@@ -20,12 +20,21 @@ It always records what it sees. It only sometimes wakes the mind:
   conversation appears in the same live answer, so the pass that sees it
   running leaves every wake pending on its row, and the next pass that finds
   it idle delivers them together as one message rather than several pings.
+  A conversation the feed still calls generating but that has produced
+  nothing for longer than a turn is allowed to last is a stalled turn, not a
+  working one, and does not hold the watch silent for ever.
 
 The wake is a turn dropped into the mind's own most recently active
 conversation (`POST /sessions/<id>/message`), which is the surface Daniel
 last used. It never opens a conversation: a new one carries no surface
 binding, so its reply would be spoken to nobody. With no conversation to
 wake, the rows stay pending and the next pass tries again.
+
+That route answers with the turn's own event stream and the gateway runs the
+turn for as long as a reader is attached: abandoning the stream cancels the
+turn, which is why `/take-a-task` sends its briefs detached rather than
+simply closing the socket. So the wake is read to its end on a thread of its
+own, outliving the pass that sent it.
 
 Environment: `COMMS_URL` and `COMMS_ADMIN_BEARER_TOKEN` (the live feed and
 the message route are both admin), `MIND_ID` (whose conversation not to
@@ -40,6 +49,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -60,6 +70,20 @@ EVERY = 60.0
 #: How long to wait on comms. Longer than a healthy answer and shorter than
 #: a pass, so a hung gateway costs one pass rather than stacking them.
 TIMEOUT = 20.0
+
+#: Past this much silence, a conversation the feed still calls generating is
+#: a stalled turn rather than a working one. The gateway kills a turn at the
+#: mind's own `turn_timeout_seconds` (900 for the chief of staff), so silence
+#: beyond that cannot be a turn still running — and a flag left set by a
+#: reader that went away would otherwise hold every wake for ever. Shorter
+#: would be wrong: comms calls a session `quiet` after 45 seconds, and
+#: silence inside a long turn is not the turn ending.
+STALLED = 900.0
+
+#: How long a wake's own stream may be held open. It is the length of a
+#: model's turn rather than of a request, because the gateway runs the turn
+#: only while a reader is attached.
+TURN_TIMEOUT = 1800.0
 
 
 class Refused(RuntimeError):
@@ -85,6 +109,12 @@ def live_state(live: dict) -> tuple[dict[str, dict], dict[str, dict]]:
     return by_id(live.get("sessions")), by_id(live.get("idle"))
 
 
+def _stalled(entry: dict, now: float) -> bool:
+    """Whether a generating conversation has been silent too long to be one."""
+    last = entry.get("last_block_at") or entry.get("started_at")
+    return last is not None and (now - last) > STALLED
+
+
 def decide(live: dict, tasks: list[dict], mind_id: str,
            now: float) -> dict[str, Any]:
     """What this pass should write and whether it should wake the mind.
@@ -99,6 +129,7 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
     """
     generating, idle = live_state(live)
     mid_turn = any(entry.get("mind_id") == mind_id
+                   and not _stalled(entry, now)
                    for entry in generating.values())
 
     running: list[str] = []
@@ -206,20 +237,73 @@ def read_live() -> dict:
 
 
 def send_wake(session_id: str, text: str) -> bool:
-    """Drop the wake into that conversation. True when comms accepted it."""
+    """Drop the wake into that conversation. True once the turn is running.
+
+    The answer is the turn's event stream, and the gateway runs the turn only
+    while something is reading it — closing the socket on the status line
+    cancels the turn before the mind has said anything. So the stream is
+    drained on a thread, which is not a daemon: a one-shot `tick` waits for
+    it on the way out, and in `run` it simply outlives the pass that sent it.
+    Recording the wake on the status line is deliberate. A turn takes minutes
+    and the pass must not, and `woken_at` is already written by then, so an
+    overlapping pass sends nothing twice.
+    """
+    url, token = _comms()
+    request = urllib.request.Request(
+        f"{url}/sessions/{session_id}/message",
+        data=json.dumps({"content": text}).encode(),
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"}, method="POST")
     try:
-        status, body = _request(f"/sessions/{session_id}/message",
-                                payload={"content": text})
-    except TimeoutError:
-        # The turn outlives this pass by design: the stream was accepted and
-        # is running, and waiting for it would hold the watch open for the
-        # length of a model's answer.
-        return True
-    if status >= 400:
-        print(f"wake refused by comms: {status} "
-              f"{body.decode(errors='replace')[:200]}", file=sys.stderr)
+        answer = urllib.request.urlopen(request, timeout=TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        print(f"wake refused by comms: {exc.code} "
+              f"{exc.read()[:200].decode(errors='replace')}", file=sys.stderr)
         return False
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"wake could not be sent: {exc}", file=sys.stderr)
+        return False
+    if answer.status >= 400:
+        answer.close()
+        print(f"wake refused by comms: {answer.status}", file=sys.stderr)
+        return False
+    threading.Thread(target=_drain, args=(answer, session_id),
+                     name=f"wake-{session_id[:8]}").start()
     return True
+
+
+def _drain(answer: Any, session_id: str) -> None:
+    """Hold a wake's stream open until the turn ends, then let it go.
+
+    A read timing out is not the end of a turn and must not close the socket:
+    the socket timeout given to `urlopen` governs every later read as well,
+    and a mind thinking for longer than that is the normal case, not a fault.
+    Only an empty read — the gateway closing the stream — ends this, or the
+    deadline, which is longer than any turn the gateway will allow.
+    """
+    deadline = time.monotonic() + TURN_TIMEOUT
+    try:
+        while time.monotonic() < deadline:
+            try:
+                if not answer.readline():
+                    return
+            except TimeoutError:
+                continue
+            except OSError as exc:
+                # `socket.timeout` is a TimeoutError on 3.10+, but a wrapped
+                # read can still surface the timeout as a plain OSError.
+                if "timed out" not in str(exc):
+                    raise
+        print(f"wake stream for {session_id} held open for "
+              f"{TURN_TIMEOUT:g}s and was let go", file=sys.stderr)
+    except Exception as exc:
+        print(f"wake stream for {session_id} ended: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        try:
+            answer.close()
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------ one pass
