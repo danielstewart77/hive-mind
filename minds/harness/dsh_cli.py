@@ -898,6 +898,43 @@ def _delta_frame(line: str) -> dict | None:
         "type": "content_block_delta", "index": 0, "delta": inner}}
 
 
+def _message_frame(line: str) -> dict | None:
+    """A completed assistant message as a whole assistant frame, or None.
+
+    Deltas keep the surface moving, but they carry no boundary: a mind that
+    speaks, dispatches delegates and speaks again streams one run of prose,
+    goes quiet for as long as the delegates take, and the reader is left with
+    a message that stops mid-thought. Daniel's words for it: "your text just
+    cuts off and it waits until the other agents finish".
+
+    The runner writes one ``{"message": "..."}`` line per completed assistant
+    message, and this is that boundary — a finished message, delivered while
+    the turn carries on working. Not observer-only: reaching the chat surface
+    is the whole point.
+    """
+    text = line.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    body = parsed.get("message")
+    if not isinstance(body, str) or not body:
+        return None
+    # `sessionId` is the turn report, which carries the final text and is
+    # yielded once the turn ends; `delta` is a fragment and `progress` a
+    # round. Any of the three with a `message` key beside it would be
+    # delivered twice or rendered as a token.
+    if "sessionId" in parsed or "delta" in parsed or "progress" in parsed:
+        return None
+    return {"type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": body}]}}
+
+
 def _rotation_check_command() -> list[str] | None:
     """The mind's own rotation check, as the hook file dsh's bridge reads
     registers it for Stop."""
@@ -1130,6 +1167,10 @@ async def _run_dsh_turn(
                         delta = _delta_frame(decoded)
                         if delta is not None:
                             yield delta
+                            continue
+                        message = _message_frame(decoded)
+                        if message is not None:
+                            yield message
                             continue
                         frame = _progress_frame(decoded)
                         if frame is not None:
