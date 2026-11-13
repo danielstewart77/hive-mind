@@ -202,3 +202,117 @@ async def test_the_staff_role_reaches_the_ledger_and_no_other_schema(
                     await inspector.execute(statement)
     finally:
         await outer.rollback()
+
+
+# ------------------------------------------------------- the tick's writes
+
+
+async def test_note_stopped_keeps_the_first_tick_moment_not_the_latest(
+        connected, inspector, clock):
+    """A second tick must not overwrite when the stop was first seen."""
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+
+    first = await staff.note_stopped(made["id"], now=clock + 60)
+    again = await staff.note_stopped(made["id"], now=clock + 600)
+
+    assert first is not None and first["stopped_at"] == clock + 60
+    assert again is None, "the guarded update reports nothing changed"
+    assert await inspector.fetchval(
+        "SELECT stopped_at FROM staff.tasks WHERE id = $1",
+        made["id"]) == clock + 60
+
+
+async def test_note_stopped_moves_updated_at_so_the_sitrep_sees_the_stop(
+        connected, inspector, clock):
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+
+    await staff.note_stopped(made["id"], now=clock + 60)
+
+    assert await inspector.fetchval(
+        "SELECT updated_at FROM staff.tasks WHERE id = $1",
+        made["id"]) == clock + 60
+
+
+async def test_note_woken_leaves_updated_at_where_the_work_last_moved(
+        connected, inspector, clock):
+    """Delivering a wake is bookkeeping, not movement in the work."""
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+    await staff.note_stopped(made["id"], now=clock + 60)
+
+    await staff.note_woken(made["id"], now=clock + 120)
+
+    row = await inspector.fetchrow(
+        "SELECT updated_at, woken_at FROM staff.tasks WHERE id = $1",
+        made["id"])
+    assert row["woken_at"] == clock + 120
+    assert row["updated_at"] == clock + 60
+
+
+async def test_note_running_clears_the_stop_so_a_later_one_is_noticed(
+        connected, inspector, clock):
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+    await staff.note_stopped(made["id"], now=clock + 60)
+
+    cleared = await staff.note_running(made["id"])
+    stopped_again = await staff.note_stopped(made["id"], now=clock + 900)
+
+    assert cleared is not None and cleared["stopped_at"] is None
+    assert stopped_again is not None, (
+        "with the first stop cleared, the guard lets the next one record")
+    assert await inspector.fetchval(
+        "SELECT stopped_at FROM staff.tasks WHERE id = $1",
+        made["id"]) == clock + 900
+
+
+async def test_note_running_changes_nothing_when_no_stop_was_recorded(
+        connected, clock):
+    """Every tick calls this for every live task; it must stay a no-op."""
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+
+    assert await staff.note_running(made["id"]) is None
+
+
+async def test_the_ticks_writes_never_move_a_status(connected, inspector,
+                                                    clock):
+    """A status is Daniel's reading of the work; the machine never sets one."""
+    made = await staff.create_task("Watched work", "on hold", now=clock)
+
+    await staff.note_stopped(made["id"], now=clock + 60)
+    await staff.note_woken(made["id"], now=clock + 120)
+    await staff.note_running(made["id"])
+
+    assert await inspector.fetchval(
+        "SELECT status FROM staff.tasks WHERE id = $1",
+        made["id"]) == "on hold"
+
+
+async def test_a_wake_is_pending_from_the_two_timestamps_alone(connected,
+                                                               clock):
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+    assert staff.wake_pending(await staff.task(made["id"])) is False
+
+    await staff.note_stopped(made["id"], now=clock + 60)
+    assert staff.wake_pending(await staff.task(made["id"])) is True
+
+    await staff.note_woken(made["id"], now=clock + 120)
+    assert staff.wake_pending(await staff.task(made["id"])) is False
+
+
+async def test_a_task_that_stops_again_after_a_wake_goes_pending_again(
+        connected, clock):
+    """The comparison is what makes a second stop news with nothing cleared."""
+    made = await staff.create_task("Watched work", "in progress", now=clock)
+    await staff.note_stopped(made["id"], now=clock + 60)
+    await staff.note_woken(made["id"], now=clock + 120)
+    await staff.note_running(made["id"])
+
+    await staff.note_stopped(made["id"], now=clock + 600)
+
+    assert staff.wake_pending(await staff.task(made["id"])) is True
+
+
+async def test_the_ticks_writes_report_nothing_for_a_task_that_is_not_there(
+        connected, clock):
+    assert await staff.note_stopped("no-such-task", now=clock) is None
+    assert await staff.note_woken("no-such-task", now=clock) is None
+    assert await staff.note_running("no-such-task") is None

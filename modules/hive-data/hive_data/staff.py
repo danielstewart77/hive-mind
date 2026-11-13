@@ -51,6 +51,12 @@ TASK_SESSIONS = "staff.task_sessions"
 #: itself, and `id` and `created_at` never move.
 _SETTABLE = frozenset({"name", "description", "status", "updated_at"})
 
+#: What the tick may set. Disjoint from `_SETTABLE` on purpose: a status is
+#: Daniel's reading of the work, and the machine that watches sessions never
+#: writes one. `updated_at` is shared because a stop is a real change to
+#: report, and the sitrep finds what moved by that column.
+_WATCHABLE = frozenset({"stopped_at", "woken_at", "updated_at"})
+
 #: Characters that render as nothing but are not `str.isspace`. The schema's
 #: checks carry the same set.
 _INVISIBLE = frozenset("\u180e\u200b\u200c\u200d\u2060\ufeff")
@@ -184,6 +190,82 @@ async def update_task(task_id: str, *, name: Any = UNSET,
                             returning=COLUMNS[TASKS])
     return (await _execute_returning(unit, sql, *args, *extra_args)
             ).get("row")
+
+
+# -------------------------------------------------------------------- watch
+#
+# The tick's three writes. It never touches a status: `note_stopped` and
+# `note_running` record what the live feed said about a task's sessions, and
+# `note_woken` records that the chief of staff has been told. A wake is
+# pending while `stopped_at` is set and `woken_at` is null or older, so
+# there is no queue anywhere and nothing to clear.
+
+
+async def note_stopped(task_id: str, *, now: float | None = None,
+                       unit: Unit | None = None) -> Row | None:
+    """Record that every session on this task has stopped. First one wins.
+
+    Guarded by `stopped_at IS NULL` in the statement, so the moment kept is
+    the first tick that saw the stop rather than the latest one, and a tick
+    running while another already recorded it changes nothing and reports
+    None. `updated_at` moves with it: a watched session stopping is a real
+    change to the task, and the sitrep reads that column to find what moved.
+    """
+    moment = _now(now)
+    clause, clause_args = _sql.where(TASKS, {"stopped_at": None}, start=4)
+    sql, args = _sql.update(
+        TASKS, {"stopped_at": moment, "updated_at": moment}, {"id": task_id},
+        settable=_WATCHABLE, extra_where=clause,
+        returning=COLUMNS[TASKS])
+    return (await _execute_returning(unit, sql, *args, *clause_args)
+            ).get("row")
+
+
+async def note_running(task_id: str, *,
+                       unit: Unit | None = None) -> Row | None:
+    """Clear the stop: a session on this task is producing output again.
+
+    Without this a task dispatched again after it was reported would keep
+    its first `stopped_at` forever and never go pending a second time.
+    Clearing it also drops a stop that was never reported, which is correct:
+    the news was that the work had stopped, and it has not.
+
+    `updated_at` does not move. Work resuming is what the chief of staff
+    just asked for, and the sitrep reporting it as movement would list every
+    relay twice.
+    """
+    sql, args = _sql.update(
+        TASKS, {"stopped_at": None}, {"id": task_id},
+        settable=_WATCHABLE, extra_where='"stopped_at" IS NOT NULL',
+        returning=COLUMNS[TASKS])
+    return (await _execute_returning(unit, sql, *args)).get("row")
+
+
+async def note_woken(task_id: str, *, now: float | None = None,
+                     unit: Unit | None = None) -> Row | None:
+    """Record that the chief of staff has been told about this task.
+
+    `updated_at` does not move: delivering a wake is the machine's own
+    bookkeeping, not a change in the work, and moving it would have every
+    sitrep report the previous sitrep's notifications as news.
+    """
+    sql, args = _sql.update(
+        TASKS, {"woken_at": _now(now)}, {"id": task_id},
+        settable=_WATCHABLE, returning=COLUMNS[TASKS])
+    return (await _execute_returning(unit, sql, *args)).get("row")
+
+
+def wake_pending(row: Row) -> bool:
+    """Whether this task is owed a wake, read from the row alone.
+
+    One definition, used by the tick to choose and by anything else that
+    wants the same answer without a second opinion about it.
+    """
+    stopped = row.get("stopped_at")
+    if stopped is None:
+        return False
+    woken = row.get("woken_at")
+    return woken is None or woken < stopped
 
 
 async def delete_task(task_id: str, *, unit: Unit | None = None) -> Row:

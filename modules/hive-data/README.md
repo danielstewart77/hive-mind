@@ -503,6 +503,9 @@ schemas. `staff` (step 6) is the chief of staff's ledger: `staff.tasks`, a
 `staff.statuses` lookup its status is a foreign key into, and
 `staff.task_sessions` pairing a task with the `core.sessions` ids working it
 (not a foreign key: the pair outlives comms deleting an ended session).
+Step 8 adds the tick's own two columns, `stopped_at` and `woken_at`: a wake
+is pending while the first is set and the second is null or older, so the
+watch keeps no queue and has nothing to clear.
 `hive_data.staff` is the only way the chief of staff and its tick reach it.
 
 Two things are deliberately outside it. **hive-health** is not part of the one
