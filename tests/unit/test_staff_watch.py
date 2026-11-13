@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import threading
 import urllib.error
 from pathlib import Path
 
@@ -262,17 +263,51 @@ def test_a_live_feed_that_refuses_is_reported_rather_than_read_as_empty(
         watch.read_live()
 
 
-def test_a_wake_whose_turn_outlives_the_pass_counts_as_delivered(watch,
-                                                                 monkeypatch):
-    """The message route answers with the turn's stream and holds it open."""
+def test_a_wake_holds_its_stream_open_until_the_turn_ends(watch,
+                                                          monkeypatch):
+    """The gateway runs the turn only while something is reading the stream.
+
+    Closing the socket on the status line cancels the turn before the mind
+    has said anything, which is why `/take-a-task` sends detached.
+    """
+    reads = []
+    closed = []
+
+    class Stream:
+        status = 200
+
+        def readline(self):
+            reads.append(1)
+            # Three events, then the end of the turn.
+            return b"data: {}\n" if len(reads) < 4 else b""
+
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setenv("COMMS_URL", "http://comms.test")
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "t")
+    monkeypatch.setattr(watch.urllib.request, "urlopen",
+                        lambda request, timeout=None: Stream())
+
+    assert watch.send_wake("sess-1", "wake up") is True
+    for thread in threading.enumerate():
+        if thread.name.startswith("wake-"):
+            thread.join(timeout=5)
+
+    assert len(reads) == 4, "the stream is read to its end, not abandoned"
+    assert closed == [1]
+
+
+def test_a_wake_the_gateway_never_answers_is_not_recorded_as_delivered(
+        watch, monkeypatch):
     def hang(request, timeout=None):
-        raise TimeoutError("the turn is still running")
+        raise TimeoutError("comms never answered")
 
     monkeypatch.setenv("COMMS_URL", "http://comms.test")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "t")
     monkeypatch.setattr(watch.urllib.request, "urlopen", hang)
 
-    assert watch.send_wake("sess-1", "wake up") is True
+    assert watch.send_wake("sess-1", "wake up") is False
 
 
 def test_a_wake_comms_refuses_is_not_recorded_as_delivered(watch,
@@ -295,14 +330,11 @@ def test_the_wake_posts_the_turn_as_the_message_route_expects(watch,
     class Answer:
         status = 200
 
-        def read(self):  # pragma: no cover - the body is never read
+        def readline(self):
             return b""
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
+        def close(self):
+            pass
 
     def capture(request, timeout=None):
         sent["url"] = request.full_url
@@ -328,3 +360,74 @@ def test_a_pass_with_no_credential_refuses_rather_than_reading_nothing(
 
     with pytest.raises(watch.Refused, match="admin"):
         watch.read_live()
+
+
+def test_a_chief_of_staff_silent_past_a_turns_life_no_longer_holds_the_wake(
+        watch):
+    """A generating flag left set by a reader that went away must not last.
+
+    The gateway kills a turn at the mind's own timeout, so silence beyond
+    that is a stalled turn and not a working one.
+    """
+    stalled = _entry("stash-1", mind_id=STASH)
+    stalled["last_block_at"] = NOW - watch.STALLED - 1
+
+    plan = watch.decide(_live(generating=[stalled]), [_task("t1")],
+                        STASH, NOW)
+
+    assert plan["mid_turn"] is False
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_chief_of_staff_merely_quiet_still_holds_the_wake(watch):
+    """Silence inside a long turn is not the turn ending."""
+    working = _entry("stash-1", mind_id=STASH)
+    working["last_block_at"] = NOW - watch.STALLED + 1
+
+    plan = watch.decide(_live(generating=[working]), [_task("t1")],
+                        STASH, NOW)
+
+    assert plan["mid_turn"] is True
+    assert plan["wake"] == []
+
+
+def test_a_wake_stream_that_times_out_waiting_is_not_treated_as_the_end(
+        watch):
+    """A mind thinking for longer than the socket timeout is the normal case.
+
+    The timeout given to `urlopen` governs every later read, so a drain that
+    stopped on one would close the socket and cancel the turn — the very
+    thing holding the stream open exists to prevent.
+    """
+    events = iter([TimeoutError("timed out"),
+                   OSError("the read timed out"),
+                   b"data: {}\n",
+                   b""])
+    closed = []
+
+    class Stream:
+        def readline(self):
+            value = next(events)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def close(self):
+            closed.append(1)
+
+    watch._drain(Stream(), "sess-1")
+
+    assert next(events, "drained") == "drained", (
+        "every event was read, two timeouts included")
+    assert closed == [1]
+
+
+def test_a_wake_stream_that_genuinely_breaks_is_let_go(watch):
+    class Stream:
+        def readline(self):
+            raise OSError("connection reset by peer")
+
+        def close(self):
+            pass
+
+    watch._drain(Stream(), "sess-1")  # reported, never raised
