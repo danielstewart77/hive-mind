@@ -6,6 +6,10 @@
     staff_ledger.py list [--status S]          each task with its session ids
     staff_ledger.py set-status TASK STATUS [--expect S]
     staff_ledger.py edit TASK [--name N] [--description D]
+                             [--board-item B] [--question Q | --answered]
+    staff_ledger.py agent-start TASK BRIEF [--about A]
+    staff_ledger.py agent-done AGENT [--outcome O]
+    staff_ledger.py agents [--task T] [--working]
     staff_ledger.py attach TASK SESSION
     staff_ledger.py detach TASK SESSION
     staff_ledger.py find SESSION
@@ -97,6 +101,33 @@ def _parser() -> argparse.ArgumentParser:
     edited.add_argument("task")
     edited.add_argument("--name")
     edited.add_argument("--description")
+    edited.add_argument("--board-item", dest="board_item",
+                        help="the board work item id this task covers, which "
+                             "is what gives the page its depth: a task "
+                             "naming a feature draws that feature's stories")
+    question = edited.add_mutually_exclusive_group()
+    question.add_argument("--question",
+                          help="the one thing this task waits on Daniel for")
+    question.add_argument("--answered", action="store_true",
+                          help="Daniel has answered: drop the question and "
+                               "leave the status alone")
+
+    started = sub.add_parser(
+        "agent-start", help="record a sub-agent beginning work on a task")
+    started.add_argument("task")
+    started.add_argument("brief", help="the brief file it was handed")
+    started.add_argument("--about", default="",
+                         help="the one thing it was handed it for, so two "
+                              "children on one brief are told apart")
+
+    finished = sub.add_parser("agent-done", help="close a sub-agent's row")
+    finished.add_argument("agent")
+    finished.add_argument("--outcome", default="")
+
+    listed_agents = sub.add_parser("agents", help="sub-agent rows")
+    listed_agents.add_argument("--task")
+    listed_agents.add_argument("--working", action="store_true",
+                               help="only those that have not reported")
 
     for name in ("attach", "detach"):
         pair = sub.add_parser(name, help=f"{name} a session")
@@ -131,6 +162,28 @@ async def _changed(task_id: str, row: dict[str, Any] | None,
     raise Refused(f"task {task_id!r} is no longer {expect!r}; unchanged")
 
 
+def _edits(args: argparse.Namespace) -> dict[str, Any]:
+    """What an `edit` writes, from what it was given. Refuses an empty one.
+
+    Its own function because `--answered` is the one flag whose *value* is
+    None: everywhere else None means the flag was not passed, so clearing a
+    question cannot be expressed by the same loop that collects the rest and
+    would otherwise be silently dropped.
+    """
+    change: dict[str, Any] = {
+        name: value for name, value in (
+            ("name", args.name), ("description", args.description),
+            ("board_item", args.board_item), ("question", args.question))
+        if value is not None}
+    if args.answered:
+        change["question"] = None
+    if not change:
+        raise Refused("edit names nothing to change: give --name, "
+                      "--description, --board-item, --question or "
+                      "--answered")
+    return change
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     command = args.command
     if command == "open":
@@ -152,14 +205,21 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         row = await staff.update_task(args.task, status=args.status, **guard)
         return await _changed(args.task, row, args.expect)
     if command == "edit":
-        change = {k: v for k, v in (("name", args.name),
-                                    ("description", args.description))
-                  if v is not None}
-        if not change:
-            raise Refused("edit names nothing to change: give --name or "
-                          "--description")
         return await _changed(args.task, await staff.update_task(
-            args.task, **change))
+            args.task, **_edits(args)))
+    if command == "agent-start":
+        agent = await staff.start_agent(args.task, args.brief,
+                                        about=args.about)
+        return {"id": agent["id"], "agent": agent}
+    if command == "agent-done":
+        row = await staff.finish_agent(args.agent, outcome=args.outcome)
+        if row is None:
+            raise Refused(f"no sub-agent {args.agent!r} still working; "
+                          "unchanged")
+        return {"agent": row}
+    if command == "agents":
+        return {"agents": await staff.agents(task_id=args.task,
+                                             working=args.working)}
     if command == "attach":
         await staff.attach_session(args.task, args.session)
         return {"task": args.task, "session": args.session, "attached": True}
