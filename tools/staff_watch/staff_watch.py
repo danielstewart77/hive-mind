@@ -38,16 +38,17 @@ own, outliving the pass that sent it.
 
 A wake is a turn in the mind's own conversation, so whatever the mind says
 back reaches Daniel on that surface whether it meant to tell him or not.
-That is why the wake itself carries the quiet hours: while the mind's
-`goodnight` marker exists, the wake says so, and the mind's skill holds the
-question for the sitrep instead of answering into the room. The watch keeps
-waking it — goodnight stops the telling, not the work.
+
+There are no quiet hours. The wake used to carry Daniel's goodnight so the
+mind would work without telling him; he withdrew it on 2026-11-13 because
+his phone silences itself at bedtime, which solves the same problem without
+a marker file, a branch in the wake text, and a path naming one mind inside
+a tool meant for whichever mind holds the role.
 
 Environment: `COMMS_URL` and `COMMS_ADMIN_BEARER_TOKEN` (the live feed and
 the message route are both admin), `MIND_ID` (whose conversation not to
-interrupt, and where to deliver), `HIVE_DATABASE_URL` for the ledger, as a
-role that sees only the `staff` schema, and `STAFF_GOODNIGHT_MARKER` for the
-file the mind touches when Daniel says goodnight.
+interrupt, and where to deliver), and `HIVE_DATABASE_URL` for the ledger, as
+a role that sees only the `staff` schema.
 """
 
 from __future__ import annotations
@@ -78,11 +79,6 @@ EVERY = 60.0
 #: How long to wait on comms. Longer than a healthy answer and shorter than
 #: a pass, so a hung gateway costs one pass rather than stacking them.
 TIMEOUT = 20.0
-
-#: The file the mind touches when Daniel says goodnight, and removes on his
-#: first message after. The watch only reads it: whose marker it is, and when
-#: it goes, are the mind's business.
-GOODNIGHT = "/usr/src/app/minds/stash/data/goodnight"
 
 #: Past this much silence, a conversation the feed still calls generating is
 #: a stalled turn rather than a working one. The gateway kills a turn at the
@@ -177,33 +173,13 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
             "pending": [row["id"] for row in pending], "wake": wake}
 
 
-def goodnight() -> bool:
-    """Whether Daniel has said goodnight, as the mind's own marker says."""
-    marker = os.environ.get("STAFF_GOODNIGHT_MARKER") or GOODNIGHT
-    try:
-        return os.path.exists(marker)
-    except OSError:
-        return False
-
-
-def wake_message(rows: list[dict], quiet: bool = False) -> str:
-    """The one turn the mind is woken with, naming every task at once.
-
-    `quiet` is Daniel's goodnight. It has to ride on the wake because the
-    wake is a turn in the mind's own conversation: anything the mind says
-    back is delivered to Daniel's surface whether it meant to tell him or
-    not, so "do not tell him" is an instruction the turn has to carry.
-    """
+def wake_message(rows: list[dict]) -> str:
+    """The one turn the mind is woken with, naming every task at once."""
     head = ("The watch: a session you are watching has stopped producing "
             "output." if len(rows) == 1 else
             f"The watch: {len(rows)} sessions you are watching have stopped "
             "producing output.")
-    tail = ("Daniel has said goodnight, so say nothing to him: run "
-            "/tend-the-ledger, answer every session the task already answers, "
-            "and put anything that needs him on hold for the sitrep. Reply "
-            "with nothing at all."
-            if quiet else
-            "Run /tend-the-ledger and read each one before saying anything "
+    tail = ("Run /tend-the-ledger and read each one before saying anything "
             "to Daniel.")
     lines = []
     for row in rows:
@@ -369,9 +345,8 @@ async def tick(now: float | None = None) -> dict[str, Any]:
     woken: list[str] = []
     if plan["wake"]:
         session_id = target_session(live, mind_id)
-        quiet = goodnight()
         if session_id is not None and send_wake(
-                session_id, wake_message(plan["wake"], quiet)):
+                session_id, wake_message(plan["wake"])):
             for row in plan["wake"]:
                 await staff.note_woken(row["id"], now=moment)
                 woken.append(row["id"])
@@ -379,7 +354,7 @@ async def tick(now: float | None = None) -> dict[str, Any]:
     return {"at": moment, "recorded_stopped": plan["stopped"],
             "recorded_running": plan["running"], "mid_turn": plan["mid_turn"],
             "pending": plan["pending"], "woken": woken,
-            "target": plan.get("target"), "goodnight": goodnight()}
+            "target": plan.get("target")}
 
 
 async def _connect() -> None:
