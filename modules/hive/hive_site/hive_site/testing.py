@@ -55,17 +55,33 @@ SCRATCH_PREFIX = "hive_data_test_"
 #: the installed package rather than copied here, so a schema change arrives
 #: instead of being silently out of date. `core` before `board`: `board`
 #: carries real foreign keys into `core.sessions` and `core.minds`.
-_SCHEMA_ORDER = ("core.sql", "memory.sql", "board.sql")
+#: `tools.sql` is here for the steps rather than for the console, which
+#: reads nothing in it: step 5 alters a `tools` table, and a step list that
+#: stopped at the first schema this site does not use would silently stop
+#: applying the later ones too.
+_SCHEMA_ORDER = ("core.sql", "memory.sql", "tools.sql", "board.sql")
 
-_SCHEMA_NAMES = ("core", "memory", "board")
+#: Every schema a test may write to, and therefore every one `reset` empties
+#: between tests. `staff` is the chief of staff's ledger, which arrives as a
+#: numbered step rather than a baseline file; a schema left out here is one
+#: whose rows leak from one test into the next.
+_SCHEMA_NAMES = ("core", "memory", "tools", "board", "staff")
 
 
 def schemas() -> list[str]:
-    """The schema statements to apply to a scratch database, in order."""
+    """The schema statements to apply to a scratch database, in order.
+
+    The three baseline files and then every numbered step, which is what the
+    installed package means by "the schema": `staff` and the columns later
+    steps add exist nowhere else, so a scratch database built from the
+    baselines alone is a hive this console could not actually run against.
+    """
     import hive_data
 
     directory = Path(hive_data.__file__).parent / "schema"
-    return [(directory / name).read_text() for name in _SCHEMA_ORDER]
+    baseline = [(directory / name).read_text() for name in _SCHEMA_ORDER]
+    steps = sorted(p for p in (directory / "steps").glob("[0-9]*.sql"))
+    return baseline + [path.read_text() for path in steps]
 
 
 def refuse_unless_scratch(dsn: str) -> str:

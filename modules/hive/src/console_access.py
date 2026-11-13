@@ -343,6 +343,12 @@ TABLE.add(
     # design pages
     "GET /design",
     "GET /design/{design_id}",
+    # The chief of staff's live tree. Admin rather than merely
+    # authenticated: it names every task Daniel has handed out, the questions
+    # he has not answered and which mind is on what, and Sloan and Aiden hold
+    # console accounts.
+    "GET /chief-of-staff",
+    "GET /api/chief-of-staff",
     # knowledge: graph, memory, rules
     "GET /graph",
     "GET /graph/data",

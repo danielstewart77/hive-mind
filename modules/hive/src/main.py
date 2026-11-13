@@ -45,6 +45,7 @@ import design_data
 import design_delivery
 import design_graph
 import holder_credentials
+import chief_of_staff
 import kanban_data
 import mind_files
 import mind_mounts
@@ -2139,6 +2140,26 @@ async def api_ollama_model_delete(
 
 
 # ── Graph ──────────────────────────────────────────────────────────────
+
+
+# ── Chief of Staff ─────────────────────────────────────────────────────
+
+
+@app.get("/chief-of-staff", response_class=HTMLResponse)
+async def chief_of_staff_page(request: Request):
+    return await _console_page(request, "chief_of_staff.html")
+
+
+@app.get("/api/chief-of-staff")
+async def api_chief_of_staff(user: dict = Depends(require_auth)):
+    """The live tree, the barrel and the bubbles, in one answer.
+
+    One call rather than three, so the tree, what has finished and what is
+    waiting on Daniel can never be drawn from different moments and disagree
+    about the same task.
+    """
+    del user
+    return await chief_of_staff.get_tree()
 
 
 @app.get("/graph/data")

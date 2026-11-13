@@ -1,0 +1,252 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+  .cos-head { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap; }
+  .cos-head h1 { margin:0; }
+  .cos-sub { color:#94a3b8; font-size:0.9rem; }
+  .cos-wrap { display:flex; gap:1rem; margin-top:1rem; align-items:stretch; }
+  #cos-cy {
+    flex:1 1 auto; min-height:72vh; height:72vh;
+    background:#0a0e19; border-radius:10px; border:1px solid rgba(56,189,248,0.18);
+  }
+  .cos-barrel {
+    flex:0 0 280px; max-width:280px; box-sizing:border-box;
+    background:#0a0e19; border:1px solid rgba(56,189,248,0.18);
+    border-radius:10px; padding:1rem; overflow-y:auto; height:72vh;
+    font-size:0.82rem; color:#cbd5e1;
+  }
+  .cos-barrel h2 { font-size:0.85rem; letter-spacing:0.08em; text-transform:uppercase;
+    color:#64748b; margin:0 0 0.75rem 0; }
+  .cos-done {
+    display:flex; gap:0.5rem; align-items:flex-start;
+    padding:0.45rem 0.55rem; margin-bottom:0.4rem; border-radius:6px;
+    background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.22);
+  }
+  .cos-done .k { color:#4ade80; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.06em; }
+  .cos-empty { color:#64748b; font-style:italic; }
+  .cos-asks { margin-top:1rem; }
+  .cos-ask {
+    padding:0.55rem 0.65rem; margin-bottom:0.5rem; border-radius:8px;
+    background:rgba(251,191,36,0.10); border:1px solid rgba(251,191,36,0.35);
+  }
+  .cos-ask .who { color:#fbbf24; font-size:0.72rem; text-transform:uppercase;
+    letter-spacing:0.06em; display:block; margin-bottom:0.2rem; }
+  .cos-foot {
+    display:flex; gap:1.5rem; flex-wrap:wrap; align-items:center;
+    margin-top:0.85rem; padding:0.7rem 1rem; border-radius:10px;
+    background:#0a0e19; border:1px solid rgba(56,189,248,0.18);
+    color:#cbd5e1; font-size:0.85rem;
+  }
+  .cos-foot b { color:#e2e8f0; }
+  .cos-bar { flex:1 1 180px; height:8px; border-radius:99px; background:rgba(148,163,184,0.18); overflow:hidden; }
+  .cos-bar span { display:block; height:100%; background:#38bdf8; }
+  .cos-error { color:#f87171; }
+</style>
+
+<div class="cos-head">
+  <h1>Chief of Staff</h1>
+  <span class="cos-sub" id="cos-when">loading…</span>
+  <span class="cos-sub" id="cos-detail"></span>
+</div>
+
+<div class="cos-wrap">
+  <div id="cos-cy"></div>
+  <aside class="cos-barrel">
+    <h2>Waiting on you</h2>
+    <div id="cos-asks" class="cos-asks"><p class="cos-empty">Nothing.</p></div>
+    <h2 style="margin-top:1.25rem">Done</h2>
+    <div id="cos-barrel"><p class="cos-empty">Nothing yet.</p></div>
+  </aside>
+</div>
+
+<div class="cos-foot">
+  <span><b id="cos-tasks">0</b> live</span>
+  <span><b id="cos-agents">0</b> delegates</span>
+  <span><b id="cos-asks-n">0</b> questions</span>
+  <span><b id="cos-done">0</b> done</span>
+  <div class="cos-bar"><span id="cos-progress" style="width:0%"></span></div>
+  <span id="cos-pct">0%</span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
+<script>
+(function () {
+  // Drawn from one payload, so the tree, the barrel and the counts can never
+  // disagree about the same moment. The page re-asks rather than being
+  // pushed to: what it shows changes on the order of a minute, which is the
+  // tick's own cadence, and a socket per open tab buys nothing for that.
+  var REFRESH_MS = 20000;
+
+  var KIND_COLOR = {
+    chief: '#38bdf8', task: '#818cf8', feature: '#a78bfa',
+    story: '#64748b', agent: '#2dd4bf', bubble: '#fbbf24'
+  };
+  // A node says what is happening to it by its border, not its fill: the
+  // fill already says what kind of thing it is, and one node cannot carry
+  // two colours without the reader guessing which is which.
+  var ACTIVITY_BORDER = {
+    working: '#22c55e', stopped: '#f59e0b', ended: '#64748b',
+    unassigned: '#f87171', orphaned: '#f87171'
+  };
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function elements(data) {
+    var out = [];
+    data.nodes.forEach(function (n) {
+      var label = n.kind === 'chief'
+        ? n.label + (n.questions ? '  (' + n.questions + '?)' : '')
+        : n.label;
+      out.push({ data: {
+        id: n.id, label: label, kind: n.kind,
+        activity: n.activity || n.status || '',
+        detail: n.about || n.description || ''
+      } });
+    });
+    data.edges.forEach(function (e) {
+      out.push({ data: { id: 'e:' + e.source + ':' + e.target,
+                         source: e.source, target: e.target, rel: 'tree' } });
+    });
+    // One bubble per question, hanging off the node that holds it and tied
+    // back to the chief, because the thing Daniel reads off this page is
+    // that an answer is owed and which work stops without it.
+    data.questions.forEach(function (q) {
+      var id = 'q:' + q.task;
+      out.push({ data: { id: id, label: '?', kind: 'bubble',
+                         activity: 'question', detail: q.question } });
+      out.push({ data: { id: 'e:' + id, source: q.task, target: id,
+                         rel: 'asks' } });
+      out.push({ data: { id: 'e:up:' + id, source: id, target: 'chief',
+                         rel: 'bubble' } });
+    });
+    return out;
+  }
+
+  function render(data) {
+    var cy = cytoscape({
+      container: document.getElementById('cos-cy'),
+      elements: elements(data),
+      style: [
+        { selector: 'node', style: {
+            'label': 'data(label)', 'color': '#e2e8f0', 'font-size': '11px',
+            'text-valign': 'center', 'text-halign': 'center',
+            'text-wrap': 'wrap', 'text-max-width': '150px',
+            'shape': 'round-rectangle', 'width': 170, 'height': 46,
+            'padding': '6px', 'background-color': '#1e293b',
+            'border-width': 2, 'border-color': '#334155'
+        } },
+        { selector: 'node[kind = "chief"]', style: {
+            'background-color': KIND_COLOR.chief, 'color': '#06202e',
+            'font-size': '14px', 'font-weight': 'bold',
+            'width': 220, 'height': 64, 'border-color': KIND_COLOR.chief } },
+        { selector: 'node[kind = "task"]', style: {
+            'background-color': '#1e1b4b', 'border-color': KIND_COLOR.task } },
+        { selector: 'node[kind = "feature"]', style: {
+            'background-color': '#2e1065', 'border-color': KIND_COLOR.feature } },
+        { selector: 'node[kind = "story"]', style: {
+            'background-color': '#111827', 'border-color': KIND_COLOR.story,
+            'width': 150, 'height': 38, 'font-size': '10px' } },
+        { selector: 'node[kind = "agent"]', style: {
+            'background-color': '#042f2e', 'border-color': KIND_COLOR.agent,
+            'shape': 'ellipse', 'width': 110, 'height': 110,
+            'font-size': '10px', 'text-max-width': '90px' } },
+        { selector: 'node[kind = "bubble"]', style: {
+            'background-color': KIND_COLOR.bubble, 'color': '#3b2708',
+            'shape': 'ellipse', 'width': 34, 'height': 34,
+            'font-size': '18px', 'font-weight': 'bold',
+            'border-color': '#fde68a' } },
+        { selector: 'node[activity = "working"]', style: {
+            'border-color': ACTIVITY_BORDER.working } },
+        { selector: 'node[activity = "stopped"]', style: {
+            'border-color': ACTIVITY_BORDER.stopped } },
+        { selector: 'node[activity = "unassigned"]', style: {
+            'border-color': ACTIVITY_BORDER.unassigned } },
+        { selector: 'node[activity = "orphaned"]', style: {
+            'border-color': ACTIVITY_BORDER.orphaned,
+            'border-style': 'dashed' } },
+        { selector: 'edge', style: {
+            'width': 1.6, 'line-color': 'rgba(129,140,248,0.45)',
+            'target-arrow-color': 'rgba(129,140,248,0.55)',
+            'target-arrow-shape': 'triangle', 'curve-style': 'taxi',
+            'taxi-direction': 'downward' } },
+        { selector: 'edge[rel = "asks"]', style: {
+            'line-color': 'rgba(251,191,36,0.6)', 'target-arrow-shape': 'none',
+            'curve-style': 'bezier' } },
+        // The bubble's own rise to the chief: dashed, arrowless and behind
+        // everything, so it reads as a thing floating up rather than as
+        // another line of command.
+        { selector: 'edge[rel = "bubble"]', style: {
+            'line-color': 'rgba(251,191,36,0.35)', 'line-style': 'dashed',
+            'target-arrow-shape': 'none', 'curve-style': 'unbundled-bezier',
+            'control-point-distances': [-80], 'control-point-weights': [0.5],
+            'z-index': 0 } }
+      ],
+      layout: { name: 'breadthfirst', directed: true, roots: ['chief'],
+                padding: 24, spacingFactor: 1.15, animate: false }
+    });
+    // A node's own detail — the task's description, the brief a delegate was
+    // handed, the question a bubble carries — would not fit on the node and
+    // would make every node unreadable if it did.
+    cy.on('tap', 'node', function (evt) {
+      var d = evt.target.data();
+      document.getElementById('cos-detail').textContent =
+        d.detail ? d.label + ' — ' + d.detail : d.label;
+    });
+    return cy;
+  }
+
+  function paint(data) {
+    document.getElementById('cos-when').textContent =
+      'as of ' + new Date(data.generated_at * 1000).toLocaleTimeString();
+
+    var asks = document.getElementById('cos-asks');
+    asks.innerHTML = data.questions.length
+      ? data.questions.map(function (q) {
+          return '<div class="cos-ask"><span class="who">' + esc(q.name) +
+                 '</span>' + esc(q.question) + '</div>';
+        }).join('')
+      : '<p class="cos-empty">Nothing.</p>';
+
+    var barrel = document.getElementById('cos-barrel');
+    barrel.innerHTML = data.barrel.length
+      ? data.barrel.map(function (d) {
+          return '<div class="cos-done"><span class="k">' + esc(d.kind) +
+                 '</span><span>' + esc(d.label) + '</span></div>';
+        }).join('')
+      : '<p class="cos-empty">Nothing yet.</p>';
+
+    var live = data.nodes.filter(function (n) { return n.kind === 'task'; });
+    var agents = data.nodes.filter(function (n) { return n.kind === 'agent'; });
+    document.getElementById('cos-tasks').textContent = live.length;
+    document.getElementById('cos-agents').textContent = agents.length;
+    document.getElementById('cos-asks-n').textContent = data.questions.length;
+    document.getElementById('cos-done').textContent = data.barrel.length;
+    var total = live.length + data.barrel.length;
+    var pct = total ? Math.round((data.barrel.length / total) * 100) : 0;
+    document.getElementById('cos-progress').style.width = pct + '%';
+    document.getElementById('cos-pct').textContent = pct + '%';
+
+    render(data);
+  }
+
+  function load() {
+    fetch('/api/chief-of-staff', { credentials: 'same-origin' })
+      .then(function (r) {
+        if (!r.ok) { throw new Error('HTTP ' + r.status); }
+        return r.json();
+      })
+      .then(paint)
+      .catch(function (err) {
+        document.getElementById('cos-when').innerHTML =
+          '<span class="cos-error">' + esc(err.message) + '</span>';
+      });
+  }
+
+  load();
+  setInterval(load, REFRESH_MS);
+})();
+</script>
+{% endblock %}
