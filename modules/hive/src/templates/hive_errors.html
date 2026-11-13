@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+{% block title %}Hive Errors · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">Diagnostics</p><h1 class="page-title">Hive Errors</h1><p class="page-description">Recent failures from Hive components. Checks run only while this page is open and visible.</p></div></header>
+    <p>Each error feed retains up to 100 errors from the last hour since its component started. Restarting clears that feed. Health-only components do not expose runtime logs.</p>
+    <p id="hive-error-status" role="status">Checking components…</p>
+    <div id="hive-error-components"></div>
+</main>
+<script src="{{ request.url_for('static', path='hive-errors.js') }}?v={{ asset_versions['hive-errors.js'] }}"></script>
+{% endblock %}

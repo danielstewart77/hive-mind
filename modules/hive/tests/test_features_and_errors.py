@@ -1,0 +1,81 @@
+"""P1: saved navigation choices; P2: real failures reach the errors page."""
+import logging
+
+import httpx
+
+import hive_errors
+import hive_logging
+
+
+def test_saved_features_hide_navigation_and_keep_settings(builtin_console):
+    client = builtin_console.admin()
+    response = client.put('/api/settings/features', json={'graph': False, 'setup': False})
+    assert response.status_code == 200
+    page = client.get('/settings/features')
+    assert page.status_code == 200
+    nav = page.text.split('aria-label="Main navigation"')[1].split('</aside>')[0]
+    assert 'href="/graph"' not in nav
+    assert 'href="/setup"' not in nav
+    assert 'href="/settings/general"' in nav
+    assert client.get('/api/settings/features').json()['enabled']['graph'] is False
+    assert client.put('/api/settings/features', json={'graph': True}).status_code == 200
+    assert 'href="/graph"' in client.get('/settings/features').text
+
+
+def test_feature_choices_belong_to_the_signed_in_account(builtin_console):
+    admin = builtin_console.admin()
+    member = builtin_console.settled_user(admin, 'member', 'member-test-password')
+    assert member.put('/api/settings/features', json={'minds': False}).status_code == 200
+    assert member.get('/settings/features').status_code == 200
+    assert member.get('/api/settings/features').json()['enabled']['minds'] is False
+    assert admin.get('/api/settings/features').json()['enabled']['minds'] is True
+    assert member.get('/api/hive-errors').status_code == 403
+
+
+def test_hive_errors_endpoint_reports_a_mind_failure(builtin_console, monkeypatch):
+    client = builtin_console.admin()
+    original_client = httpx.AsyncClient
+    feed = {'started_at': '2026-11-13T18:00:00Z', 'errors': [
+        {'message': 'Failed to open terminal', 'detail': 'no context window for gpt-5.6-sol'}]}
+    def transport(request):
+        if request.url.path == '/broker/minds':
+            return httpx.Response(200, json=[{'name': 'Atlas', 'gateway_url': 'http://atlas:8420'}])
+        return httpx.Response(200, json=feed)
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(
+        **kwargs, transport=httpx.MockTransport(transport)))
+    result = client.get('/api/hive-errors')
+    assert result.status_code == 200
+    atlas = next(c for c in result.json()['components'] if c['name'] == 'Atlas')
+    assert atlas['errors'][0]['detail'] == 'no context window for gpt-5.6-sol'
+    assert client.get('/hive-errors').status_code == 200
+
+
+async def test_terminal_start_exception_reaches_component_error_report():
+    record = logging.LogRecord('mind.pty', logging.ERROR, '', 0,
+                               'Failed to open terminal', (), None)
+    try:
+        raise RuntimeError('the inference proxy declares no context window for gpt-5.6-sol')
+    except RuntimeError:
+        import sys
+        record.exc_info = sys.exc_info()
+    hive_logging.HiveJsonFormatter().format(record)
+    feed = hive_logging.recent_errors()
+    async def transport(request):
+        return httpx.Response(200, json=feed)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        result = await hive_errors.probe(client, 'Atlas', 'http://atlas', {})
+    assert result['status'] == 'ok'
+    assert any('no context window for gpt-5.6-sol' in item['detail']
+               for item in result['errors'])
+
+
+async def test_unavailable_error_feed_is_reported_without_hiding_other_components():
+    async def transport(request):
+        if request.url.host == 'old':
+            return httpx.Response(404)
+        raise httpx.ConnectError('unreachable', request=request)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        old = await hive_errors.probe(client, 'Old mind', 'http://old', {})
+        down = await hive_errors.probe(client, 'Down mind', 'http://down', {})
+    assert old['status'] == 'unsupported'
+    assert down['status'] == 'unreachable'

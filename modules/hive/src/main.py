@@ -38,6 +38,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 import auth
+import features
+import hive_errors
 import console_access
 import credential_registry
 import dashboard_data
@@ -88,7 +90,7 @@ from configuration_data import (
 )
 from credentials_data import rotate_credential, set_github_pat
 from graph_data import get_graph_data
-from hive_logging import configure_logging, install_fastapi_logging, log_event
+from hive_logging import configure_logging, install_fastapi_logging, log_event, recent_errors
 from settings_data import (
     DEFAULT_VOICE_CLIP,
     ClipExists,
@@ -340,6 +342,9 @@ async def _render_template(request: Request, template_name: str,
     context.setdefault("current_user",
                        await get_current_user_from_request(request))
     context.setdefault("asset_versions", _asset_versions())
+    if context["current_user"]:
+        context.setdefault("feature_enabled", await features.enabled(context["current_user"]))
+        context.setdefault("feature_catalogue", features.FEATURES)
     context["request"] = request
     return templates.TemplateResponse(request, template_name, context)
 
@@ -2732,7 +2737,7 @@ async def settings_page(request: Request):
 
 
 _SETTINGS_SECTIONS = {
-    "general", "access", "connections", "voice", "credentials", "advanced", "users",
+    "general", "access", "connections", "voice", "credentials", "advanced", "users", "features",
 }
 
 
@@ -5121,6 +5126,62 @@ async def api_admin_group_member_remove(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/settings/features")
+async def api_features(user: dict = Depends(require_auth)):
+    return {"enabled": await features.enabled(user)}
+
+
+@app.put("/api/settings/features")
+async def api_features_save(body: dict, user: dict = Depends(require_auth)):
+    return {"enabled": await features.save(user, body)}
+
+
+@app.get("/hive-errors", response_class=HTMLResponse)
+async def hive_errors_page(request: Request):
+    return await _console_page(request, "hive_errors.html")
+
+
+@app.get("/api/hive-errors")
+async def api_hive_errors(user: dict = Depends(require_auth)):
+    del user
+    targets = []
+    for name, url, token in [
+        ("Hive Comms", _gateway_base_url(), os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")),
+        ("Lucent", _lucent_base_url(), os.getenv("LUCENT_ADMIN_BEARER_TOKEN", "")),
+    ]:
+        targets.append({"name": name, "url": url, "headers": {"Authorization": f"Bearer {token}"}})
+    # A failed registry read must stay visible rather than reporting zero minds.
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            response = await client.get(_gateway_base_url().rstrip('/') + '/broker/minds', headers=_gateway_headers())
+            response.raise_for_status()
+            minds = response.json()
+        if not isinstance(minds, list):
+            raise ValueError("Invalid mind registry")
+        for mind in minds:
+            if isinstance(mind, dict) and mind.get("gateway_url"):
+                targets.append({"name": mind.get("name") or "Mind", "url": mind["gateway_url"],
+                                "headers": {"Authorization": "Bearer " + os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")}})
+    except Exception:
+        minds = None
+    for name, variable in [("Voice (Chatterbox)", "CHATTERBOX_VOICE_URL"), ("Voice (Kokoro)", "KOKORO_VOICE_URL"),
+                           ("Terminal site", "HIVE_TERMINAL_URL"), ("Hive Tools", "HIVE_TOOLS_URL")]:
+        if os.getenv(variable):
+            targets.append({"name": name, "url": os.environ[variable], "headers": {}, "feed": False})
+    report = await hive_errors.collect(targets, recent_errors())
+    try:
+        await store.get_auth_setting('diagnostics.health')
+        report['components'].append({'name': 'PostgreSQL', 'status': 'health-only', 'errors': [],
+                                     'detail': 'Database query succeeded; database server logs are not exposed.'})
+    except Exception:
+        report['components'].append({'name': 'PostgreSQL', 'status': 'error', 'errors': [],
+                                     'detail': 'Database query failed.'})
+    if minds is None:
+        report["components"].append({"name": "Mind registry", "status": "unreachable", "errors": [],
+                                     "detail": "Could not discover minds; mind diagnostics are incomplete."})
+    return report
 
 
 if __name__ == "__main__":

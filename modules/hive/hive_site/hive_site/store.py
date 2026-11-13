@@ -735,3 +735,15 @@ async def memory_rows(table: str, *, limit: int = MEMORY_LIMIT_DEFAULT,
     a typo in a URL, not a failure of the store.
     """
     return await memory.rows(table, limit=limit, offset=offset, unit=_live())
+
+
+# ------------------------------------------------ navigation preferences
+
+async def get_navigation_features(username: str) -> dict:
+    import json
+    row = await core.get_setting("navigation.features:" + username, unit=_live())
+    return json.loads(row["value"]) if row else {}
+
+
+async def put_navigation_features(username: str, value: str) -> None:
+    await core.put_setting("navigation.features:" + username, value, time.time(), unit=_live())
