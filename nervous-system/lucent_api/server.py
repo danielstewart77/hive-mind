@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from lucent_api import holder_access
 from lucent_api.auth import require_admin_bearer
 
-from hive_logging import configure_logging, install_fastapi_logging, log_event
+from hive_logging import configure_logging, install_fastapi_logging, log_event, recent_errors
 
 log = configure_logging("lucent-api")
 
@@ -64,6 +64,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     install_fastapi_logging(app, log, "lucent-api")
+
+    @app.get("/diagnostics/errors", dependencies=[Depends(require_admin_bearer)])
+    async def diagnostic_errors():
+        return recent_errors()
 
     @app.get("/health")
     async def health() -> JSONResponse:
