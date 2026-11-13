@@ -431,3 +431,39 @@ def test_a_wake_stream_that_genuinely_breaks_is_let_go(watch):
             pass
 
     watch._drain(Stream(), "sess-1")  # reported, never raised
+
+
+# ------------------------------------------------------------ quiet hours
+
+
+def test_the_wake_carries_the_goodnight_so_the_mind_says_nothing_back(watch):
+    """The wake is a turn in the mind's own conversation.
+
+    Whatever it says back is delivered to Daniel's surface whether it meant
+    to tell him or not, so "do not tell him" has to ride on the wake itself.
+    """
+    rows = [_task("t1", name="Health app coach tab")]
+
+    text = watch.wake_message(rows, quiet=True)
+
+    assert "said goodnight" in text
+    assert "Reply with nothing at all." in text
+    assert "on hold for the sitrep" in text
+    assert "Health app coach tab" in text, "it still names the work"
+
+
+def test_the_wake_says_nothing_about_goodnight_when_he_has_not_said_it(watch):
+    text = watch.wake_message([_task("t1")], quiet=False)
+
+    assert "goodnight" not in text
+
+
+def test_goodnight_is_read_from_the_minds_own_marker(watch, monkeypatch,
+                                                     tmp_path):
+    marker = tmp_path / "goodnight"
+    monkeypatch.setenv("STAFF_GOODNIGHT_MARKER", str(marker))
+    assert watch.goodnight() is False
+
+    marker.touch()
+
+    assert watch.goodnight() is True
