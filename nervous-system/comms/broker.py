@@ -20,6 +20,8 @@ import uuid
 import hive_data
 from hive_data import broker_ops, core
 
+from comms import discord_out
+
 from hive_logging import log_event
 
 log = logging.getLogger("hive-mind.broker")
@@ -185,6 +187,41 @@ async def recover_stranded_messages() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Where the answer goes
+# ---------------------------------------------------------------------------
+def channel_destination(metadata: dict | None) -> str | None:
+    """The Discord channel this dispatch's answer belongs in, or None.
+
+    A channel id is all digits. Anything else - a channel *name* somebody
+    typed instead of its id, a placeholder left in a skill - is not one, and
+    is dropped rather than carried forward as a destination that 404s on the
+    first post. The same rule the scheduler applies to `discord_channel` in a
+    scheduled skill's frontmatter, for the same reason: `isdigit` alone is
+    true of superscripts and fullwidth forms, which address no channel.
+    """
+    value = str((metadata or {}).get("discord_channel") or "").strip()
+    return value if value.isascii() and value.isdigit() else None
+
+
+async def _discord_claim(mind_id: str) -> str:
+    """The Discord user this mind's bot answers, or empty.
+
+    The channel is the session's `client_ref`; `surface_id` is the person,
+    which is what the bot keys its own sessions on. Getting it wrong mints a
+    second session for a channel that already has one, and Daniel's replies
+    then follow a different conversation than the escalation opened.
+    """
+    try:
+        from comms import surface_claims  # noqa: PLC0415
+
+        state = await surface_claims.claim_state(mind_id, "discord")
+        return state.claimed_ref or ""
+    except Exception:
+        log.warning("broker: could not read the discord claim mind=%s", mind_id)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Wakeup prompt
 # ---------------------------------------------------------------------------
 def build_wakeup_prompt(
@@ -194,8 +231,16 @@ def build_wakeup_prompt(
     content: str,
     rolling_summary: str,
     message_number: int,
+    discord_channel: str | None = None,
 ) -> str:
-    """Construct the wakeup prompt sent to the callee's new session."""
+    """Construct the wakeup prompt sent to the callee's new session.
+
+    `discord_channel` changes who the answer is addressed to. A dispatch with
+    no channel is answered to the mind that asked, and the caller is the only
+    reader. A dispatch with one is also posted into that channel, where the
+    reader is Daniel - and a mind that was not told so writes a report to
+    another machine and Daniel gets handed it.
+    """
     parts = [f"You have a new message from {from_mind}.", "", f"Conversation ID: {conversation_id}", ""]
 
     if message_number > 1 and rolling_summary:
@@ -205,13 +250,21 @@ def build_wakeup_prompt(
             "",
         ])
 
-    parts.extend([
-        "New message:",
-        content,
-        "",
-        "Complete the requested work and respond with your findings. Your response will be",
-        f"automatically collected and delivered back to {from_mind}.",
-    ])
+    parts.extend(["New message:", content, ""])
+
+    if discord_channel:
+        parts.extend([
+            "Complete the requested work. Your response is posted into Daniel's",
+            f"Discord channel {discord_channel} as well as returned to {from_mind},",
+            "and that channel is where he will read it and reply to you. So write it",
+            "to Daniel: what happened, what you did about it, and what is left for",
+            f"him to decide. Not a report addressed to {from_mind}.",
+        ])
+    else:
+        parts.extend([
+            "Complete the requested work and respond with your findings. Your response will be",
+            f"automatically collected and delivered back to {from_mind}.",
+        ])
 
     return "\n".join(parts)
 
@@ -269,11 +322,25 @@ async def wakeup_and_collect(
     # per mind, reused and never killed. A dispatch between two different
     # minds keeps its own session per message, because that one is a task with
     # a beginning and an end and a caller waiting on its result.
-    standing = from_mind == to_mind
-    client_ref = (
-        f"broker-self-{to_mind}" if standing
-        else f"broker-{conversation_id}-{to_mind}"
-    )
+    #
+    # A dispatch naming a Discord channel is neither. It lands in that
+    # channel's own session - the one Daniel is already talking to there - so
+    # the answer arrives in a thread he can reply into, and his reply
+    # continues the conversation the escalation opened rather than opening a
+    # second one nobody is reading. An explicit destination wins over the
+    # self-wake, because a mind that names a channel has said where it wants
+    # the answer read.
+    channel_id = channel_destination(metadata)
+    standing = from_mind == to_mind and channel_id is None
+    # Both of these outlive the exchange. Killing the channel's session would
+    # take Daniel's thread with it.
+    resident = standing or channel_id is not None
+    if channel_id is not None:
+        client_type, client_ref = f"discord:{to_mind}", channel_id
+    elif standing:
+        client_type, client_ref = "broker", f"broker-self-{to_mind}"
+    else:
+        client_type, client_ref = "broker", f"broker-{conversation_id}-{to_mind}"
 
     try:
         # 1. Dispatched
@@ -285,7 +352,24 @@ async def wakeup_and_collect(
         if row:
             mind_model = row.get("model")
         mind_name = (row or {}).get("name") or to_mind
-        if standing:
+        if channel_id is not None:
+            # Reuse before create, and keyed exactly as the Discord bot keys
+            # its own: `client_type` carries the mind so one bot's channel is
+            # not another's, `client_ref` is the channel, `surface_id` the
+            # person. A mismatch on any of the three mints a parallel session
+            # for a channel that already has one.
+            existing = await session_mgr.get_active_session(client_type, client_ref)
+            if existing:
+                session = existing
+            else:
+                session = await session_mgr.create_session(
+                    surface=client_type,
+                    surface_id=await _discord_claim(to_mind) or channel_id,
+                    client_ref=client_ref,
+                    mind_id=to_mind,
+                    model=mind_model,
+                )
+        elif standing:
             # A mind waking itself is a scheduler, a watch or a pass, and it
             # does it over and over: the sentinel alone had sent 21,114 of
             # these, one session minted and killed per wake, which is a
@@ -330,7 +414,10 @@ async def wakeup_and_collect(
         # 3. Send wakeup and collect response
         from_row = await get_mind_by_id(from_mind)
         from_display = (from_row.get("name") if from_row else None) or from_mind
-        prompt = build_wakeup_prompt(from_display, to_mind, conversation_id, content, rolling_summary, message_number)
+        prompt = build_wakeup_prompt(
+            from_display, to_mind, conversation_id, content, rolling_summary,
+            message_number, discord_channel=channel_id,
+        )
         response_text = await asyncio.wait_for(
             _collect_response(session_mgr.send_message(session_id, prompt)),
             timeout=backstop,
@@ -350,6 +437,25 @@ async def wakeup_and_collect(
 
         # 5. Mark original as completed
         await update_message_status(message_id, "completed")
+
+        # 6. The copy for Daniel, last and separately. The caller already has
+        # its answer and the message row already says so, so a Discord outage
+        # or an unset token costs the copy and not the dispatch - which is the
+        # right way round, because the mind cannot be asked to do the work
+        # twice.
+        if channel_id is not None and (response_text or "").strip():
+            try:
+                await discord_out.post(channel_id, response_text)
+            except Exception:
+                log.exception(
+                    "broker: discord delivery failed channel=%s message=%s",
+                    channel_id, message_id,
+                )
+                log_event(log, "broker.wakeup.delivery_failed",
+                          level=logging.ERROR, conversation_id=conversation_id,
+                          message_id=message_id, from_mind=from_mind,
+                          to_mind=to_mind, channel_id=channel_id,
+                          session_id=session_id)
         log.info("broker: wakeup complete conversation=%s from=%s to=%s", conversation_id, from_mind, to_mind)
         log_event(log, "broker.wakeup.completed", conversation_id=conversation_id,
                   message_id=message_id, from_mind=from_mind, to_mind=to_mind,
@@ -377,11 +483,12 @@ async def wakeup_and_collect(
                   error_type=type(e).__name__, exc_info=True)
 
     finally:
-        # 6. Kill the callee session — unless it is the standing wake channel,
-        # which the next wake reuses. Killing it is what made every wake mint
-        # a new row, and a killed session is also a mind that opens its next
-        # wake having forgotten the last one.
-        if session_id is not None and not standing:
+        # 7. Kill the callee session — unless it is one that outlives the
+        # exchange: the standing wake channel, which the next wake reuses, or
+        # a Discord channel's session, which is Daniel's thread. Killing is
+        # what made every wake mint a new row, and a killed session is also a
+        # mind that opens its next wake having forgotten the last one.
+        if session_id is not None and not resident:
             try:
                 await session_mgr.kill_session(session_id)
             except Exception:
