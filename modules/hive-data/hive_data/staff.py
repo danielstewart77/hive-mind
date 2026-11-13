@@ -46,16 +46,22 @@ Row = dict[str, Any]
 STATUSES = "staff.statuses"
 TASKS = "staff.tasks"
 TASK_SESSIONS = "staff.task_sessions"
+AGENTS = "staff.agents"
 
 #: What `update_task` may set. `updated_at` is moved by the operation
 #: itself, and `id` and `created_at` never move.
-_SETTABLE = frozenset({"name", "description", "status", "updated_at"})
+_SETTABLE = frozenset({"name", "description", "status", "board_item",
+                       "question", "updated_at"})
 
 #: What the tick may set. Disjoint from `_SETTABLE` on purpose: a status is
 #: Daniel's reading of the work, and the machine that watches sessions never
 #: writes one. `updated_at` is shared because a stop is a real change to
 #: report, and the sitrep finds what moved by that column.
 _WATCHABLE = frozenset({"stopped_at", "woken_at", "updated_at"})
+
+#: What `finish_agent` may set. A sub-agent's brief, task and start never
+#: move: the row is a record of what ran, not a slot to be reused.
+_AGENT_SETTABLE = frozenset({"finished_at", "outcome"})
 
 #: Characters that render as nothing but are not `str.isspace`. The schema's
 #: checks carry the same set.
@@ -150,10 +156,20 @@ async def tasks(*, status: str | None = None,
 
 async def update_task(task_id: str, *, name: Any = UNSET,
                       description: Any = UNSET, status: Any = UNSET,
+                      board_item: Any = UNSET, question: Any = UNSET,
                       expected_status: Any = UNSET,
                       now: float | None = None,
                       unit: Unit | None = None) -> Row | None:
-    """Change a task's name, description or status; `updated_at` moves.
+    """Change a task's name, description, status, board item or question.
+
+    `updated_at` moves with any of them.
+
+    `board_item` is the `board.work_items` id this task covers and is what
+    gives the Chief of Staff page its depth: a task that names a feature
+    draws that feature's stories beneath it. `question` is the one thing the
+    task is waiting on Daniel for, and a task holding one draws a bubble.
+    Either may be set to None, which is how an answered question is cleared;
+    passing nothing leaves both as they were.
 
     Only what is passed is written. Returns the task as it now stands, or
     None when nothing was changed: there is no such task, or
@@ -170,7 +186,8 @@ async def update_task(task_id: str, *, name: Any = UNSET,
     if name is not UNSET:
         _not_blank("task name", name)
     values = _sql.passed(
-        {"name": name, "description": description, "status": status})
+        {"name": name, "description": description, "status": status,
+         "board_item": board_item, "question": question})
     if not values:
         raise ValueRefused(
             "an update of a staff task named nothing to change. Moving "
@@ -278,6 +295,91 @@ async def delete_task(task_id: str, *, unit: Unit | None = None) -> Row:
     clause, args = _sql.where(TASKS, {"id": task_id})
     return await _execute(
         unit, f"DELETE FROM {qualified(TASKS)} WHERE {clause}", *args)
+
+
+# ------------------------------------------------------------------ agents
+#
+# The sub-agents working a task, registered by the children themselves. A
+# sub-agent is an in-process child of a mind's turn, so nothing outside that
+# process can enumerate one: the child writes its own row on the way in and
+# closes it on the way out, and that row is the only record of it that
+# outlives the turn.
+
+
+async def start_agent(task_id: str, brief: str, *, about: str = "",
+                      agent_id: str | None = None, now: float | None = None,
+                      unit: Unit | None = None) -> Row:
+    """Record a sub-agent beginning work on a task, and return its row.
+
+    `brief` is the brief file it was handed, `about` the one thing it was
+    handed it for - a session id, a board number - so two children on the
+    same brief are telling apart on the page. `MissingReference` when there
+    is no such task, so a typo does not leave a child hanging off nothing.
+    """
+    _not_blank("agent brief", brief)
+    if agent_id is not None:
+        _not_blank("agent id", agent_id)
+    sql, args = _sql.insert(AGENTS, {
+        "id": agent_id if agent_id is not None else uuid.uuid4().hex,
+        "task_id": task_id, "brief": brief, "about": about,
+        "started_at": _now(now),
+    }, returning=COLUMNS[AGENTS])
+    return (await _execute_returning(unit, sql, *args)).get("row")
+
+
+async def finish_agent(agent_id: str, *, outcome: str = "",
+                       now: float | None = None,
+                       unit: Unit | None = None) -> Row | None:
+    """Close a sub-agent's row. None when there is no such open agent.
+
+    Guarded by `finished_at IS NULL` in the statement, so the moment kept is
+    the first report rather than the latest: a brief that reports twice does
+    not move the time its work actually ended.
+    """
+    clause, clause_args = _sql.where(AGENTS, {"finished_at": None}, start=4)
+    sql, args = _sql.update(
+        AGENTS, {"finished_at": _now(now), "outcome": outcome},
+        {"id": agent_id}, settable=_AGENT_SETTABLE, extra_where=clause,
+        returning=COLUMNS[AGENTS])
+    return (await _execute_returning(unit, sql, *args, *clause_args)
+            ).get("row")
+
+
+async def agents(*, task_id: str | None = None, working: bool = False,
+                 unit: Unit | None = None) -> list[Row]:
+    """Sub-agent rows, newest first; one task's, or every task's.
+
+    `working` keeps only those that have not reported. Note that a child
+    still open is not the same as a child still alive - one dies with the
+    turn's process and never writes `finished_at` - so a caller drawing
+    live work decides staleness from `started_at` and its own clock.
+    """
+    conditions: dict[str, Any] = {}
+    if task_id is not None:
+        conditions["task_id"] = task_id
+    where, args = ("", [])
+    if conditions:
+        where, args = _sql.where(AGENTS, conditions)
+    clauses = [where] if where else []
+    if working:
+        clauses.append('"finished_at" IS NULL')
+    joined = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return await _fetch(
+        unit, f"SELECT {select_list(AGENTS)} FROM {qualified(AGENTS)} "
+        f'{joined} ORDER BY "started_at" DESC, "id"', *args)
+
+
+def agent_stale(row: Row, *, now: float, timeout: float) -> bool:
+    """Whether an unreported sub-agent has outlived the turn that spawned it.
+
+    One definition, because the page and anything else reading these rows
+    must agree about it. A child lives inside the turn's process, so an open
+    row older than the mind's turn timeout is an orphan - the child was
+    killed and could not write its own ending - rather than work in flight.
+    """
+    if row.get("finished_at") is not None:
+        return False
+    return now - row["started_at"] > timeout
 
 
 # ----------------------------------------------------------------- sessions

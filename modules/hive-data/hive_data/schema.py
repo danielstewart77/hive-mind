@@ -110,8 +110,13 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "staff.statuses": ("name",),
     "staff.tasks": (
         "id", "name", "description", "status", "created_at", "updated_at",
-        "stopped_at", "woken_at"),
+        "stopped_at", "woken_at", "board_item", "question"),
     "staff.task_sessions": ("session_id", "task_id", "attached_at"),
+    #: The sub-agents working a task, registered by the children themselves
+    #: because nothing outside a mind's turn can see one (step 9).
+    "staff.agents": (
+        "id", "task_id", "brief", "about", "outcome", "started_at",
+        "finished_at"),
     #: Lucent's half. Qualified keys, not bare ones, and that is the point:
     #: `credentials` exists in both `core` and `memory`, the 12 holders that
     #: appear in both share no `token_sha`, and a bare name could only ever

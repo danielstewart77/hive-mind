@@ -316,3 +316,168 @@ async def test_the_ticks_writes_report_nothing_for_a_task_that_is_not_there(
     assert await staff.note_stopped("no-such-task", now=clock) is None
     assert await staff.note_woken("no-such-task", now=clock) is None
     assert await staff.note_running("no-such-task") is None
+
+
+# ---------------------------------------------- the board item and question
+#
+# What the Chief of Staff page draws a tree and its bubbles from (step 9).
+
+
+async def test_a_task_carries_the_board_item_it_covers(connected, inspector,
+                                                       clock):
+    """Without it a task that *is* a feature can only ever be one node."""
+    made = await staff.create_task("Chief of staff page", "in progress",
+                                   now=clock)
+
+    await staff.update_task(made["id"], board_item="f1deb69399136e16d",
+                            now=clock + 1)
+
+    assert (await staff.task(made["id"]))["board_item"] == "f1deb69399136e16d"
+    assert await inspector.fetchval(
+        "SELECT board_item FROM staff.tasks WHERE id = $1",
+        made["id"]) == "f1deb69399136e16d"
+
+
+async def test_a_task_carries_the_question_it_is_holding_for_daniel(
+        connected, inspector, clock):
+    """The status said an answer was owed; only this says which."""
+    made = await staff.create_task("Judging brief", "in progress", now=clock)
+
+    await staff.update_task(
+        made["id"], question="Which model does the judging child run on?",
+        now=clock + 1)
+
+    assert (await staff.task(made["id"]))["question"] == (
+        "Which model does the judging child run on?")
+    assert await inspector.fetchval(
+        "SELECT question FROM staff.tasks WHERE id = $1",
+        made["id"]) == "Which model does the judging child run on?"
+
+
+async def test_an_answered_question_is_cleared_without_touching_the_status(
+        connected, clock):
+    """A task can hold a question and still be worked, so the two are apart."""
+    made = await staff.create_task("Judging brief", "in progress", now=clock)
+    await staff.update_task(made["id"], question="Which model?", now=clock + 1)
+
+    row = await staff.update_task(made["id"], question=None, now=clock + 2)
+
+    assert row["question"] is None
+    assert row["status"] == "in progress"
+
+
+async def test_a_new_task_holds_neither_a_board_item_nor_a_question(
+        connected, clock):
+    made = await staff.create_task("Something small", "in progress", now=clock)
+
+    assert made["board_item"] is None
+    assert made["question"] is None
+
+
+# ------------------------------------------------------------- sub-agents
+#
+# A sub-agent is an in-process child of a mind's turn, invisible from
+# outside it, so the children register themselves (step 9).
+
+
+async def test_a_sub_agent_registers_itself_against_the_task_it_works(
+        connected, inspector, clock):
+    task = await staff.create_task("Tend the ledger", "in progress", now=clock)
+
+    agent = await staff.start_agent(task["id"], "read-and-judge.md",
+                                    about="session 1a2b", now=clock + 5)
+
+    assert agent["brief"] == "read-and-judge.md"
+    assert agent["about"] == "session 1a2b"
+    assert agent["started_at"] == clock + 5
+    assert agent["finished_at"] is None
+    stored = await inspector.fetchrow(
+        "SELECT task_id, brief, about FROM staff.agents WHERE id = $1",
+        agent["id"])
+    assert dict(stored) == {"task_id": task["id"],
+                            "brief": "read-and-judge.md",
+                            "about": "session 1a2b"}
+
+
+async def test_a_sub_agent_cannot_hang_off_a_task_that_is_not_there(
+        connected, clock):
+    """A typo leaving a child under nothing would draw as a loose node."""
+    with pytest.raises(hive_data.errors.MissingReference):
+        await staff.start_agent("no-such-task", "chase.md", now=clock)
+
+
+async def test_a_sub_agent_that_reports_carries_its_outcome_and_end(
+        connected, clock):
+    task = await staff.create_task("Tend the ledger", "in progress", now=clock)
+    agent = await staff.start_agent(task["id"], "chase.md", now=clock + 5)
+
+    closed = await staff.finish_agent(agent["id"], outcome="waiting",
+                                      now=clock + 70)
+
+    assert closed["finished_at"] == clock + 70
+    assert closed["outcome"] == "waiting"
+
+
+async def test_a_brief_reporting_twice_keeps_the_moment_its_work_ended(
+        connected, clock):
+    task = await staff.create_task("Tend the ledger", "in progress", now=clock)
+    agent = await staff.start_agent(task["id"], "chase.md", now=clock + 5)
+    await staff.finish_agent(agent["id"], outcome="waiting", now=clock + 70)
+
+    again = await staff.finish_agent(agent["id"], outcome="later",
+                                     now=clock + 900)
+
+    assert again is None
+    assert (await staff.agents(task_id=task["id"]))[0]["finished_at"] == (
+        clock + 70)
+
+
+async def test_only_the_sub_agents_still_working_are_listed_when_asked(
+        connected, clock):
+    task = await staff.create_task("Tend the ledger", "in progress", now=clock)
+    done = await staff.start_agent(task["id"], "chase.md", now=clock + 1)
+    live = await staff.start_agent(task["id"], "read-and-judge.md",
+                                   now=clock + 2)
+    await staff.finish_agent(done["id"], now=clock + 3)
+
+    working = await staff.agents(task_id=task["id"], working=True)
+
+    assert [a["id"] for a in working] == [live["id"]]
+
+
+async def test_sub_agents_are_listed_for_one_task_rather_than_every_task(
+        connected, clock):
+    one = await staff.create_task("First", "in progress", now=clock)
+    two = await staff.create_task("Second", "in progress", now=clock)
+    mine = await staff.start_agent(one["id"], "chase.md", now=clock + 1)
+    await staff.start_agent(two["id"], "chase.md", now=clock + 2)
+
+    assert [a["id"] for a in await staff.agents(task_id=one["id"])] == [
+        mine["id"]]
+
+
+async def test_an_open_sub_agent_past_the_turn_timeout_reads_as_orphaned(
+        connected, clock):
+    """A child dies with its turn's process and never writes its own ending."""
+    task = await staff.create_task("Tend the ledger", "in progress", now=clock)
+    agent = await staff.start_agent(task["id"], "chase.md", now=clock)
+    row = (await staff.agents(task_id=task["id"]))[0]
+
+    assert staff.agent_stale(row, now=clock + 899, timeout=15 * 60) is False
+    assert staff.agent_stale(row, now=clock + 901, timeout=15 * 60) is True
+    await staff.finish_agent(agent["id"], now=clock + 10)
+    assert staff.agent_stale(
+        (await staff.agents(task_id=task["id"]))[0], now=clock + 9000,
+        timeout=15 * 60) is False
+
+
+async def test_deleting_a_task_opened_in_error_takes_its_sub_agents(
+        connected, inspector, clock):
+    task = await staff.create_task("Opened wrong", "in progress", now=clock)
+    await staff.start_agent(task["id"], "chase.md", now=clock + 1)
+
+    await staff.delete_task(task["id"])
+
+    assert await inspector.fetchval(
+        "SELECT count(*) FROM staff.agents WHERE task_id = $1",
+        task["id"]) == 0
