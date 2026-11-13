@@ -1323,6 +1323,19 @@ def _delta_line(kind: str, text: str) -> str:
     return json.dumps({"delta": {"kind": kind, "text": text}}) + "\n"
 
 
+def _message_line(text: str) -> str:
+    """One completed assistant message the way the resumable runner writes it."""
+    return json.dumps({"message": text}) + "\n"
+
+
+def _assistant_texts(events: list[dict]) -> list[str]:
+    """Every whole assistant message handed over, in the order it was."""
+    return [block["text"]
+            for event in events if event.get("type") == "assistant"
+            for block in event["message"]["content"]
+            if block.get("type") == "text"]
+
+
 def _streamed(events: list[dict], inner_type: str) -> list[str]:
     """The streamed pieces of one kind, in the order a surface receives them."""
     field = "thinking" if inner_type == "thinking_delta" else "text"
@@ -1512,3 +1525,82 @@ async def test_an_overflow_dsh_words_its_own_way_is_reported_under_the_one_code(
         "message": "This model's maximum context length is 131072 tokens."})])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert _result(await _drain(dsh))["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+
+
+async def test_a_finished_message_is_delivered_while_the_turn_works_on(
+    dsh, monkeypatch
+) -> None:
+    """Deltas keep the surface moving but carry no boundary.
+
+    A mind that speaks, dispatches delegates and speaks again streams one run
+    of prose and then goes quiet for as long as the delegates take, leaving
+    the reader with a message that stops mid-thought. Daniel's words: "your
+    text just cuts off and it waits until the other agents finish."
+    """
+    _session(dsh)
+    lines = [
+        _delta_line("text", "Dispatched three "),
+        _delta_line("text", "jobs."),
+        _message_line("Dispatched three jobs."),
+        _delta_line("text", "Cypher is back: green."),
+        _message_line("Cypher is back: green."),
+        _report(text="Cypher is back: green."),
+    ]
+    proc = _FakeProc(lines)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec",
+                        lambda *a, **k: _answer_with(proc))
+    unread_at_first_message = None
+    events = []
+    async for event in dsh._run_dsh_turn("row-1", "do the thing", None):
+        if unread_at_first_message is None and event.get("type") == "assistant":
+            unread_at_first_message = len(proc.stdout._lines)
+        events.append(event)
+
+    # The first whole message was handed over with three lines still unread:
+    # the second delta, its message, and the report. An adapter that waited
+    # for the turn would have drained every one of them first.
+    assert unread_at_first_message == 3
+    assert _assistant_texts(events)[0] == "Dispatched three jobs."
+    # Reaching the surface is the point.
+    assert all(not event.get("_observer_only")
+               for event in events if event.get("type") == "assistant")
+
+
+async def test_a_message_frame_is_not_made_from_a_fragment_or_a_report(
+    dsh,
+) -> None:
+    """A surface sending one message per token would send a hundred."""
+    assert dsh._message_frame(_delta_line("text", "half ")) is None
+    assert dsh._message_frame(_report(text="done")) is None
+    assert dsh._message_frame(
+        json.dumps({"progress": {"round": 2}, "message": "x"})) is None
+    assert dsh._message_frame(
+        json.dumps({"sessionId": "conv-1", "message": "done"})) is None
+
+
+async def test_node_chatter_never_becomes_a_message(dsh) -> None:
+    assert dsh._message_frame("(node:7) ExperimentalWarning: blah") is None
+    assert dsh._message_frame('{"message": ') is None
+    assert dsh._message_frame(json.dumps({"message": ""})) is None
+    assert dsh._message_frame(json.dumps({"message": 7})) is None
+    assert dsh._message_frame(json.dumps(["message"])) is None
+
+
+async def test_the_turn_ledger_still_gets_the_buffered_copy(
+    dsh, monkeypatch
+) -> None:
+    """Unchanged by the message frames, and for the same reason as before.
+
+    The buffered frame is what comms accumulates into `session_turns`, which
+    `/history`, the rotation carry-forward and the late-turn merge all read.
+    Showing it twice is the chat surfaces' problem and they already solve it.
+    """
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        _message_line("the answer"),
+        _report(text="the answer"),
+    ]))
+
+    events = await _drain(dsh)
+
+    assert _assistant_texts(events) == ["the answer", "the answer"]
