@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, patch
@@ -1816,14 +1817,28 @@ def test_an_overflow_whose_debt_cannot_be_recorded_keeps_the_message_in_the_ledg
 # ---------------------------------------------------------------------------
 # The composed prompt is one execve argument
 #
-# The harness carries it as a single ``--append-system-prompt``, and Linux caps
-# one argument at 32 pages regardless of ``ARG_MAX``. A prompt past that is not
-# a long prompt — it is a spawn that dies with ``[Errno 7] Argument list too
-# long`` while the mind's service still reports healthy.
+# The claude harness carries it as a single ``--append-system-prompt``, and
+# Linux caps one argument at 32 pages regardless of ``ARG_MAX``. A prompt past
+# that is not a long prompt — it is a spawn that dies with ``[Errno 7]
+# Argument list too long`` while the mind's service still reports healthy.
+#
+# The ceiling is pinned against the kernel, never against itself: an earlier
+# version of these tests passed with PROMPT_MAX_BYTES set eight times too
+# high, which is the original bug with a green suite over it.
 # ---------------------------------------------------------------------------
 
-CF_HEAD = "OLDEST-CARRY-FORWARD-HEAD"
+CF_SUMMARY = "## Summary of the previous session\nWE-WERE-FIXING-THE-BOILER"
+CF_MIDDLE = "MIDDLE-DIALOGUE-THAT-MAY-GO"
 CF_TAIL = "NEWEST-CARRY-FORWARD-TAIL"
+
+
+def _execve_takes(nbytes: int) -> bool:
+    """Whether this kernel will carry one argument of ``nbytes``."""
+    try:
+        subprocess.run(["/bin/true", "x" * nbytes], check=True)
+        return True
+    except OSError:
+        return False
 
 
 async def _memory_for(client_ref: str, body: str, created_at: float) -> None:
@@ -1835,24 +1850,31 @@ async def _memory_for(client_ref: str, body: str, created_at: float) -> None:
     )
 
 
-def _oversized_carry_forward() -> str:
-    """A carry-forward several times past what execve will take."""
-    filler = "x" * (PROMPT_MAX_BYTES * 3)
-    return json.dumps({"carry_forward": f"{CF_HEAD}{filler}{CF_TAIL}"})
+def _oversized_carry_forward(continuation: list | None = None) -> str:
+    """A rendered carry-forward several times past what execve will take.
+
+    Shaped like the real thing: the summary at the head, the rotation
+    epilogue at the tail, dialogue in between.
+    """
+    filler = (CF_MIDDLE + "x" * 200) * (PROMPT_MAX_BYTES * 3 // 220)
+    envelope = {"carry_forward": f"{CF_SUMMARY}\n{filler}\n{CF_TAIL}"}
+    if continuation is not None:
+        envelope["continuation"] = continuation
+    return json.dumps(envelope)
 
 
-def _lucent_stubbed():
+def _lucent_stubbed(soul: str = "<soul>me</soul>"):
     """Compose for real; only the lucent HTTP fetches are stubbed."""
     return (
-        patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"),
+        patch.object(bootstrap_loader, "_fetch_soul", return_value=soul),
         patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""),
     )
 
 
-def _spawn_on_oversized_memory():
+def _spawn_on_oversized_memory(harness: str = "claude_cli", continuation=None):
     async def scenario():
-        mgr = await _manager(harness="claude_cli")
-        await _memory_for("789", _oversized_carry_forward(), time.time())
+        mgr = await _manager(harness=harness)
+        await _memory_for("789", _oversized_carry_forward(continuation), time.time())
         mind = FakeMind()
         soul, recent = _lucent_stubbed()
         with mind.wired(), soul, recent:
@@ -1865,16 +1887,70 @@ def _spawn_on_oversized_memory():
     return _run(scenario()).spawns()[-1]["system_prompt_blocks"]
 
 
+def test_the_prompt_ceiling_is_one_the_kernel_will_actually_carry(comms_db):
+    """Pins PROMPT_MAX_BYTES to the kernel rather than to itself, and leaves
+    room for the surface prompt the adapter appends after it."""
+    assert _execve_takes(PROMPT_MAX_BYTES)
+    assert PROMPT_MAX_BYTES < bootstrap_loader._MAX_ARG_STRLEN
+    assert not _execve_takes(bootstrap_loader._MAX_ARG_STRLEN)
+
+
 def test_a_fresh_session_composes_a_prompt_execve_can_carry(comms_db):
-    assert len(_spawn_on_oversized_memory().encode("utf-8")) <= PROMPT_MAX_BYTES
+    blocks = _spawn_on_oversized_memory()
+    # Not vacuous: the carry-forward really was loaded and really was cut.
+    assert CF_TAIL in blocks
+    assert len(blocks.encode("utf-8")) <= PROMPT_MAX_BYTES
+    assert _execve_takes(len(blocks.encode("utf-8")))
 
 
-def test_a_trimmed_carry_forward_keeps_its_newest_text_the_soul_and_a_mark(comms_db):
+def test_a_trimmed_carry_forward_keeps_its_summary_its_newest_text_and_a_mark(comms_db):
+    """The rendered carry-forward opens with its summary and closes with the
+    rotation epilogue telling the mind that the summary above is its memory.
+    Keeping only the tail deletes the summary and keeps the sentence
+    insisting it is there."""
     blocks = _spawn_on_oversized_memory()
     assert "<soul>me</soul>" in blocks
+    assert "WE-WERE-FIXING-THE-BOILER" in blocks, "the summary was trimmed away"
     assert CF_TAIL in blocks
-    assert CF_HEAD not in blocks
     assert "trimmed to fit" in blocks
+    assert blocks.count(CF_MIDDLE) * len(CF_MIDDLE) < len(blocks)
+
+
+def test_a_pending_continuation_is_never_cut_into(comms_db):
+    """It is a user turn that was never answered, not history.
+
+    A trim landing inside it left an unclosed <session-memory> wrapped around
+    a stray </pending-continuation>, with the line telling the mind to answer
+    it cut away — the message present and unanswerable.
+    """
+    # Big enough that a trim treating it as part of the carry-forward would
+    # land its cut inside the continuation — a user pasting during rotation.
+    pasted = "PASTED-LINE\n" * 12_000
+    blocks = _spawn_on_oversized_memory(
+        continuation=[{"role": "user", "content": pasted + "DID THE DEPLOY LAND"}]
+    )
+    assert "DID THE DEPLOY LAND" in blocks
+    assert "Respond to it as the user's latest message." in blocks
+    assert blocks.count("<pending-continuation>") == 1
+    assert blocks.count("</pending-continuation>") == 1
+    # Tags balanced: a cut across the boundary leaves <session-memory> open
+    # around a stray </pending-continuation>.
+    assert blocks.count("<session-memory>") == blocks.count("</session-memory>")
+    assert blocks.index("</session-memory>") < blocks.index("<pending-continuation>")
+    # And the whole thing still fits: treating the continuation as
+    # untrimmable starved the carry-forward and landed at 144,191 bytes.
+    assert len(blocks.encode("utf-8")) <= PROMPT_MAX_BYTES
+    assert _execve_takes(len(blocks.encode("utf-8")))
+
+
+def test_a_codex_conversation_is_not_held_to_the_claude_exec_ceiling(comms_db):
+    """Codex passes the prompt on stdin and in a seed file; dsh holds it in a
+    state dict. Neither can hit MAX_ARG_STRLEN, and trimming their
+    carry-forward for it costs them history to respect a limit they do not
+    have."""
+    blocks = _spawn_on_oversized_memory(harness="codex_cli")
+    assert len(blocks.encode("utf-8")) > PROMPT_MAX_BYTES
+    assert CF_SUMMARY.split("\n")[1] in blocks
 
 
 def test_a_rotation_budget_past_the_exec_ceiling_is_clamped_to_it(comms_db):
@@ -1901,3 +1977,26 @@ def test_a_rotation_budget_past_the_exec_ceiling_is_clamped_to_it(comms_db):
     blocks = _run(scenario())
     assert CF_TAIL in blocks, "the carry-forward was never loaded; test is vacuous"
     assert len(blocks.encode("utf-8")) <= PROMPT_MAX_BYTES
+    assert _execve_takes(len(blocks.encode("utf-8")))
+
+
+def test_a_carry_forward_with_no_room_to_trim_is_marked_rather_than_vanishing():
+    """A block that simply disappears leaves the mind believing it has the
+    whole history. The mark is the smallest honest thing that fits."""
+    block = bootstrap_loader.SESSION_MEMORY_OPEN + "\n" + ("x" * 5000) + \
+        "\n" + bootstrap_loader.SESSION_MEMORY_CLOSE
+    mark = bootstrap_loader.SESSION_MEMORY_DROPPED
+
+    # Room for the mark and nothing else: the mark is what comes back.
+    out = bootstrap_loader._keep_head_and_tail(block, len(mark.encode("utf-8")))
+    assert out == mark
+
+    # Not even room for the mark: the block goes, but it is on the record.
+    assert bootstrap_loader._keep_head_and_tail(block, 5) == ""
+
+
+def test_recent_memory_with_no_room_left_is_marked_rather_than_vanishing():
+    block = "<recent-memory>\n" + ("y" * 5000) + "\n</recent-memory>"
+    mark = bootstrap_loader.RECENT_MEMORY_DROPPED
+
+    assert bootstrap_loader._keep_head(block, len(mark.encode("utf-8"))) == mark
