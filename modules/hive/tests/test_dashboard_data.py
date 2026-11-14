@@ -611,14 +611,14 @@ class TestBarBasis:
         assert reading["bar_basis"] is None
         assert reading["bar_fraction"] is None
 
-    def test_a_rotation_point_of_zero_draws_no_mark(self):
-        """A mark at the left edge claims this conversation rotates
-        immediately, which is worse than no mark at all."""
+    def test_a_known_zero_rotation_point_is_drawn_and_reports_over(self):
+        """A positive model window can yield a known zero-token threshold."""
         reading = dd.context_reading(
             {"tokens": 5000, "threshold": 0, "window": 1000000}
         )
 
-        assert reading["mark_fraction"] is None
+        assert reading["mark_fraction"] == 0.0
+        assert reading["over"] is True
 
     def test_a_rotation_point_past_the_window_is_flagged_not_clamped(self):
         """A mind reporting a 200k window against a 300k rotation point is
@@ -871,6 +871,19 @@ class TestThresholdFromTheModel:
 
     def test_without_a_percent_the_threshold_stays_unknown(self):
         assert dd.resolve_threshold(reported=None, window=1_000_000, percent=None) is None
+
+    def test_a_reported_zero_is_not_replaced_by_a_fallback(self):
+        assert dd.resolve_threshold(reported=0, window=100_000, percent=40) == 0
+
+    def test_a_known_zero_threshold_remains_visible_and_over(self):
+        reading = dd.context_reading(
+            {"tokens": 0, "threshold": 0, "window": 1,
+             "threshold_percent": 1, "kind": "usage"}
+        )
+
+        assert (reading["status"], reading["threshold"], reading["over"],
+                reading["mark_fraction"]) == ("reporting", 0, True, 0.0)
+        assert reading["fraction_of_threshold"] is None
 
     def test_a_percent_no_window_could_rotate_at_is_not_taken(self):
         assert dd.threshold_percent({"rotation_threshold_percent": 150}) is None

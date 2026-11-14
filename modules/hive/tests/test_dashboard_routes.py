@@ -236,21 +236,32 @@ def test_an_unreachable_proxy_leaves_the_window_unknown_rather_than_guessed(
     assert context["fraction_of_window"] is None
 
 
-def test_repeated_page_loads_do_not_re_probe_the_machines(
+def test_dashboard_reuses_and_refreshes_host_snapshot_at_its_ttl(
     tmp_path, monkeypatch, wired
 ):
-    """Requirement 26. Every tab reads one shared reading; without it, ten
-    open tabs is ten `nvidia-smi` invocations per interval on a kid's PC."""
-    probe = AsyncMock(return_value=HOSTS)
+    """Route output reuses one observation until its refresh time."""
+    now = [100.0]
+    current_reading = [copy.deepcopy(HOSTS)]
+
+    async def read_hosts():
+        return copy.deepcopy(current_reading[0])
+
     main_mod._host_snapshot.invalidate()
-    main_mod._host_snapshot._fetch = probe
+    monkeypatch.setattr(main_mod._host_snapshot, "_clock", lambda: now[0])
+    monkeypatch.setattr(main_mod._host_snapshot, "_fetch", read_hosts)
     client = _authed_client(tmp_path, monkeypatch)
 
-    client.get("/api/dashboard")
-    client.get("/api/dashboard")
-    client.get("/api/dashboard")
+    first = client.get("/api/dashboard").json()["hosts"]
+    current_reading[0] = {
+        "hosts": [{"host_id": "boot-1", "hostname": "updated workstation",
+                   "status": "reporting"}]
+    }
+    within_ttl = client.get("/api/dashboard").json()["hosts"]
+    assert within_ttl["hosts"][0]["hostname"] == first["hosts"][0]["hostname"]
 
-    assert probe.await_count == 1
+    now[0] += main_mod._host_snapshot._ttl + 1.0
+    after_ttl = client.get("/api/dashboard").json()["hosts"]
+    assert after_ttl["hosts"][0]["hostname"] == "updated workstation"
 
 
 def test_the_text_route_relays_the_sequenced_blocks(tmp_path, monkeypatch, wired):
@@ -476,12 +487,10 @@ def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_windo
     assert idle["context"]["kind"] == "estimated"
 
 
-def test_a_conversation_with_no_reported_threshold_rotates_at_its_models_percent(
+def test_a_conversation_without_a_mind_threshold_does_not_use_proxy_percentage(
     tmp_path, monkeypatch, wired
 ):
-    """The rotation percentage is on the proxy's row for the model, so a
-    conversation whose mind has not reported a threshold is drawn at that
-    percentage of the window, and the page is told the percentage."""
+    """A proxy-wide model percentage cannot fill an unreported mind preference."""
     live = copy.deepcopy(LIVE)
     live["sessions"][0]["context"]["threshold"] = None
     monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
@@ -489,12 +498,26 @@ def test_a_conversation_with_no_reported_threshold_rotates_at_its_models_percent
 
     context = client.get("/api/dashboard").json()["columns"][0]["context"]
 
-    assert context["threshold"] == 1_000_000 * 30 // 100
-    assert context["threshold_percent"] == 30
-    assert context["fraction_of_threshold"] == 150_000 / (1_000_000 * 30 // 100)
+    assert context["threshold"] is None
+    assert context["threshold_percent"] is None
+    assert context["fraction_of_threshold"] is None
 
 
-def test_the_model_catalog_relays_each_models_rotation_percent(monkeypatch):
+def test_a_reported_session_threshold_wins_over_proxy_metadata(
+    tmp_path, monkeypatch, wired,
+):
+    live = copy.deepcopy(LIVE)
+    live["sessions"][0]["context"].update({"threshold": 80_000, "window": 200_000})
+    monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
+    client = _authed_client(tmp_path, monkeypatch)
+
+    context = client.get("/api/dashboard").json()["columns"][0]["context"]
+
+    assert context["threshold"] == 80_000
+    assert context["window"] == 200_000
+
+
+def test_the_model_catalog_relays_context_capacity_without_proxy_rotation_policy(monkeypatch):
     listing = {"data": [
         {"id": "claude-opus-5", "context_window": 1_000_000, "rotation_threshold_percent": 30},
         {"id": "gpt-5.6-terra", "context_window": 400_000},
@@ -503,5 +526,6 @@ def test_the_model_catalog_relays_each_models_rotation_percent(monkeypatch):
 
     catalog = asyncio.run(main_mod._fetch_model_catalog())
 
-    assert catalog["catalog"] == {"claude-opus-5": 1_000_000, "gpt-5.6-terra": 400_000}
-    assert catalog["percents"] == {"claude-opus-5": 30, "gpt-5.6-terra": None}
+    assert catalog == {
+        "catalog": {"claude-opus-5": 1_000_000, "gpt-5.6-terra": 400_000}
+    }

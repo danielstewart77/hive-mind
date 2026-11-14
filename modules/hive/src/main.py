@@ -1289,8 +1289,7 @@ async def _fetch_provider_limits() -> dict:
 
 
 async def _fetch_model_catalog() -> dict:
-    """Deployment name to declared context window and rotation threshold
-    percentage, from the model map.
+    """Deployment name to published context window, from the model map.
 
     The proxy owns that map, so this is a relay rather than a table the
     console keeps — a second copy would disagree the first time somebody
@@ -1303,9 +1302,6 @@ async def _fetch_model_catalog() -> dict:
     ]
     return {
         "catalog": {row["id"]: row.get("context_window") for row in rows},
-        "percents": {
-            row["id"]: dashboard_data.threshold_percent(row) for row in rows
-        },
     }
 
 
@@ -1419,7 +1415,6 @@ async def api_dashboard(user: dict = Depends(require_auth)):
         return_exceptions=True,
     )
     windows = catalog.get("catalog", {}) if isinstance(catalog, dict) else {}
-    percents = catalog.get("percents", {}) if isinstance(catalog, dict) else {}
     sessions = live.get("sessions", []) if isinstance(live, dict) else []
     # Every open conversation that is not producing, read from the gateway's
     # table: how close one is to its rotation point matters most before
@@ -1430,11 +1425,11 @@ async def api_dashboard(user: dict = Depends(require_auth)):
         context["window"] = dashboard_data.resolve_window(
             context.get("window"), dashboard_data.window_for(session.get("model"), windows)
         )
-        # The rotation point is a property of the model: its percentage is
-        # on the proxy's row, and fills in a threshold no mind reported.
-        context["threshold_percent"] = percents.get(session.get("model"))
+        # A conversation's threshold comes from the mind or gateway report.
+        # A proxy-wide model percentage belongs to no specific mind/session.
         context["threshold"] = dashboard_data.resolve_threshold(
-            context.get("threshold"), context["window"], context["threshold_percent"]
+            context.get("threshold"), context["window"],
+            context.get("threshold_percent"),
         )
         session["context"] = dashboard_data.context_reading(context)
     registry = await _broker_minds_safe()
@@ -2951,6 +2946,21 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
         for row in await mind_runtime.fetch_models(gateway_url)
         if isinstance(row, dict) and row.get("name")
     ]
+    default_model = configuration.get("default_model")
+    selected_model = next((row for row in models if row["name"] == default_model), None)
+    selected_window = dashboard_data.window_of(selected_model or {})
+    selected_percent = dashboard_data.threshold_percent(selected_model or {})
+    configuration.update({
+        "context_window": selected_window,
+        "rotation_threshold_percent": selected_percent,
+        "rotation_threshold_tokens": (
+            selected_window * selected_percent // 100
+            if selected_window is not None and selected_percent is not None else None
+        ),
+        "rotation_threshold_status": (
+            "known" if selected_window is not None else "unavailable"
+        ),
+    })
     return {
         "configuration": {
             "name": configuration.get("name") or name,
