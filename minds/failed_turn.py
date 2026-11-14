@@ -28,7 +28,7 @@ def rotation_check_command(stop_groups: Iterable[Any]) -> list[str] | None:
             continue
         for hook in group.get("hooks") or []:
             command = str((hook or {}).get("command") or "") if isinstance(hook, dict) else ""
-            if "rotation_check" in command:
+            if "rotation_check" in command or "rotation_hooks.py check" in command:
                 return shlex.split(command)
     return None
 

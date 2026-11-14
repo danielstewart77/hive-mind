@@ -218,11 +218,8 @@ async def test_whether_a_model_reads_images_is_relayed_in_three_states(wire, run
 
 
 @pytest.mark.asyncio
-async def test_a_models_rotation_share_is_relayed_beside_its_window(wire, runtime_file):
-    """The share of the window a conversation fills before rotating belongs to
-    the model, so it is relayed off the same row as the window. Anything that
-    is not a share of a window — none, zero, a whole window, a word, a bool —
-    is relayed as unknown rather than as a threshold nobody declared."""
+async def test_proxy_rotation_shares_do_not_replace_the_minds_default(wire, runtime_file):
+    """The proxy owns capacity, while an absent mind preference means 100%."""
     wire({"/v1/models?harness=dsh": {"data": [
         {"id": "declared", "context_window": 131_072, "rotation_threshold_percent": 40},
         {"id": "undeclared", "context_window": 131_072},
@@ -238,6 +235,55 @@ async def test_a_models_rotation_share_is_relayed_beside_its_window(wire, runtim
     sizing = await models_api.model_sizing(path, "dsh", "declared")
 
     assert [(r["name"], r["rotation_threshold_percent"]) for r in rows] == [
-        ("declared", 40), ("undeclared", None), ("zero", None), ("whole", None),
-        ("word", None), ("flag", None)]
-    assert sizing == (131_072, 40)
+        ("declared", 100), ("undeclared", 100), ("zero", 100), ("whole", 100),
+        ("word", 100), ("flag", 100)]
+    assert sizing == (131_072, 100)
+
+
+@pytest.mark.asyncio
+async def test_the_minds_saved_percentage_replaces_proxy_rotation_metadata(
+    wire, runtime_file,
+):
+    wire({"/v1/models?harness=claude": {"data": [
+        {"id": "model-a", "context_window": 100_000,
+         "rotation_threshold_percent": 20},
+        {"id": "model-b", "context_window": 200_000,
+         "rotation_threshold_percent": 30},
+    ]}})
+    path = runtime_file(env={
+        "ANTHROPIC_BASE_URL": "http://proxy:8899",
+        "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
+    })
+    path.write_text(path.read_text() + "rotation_threshold_percent: 40\n")
+
+    rows = await models_api.build_catalog(path, harness="claude")
+    sizing = await models_api.model_sizing(path, "claude", "model-b")
+
+    assert [row["rotation_threshold_percent"] for row in rows] == [40, 40]
+    assert sizing == (200_000, 40)
+
+
+@pytest.mark.asyncio
+async def test_invalid_proxy_context_capacities_are_unknown_at_the_parser(
+    wire, runtime_file,
+):
+    values = [True, False, 0, -1, 100_000.5, "100000", 100_000]
+    wire({"/v1/models?harness=claude": {"data": [
+        {"id": f"row-{index}", "context_window": value}
+        for index, value in enumerate(values)
+    ]}})
+    path = runtime_file(env={
+        "ANTHROPIC_BASE_URL": "http://proxy:8899",
+        "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
+    })
+    path.write_text(path.read_text() + "rotation_threshold_percent: 40\n")
+
+    rows = await models_api.build_catalog(path, harness="claude")
+    sizing = {
+        f"row-{index}": await models_api.model_sizing(path, "claude", f"row-{index}")
+        for index in range(len(values))
+    }
+
+    assert [row["context_window"] for row in rows] == [None] * 6 + [100_000]
+    assert sizing == {f"row-{index}": (None if index < 6 else 100_000, 40)
+                      for index in range(len(values))}

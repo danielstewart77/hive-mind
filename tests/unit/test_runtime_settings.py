@@ -8,6 +8,9 @@ Both of those are behaviours, not conventions, so both are tested here.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from contextlib import contextmanager
 
 import pytest
 from fastapi import FastAPI
@@ -65,6 +68,16 @@ def claude_file(tmp_path):
 
 
 class TestWhichControlsAppear:
+    def test_rotation_threshold_is_an_integer_setting_for_every_harness(self):
+        for harness in ("claude", "codex", "dsh"):
+            setting = next(
+                item for item in runtime_settings.settings_for_harness(harness)
+                if item.key == "rotation_threshold_percent"
+            )
+            assert (setting.kind, setting.minimum, setting.maximum) == (
+                runtime_settings.NUMBER, 1, 100
+            )
+
     def test_a_dsh_mind_is_offered_the_goal_and_timeout_controls(self, dsh_file):
         view = runtime_settings.settings_view(runtime_api.load_runtime(dsh_file))
         offered = {entry["key"] for entry in view["settings"]}
@@ -175,6 +188,41 @@ class TestWritingASetting:
             )
         assert runtime_api.load_runtime(dsh_file)["goal_rounds"] == 40
 
+    def test_overlapping_model_and_percentage_writes_keep_both_values(
+        self, dsh_file, monkeypatch,
+    ):
+        arrived = threading.Barrier(2)
+        transaction = runtime_api._runtime_write_transaction
+
+        @contextmanager
+        def overlap_at_real_transaction(path):
+            arrived.wait(timeout=5)
+            with transaction(path) as locked_path:
+                yield locked_path
+
+        monkeypatch.setattr(
+            runtime_api, "_runtime_write_transaction", overlap_at_real_transaction
+        )
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            model = workers.submit(
+                runtime_api.update_runtime_fields,
+                dsh_file,
+                {"default_model": "model-b", "model_context_window": "200000"},
+            )
+            percentage = workers.submit(
+                runtime_api.update_settings,
+                dsh_file,
+                {"rotation_threshold_percent": 40},
+            )
+            model.result(timeout=10)
+            percentage.result(timeout=10)
+
+        persisted = runtime_api.load_runtime(dsh_file)
+        assert (persisted["default_model"], persisted["model_context_window"]) == (
+            "model-b", 200000,
+        )
+        assert persisted["rotation_threshold_percent"] == 40
+
 
 @pytest.fixture()
 def client(dsh_file, monkeypatch):
@@ -198,6 +246,40 @@ class TestRoutes:
         entry = next(e for e in body["settings"] if e["key"] == "goal_rounds")
         assert entry["value"] == 40
         assert body["harness"] == "dsh_cli"
+
+    def test_the_panel_reports_an_unsaved_threshold_as_effective_100(self, client):
+        body = client.get(
+            "/runtime/settings", headers={"Authorization": "Bearer s3cret"}
+        ).json()
+        assert body["rotation_threshold_percent"] == 100
+
+    def test_the_panel_saves_and_returns_the_mind_threshold(self, client, dsh_file):
+        response = client.patch(
+            "/runtime/settings",
+            json={"settings": {"rotation_threshold_percent": 40}},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 200, response.text
+        assert runtime_api.load_runtime(dsh_file)["rotation_threshold_percent"] == 40
+        assert response.json()["rotation_threshold_percent"] == 40
+
+    @pytest.mark.parametrize("value", [0, 101, -1, 40.5, "40.5", True, None, ""])
+    def test_an_invalid_rotation_threshold_refuses_the_entire_save(
+        self, client, dsh_file, value,
+    ):
+        before = dsh_file.read_bytes()
+        response = client.patch(
+            "/runtime/settings",
+            json={"settings": {
+                "description": "must remain unchanged",
+                "rotation_threshold_percent": value,
+            }},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]
+        assert dsh_file.read_bytes() == before
 
     def test_a_save_writes_the_file_and_reports_the_new_value(self, client, dsh_file):
         response = client.patch(

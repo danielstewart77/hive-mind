@@ -308,7 +308,7 @@ def test_a_switch_takes_its_threshold_from_the_new_models_own_percent(comms_db):
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 40 // 100)
 
 
-def test_a_model_row_with_no_percent_falls_back_to_the_conversations_own_ratio(comms_db):
+def test_a_model_row_with_no_percent_does_not_infer_a_new_ratio_from_the_conversation(comms_db):  # noqa: F811
     async def scenario():
         mgr = await _manager()
         await _seed(mgr)
@@ -320,7 +320,7 @@ def test_a_model_row_with_no_percent_falls_back_to_the_conversations_own_ratio(c
         return row
 
     row = _run(scenario())
-    assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 30 // 100)
+    assert (row["context_window"], row["context_threshold"]) == (200_000, None)
 
 
 def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row(comms_db):
@@ -899,7 +899,7 @@ def test_a_handover_dates_the_new_conversation_so_a_late_arm_is_refused(comms_db
     assert _run(scenario())["ok"] is False
 
 
-def test_a_report_of_a_zero_window_leaves_the_known_window_alone(comms_db):
+def test_a_zero_threshold_is_known_even_when_a_zero_window_is_ignored(comms_db):  # noqa: F811
     async def scenario():
         mgr = await _manager()
         await _seed(mgr)
@@ -911,7 +911,15 @@ def test_a_report_of_a_zero_window_leaves_the_known_window_alone(comms_db):
 
     row = _run(scenario())
     assert (row["context_tokens"], row["context_window"], row["context_threshold"]) == (
-        2_000, 200_000, 100_000)
+        2_000, 200_000, 0)
+
+
+def test_model_switch_does_not_infer_percentage_from_an_old_context_ratio():
+    session = {"context_window": 1_000_000, "context_threshold": 150_000}
+
+    percentage = SessionManager._rotation_percent(session, {"context_window": 200_000})
+
+    assert percentage is None
 
 
 # ---------------------------------------------------------------------------

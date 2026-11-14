@@ -98,9 +98,12 @@ class TestUpdateRuntimeFields:
             "http://example:8420"
         )
 
-    def test_leaves_no_temporary_files_behind(self, runtime_file):
+    def test_leaves_no_write_temporary_files_behind(self, runtime_file):
         runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
-        assert [p.name for p in runtime_file.parent.iterdir()] == ["runtime.yaml"]
+        assert {p.name for p in runtime_file.parent.iterdir()} == {
+            "runtime.yaml",
+            ".runtime.yaml.lock",
+        }
 
 
 class TestRegistrationPayload:
