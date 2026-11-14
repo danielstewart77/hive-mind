@@ -384,6 +384,30 @@ def test_the_harness_report_refuses_a_caller_without_the_admin_token(homes):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_every_harness_hands_the_turn_the_gateway_session_id(
+    equipped, proxy, monkeypatch, harness,
+):
+    """A mind's `/end-session` deletes the gateway's row for the conversation
+    it is in. Until this was set nothing exported an id that could resolve
+    one: claude and codex each export their own conversation id, which the
+    skill then had to match against the live list, and dsh exports neither —
+    so ending a session was impossible on a dsh mind, which is how a chief of
+    staff closing a finished task found it."""
+    proxy(DSH_WINDOWS)
+    spawner = _Spawner(harness)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "row-1", "resume_sid": "conv-1", "model": "some-model",
+        "harness": harness,
+    })
+    client.post("/sessions/row-1/message", headers=SESSION, json={"content": "hello"})
+
+    assert spawner.calls[0]["env"]["HIVE_SESSION_ID"] == "row-1"
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
 def test_a_chat_session_runs_on_the_adapter_its_harness_names(
     equipped, proxy, monkeypatch, harness,
 ):
