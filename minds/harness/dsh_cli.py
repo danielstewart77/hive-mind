@@ -382,10 +382,19 @@ PANE_CONVERSATION_ENV: dict[str, dict[str, str]] = {}
 
 def _pane_env(
     model: str, client_ref: str | None, surface: str | None, surface_id: str | None,
-    conversation_env: dict[str, str] | None = None,
+    conversation_env: dict[str, str] | None = None, session_id: str = "",
 ) -> dict[str, str]:
     """Environment the tmux pane needs for this conversation and model."""
     env = {k: str(v) for k, v in RUNTIME_ENV.items()}
+    # The gateway's own row id for this conversation. A mind's `/end-session`
+    # skill deletes that row, and until this was set no harness exported
+    # anything it could resolve: claude and codex each export their own
+    # conversation id and the skill matched it against the live list, and dsh
+    # exports neither, so ending a session was simply impossible on a dsh
+    # mind. The id is handed to this mind on every spawn — there is nothing to
+    # look up and nothing to guess.
+    if session_id:
+        env["HIVE_SESSION_ID"] = session_id
     env.update(conversation_env or {})
     env.update(_model_env(model, _pane_window(
         model, (conversation_env or {}).get("HIVE_MODEL_CONTEXT_WINDOW"))))
@@ -431,7 +440,7 @@ def _spawn_pty(
     if extra_env:
         PANE_CONVERSATION_ENV[session_id] = dict(extra_env)
     pane_env = _pane_env(model, client_ref, surface, surface_id,
-                         PANE_CONVERSATION_ENV.get(session_id))
+                         PANE_CONVERSATION_ENV.get(session_id), session_id)
     context_file: Path | None = None
     as_turn = False
     if not TERMINALS.alive(session_id):
@@ -496,7 +505,7 @@ def _rotate_pty(
             _terminal_argv(new_conversation_id, context_file,
                            context_as_turn=bool(user_prompt) and context_file is not None),
             env_overrides=_pane_env(model, client_ref, surface, surface_id,
-                                    PANE_CONVERSATION_ENV.get(session_id)),
+                                    PANE_CONVERSATION_ENV.get(session_id), session_id),
         )
     except Exception:
         if context_file is not None:
@@ -1017,6 +1026,7 @@ async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
         (state.get("conversation_env") or {}).get("HIVE_MODEL_CONTEXT_WINDOW"),
     )
     env.update(_model_env(state["model"], window))
+    env["HIVE_SESSION_ID"] = sid
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     if hooks_config():

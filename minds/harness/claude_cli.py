@@ -235,6 +235,14 @@ async def _spawn_proc(
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
+    # The gateway's own row id for this conversation. A mind's `/end-session`
+    # skill deletes that row, and until this was set no harness exported
+    # anything it could resolve: claude and codex each export their own
+    # conversation id and the skill matched it against the live list, and dsh
+    # exports neither, so ending a session was simply impossible on a dsh
+    # mind. The id is handed to this mind on every spawn — there is nothing to
+    # look up and nothing to guess.
+    env["HIVE_SESSION_ID"] = session_id
     if surface == "scheduler":
         env["HIVEMIND_SCHEDULED_TASK"] = "1"
     # Per-spawn metadata for the rotation_check Stop hook. Empty values
@@ -335,7 +343,8 @@ def _rotation_argv(model: str, new_conversation_id: str, effort: str | None = No
 
 
 def _pane_env(
-    client_ref: str | None, surface: str | None, surface_id: str | None
+    client_ref: str | None, surface: str | None, surface_id: str | None,
+    session_id: str = "",
 ) -> dict[str, str]:
     """Environment the pane needs that the tmux server can't have inherited.
 
@@ -350,6 +359,8 @@ def _pane_env(
     # a second, conflicting session picker inside it, re-hosting the
     # conversation in a nested pty at a geometry nobody asked for.
     env["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
+    if session_id:
+        env["HIVE_SESSION_ID"] = session_id
     # A pty spawn is the web terminal by definition — no gateway derivation
     # needed. Per-turn hooks read this to tell the model which surface a turn
     # arrived on.
@@ -385,7 +396,7 @@ def _spawn_pty(
     """
     del harness_sid  # claude adopts the gateway's id; nothing else to track
     ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
-    pane_env = {**_pane_env(client_ref, surface, surface_id), **(extra_env or {})}
+    pane_env = {**_pane_env(client_ref, surface, surface_id, session_id), **(extra_env or {})}
     # ``system_prompt`` is a carry-forward comms is still holding: a switch's
     # handover or a rotation's seed, with no turn landed on it yet, so it has
     # to be applied again or the context composed for it is gone. It opens the
@@ -458,7 +469,7 @@ def _rotate_pty(
     )
     TERMINALS.respawn(
         session_id, argv,
-        env_overrides=_pane_env(client_ref, surface, surface_id),
+        env_overrides=_pane_env(client_ref, surface, surface_id, session_id),
     )
     log.info("Rotated the conversation in terminal %s onto %s (seed=%d chars)",
              TERMINALS.session_name(session_id), new_conversation_id, len(seed))
