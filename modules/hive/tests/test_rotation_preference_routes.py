@@ -12,11 +12,11 @@ from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from hive_site.testing import run
+
 import auth
 import main as main_mod
 import mind_runtime
-from hive_site.testing import run
-
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
