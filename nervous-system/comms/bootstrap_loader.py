@@ -43,6 +43,25 @@ def _auth_headers() -> dict:
 RECENT_MEMORY_CHAR_CAP = 6000    # ~1500 tokens
 REQUEST_TIMEOUT = 5              # seconds — never hang spawn
 
+# Linux caps a *single* ``execve`` argument at ``MAX_ARG_STRLEN`` — 32 pages,
+# 131,072 bytes on a 4k-page host — no matter how much room ``ARG_MAX`` leaves
+# for the argument list as a whole. The claude harness takes this composed
+# string as one ``--append-system-prompt`` argument, so a prompt past that
+# ceiling is not merely a long prompt: the spawn dies with
+# ``OSError: [Errno 7] Argument list too long`` before the process exists, and
+# the mind goes quiet while its service still reports healthy.
+#
+# This ceiling is therefore **not** a context-window budget and is never sized
+# from one. A rotation's budget comes from the model's own threshold and runs
+# to hundreds of kilobytes — far past what ``execve`` will carry — which is why
+# ``max_bytes`` is *clamped* to this rather than trusted. Composing to a
+# context budget alone is what let a 265KB carry-forward reach argv.
+#
+# Three quarters of the kernel ceiling, leaving the last quarter for the
+# per-surface prompt the mind appends after this string, and for the flag.
+_MAX_ARG_STRLEN = 32 * os.sysconf("SC_PAGESIZE")
+PROMPT_MAX_BYTES = _MAX_ARG_STRLEN * 3 // 4   # 98,304 on a 4k-page host
+
 
 def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
@@ -203,7 +222,16 @@ async def compose_prompt_blocks(
     it is the one block whose size is the conversation's, not the mind's —
     and it keeps its tail, where the latest exchange and anything still
     pending sit.
+
+    Whatever ``max_bytes`` says, the result is composed to at most
+    ``PROMPT_MAX_BYTES``: the harness carries this string as one ``execve``
+    argument, and the kernel's per-argument ceiling is far below any
+    context-window budget. A caller that names no budget — a fresh session
+    create — gets that ceiling rather than no ceiling at all.
     """
+    max_bytes = (PROMPT_MAX_BYTES if max_bytes is None
+                 else min(max_bytes, PROMPT_MAX_BYTES))
+
     blocks: list[str] = []
 
     soul = _fetch_soul(mind_id, mind_name)
@@ -211,7 +239,7 @@ async def compose_prompt_blocks(
         blocks.append(soul)
 
     recent = _fetch_recent_memory(mind_id)
-    if recent and max_bytes is not None:
+    if recent:
         # Recent memory gives way only once session memory has nothing
         # left to give: it keeps its head, where the strongest rows are.
         fixed = len("\n\n".join(blocks + [""]).encode("utf-8"))
@@ -220,7 +248,7 @@ async def compose_prompt_blocks(
         blocks.append(recent)
 
     session_memory = await _fetch_session_memory(mind_id=mind_id, client_ref=client_ref)
-    if session_memory and max_bytes is not None:
+    if session_memory:
         fixed = len("\n\n".join(blocks + [""]).encode("utf-8"))
         session_memory = _keep_tail(session_memory, max_bytes - fixed)
     if session_memory:

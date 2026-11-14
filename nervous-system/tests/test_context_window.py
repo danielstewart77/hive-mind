@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from comms import bootstrap_loader
+from comms.bootstrap_loader import PROMPT_MAX_BYTES
 from comms.sessions import DEFAULT_HARNESS_OVERHEAD_TOKENS as OVERHEAD
 from comms.sessions import SessionManager, SwitchWontFit
 from comms_pg_fixture import (  # noqa: F401 - comms_db and scratch_dsn are fixtures
@@ -1705,7 +1706,10 @@ def test_a_switch_that_fails_to_start_restores_the_old_harness_on_its_own_whole_
 
     restored = _run(scenario()).spawns()[-1]
     assert restored["harness"] == "claude"
-    assert "x" * 200_000 + " LAST WORDS" in restored["system_prompt_blocks"]
+    # Its own carry-forward, newest text intact — but composed to what execve
+    # will carry, not to the 200k the conversation happened to leave behind.
+    assert " LAST WORDS" in restored["system_prompt_blocks"]
+    assert len(restored["system_prompt_blocks"].encode("utf-8")) <= PROMPT_MAX_BYTES
 
 
 def test_an_overflow_the_model_has_no_room_to_take_keeps_the_message_and_says_why(comms_db):
@@ -1807,3 +1811,93 @@ def test_an_overflow_whose_debt_cannot_be_recorded_keeps_the_message_in_the_ledg
     ledger, row = _run(scenario())
     assert "ship it" in [t["content"] for t in ledger]
     assert row["resend_content"] is None
+
+
+# ---------------------------------------------------------------------------
+# The composed prompt is one execve argument
+#
+# The harness carries it as a single ``--append-system-prompt``, and Linux caps
+# one argument at 32 pages regardless of ``ARG_MAX``. A prompt past that is not
+# a long prompt — it is a spawn that dies with ``[Errno 7] Argument list too
+# long`` while the mind's service still reports healthy.
+# ---------------------------------------------------------------------------
+
+CF_HEAD = "OLDEST-CARRY-FORWARD-HEAD"
+CF_TAIL = "NEWEST-CARRY-FORWARD-TAIL"
+
+
+async def _memory_for(client_ref: str, body: str, created_at: float) -> None:
+    """A rotation carry-forward filed for this mind and an arbitrary chat."""
+    await execute(
+        "INSERT INTO core.session_memory (mind_id, mind_name, client_ref, "
+        "conversation_id, body, created_at) VALUES ($1, 'ada', $2, 'conv-x', $3, $4)",
+        MIND, client_ref, body, created_at,
+    )
+
+
+def _oversized_carry_forward() -> str:
+    """A carry-forward several times past what execve will take."""
+    filler = "x" * (PROMPT_MAX_BYTES * 3)
+    return json.dumps({"carry_forward": f"{CF_HEAD}{filler}{CF_TAIL}"})
+
+
+def _lucent_stubbed():
+    """Compose for real; only the lucent HTTP fetches are stubbed."""
+    return (
+        patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"),
+        patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""),
+    )
+
+
+def _spawn_on_oversized_memory():
+    async def scenario():
+        mgr = await _manager(harness="claude_cli")
+        await _memory_for("789", _oversized_carry_forward(), time.time())
+        mind = FakeMind()
+        soul, recent = _lucent_stubbed()
+        with mind.wired(), soul, recent:
+            await mgr.create_session(
+                surface="telegram", surface_id="789", client_ref="789", mind_id=MIND,
+            )
+        await _close(mgr)
+        return mind
+
+    return _run(scenario()).spawns()[-1]["system_prompt_blocks"]
+
+
+def test_a_fresh_session_composes_a_prompt_execve_can_carry(comms_db):
+    assert len(_spawn_on_oversized_memory().encode("utf-8")) <= PROMPT_MAX_BYTES
+
+
+def test_a_trimmed_carry_forward_keeps_its_newest_text_the_soul_and_a_mark(comms_db):
+    blocks = _spawn_on_oversized_memory()
+    assert "<soul>me</soul>" in blocks
+    assert CF_TAIL in blocks
+    assert CF_HEAD not in blocks
+    assert "trimmed to fit" in blocks
+
+
+def test_a_rotation_budget_past_the_exec_ceiling_is_clamped_to_it(comms_db):
+    """A 300k-token threshold sizes a prompt budget of hundreds of kilobytes.
+
+    That budget is the model's room, not the kernel's, and composing to it
+    alone is what let a 265KB carry-forward reach argv.
+    """
+    async def scenario():
+        # The manager opens the hive_data pool. Without it the session-memory
+        # read fails and is swallowed as best-effort, composing the soul alone
+        # — which fits any ceiling and would prove nothing.
+        mgr = await _manager(harness="claude_cli")
+        await _memory_for("789", _oversized_carry_forward(), time.time())
+        soul, recent = _lucent_stubbed()
+        with soul, recent:
+            blocks = await bootstrap_loader.compose_prompt_blocks(
+                mind_id=MIND, mind_name="ada", client_ref="789",
+                max_bytes=600_000,
+            )
+        await _close(mgr)
+        return blocks
+
+    blocks = _run(scenario())
+    assert CF_TAIL in blocks, "the carry-forward was never loaded; test is vacuous"
+    assert len(blocks.encode("utf-8")) <= PROMPT_MAX_BYTES
