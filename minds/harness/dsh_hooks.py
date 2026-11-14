@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -68,14 +69,15 @@ EVENTS = {
 }
 
 
-def hooks_config(hooks_dir_in_container: str) -> dict:
+def hooks_config(hooks_dir_in_container: str, *, python: str = "/opt/venv/bin/python") -> dict:
     """The hook file for scripts found at this path inside the container."""
     config: dict = {"hooks": {}}
     for event, groups in EVENTS.items():
         config["hooks"][event] = [
             {"hooks": [
                 {"type": "command",
-                 "command": f"python3 {hooks_dir_in_container}/{script}",
+                 "command": f"{shlex.quote(python if script == 'rotation_check.py' else 'python3')} "
+                            f"{shlex.quote(hooks_dir_in_container + '/' + script)}",
                  **({"timeout": timeout} if timeout else {})}
                 for script, timeout in group
             ]}
@@ -84,23 +86,87 @@ def hooks_config(hooks_dir_in_container: str) -> dict:
     return config
 
 
+def _managed_rotation(command: object, managed_scripts: set[str]) -> bool:
+    try:
+        arguments = shlex.split(str(command or ""))
+    except ValueError:
+        return False
+    return any(argument in managed_scripts for argument in arguments)
+
+
+def _merge_rotation_hooks(existing: dict, generated: dict,
+                          managed_scripts: set[str]) -> dict:
+    """Refresh the two managed rotation entries without replacing user hooks."""
+    result = dict(existing)
+    hooks = dict(existing.get("hooks") or {})
+    generated_hooks = generated.get("hooks") or {}
+    for event in ("Stop", "UserPromptSubmit"):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            groups = []
+        kept = []
+        for group in groups:
+            if not isinstance(group, dict):
+                kept.append(group)
+                continue
+            commands = group.get("hooks")
+            if not isinstance(commands, list):
+                kept.append(group)
+                continue
+            retained = [hook for hook in commands if not (
+                isinstance(hook, dict)
+                and _managed_rotation(hook.get("command"), managed_scripts)
+            )]
+            if retained:
+                kept.append({**group, "hooks": retained})
+        wanted = []
+        for group in generated_hooks.get(event, []):
+            selected = [hook for hook in group.get("hooks", [])
+                        if _managed_rotation(hook.get("command"), managed_scripts)]
+            if selected:
+                wanted.append({**group, "hooks": selected})
+        hooks[event] = kept + wanted
+    result["hooks"] = hooks
+    return result
+
+
 def write_hooks(mind: str, minds_dir: Path,
-                container_minds_dir: str = DEFAULT_CONTAINER_MINDS_DIR) -> dict:
+                container_minds_dir: str = DEFAULT_CONTAINER_MINDS_DIR,
+                *, python: str = "/opt/venv/bin/python",
+                home: Path | None = None,
+                container_hooks_dir: str | None = None) -> dict:
     """Write this mind's hook scripts and, if it has none, its hook file."""
     if not container_minds_dir.startswith("/"):
         raise ValueError(f"the container minds folder must be absolute: {container_minds_dir!r}")
-    dsh_home = profile_dir(mind, minds_dir).parent.parent
+    dsh_home = Path(home) if home is not None else profile_dir(mind, minds_dir).parent.parent
     hooks_dir = dsh_home / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for script in SCRIPTS:
         target = hooks_dir / script
         shutil.copyfile(SCRIPTS_DIR / script, target)
         target.chmod(0o755)
-    in_container = f"{container_minds_dir.rstrip('/')}/{mind}/.dsh/hooks"
+    in_container = (container_hooks_dir or
+                    (str(dsh_home) if home is not None else
+                     f"{container_minds_dir.rstrip('/')}/{mind}/.dsh/hooks"))
     config_path = dsh_home / "hooks.json"
-    written = not config_path.exists()
+    generated = hooks_config(in_container, python=python)
+    managed_scripts = {
+        f"{in_container.rstrip('/')}/{name}"
+        for name in ("rotation_check.py", "rotation_fire.py")
+    }
+    if config_path.exists():
+        original = config_path.read_text()
+        existing = json.loads(original)
+        if not isinstance(existing, dict):
+            raise ValueError(f"dsh hooks configuration must be a JSON object: {config_path}")
+        merged = _merge_rotation_hooks(existing, generated, managed_scripts)
+        encoded = json.dumps(merged, indent=2) + "\n"
+        written = encoded != original
+    else:
+        encoded = json.dumps(generated, indent=2) + "\n"
+        written = True
     if written:
-        config_path.write_text(json.dumps(hooks_config(in_container), indent=2) + "\n")
+        config_path.write_text(encoded)
     return {
         "mind": mind,
         "hooks_dir": str(hooks_dir),
@@ -121,9 +187,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="the minds folder the mind's own folder sits in")
     parser.add_argument("--container-minds-dir", default=DEFAULT_CONTAINER_MINDS_DIR,
                         help="where the mind's container sees that minds folder")
+    parser.add_argument("--python", default="/opt/venv/bin/python",
+                        help="the mind application's Python interpreter for policy hooks")
     args = parser.parse_args(argv)
     try:
-        result = write_hooks(args.mind, args.out, args.container_minds_dir)
+        result = write_hooks(args.mind, args.out, args.container_minds_dir,
+                             python=args.python)
     except (ValueError, OSError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 2
