@@ -53,6 +53,46 @@ PROJECT_DIR = Path("/usr/src/app")
 
 log = configure_logging(f"hive-mind.minds.{MIND_NAME}")
 
+# Linux caps a *single* ``execve`` argument at ``MAX_ARG_STRLEN`` — 32 pages —
+# independently of ``ARG_MAX``, which bounds the argument list as a whole.
+# This adapter passes the composed system prompt as one
+# ``--append-system-prompt``, so the per-argument ceiling is what decides
+# whether a containerised mind can be spawned at all.
+MAX_ARG_STRLEN = 32 * os.sysconf("SC_PAGESIZE")
+
+
+class SpawnArgTooLarge(ValueError):
+    """One spawn argument is past the kernel's per-argument ceiling.
+
+    Raised rather than letting ``execve`` answer. The kernel's error —
+    ``OSError: [Errno 7] Argument list too long`` — names no argument, no
+    size and no limit, and points at the argument *list*, sending every
+    reader to ``ARG_MAX``, which is not the limit being hit.
+    """
+
+    def __init__(self, flag: str, size: int, limit: int) -> None:
+        self.flag = flag
+        self.size = size
+        self.limit = limit
+        super().__init__(
+            f"{flag} is {size:,} bytes — past the {limit:,}-byte kernel ceiling "
+            f"on a single exec argument (MAX_ARG_STRLEN, 32 pages). This is not "
+            f"ARG_MAX and not a context-window limit."
+        )
+
+
+def _refuse_oversized_args(cmd: list[str]) -> None:
+    """Refuse a command carrying an argument ``execve`` cannot take.
+
+    The ceiling applies to the NUL-terminated string, so the largest argument
+    that survives is one byte under ``MAX_ARG_STRLEN``.
+    """
+    for i, arg in enumerate(cmd):
+        size = len(arg.encode("utf-8"))
+        if size >= MAX_ARG_STRLEN:
+            flag = cmd[i - 1] if i and cmd[i - 1].startswith("--") else f"argv[{i}]"
+            raise SpawnArgTooLarge(flag, size, MAX_ARG_STRLEN)
+
 RUNTIME_PATH = MIND_DIR / "runtime.yaml"
 RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
 NAME: str = RUNTIME["name"]
@@ -259,6 +299,8 @@ async def _spawn_proc(
     if surface_label:
         env["HIVE_SURFACE"] = surface_label
     env.update(extra_env or {})
+
+    _refuse_oversized_args(cmd)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
