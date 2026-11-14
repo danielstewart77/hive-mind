@@ -437,7 +437,8 @@ def _terminal_argv(model: str, thread_id: str | None, effort: str | None = None)
 
 
 def _pane_env(
-    client_ref: str | None, surface: str | None, surface_id: str | None
+    client_ref: str | None, surface: str | None, surface_id: str | None,
+    session_id: str = "",
 ) -> dict[str, str]:
     """Environment the pane needs that the tmux server can't have inherited.
 
@@ -449,6 +450,8 @@ def _pane_env(
     """
     env = {k: str(v) for k, v in RUNTIME_ENV.items()}
     env["CODEX_HOME"] = str(CODEX_HOME)
+    if session_id:
+        env["HIVE_SESSION_ID"] = session_id
     # A pty spawn is the web terminal by definition — no gateway derivation
     # needed. Per-turn hooks read this to tell the model which surface a turn
     # arrived on.
@@ -507,7 +510,7 @@ def _spawn_pty(
     if not home_declared():
         raise PtyUnavailable("no codex home declared for this mind")
     thread_id = _resumable_thread(session_id, harness_sid)
-    pane_env = {**_pane_env(client_ref, surface, surface_id), **(extra_env or {})}
+    pane_env = {**_pane_env(client_ref, surface, surface_id, session_id), **(extra_env or {})}
 
     fresh = not TERMINALS.alive(session_id) and not thread_id
     before = _existing_rollout_paths() if fresh else set()
@@ -592,7 +595,7 @@ def _rotate_pty(
     )
     TERMINALS.respawn(
         session_id, argv,
-        env_overrides=_pane_env(client_ref, surface, surface_id),
+        env_overrides=_pane_env(client_ref, surface, surface_id, session_id),
     )
     _watch_for_new_thread_in_background(session_id, before)
     log.info("Rotated the conversation in terminal %s (seed=%d chars)",
@@ -678,6 +681,14 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     env["CODEX_HOME"] = str(CODEX_HOME)
+    # The gateway's own row id for this conversation. A mind's `/end-session`
+    # skill deletes that row, and until this was set no harness exported
+    # anything it could resolve: claude and codex each export their own
+    # conversation id and the skill matched it against the live list, and dsh
+    # exports neither, so ending a session was simply impossible on a dsh
+    # mind. The id is handed to this mind on every spawn — there is nothing to
+    # look up and nothing to guess.
+    env["HIVE_SESSION_ID"] = sid
     # Per-spawn metadata for the rotation_check Stop hook. The hook reads
     # these to attribute the rotation summary to the right (mind_id,
     # client_ref) row in NS's session_memory table. Empty values stay

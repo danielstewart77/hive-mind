@@ -1967,3 +1967,24 @@ async def test_a_report_for_another_turn_does_not_answer_this_one(
     events = await _drain(dsh)
     assert _result(events)["stop_reason"] == "timeout"
     assert "the other answer" not in " ".join(_assistant_texts(events))
+
+
+async def test_the_turn_carries_the_gateway_session_id_a_mind_needs_to_end_itself(
+    dsh, monkeypatch
+) -> None:
+    """A mind's `/end-session` deletes the gateway's row for the conversation
+    it is in, and this harness exports no conversation id of its own to look
+    one up by — so without this, ending a session is impossible on a dsh mind
+    and the skill reports that the session identifier is unavailable."""
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["HIVE_SESSION_ID"] == "row-1"
+
+
+def test_the_terminals_pane_carries_the_same_session_id(dsh) -> None:
+    """A pane is a conversation too, and the operator typing end-session in
+    the browser terminal is the one most likely to."""
+    env = dsh._pane_env("qwen35-131k", "", "", "", None, "row-1")
+    assert env["HIVE_SESSION_ID"] == "row-1"
