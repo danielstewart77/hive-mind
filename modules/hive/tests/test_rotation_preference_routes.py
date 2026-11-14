@@ -70,29 +70,15 @@ def _use_mind_transport(monkeypatch, handler):
     monkeypatch.setattr(mind_runtime.httpx, "AsyncClient", client_factory)
 
 
-def test_console_rotation_write_targets_the_named_mind_and_sends_only_the_change(
-    tmp_path, monkeypatch
-):
-    """The HTTP relay sends the saved preference to this Mind alone.
-
-    The transport stands at the remote Mind boundary; runtime_api's file
-    persistence is covered by the Hive Mind tests.
-    """
+def test_console_percentage_write_targets_only_requested_mind(tmp_path, monkeypatch):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "rotation-admin-token")
     _broker_rows(monkeypatch)
-    preferences = {"alice": 75, "bob": 75}
     requests = []
 
     async def mind_service(request):
         requests.append(request)
-        host = request.url.host.split(".")[0]
-        if request.url.path != "/runtime/settings":
-            return httpx.Response(404, json={"error": "not found"}, request=request)
-        if request.method == "PATCH":
-            payload = json.loads(request.content)
-            preferences[host] = payload["settings"]["rotation_threshold_percent"]
         return httpx.Response(
-            200, json=_settings_body(preferences[host], 100_000), request=request
+            200, json=_settings_body(40, 100_000), request=request
         )
 
     _use_mind_transport(monkeypatch, mind_service)
@@ -106,13 +92,14 @@ def test_console_rotation_write_targets_the_named_mind_and_sends_only_the_change
     assert response.status_code == 200
     assert response.json()["saved"] is True
     assert response.json()["rotation_threshold_percent"] == 40
-    assert preferences == {"alice": 75, "bob": 40}
+    assert response.json()["context_window"] == 100_000
     assert len(requests) == 1
-    assert (requests[0].method, requests[0].url.host, requests[0].url.path) == (
+    request = requests[0]
+    assert (request.method, request.url.host, request.url.path) == (
         "PATCH", "bob", "/runtime/settings"
     )
-    assert requests[0].headers["authorization"] == "Bearer rotation-admin-token"
-    assert json.loads(requests[0].content) == {
+    assert request.headers["authorization"] == "Bearer rotation-admin-token"
+    assert json.loads(request.content) == {
         "settings": {"rotation_threshold_percent": 40}
     }
 
