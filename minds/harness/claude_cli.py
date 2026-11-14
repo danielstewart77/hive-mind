@@ -29,7 +29,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from minds.proactive import idle_drain
+from minds.proactive import BUFFER as proactive_buffer, idle_drain
 from minds.pty_attach import (
     TmuxTerminals,
     claude_conversation_flags,
@@ -87,7 +87,7 @@ SESSIONS: dict[str, dict] = {}
 # Proactive (unsolicited) delivery. The idle drain appends {"chat_id", "text"}
 # items here while no request is in flight; mind_server serves it on
 # GET /proactive for this mind's Telegram bot. See minds/proactive.py.
-PROACTIVE_BUFFER: list[dict] = []
+PROACTIVE_BUFFER: list[dict] = proactive_buffer
 
 
 # ---------------------------------------------------------------------------
