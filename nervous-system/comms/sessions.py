@@ -304,6 +304,19 @@ def normalise_harness(value: str | None) -> str:
     return str(value or "").strip().lower().split("_", 1)[0]
 
 
+#: Harnesses that hand the system prompt to ``execve`` as one argument, and so
+#: are bound by the kernel's per-argument ceiling rather than by the model's
+#: context window alone. Claude takes ``--append-system-prompt`` on argv; codex
+#: passes the prompt on stdin and in a seed file, dsh holds it in a state dict,
+#: and neither can hit that limit.
+ARGV_BOUND_HARNESSES = frozenset({"claude"})
+
+
+def harness_is_argv_bound(harness: str | None) -> bool:
+    """Whether this harness's prompt has to survive ``execve`` as one argument."""
+    return normalise_harness(harness) in ARGV_BOUND_HARNESSES
+
+
 # The error code every adapter reports for a turn that hit its model's
 # context limit, whatever the harness or provider called it.
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
@@ -662,6 +675,7 @@ class SessionManager:
             mind_id=mind_id,
             mind_name=mind_name,
             client_ref=client_ref,
+            argv_bound=harness_is_argv_bound(harness),
         )
 
         await self._spawn(
@@ -2890,6 +2904,7 @@ class SessionManager:
         prompt = await self._compose_soul(
             mind_id, client_ref,
             max_bytes=None if available is None else max(0, available // 2),
+            harness=harness,
         )
         carried = len(prompt.encode("utf-8"))
         if available is None:
@@ -3245,7 +3260,8 @@ class SessionManager:
                         # The prompt the switch composed was trimmed for the
                         # new model; the old one takes its own.
                         system_prompt_blocks=await self._compose_soul(
-                            mind_id, routing["client_ref"]
+                            mind_id, routing["client_ref"],
+                            harness=await self.conversation_harness(session),
                         ),
                         mind_id=mind_id,
                         **routing,
@@ -3377,9 +3393,15 @@ class SessionManager:
 
     async def _compose_soul(
         self, mind_id: str, client_ref: str | None, max_bytes: int | None = None,
+        *, harness: str | None = None,
     ) -> str:
         """The system-prompt blocks a new harness process opens on, trimmed
-        to ``max_bytes`` the way a rotation's successor prompt is."""
+        to ``max_bytes`` the way a rotation's successor prompt is.
+
+        ``harness`` decides whether the kernel's per-argument ceiling applies
+        on top of that budget; only claude carries the prompt on argv. A
+        caller that does not name one is held to the ceiling, which is the
+        safe side of the choice."""
         from comms import bootstrap_loader  # noqa: PLC0415
         try:
             mind_row = await self._get_mind_row(mind_id)
@@ -3390,6 +3412,8 @@ class SessionManager:
             mind_name=(mind_row or {}).get("name") or mind_id,
             client_ref=client_ref,
             max_bytes=max_bytes,
+            argv_bound=(True if harness is None
+                        else harness_is_argv_bound(harness)),
         )
 
     async def _had_turns(self, session_id: str) -> bool:
@@ -3832,6 +3856,7 @@ class SessionManager:
             )
             system_prompt_blocks = await self._compose_soul(
                 mind_id, client_ref, max_bytes=cap,
+                harness=(session_row or {}).get("harness"),
             )
         mind_url = row["gateway_url"]
         mind_name = row["name"]
