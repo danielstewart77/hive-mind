@@ -55,7 +55,7 @@ from minds import (
     surface_token_api,
     transcript,
 )
-from minds.proactive import make_proactive_router
+from minds.proactive import BUFFER as proactive_buffer, make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -105,11 +105,12 @@ HARNESS_OF: dict[str, str] = {}
 app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
 
-# Only the claude adapter has an idle stream to drain into this buffer; the
-# per-turn harnesses leave it empty, as they do when run alone.
+# One buffer for every adapter that can produce an unsolicited turn: claude's
+# idle drain, and dsh's resident process reporting a background child that
+# settled after the turn that dispatched it had closed. The codex adapter
+# spawns per turn with no idle stream and leaves it empty.
 app.include_router(make_proactive_router(
-    getattr(ADAPTERS.get("claude"), "PROACTIVE_BUFFER", []),
-    os.environ.get("COMMS_BEARER_TOKEN") or None,
+    proactive_buffer, os.environ.get("COMMS_BEARER_TOKEN") or None,
 ))
 
 

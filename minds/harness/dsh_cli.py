@@ -5,8 +5,17 @@ and calls its session functions for every conversation that runs on it. The
 mind is selected by the ``MIND_NAME`` env var; everything mind-specific comes
 from ``minds/<MIND_NAME>/runtime.yaml``.
 
-dsh runs one process per chat turn and one persistent process for a browser
-terminal. Unlike codex it takes the conversation id it is handed, through the
+dsh runs one resident process per conversation, one process per goal
+dispatch, and one persistent process for a browser terminal. The resident one
+is what lets a background child outlive the turn that sent it: its stdin takes
+turns as JSON lines, one reader holds its stdout for the life of the process,
+and a message it writes while no turn is in flight is an unsolicited turn,
+handed to the mind's surface through the proactive buffer. A goal run still
+owns a process, because the runner refuses `--goal-rounds` in a resident one
+and two processes on one session store write a log dsh can then load for
+neither resume nor create.
+
+Unlike codex it takes the conversation id it is handed, through the
 ``@hive/dsh-headless-resumable`` surface in the harness tree. So the gateway's
 conversation id *is* the harness session's id here, there is no second
 provider-native id to carry, and the two spawn shapes are the same
@@ -36,6 +45,7 @@ import os
 import re
 import signal
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +61,7 @@ from minds import (
     runtime_api,
     transcript,
 )
+from minds.proactive import BUFFER as PROACTIVE_BUFFER, proactive_chat_id
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
@@ -990,62 +1001,22 @@ def _no_text_diagnostic(report: dict) -> str:
     return "\n\n".join(parts)
 
 
-async def _run_dsh_turn(
-    sid: str, content: str, images: list[dict] | None, goal_rounds: object = None,
-) -> Any:
-    state = SESSIONS.get(sid)
-    if state is None:
-        yield {"type": "result", "is_error": True}
-        return
+async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
+    """The environment a dsh process for this conversation runs under.
 
-    # Cleared per turn: the flag is the *previous* turn's verdict, and a fresh
-    # turn nobody has interrupted must not report itself as stopped on purpose
-    # the moment its own output is unreadable.
-    state["killed"] = False
-
-    # The composed prompt rides in on the conversation's first turn, the way it
-    # does for codex: the surface submits the task as a user message, and a
-    # system prompt submitted to nothing reaches no transcript.
-    conversation_id = state["conversation_id"]
-    flags = _conversation_flags(conversation_id)
-    message = transcript.with_opening_turn(state, content)
-    task = message if flags[0] == "--resume" else f"{state['system_prompt']}\n\n---\n\n{message}"
-
-    if images:
-        # Said out loud rather than logged: a model answering the text as if
-        # nothing was attached looks like a model that ignored the picture.
-        log.warning("%s session %s: image input not supported, ignoring", NAME, sid)
-        yield {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{
-                "type": "text",
-                "text": f"({len(images)} attached image(s) were not sent —"
-                        " this harness has no image input yet.)",
-            }]},
-        }
-
+    Raised rather than returned on failure: a mind whose own configuration
+    cannot size a model request has nothing to run, and the callers say so out
+    loud. Composed per turn because the window is asked of the proxy per turn,
+    and compared against a resident process's own environment to decide whether
+    that process still speaks for this conversation.
+    """
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     window = await _turn_window(
         state["model"],
         (state.get("conversation_env") or {}).get("HIVE_MODEL_CONTEXT_WINDOW"),
     )
-    try:
-        env.update(_model_env(state["model"], window))
-    except RuntimeError as exc:
-        # Said out loud, like the spawn failures below. This raises on a mind
-        # whose own configuration cannot size a model request, and an unhandled
-        # one here ends the response with zero frames — the gateway reports a
-        # turn that produced nothing, which is total silence for the operator
-        # who is the only person able to fix it.
-        log.error("%s session %s: %s", NAME, sid, exc)
-        yield {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": f"Error: {exc}"}]},
-        }
-        yield {"type": "result", "session_id": conversation_id, "stop_reason": "error",
-               "is_error": True, "error_code": "MIND_MISCONFIGURED", "error": str(exc)}
-        return
+    env.update(_model_env(state["model"], window))
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     if hooks_config():
@@ -1058,6 +1029,535 @@ async def _run_dsh_turn(
         if state.get(key):
             env[name] = state[key]
     env.update(state.get("conversation_env") or {})
+    log.debug("%s session %s: turn environment composed", NAME, sid)
+    return env
+
+
+def _turn_frames(sid: str, state: dict, conversation_id: str, report: dict) -> Any:
+    """The frames a completed turn report produces, in order.
+
+    One generator for both dispatch shapes: a resident turn and a goal run
+    report the same way, and a second copy of this is how the two drift until
+    only one of them records the traffic.
+    """
+    yield {"type": "dsh_report", "session_id": sid, "report": report,
+           "_observer_only": True}
+
+    text = str(report.get("text") or "")
+    # Still written when the turn already streamed every word of it. The chat
+    # surfaces drop a buffered copy of prose they have already shown — that
+    # mechanism predates this harness and claude relies on it — and the frame is
+    # the only thing comms accumulates into the turn ledger. Withholding it put
+    # the answer on the screen and left the session's own history holding the
+    # question and no reply, which `/history`, the rotation carry-forward and
+    # the late-turn merge all read.
+    yield {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": text if text else _no_text_diagnostic(report)}
+        ]},
+    }
+
+    outcome = str(report.get("outcome") or "unknown")
+    traffic = report.get("traffic") or {}
+    error = report.get("error")
+    # `completed` is the only outcome that is not a failure. Everything else —
+    # a refusal, an error, max-tokens, a reason this harness has not grown yet
+    # — is reported under its own name rather than flattened, because the stop
+    # reason is the measurement and `max-tokens` in particular is the context
+    # ceiling rather than a crash.
+    log_event(log, "turn.completed", mind_id=MIND_ID, mind_name=NAME, session_id=sid,
+              model=state["model"], stop_reason=outcome,
+              error_code=(error or {}).get("code"),
+              tools_emitted=traffic.get("emitted"),
+              tools_succeeded=traffic.get("succeeded"),
+              tools_failed=traffic.get("failed"),
+              tools_unanswered=traffic.get("unanswered"),
+              turns=report.get("turns"), goal_phase=report.get("goalPhase"))
+    transcript.settle_opening_turn(state, ok=outcome == "completed")
+    result: dict[str, Any] = {
+        "type": "result",
+        "session_id": str(report.get("sessionId") or conversation_id),
+        "stop_reason": outcome,
+        "traffic": traffic,
+        "is_error": outcome != "completed",
+    }
+    # Reported beside the tally rather than folded into it: a build that stopped
+    # at round two of forty and one that burned all forty are different
+    # failures, and the tally alone cannot tell them apart.
+    if report.get("turns") is not None:
+        result["turns"] = report["turns"]
+    if report.get("goalPhase") is not None:
+        result["goal_phase"] = report["goalPhase"]
+    # A goal run dsh ended because the conversation reached its threshold.
+    # The objective and the rounds it had left are what the gateway needs to
+    # carry the goal onto a fresh conversation — dsh never rotates itself.
+    if isinstance(report.get("goal"), dict):
+        result["goal"] = report["goal"]
+    if error:
+        result["error_code"] = error.get("code")
+        result["error"] = error.get("message")
+        # One code for an overflow on every harness, whatever words the
+        # provider used; the gateway rotates on it and never reads the text.
+        if context_overflow.is_overflow(error.get("code"), error.get("message")):
+            result["error_code"] = context_overflow.CONTEXT_WINDOW_EXCEEDED
+    yield result
+
+
+# --------------------------------------------------------------- the resident
+
+#: How long a resident process has to announce itself before the turn that
+#: spawned it reports a harness that would not start. Generous because this is
+#: a node process loading a profile and a plugin tree, and a boot slower than
+#: this is still a boot — but bounded, because a turn waiting on a readiness
+#: line that is never coming is a conversation with no reply and no reason.
+RESIDENT_READY_SECONDS = 120.0
+
+class _Resident:
+    """One dsh process holding this conversation open across many turns.
+
+    The adapter used to spawn a process per turn, which is why a background
+    child died the moment the turn that dispatched it closed: the child's
+    parent was the turn. Daniel's words for the result — he asks for three
+    tasks, gets a token or two, then nothing until all three finish and
+    everything arrives at once.
+
+    So one process per conversation instead. Turns are written to its stdin as
+    JSON lines, its stdout is read by one task for the life of the process, and
+    a message it writes while no turn is in flight is an unsolicited turn —
+    which is what a settled background job produces, and what there was
+    previously no process alive to hear.
+    """
+
+    def __init__(self, proc: Any, mode: str, env: dict[str, str]) -> None:
+        self.proc = proc
+        self.mode = mode
+        #: The environment it was spawned under. A turn whose composed
+        #: environment differs — a surface switch, a re-sized window — needs a
+        #: process that was told, so the comparison decides a respawn.
+        self.env = env
+        self.ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        #: The turn each id is waiting on. A dict rather than a single slot
+        #: because the report is matched by the id that asked for it, and a
+        #: report arriving for a turn that has already given up must not be
+        #: delivered to the next one.
+        self.waiting: dict[str, asyncio.Queue] = {}
+        #: The turn in flight, for the lines that carry no id of their own —
+        #: deltas, and the runner's complaint about a line it could not read.
+        self.current: asyncio.Queue | None = None
+        self.reader: asyncio.Task | None = None
+        self.pgid: int | None = None
+        #: Whether the composed prompt still has to ride in. A process that
+        #: created the conversation opened it empty, so its first turn carries
+        #: the system prompt the way a one-shot's first turn does.
+        self.needs_prompt = mode == "create"
+        #: What it refused to start for, when it refused.
+        self.refusal: dict | None = None
+        #: Why its output stopped being readable, when it did. Shown to the
+        #: operator with the no-report sentence, because a turn that produced
+        #: nothing is otherwise indistinguishable from a quiet model.
+        self.unreadable: str | None = None
+
+    @property
+    def alive(self) -> bool:
+        return self.proc.returncode is None
+
+
+def _resident_dispatch(line: str) -> dict | None:
+    """What one line from a resident process is, or None for anything else.
+
+    Pulled out of the reader so the routing can be read and tested without a
+    process: every line the runner writes is one of six things, and which one
+    decides whether it reaches the turn that is waiting, the turn that asked
+    for it by id, or Daniel directly because nobody asked at all.
+    """
+    text = line.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if isinstance(parsed.get("ready"), dict):
+        return {"kind": "ready", "ready": parsed["ready"]}
+    # The report, first of the message-shaped lines: it carries the final text
+    # beside `sessionId`, and reading it as a message would deliver the answer
+    # twice.
+    if "sessionId" in parsed and "progress" not in parsed:
+        return {"kind": "report", "id": parsed.get("id"), "report": parsed}
+    if isinstance(parsed.get("refused"), str):
+        return {"kind": "refused", "detail": parsed["refused"]}
+    delta = _delta_frame(text)
+    if delta is not None:
+        return {"kind": "frame", "id": None, "frame": delta}
+    if parsed.get("unsolicited") is True and isinstance(parsed.get("message"), str):
+        # Nobody is waiting for this. It is the mind speaking of its own
+        # accord, which on this harness means a background child settled and
+        # dsh opened a turn on the idle owner to report it.
+        return {"kind": "unsolicited", "text": parsed["message"]}
+    message = _message_frame(text)
+    if message is not None:
+        return {"kind": "frame", "id": parsed.get("id"), "frame": message}
+    progress = _progress_frame(text)
+    if progress is not None:
+        return {"kind": "frame", "id": None, "frame": progress}
+    return None
+
+
+def _buffer_unsolicited(state: dict, text: str) -> bool:
+    """Hand an unsolicited turn to this mind's surface, or say it cannot be.
+
+    The buffer is drained by `GET /proactive`, which the mind's own surface
+    polls — the same path claude's idle drain has always used, and the reason
+    this adapter composes the session's surface and ref into the same keys.
+    """
+    # The keys `proactive_chat_id` reads, composed from the ones this adapter
+    # keeps. The surface decides whether a ref can take a delivery at all: a
+    # Discord snowflake is nineteen digits and `int()` takes it without
+    # complaint, which is how one mind's unsolicited turn was posted at a
+    # Telegram chat id that did not exist, sixty times over three hours.
+    chat_id = proactive_chat_id({
+        "surface": state.get("surface_label") or state.get("surface") or "",
+        "chat_id": state.get("client_ref"),
+    })
+    if chat_id is None:
+        # The last copy. The harness has already let go of this text and the
+        # buffer is process memory, so a surface with nowhere to deliver it
+        # means this record is the only place it will ever exist.
+        log.warning("%s: undeliverable unsolicited turn (surface %r): %s",
+                    NAME, state.get("surface"), text)
+        return False
+    PROACTIVE_BUFFER.append({"chat_id": chat_id, "text": text})
+    log_event(log, "proactive.buffered", mind_name=NAME,
+              surface=state.get("surface") or "", client_ref=chat_id,
+              content_chars=len(text))
+    return True
+
+
+async def _resident_reader(resident: _Resident, state: dict) -> None:
+    """Read one resident process's stdout for the life of the process.
+
+    One reader, not one per turn, because the window this whole feature exists
+    to cover is the one between turns: a per-turn reader is deaf exactly when a
+    settled background child speaks.
+    """
+    stdout = resident.proc.stdout
+    while True:
+        try:
+            raw = await stdout.readline()
+        except ValueError as exc:
+            # A line past the stream limit, which the reader discards. Ending
+            # here rather than reading on: what was discarded was part of a
+            # line, so every byte after it may be the tail of a frame this
+            # reader cannot place, and a report assembled from one is worse
+            # than no report. Retrying also live-locks a stream that keeps
+            # raising, which is this process, not a turn.
+            log.error("%s: unreadable resident output: %s", NAME, exc)
+            resident.unreadable = str(exc)
+            break
+        if not raw:
+            break
+        line = raw.decode(errors="replace")
+        routed = _resident_dispatch(line)
+        if routed is None:
+            continue
+        kind = routed["kind"]
+        if kind == "ready":
+            if not resident.ready.done():
+                resident.ready.set_result(routed["ready"])
+            continue
+        if kind == "report":
+            turn_id = routed["id"]
+            queue = resident.waiting.get(turn_id) if turn_id else None
+            if queue is not None:
+                queue.put_nowait(routed)
+                continue
+            # A report with no id is the runner refusing to start at all —
+            # no model, or a conversation it was told to continue and could
+            # not find. It belongs to the spawn, not to a turn.
+            if not resident.ready.done():
+                resident.refusal = (routed["report"].get("error") or {})
+                resident.ready.set_result(None)
+                continue
+            log.warning("%s: resident report for unknown turn %r", NAME, turn_id)
+            continue
+        if kind == "unsolicited":
+            _buffer_unsolicited(state, routed["text"])
+            continue
+        queue = resident.waiting.get(routed["id"]) if routed.get("id") else resident.current
+        if queue is not None:
+            queue.put_nowait(routed)
+    # EOF: the process is gone. Anything waiting on it is waiting for nothing.
+    if not resident.ready.done():
+        resident.ready.set_result(None)
+    for queue in list(resident.waiting.values()):
+        queue.put_nowait({"kind": "closed"})
+
+
+async def _stop_resident(state: dict) -> None:
+    """End this conversation's resident process, leaving the conversation.
+
+    dsh's session lives on disk, so the process is the only thing lost: the
+    next turn resumes the same conversation in a new one.
+    """
+    resident: _Resident | None = state.pop("resident", None)
+    if resident is None:
+        return
+    reader = resident.reader
+    if resident.proc.stdin is not None:
+        try:
+            resident.proc.stdin.close()
+        except (OSError, RuntimeError):
+            pass
+    await _reap_proc(resident.proc)
+    if reader is not None:
+        reader.cancel()
+        try:
+            await reader
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+    for queue in list(resident.waiting.values()):
+        queue.put_nowait({"kind": "closed"})
+
+
+async def _spawn_resident(sid: str, state: dict, env: dict[str, str]) -> Any:
+    """Start the process this conversation's turns are written to.
+
+    Returns the resident, or the error dict the turn reports instead. The
+    create-or-continue decision is the same one a one-shot made and is made the
+    same way, from disk: an invented create answers in a conversation with no
+    history and leaves the one that was meant unfindable.
+    """
+    conversation_id = state["conversation_id"]
+    flags = _conversation_flags(conversation_id)
+    cmd = [DSH_BIN, "--profile", dsh_profile(), *_patch_args(), *flags, "--resident"]
+    if _stop_on_failed_call():
+        # Per process here rather than per turn, because the flag is per mind:
+        # it says this is a mind under test, and a mind under test is one for
+        # the life of its conversation.
+        cmd.append("--stop-on-failed-call")
+    log.info("%s session %s: spawning resident dsh (%s %s)",
+             NAME, sid, flags[0], conversation_id)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=10 * 1024 * 1024,
+            env=env,
+            cwd=str(SPAWN_DIR),
+            start_new_session=True,
+        )
+    except OSError as exc:
+        # The launcher is not on PATH, or the working directory is gone.
+        log.error("%s session %s: could not spawn %s: %s", NAME, sid, DSH_BIN, exc)
+        return {"code": "HARNESS_NOT_SPAWNED",
+                "message": f"The harness could not be started: {exc}"}
+    resident = _Resident(proc, "resume" if flags[0] == "--resume" else "create", env)
+    # Captured while the leader is alive: once it is reaped its pgid cannot be
+    # looked up, and the group is what has to be signalled.
+    try:
+        resident.pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        resident.pgid = None
+    state["resident"] = resident
+    resident.reader = asyncio.ensure_future(_resident_reader(resident, state))
+    try:
+        async with asyncio.timeout(RESIDENT_READY_SECONDS):
+            ready = await asyncio.shield(resident.ready)
+    except TimeoutError:
+        log.error("%s session %s: resident dsh never reported ready", NAME, sid)
+        await _stop_resident(state)
+        return {"code": "HARNESS_NOT_READY",
+                "message": "The harness started but never reported a conversation"
+                           f" within {int(RESIDENT_READY_SECONDS)} seconds."}
+    if ready is None:
+        refusal = resident.refusal or {}
+        unreadable = resident.unreadable
+        await _stop_resident(state)
+        code = str(refusal.get("code") or "NO_TURN_REPORT")
+        detail = str(refusal.get("message") or unreadable
+                     or "the harness exited before reporting a turn")
+        log.error("%s session %s: resident dsh refused to start (%s) %s",
+                  NAME, sid, code, detail)
+        return {"code": code, "message": f"The harness refused this conversation: {detail}"}
+    log.info("%s session %s: resident dsh ready (%s)", NAME, sid, ready)
+    return resident
+
+
+async def _live_resident(sid: str, state: dict, env: dict[str, str]) -> Any:
+    """The resident process for this conversation, started if there is none.
+
+    A process spawned under a different environment is replaced rather than
+    reused: the surface a turn is answered on, and the window a request is
+    sized by, are both in that environment, and a conversation picked up on
+    another surface would otherwise keep answering to the first one.
+    """
+    resident: _Resident | None = state.get("resident")
+    if resident is not None and not resident.alive:
+        await _stop_resident(state)
+        resident = None
+    if resident is not None and resident.env != env:
+        log.info("%s session %s: respawning resident dsh, its environment moved", NAME, sid)
+        await _stop_resident(state)
+        resident = None
+    if resident is not None:
+        return resident
+    return await _spawn_resident(sid, state, env)
+
+
+async def _run_resident_turn(sid: str, state: dict, content: str, env: dict[str, str]) -> Any:
+    """Write one turn to this conversation's resident process and stream it."""
+    conversation_id = state["conversation_id"]
+    started = await _live_resident(sid, state, env)
+    if not isinstance(started, _Resident):
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": started["message"]}]},
+        }
+        yield {"type": "result", "session_id": conversation_id,
+               "stop_reason": "not-spawned", "is_error": True,
+               "error_code": started["code"], "error": started["message"]}
+        return
+    resident = started
+
+    message = transcript.with_opening_turn(state, content)
+    task = (f"{state['system_prompt']}\n\n---\n\n{message}"
+            if resident.needs_prompt else message)
+    turn_id = uuid.uuid4().hex
+    queue: asyncio.Queue = asyncio.Queue()
+    resident.waiting[turn_id] = queue
+    resident.current = queue
+
+    report: dict | None = None
+    timed_out = False
+    # Resolved now rather than at import: the console writes this value into
+    # the file while this process is serving, and a bound read at boot would
+    # mean every edit waited on a container restart.
+    deadline = turn_timeout(live_runtime())
+    try:
+        stdin = resident.proc.stdin
+        if stdin is None:
+            raise BrokenPipeError("the resident process has no stdin")
+        stdin.write((json.dumps({"id": turn_id, "turn": task}) + "\n").encode())
+        await stdin.drain()
+        resident.needs_prompt = False
+        async with asyncio.timeout(deadline):
+            while True:
+                try:
+                    routed = await asyncio.wait_for(queue.get(), HEARTBEAT_SECONDS)
+                except (TimeoutError, asyncio.TimeoutError):
+                    # Nothing has crossed the socket for a heartbeat. comms
+                    # caps the response on time since the last byte, and a
+                    # turn that thinks for longer than that is otherwise read
+                    # as a mind that stopped answering.
+                    yield {"type": "turn_heartbeat", "_observer_only": True,
+                           "session_id": conversation_id}
+                    continue
+                kind = routed["kind"]
+                if kind == "frame":
+                    yield routed["frame"]
+                    continue
+                if kind == "refused":
+                    # The runner could not read the line this adapter wrote,
+                    # which is this adapter's fault and not the model's.
+                    log.error("%s session %s: resident refused the turn request: %s",
+                              NAME, sid, routed["detail"])
+                    break
+                if kind == "closed":
+                    # The process ended without reporting this turn. Waiting
+                    # longer cannot tell that from a model with nothing to say.
+                    break
+                if kind == "report":
+                    report = routed["report"]
+                    break
+    except TimeoutError:
+        # Ahead of the OSError clause deliberately: `TimeoutError` is a
+        # subclass of `OSError`, so a deadline caught as a broken pipe would
+        # report a turn that ran out of time as a harness that fell over.
+        timed_out = True
+        log.error("%s session %s: dsh turn exceeded %ss, killing it", NAME, sid, deadline)
+    except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+        log.error("%s session %s: could not write the turn to resident dsh: %s",
+                  NAME, sid, exc)
+    finally:
+        resident.waiting.pop(turn_id, None)
+        if resident.current is queue:
+            resident.current = None
+
+    if timed_out:
+        # The process goes with the turn. It is holding a model request this
+        # turn has stopped waiting for, and a later turn sharing a process
+        # still working on an abandoned one is two turns in one conversation.
+        await _stop_resident(state)
+        await _check_failed_turn(state, conversation_id, env, "TURN_TIMEOUT")
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "text",
+                "text": f"The turn was still running after {int(deadline or 0)}"
+                        " seconds and was stopped.",
+            }]},
+        }
+        yield {"type": "result", "session_id": conversation_id,
+               "stop_reason": "timeout", "is_error": True,
+               "error_code": "TURN_TIMEOUT"}
+        return
+
+    if report is None:
+        await _stop_resident(state)
+        if state.get("killed"):
+            # Stopped on purpose — a kill, or a release to another surface.
+            # The crash sentence below would read as the harness falling over.
+            await _check_failed_turn(state, conversation_id, env, "TURN_KILLED")
+            yield {"type": "result", "session_id": conversation_id,
+                   "stop_reason": "stopped", "is_error": False}
+            return
+        detail = resident.unreadable or ""
+        if not detail and resident.proc.stderr is not None:
+            try:
+                detail = (await resident.proc.stderr.read()).decode(errors="replace").strip()[-2000:]
+            except (OSError, ValueError):
+                detail = ""
+        log.error("%s session %s: resident dsh wrote no turn report (rc=%s) %s",
+                  NAME, sid, resident.proc.returncode, detail)
+        await _check_failed_turn(state, conversation_id, env, "NO_TURN_REPORT")
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "text",
+                "text": "The harness exited without reporting a turn"
+                        f" (exit {resident.proc.returncode})."
+                        + (f"\n\n{detail}" if detail else ""),
+            }]},
+        }
+        yield {"type": "result", "session_id": conversation_id,
+               "stop_reason": "no-report", "is_error": True}
+        return
+
+    for frame in _turn_frames(sid, state, conversation_id, report):
+        yield frame
+
+
+async def _run_one_shot_turn(sid: str, state: dict, content: str,
+                             env: dict[str, str], rounds: int) -> Any:
+    """Run one goal dispatch as its own process, and stream it.
+
+    A goal run is not a chat turn: the runner refuses `--goal-rounds` in a
+    resident process, and two processes sharing one session store write
+    colliding event sequence numbers — a log dsh then refuses to load for
+    either resume or create, which ends the conversation permanently. So this
+    is the one shape that still owns a process, and the resident one is stopped
+    before it starts rather than left beside it.
+    """
+    conversation_id = state["conversation_id"]
+    flags = _conversation_flags(conversation_id)
+    message = transcript.with_opening_turn(state, content)
+    task = message if flags[0] == "--resume" else f"{state['system_prompt']}\n\n---\n\n{message}"
 
     # The task travels in a file: MAX_ARG_STRLEN caps one argv entry at 128 KiB
     # regardless of total command-line room, and a composed prompt plus a turn
@@ -1069,31 +1569,27 @@ async def _run_dsh_turn(
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(task)
 
-        rounds = _goal_rounds(goal_rounds)
-        goal_flags: list[str] = []
-        if rounds > 1:
-            # The rotation check answers a goal round's Stop on stdout, which
-            # dsh reads to end the run before a round the conversation has no
-            # room for. It does that only when it knows it is in one.
-            env["HIVE_GOAL_RUN"] = "1"
-            # The objective travels separately from the task. A conversation's
-            # first turn is the composed system prompt and the message together,
-            # and the round driver quotes the objective into every round — so a
-            # goal armed with the task would spend the context window on forty
-            # copies of a soul. It travels in a file for the same reason the task
-            # does: MAX_ARG_STRLEN caps one argv entry at 128 KiB.
-            obj_handle, objective_path = tempfile.mkstemp(
-                prefix="dsh-goal-", suffix=".txt")
-            with os.fdopen(obj_handle, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            goal_flags = ["--goal-rounds", str(rounds),
-                          "--goal-objective-file", objective_path]
+        # The rotation check answers a goal round's Stop on stdout, which dsh
+        # reads to end the run before a round the conversation has no room for.
+        # It does that only when it knows it is in one.
+        env = dict(env)
+        env["HIVE_GOAL_RUN"] = "1"
+        # The objective travels separately from the task. A conversation's
+        # first turn is the composed system prompt and the message together,
+        # and the round driver quotes the objective into every round — so a
+        # goal armed with the task would spend the context window on forty
+        # copies of a soul. It travels in a file for the same reason the task
+        # does: MAX_ARG_STRLEN caps one argv entry at 128 KiB.
+        obj_handle, objective_path = tempfile.mkstemp(prefix="dsh-goal-", suffix=".txt")
+        with os.fdopen(obj_handle, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        goal_flags = ["--goal-rounds", str(rounds), "--goal-objective-file", objective_path]
         if _stop_on_failed_call():
             goal_flags.append("--stop-on-failed-call")
         cmd = [DSH_BIN, "--profile", dsh_profile(), *_patch_args(), *flags, *goal_flags,
                "--task-file", task_path]
-        log.info("%s session %s: spawning dsh turn (%s %s)",
-                 NAME, sid, flags[0], conversation_id)
+        log.info("%s session %s: spawning dsh goal run (%s %s, %s rounds)",
+                 NAME, sid, flags[0], conversation_id, rounds)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1168,9 +1664,9 @@ async def _run_dsh_turn(
                         if delta is not None:
                             yield delta
                             continue
-                        message = _message_frame(decoded)
-                        if message is not None:
-                            yield message
+                        message_frame = _message_frame(decoded)
+                        if message_frame is not None:
+                            yield message_frame
                             continue
                         frame = _progress_frame(decoded)
                         if frame is not None:
@@ -1254,68 +1750,62 @@ async def _run_dsh_turn(
                "stop_reason": "no-report", "is_error": True}
         return
 
-    yield {"type": "dsh_report", "session_id": sid, "report": report,
-           "_observer_only": True}
+    for frame in _turn_frames(sid, state, conversation_id, report):
+        yield frame
 
-    text = str(report.get("text") or "")
-    # Still written when the turn already streamed every word of it. The chat
-    # surfaces drop a buffered copy of prose they have already shown — that
-    # mechanism predates this harness and claude relies on it — and the frame is
-    # the only thing comms accumulates into the turn ledger. Withholding it put
-    # the answer on the screen and left the session's own history holding the
-    # question and no reply, which `/history`, the rotation carry-forward and
-    # the late-turn merge all read.
-    yield {
-        "type": "assistant",
-        "message": {"role": "assistant", "content": [
-            {"type": "text", "text": text if text else _no_text_diagnostic(report)}
-        ]},
-    }
 
-    outcome = str(report.get("outcome") or "unknown")
-    traffic = report.get("traffic") or {}
-    error = report.get("error")
-    # `completed` is the only outcome that is not a failure. Everything else —
-    # a refusal, an error, max-tokens, a reason this harness has not grown yet
-    # — is reported under its own name rather than flattened, because the stop
-    # reason is the measurement and `max-tokens` in particular is the context
-    # ceiling rather than a crash.
-    log_event(log, "turn.completed", mind_id=MIND_ID, mind_name=NAME, session_id=sid,
-              model=state["model"], stop_reason=outcome,
-              error_code=(error or {}).get("code"),
-              tools_emitted=traffic.get("emitted"),
-              tools_succeeded=traffic.get("succeeded"),
-              tools_failed=traffic.get("failed"),
-              tools_unanswered=traffic.get("unanswered"),
-              turns=report.get("turns"), goal_phase=report.get("goalPhase"))
-    transcript.settle_opening_turn(state, ok=outcome == "completed")
-    result: dict[str, Any] = {
-        "type": "result",
-        "session_id": str(report.get("sessionId") or conversation_id),
-        "stop_reason": outcome,
-        "traffic": traffic,
-        "is_error": outcome != "completed",
-    }
-    # Reported beside the tally rather than folded into it: a build that stopped
-    # at round two of forty and one that burned all forty are different
-    # failures, and the tally alone cannot tell them apart.
-    if report.get("turns") is not None:
-        result["turns"] = report["turns"]
-    if report.get("goalPhase") is not None:
-        result["goal_phase"] = report["goalPhase"]
-    # A goal run dsh ended because the conversation reached its threshold.
-    # The objective and the rounds it had left are what the gateway needs to
-    # carry the goal onto a fresh conversation — dsh never rotates itself.
-    if isinstance(report.get("goal"), dict):
-        result["goal"] = report["goal"]
-    if error:
-        result["error_code"] = error.get("code")
-        result["error"] = error.get("message")
-        # One code for an overflow on every harness, whatever words the
-        # provider used; the gateway rotates on it and never reads the text.
-        if context_overflow.is_overflow(error.get("code"), error.get("message")):
-            result["error_code"] = context_overflow.CONTEXT_WINDOW_EXCEEDED
-    yield result
+async def _run_dsh_turn(
+    sid: str, content: str, images: list[dict] | None, goal_rounds: object = None,
+) -> Any:
+    """Answer one turn on this conversation, by whichever dispatch it needs."""
+    state = SESSIONS.get(sid)
+    if state is None:
+        yield {"type": "result", "is_error": True}
+        return
+    # Cleared per turn: the flag is the *previous* turn's verdict, and a fresh
+    # turn nobody has interrupted must not report itself as stopped on purpose
+    # the moment its own output is unreadable.
+    state["killed"] = False
+    conversation_id = state["conversation_id"]
+
+    if images:
+        # Said out loud rather than logged: a model answering the text as if
+        # nothing was attached looks like a model that ignored the picture.
+        log.warning("%s session %s: image input not supported, ignoring", NAME, sid)
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "text",
+                "text": f"({len(images)} attached image(s) were not sent —"
+                        " this harness has no image input yet.)",
+            }]},
+        }
+
+    try:
+        env = await _compose_turn_env(sid, state)
+    except RuntimeError as exc:
+        # Said out loud, like the spawn failures. This raises on a mind whose
+        # own configuration cannot size a model request, and an unhandled one
+        # here ends the response with zero frames — the gateway reports a turn
+        # that produced nothing, which is total silence for the operator who is
+        # the only person able to fix it.
+        log.error("%s session %s: %s", NAME, sid, exc)
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": f"Error: {exc}"}]},
+        }
+        yield {"type": "result", "session_id": conversation_id, "stop_reason": "error",
+               "is_error": True, "error_code": "MIND_MISCONFIGURED", "error": str(exc)}
+        return
+
+    rounds = _goal_rounds(goal_rounds)
+    if rounds > 1:
+        await _stop_resident(state)
+        async for event in _run_one_shot_turn(sid, state, content, env, rounds):
+            yield event
+        return
+    async for event in _run_resident_turn(sid, state, content, env):
+        yield event
 
 
 async def send(sid: str, body: dict) -> Any:
@@ -1368,13 +1858,27 @@ async def interrupt_session(sid: str) -> Any:
     if sess is None:
         return JSONResponse({"error": f"Session {sid} not found"}, status_code=404)
     proc = sess.get("proc")
-    if proc is None or proc.returncode is not None:
+    resident = sess.get("resident")
+    if proc is not None and proc.returncode is None:
+        # A goal run, which owns its own process.
+        # Read by the turn generator, which reports a process that wrote no
+        # report as stopped on purpose rather than as a harness that fell over.
+        sess["killed"] = True
+        await _reap_proc(proc)
+        sess["proc"] = None
+    elif resident is not None and sess.get("in_flight"):
+        # The resident process is the turn's only driver, so stopping the turn
+        # costs the process. The conversation is in dsh's session store on
+        # disk, so the next turn resumes it in a new one — which is what
+        # separates this from `DELETE`.
+        sess["killed"] = True
+        await _stop_resident(sess)
+    else:
+        # A resident process with no turn in flight is not something running.
+        # Killing it here would answer "interrupted" for a conversation that
+        # was only sitting idle, and cost the residency a settled background
+        # child needs.
         return {"ok": True, "session_id": sid, "message": "nothing_running"}
-    # Read by the turn generator, which reports a process that wrote no report
-    # as stopped on purpose rather than as a harness that fell over.
-    sess["killed"] = True
-    await _reap_proc(proc)
-    sess["proc"] = None
     log_event(log, "turn.interrupted", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"ok": True, "session_id": sid, "message": "interrupted"}
 
@@ -1390,6 +1894,7 @@ async def release_session(sid: str, surface: str) -> Any:
     sess = SESSIONS.pop(sid, None)
     if sess is not None:
         sess["killed"] = True
+        await _stop_resident(sess)
         await _reap_proc(sess.get("proc"))
     return {"session_id": sid, "surface": surface, "released": sess is not None}
 
@@ -1398,6 +1903,7 @@ async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)
     if sess is not None:
         sess["killed"] = True
+        await _stop_resident(sess)
         await _reap_proc(sess.get("proc"))
     teardown_pty(sid)
     PANE_CONVERSATION_ENV.pop(sid, None)
