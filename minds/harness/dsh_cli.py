@@ -1377,6 +1377,15 @@ async def _spawn_resident(sid: str, state: dict, env: dict[str, str]) -> Any:
     if ready is None:
         refusal = resident.refusal or {}
         unreadable = resident.unreadable
+        if not refusal and not unreadable and proc.stderr is not None:
+            # A process that died before announcing itself said why on stderr,
+            # and nothing else will: the operator who has to fix a launcher
+            # that will not boot is the one person this message reaches.
+            try:
+                unreadable = (await proc.stderr.read()).decode(
+                    errors="replace").strip()[-2000:] or None
+            except (OSError, ValueError):
+                unreadable = None
         await _stop_resident(state)
         code = str(refusal.get("code") or "NO_TURN_REPORT")
         detail = str(refusal.get("message") or unreadable
