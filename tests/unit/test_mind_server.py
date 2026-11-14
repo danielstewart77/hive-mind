@@ -141,13 +141,23 @@ class _Stdout:
     polls for, so the drain backs off and the turn's own reader gets them.
     """
 
-    def __init__(self, lines: list[bytes], gate: asyncio.Event | None):
+    def __init__(self, lines: list[bytes], gate: asyncio.Event | None,
+                 holds_open: bool = False):
         self._lines, self._gate = list(lines), gate
+        #: A resident process does not end its stdout when it has nothing to
+        #: say: it is waiting for the next turn, and an EOF would be read as
+        #: the conversation's process having died.
+        self._holds_open = holds_open
+
+    def feed(self, line: bytes) -> None:
+        self._lines.append(line)
 
     async def readline(self) -> bytes:
         if self._gate is not None:
             await self._gate.wait()
             await asyncio.sleep(0.3)
+        while self._holds_open and not self._lines:
+            await asyncio.sleep(0.01)
         return self._lines.pop(0) if self._lines else b""
 
     def __aiter__(self):
@@ -166,6 +176,7 @@ class _Stdin:
 
     def write(self, data: bytes) -> None:
         self._proc.stdin_bytes += data
+        self._proc.answer(data)
         if self._proc.gate is not None:
             self._proc.gate.set()
 
@@ -188,16 +199,43 @@ class _Stderr:
 
 
 class _Proc:
-    def __init__(self, lines: list[bytes], gated: bool):
+    """One spawned harness process.
+
+    ``resident`` is dsh: the process holds the conversation open, announces it
+    on stdout before any turn, and answers each turn written to its stdin with
+    that turn's id on the report — so the adapter can match a report to the
+    request that asked for it.
+    """
+
+    def __init__(self, lines: list[bytes], gated: bool, resident: bool = False):
         self.gate = asyncio.Event() if gated else None
         self.stdin_bytes = b""
         self.stdin = _Stdin(self)
-        self.stdout = _Stdout(lines, self.gate)
+        self.script = list(lines)
+        self.turns: list[dict] = []
+        self.resident = resident
+        self.stdout = _Stdout([_line(RESIDENT_READY)] if resident else lines,
+                              self.gate, holds_open=resident)
         self.stderr = _Stderr()
         # A per-turn harness has exited by the time it is reaped, so a reaper
         # signals nothing; claude's process lives across turns.
         self.returncode = None if gated else 0
         self.pid = NO_SUCH_PID
+
+    def answer(self, data: bytes) -> None:
+        """Answer one turn request, as the resident runner answers it."""
+        if not self.resident:
+            return
+        for raw in data.decode().splitlines():
+            if not raw.strip():
+                continue
+            request = json.loads(raw)
+            self.turns.append(request)
+            for line in self.script:
+                parsed = json.loads(line.decode())
+                if "sessionId" in parsed or isinstance(parsed.get("message"), str):
+                    parsed["id"] = request["id"]
+                self.stdout.feed(_line(parsed))
 
     async def wait(self) -> int:
         return 0
@@ -209,6 +247,10 @@ class _Proc:
 def _line(event: dict) -> bytes:
     return json.dumps(event).encode() + b"\n"
 
+
+#: What a resident dsh process writes before it reads its first turn.
+RESIDENT_READY = {"ready": {"sessionId": "conv-1", "mode": "create",
+                            "model": "qwen35-131k"}}
 
 #: What each harness writes for one finished turn.
 TURN_OUTPUT = {
@@ -235,10 +277,11 @@ class _Spawner:
     async def __call__(self, *argv: str, **kwargs: Any) -> _Proc:
         call = {"argv": list(argv), "env": kwargs.get("env") or {}}
         if "--task-file" in argv:
-            # dsh's turn arrives in a file the adapter deletes afterwards.
+            # A goal dispatch's task arrives in a file the adapter deletes.
             call["task"] = Path(argv[argv.index("--task-file") + 1]).read_text()
         lines = self.outputs.pop(0) if self.outputs else TURN_OUTPUT[self.harness]
-        proc = _Proc(lines, gated=self.harness == "claude")
+        proc = _Proc(lines, gated=self.harness == "claude",
+                     resident="--resident" in argv)
         call["proc"] = proc
         self.calls.append(call)
         return proc
@@ -251,6 +294,9 @@ def _delivered(harness: str, call: dict) -> str:
         return message["message"]["content"][0]["text"]
     if harness == "codex":
         return call["proc"].stdin_bytes.decode()
+    if call["proc"].resident:
+        # dsh's turn is written to its resident process as a JSON line.
+        return call["proc"].turns[-1]["turn"]
     return call["task"]
 
 

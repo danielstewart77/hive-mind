@@ -38,6 +38,14 @@ from core.hive_logging import log_event
 log = logging.getLogger("hive-mind.proactive")
 NAME = os.environ.get("MIND_NAME", "")
 
+#: The one buffer of unsolicited turns in this process, whichever adapter
+#: produced them. Owned here rather than by an adapter because `GET /proactive`
+#: is one route and a surface polls it once: a second buffer behind a second
+#: adapter is a turn that is written, never read, and lost on restart — which
+#: is what happened to every unsolicited turn the dsh adapter could have
+#: delivered while this list was claude's alone.
+BUFFER: list[dict] = []
+
 
 def extract_assistant_texts(event: dict) -> list[str]:
     """Return the text of every ``text`` content block in an assistant event.

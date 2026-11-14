@@ -1,4 +1,4 @@
-"""The dsh harness adapter: one process per turn, in the gateway's conversation.
+"""The dsh harness adapter: one resident process per conversation.
 
 Every test imports ``minds.harness.dsh_cli`` and calls it. The one stub is
 ``asyncio.create_subprocess_exec`` — the boundary where the process stops
@@ -36,31 +36,36 @@ def _set_live(monkeypatch, dsh, key: str, value) -> None:
 
 
 class _FakeStdout:
-    """The spawned process's stdout, line by line.
+    """The spawned process's stdout, fed line by line as the process writes.
 
-    ``readline`` is what the adapter actually uses, so it can tick a heartbeat
-    between lines; ``line_delay`` is how long a line keeps it waiting.
+    A queue rather than a fixed list, because a resident process writes when it
+    is spoken to: its readiness line lands at spawn and a turn's lines land
+    when the turn is written to its stdin. ``line_delay`` is how long a line
+    keeps the reader waiting.
     """
 
-    def __init__(self, lines: list[str], line_delay: float = 0.0) -> None:
-        self._lines = list(lines)
-        self._delay = line_delay
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue = asyncio.Queue()
+        #: How long each line keeps the reader waiting. Set after the
+        #: readiness line is fed, so a slow turn is not also a slow boot: the
+        #: readiness wait is its own boundary and not what these tests drive.
+        self.delay = 0.0
+
+    @property
+    def unread(self) -> int:
+        """Lines written but not yet read — how far behind the reader is."""
+        return self._queue.qsize()
+
+    def feed(self, line: str) -> None:
+        self._queue.put_nowait(line.encode())
+
+    def eof(self) -> None:
+        self._queue.put_nowait(b"")
 
     async def readline(self) -> bytes:
-        if self._delay:
-            await asyncio.sleep(self._delay)
-        if not self._lines:
-            return b""
-        return self._lines.pop(0).encode()
-
-    def __aiter__(self) -> Any:
-        async def gen() -> Any:
-            while True:
-                line = await self.readline()
-                if not line:
-                    return
-                yield line
-        return gen()
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return await self._queue.get()
 
 
 class _FakeStderr:
@@ -71,35 +76,183 @@ class _FakeStderr:
         return self._text.encode()
 
 
+#: The line a resident process writes before it reads its first turn.
+_READY = json.dumps({"ready": {"sessionId": "conv-1", "mode": "create",
+                               "model": "qwen35-131k"}}) + "\n"
+
+
+class _ReadyThenHangs(_FakeStdout):
+    """A process that announces its conversation and then never writes again.
+
+    The readiness line is its own boundary with its own wait; what these tests
+    drive is the turn deadline, which only starts once there is a process to
+    write a turn to.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.feed(_READY)
+
+    async def readline(self) -> bytes:
+        if self.unread:
+            return await super().readline()
+        await asyncio.sleep(30)
+        return b""
+
+
+class _FakeStdin:
+    """The resident process's stdin: one turn request per line."""
+
+    def __init__(self, proc: "_FakeProc") -> None:
+        self._proc = proc
+
+    def write(self, data: bytes) -> None:
+        self._proc.take(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _has_report(lines: list[str]) -> bool:
+    """Whether a script answers a turn at all, as the adapter reads a report."""
+    for line in lines:
+        text = line.strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "sessionId" in parsed and "progress" not in parsed:
+            return True
+    return False
+
+
 class _FakeProc:
+    """A scripted dsh process, resident or one-shot.
+
+    Resident: the readiness line lands at spawn, and every turn written to
+    stdin is answered with the script — with this turn's id stamped onto the
+    report and onto any completed message, which is what the real runner does
+    and what the adapter matches on. A script carrying no report is a process
+    that died without answering, so it ends its stdout rather than hanging the
+    turn that is waiting.
+
+    One-shot (a goal dispatch): the whole script is written at spawn and the
+    stream ends, which is the shape that process actually has.
+    """
+
     def __init__(self, lines: list[str], stderr: str = "", returncode: int = 0,
-                 line_delay: float = 0.0) -> None:
-        self.stdout = _FakeStdout(lines, line_delay)
+                 line_delay: float = 0.0, resident: bool = True,
+                 ready: bool = True, hold_report: bool = False,
+                 answer_id: str | None = None) -> None:
+        self.stdout = _FakeStdout()
         self.stderr = _FakeStderr(stderr)
-        self.returncode = returncode
+        self.stdin = _FakeStdin(self) if resident else None
+        self.returncode: int | None = None if resident else returncode
+        self._exit = returncode
         self.pid = 4242
+        self.script = list(lines)
+        self.requests: list[dict] = []
+        #: Answer a turn with everything but its report, until `finish` is
+        #: called. A frame that reaches the surface while the report is still
+        #: being withheld cannot have been buffered until the turn ended,
+        #: because nothing that could end it has been written yet.
+        self.hold_report = hold_report
+        self._held: list[str] = []
+        #: Answer every turn under this id instead of the one that asked —
+        #: what a report left over from an abandoned turn looks like arriving
+        #: while a later one is waiting.
+        self.answer_id = answer_id
+        if resident:
+            if ready:
+                self.stdout.feed(_READY)
+        else:
+            for line in lines:
+                self.stdout.feed(line)
+            self.stdout.eof()
+        self.stdout.delay = line_delay
+
+    def take(self, data: bytes) -> None:
+        """Answer one turn request the way the resident runner answers it."""
+        request = json.loads(data.decode())
+        self.requests.append(request)
+        turn_id = self.answer_id or request.get("id")
+        for line in self.script:
+            stamped = _stamp(line, turn_id)
+            if self.hold_report and _has_report([line]):
+                self._held.append(stamped)
+                continue
+            self.stdout.feed(stamped)
+        if self.hold_report:
+            return
+        if not _has_report(self.script):
+            # Nothing answered this turn: the process is gone.
+            self.returncode = self._exit
+            self.stdout.eof()
+
+    def speak(self, text: str) -> None:
+        """Write a message nobody asked for, as a settled background child
+        makes this process do: dsh opens a turn on the idle owner and the
+        runner marks what it says unsolicited, because no turn is in flight."""
+        self.stdout.feed(json.dumps({"message": text, "unsolicited": True}) + "\n")
+
+    def finish(self) -> None:
+        """Write the report this process was holding back."""
+        for line in self._held:
+            self.stdout.feed(line)
+        self._held = []
 
     async def wait(self) -> int:
-        return self.returncode
+        self.returncode = self._exit
+        return self._exit
+
+
+def _stamp(line: str, turn_id: str | None) -> str:
+    """Put this turn's id on the lines the runner puts it on."""
+    text = line.strip()
+    if turn_id is None or not text.startswith("{"):
+        return line
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return line
+    if not isinstance(parsed, dict):
+        return line
+    if "sessionId" in parsed or isinstance(parsed.get("message"), str):
+        parsed["id"] = turn_id
+        return json.dumps(parsed) + "\n"
+    return line
 
 
 class _Spawn:
     """Records the spawn and answers it with a scripted process."""
 
     def __init__(self, lines: list[str], stderr: str = "", returncode: int = 0,
-                 on_spawn: Any = None, line_delay: float = 0.0) -> None:
+                 on_spawn: Any = None, line_delay: float = 0.0,
+                 ready: bool = True, answer_id: str | None = None) -> None:
         self.lines = lines
         self.stderr = stderr
         self.returncode = returncode
         self.on_spawn = on_spawn
         self.line_delay = line_delay
+        self.ready = ready
+        self.answer_id = answer_id
         self.calls: list[dict] = []
+        self.procs: list[_FakeProc] = []
 
     async def __call__(self, *argv: str, **kwargs: Any) -> _FakeProc:
         self.calls.append({"argv": list(argv), **kwargs})
         if self.on_spawn is not None:
             self.on_spawn()
-        return _FakeProc(self.lines, self.stderr, self.returncode, self.line_delay)
+        proc = _FakeProc(self.lines, self.stderr, self.returncode, self.line_delay,
+                         resident="--resident" in argv, ready=self.ready,
+                         answer_id=self.answer_id)
+        self.procs.append(proc)
+        return proc
 
     @property
     def argv(self) -> list[str]:
@@ -108,6 +261,11 @@ class _Spawn:
     @property
     def env(self) -> dict[str, str]:
         return self.calls[-1]["env"]
+
+    @property
+    def turns(self) -> list[dict]:
+        """Every turn request written to a resident process, in order."""
+        return [request for proc in self.procs for request in proc.requests]
 
 
 def _report(**overrides: Any) -> str:
@@ -130,6 +288,11 @@ def dsh(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(dsh_cli, "PROJECT_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SPAWN_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SESSIONS", {})
+    # A readiness wait short enough that a process which never announces itself
+    # is a failed test rather than a two-minute one. The real value is the
+    # boundary, not the behaviour under test.
+    monkeypatch.setattr(dsh_cli, "RESIDENT_READY_SECONDS", 2.0)
+    monkeypatch.setattr(dsh_cli, "PROACTIVE_BUFFER", [])
     # Each model is sized by the window the proxy lists for it, asked per turn.
     proxy(monkeypatch, {"qwen35-131k": 131_072, "gpt-oss:20b-32k": 32_768})
     return dsh_cli
@@ -332,17 +495,20 @@ async def test_the_conversations_first_turn_creates_under_the_gateways_id(
     assert "--resume" not in spawn.argv
 
 
-async def test_the_second_turn_on_that_id_continues_it(dsh, monkeypatch) -> None:
+async def test_the_second_turn_is_written_to_the_process_the_first_one_started(
+    dsh, monkeypatch
+) -> None:
+    """The residency itself. A second process would be a second conversation
+    on one session store — colliding event sequence numbers, a log dsh can
+    then load for neither resume nor create — and a background child the first
+    turn dispatched would have died with it."""
     _session(dsh)
-    # A real dsh turn persists the session; the fake does the same so the
-    # second spawn sees what the first one left behind.
     spawn = _Spawn([_report()], on_spawn=lambda: _persist(dsh, "conv-1"))
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
     await _drain(dsh, "row-1", "and now the next thing")
-    assert "--resume" in spawn.argv
-    assert spawn.argv[spawn.argv.index("--resume") + 1] == "conv-1"
-    assert "--session-id" not in spawn.argv
+    assert len(spawn.calls) == 1
+    assert [request["turn"] for request in spawn.turns][1] == "and now the next thing"
 
 
 async def test_a_session_dsh_already_holds_is_resumed_by_a_process_that_never_saw_it(
@@ -454,9 +620,12 @@ async def test_the_stop_reason_is_recorded_verbatim(dsh, monkeypatch) -> None:
                         _Spawn([_report(outcome="max-tokens")]))
     assert _result(await _drain(dsh))["stop_reason"] == "max-tokens"
 
+    # A second conversation, because the first one's process is resident and
+    # answers from the script it was spawned with.
+    _session(dsh, "row-2", conversation_id="conv-2")
     monkeypatch.setattr(asyncio, "create_subprocess_exec",
                         _Spawn([_report(outcome="halted-by-the-moon")]))
-    result = _result(await _drain(dsh))
+    result = _result(await _drain(dsh, "row-2"))
     assert result["stop_reason"] == "halted-by-the-moon"
     assert result["is_error"] is True
 
@@ -607,18 +776,20 @@ async def test_an_empty_session_directory_is_not_a_resumable_conversation(
     assert "--session-id" in spawn.argv
 
 
-async def test_the_turns_process_group_is_signalled_on_every_turn(
+async def test_a_goal_dispatchs_process_group_is_signalled_when_its_run_ends(
     dsh, monkeypatch
 ) -> None:
-    """A tool's background child outlives the launcher, and a child that
-    outlives its group reparents to PID 1 — which in the mind's container is
-    this process."""
+    """A goal run owns its process, and a tool's background child outlives the
+    launcher: a child that outlives its group reparents to PID 1, which in the
+    mind's container is this process. A chat turn's group is not signalled
+    here, because the process it shares is the conversation's."""
     _session(dsh)
+    _set_live(monkeypatch, dsh, "goal_rounds", 4)
     signalled: list[tuple[int, int]] = []
     monkeypatch.setattr(os, "getpgid", lambda pid: pid + 1000)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([_report()]))
-    await _drain(dsh)
+    await _drain(dsh, goal_rounds=4)
     assert signalled == [(5242, 9)]
 
 
@@ -629,23 +800,15 @@ async def test_the_composed_prompt_rides_in_on_the_conversations_first_turn(
     and standing rules — and a mind whose first turn goes out without it is a
     mind with no identity, which no assertion about tool traffic would catch."""
     _session(dsh)
-    captured: list[str] = []
     spawn = _Spawn([_report()])
-
-    def read_task_file() -> None:
-        path = spawn.argv[spawn.argv.index("--task-file") + 1]
-        captured.append(Path(path).read_text(encoding="utf-8"))
-
-    spawn.on_spawn = read_task_file
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh, "row-1", "do the thing")
-    assert "SOUL AND MEMORY" in captured[0]
-    assert "do the thing" in captured[0]
+    assert "SOUL AND MEMORY" in spawn.turns[0]["turn"]
+    assert "do the thing" in spawn.turns[0]["turn"]
 
-    _persist(dsh, "conv-1")
     await _drain(dsh, "row-1", "and the next thing")
-    assert "SOUL AND MEMORY" not in captured[1]
-    assert captured[1] == "and the next thing"
+    assert "SOUL AND MEMORY" not in spawn.turns[1]["turn"]
+    assert spawn.turns[1]["turn"] == "and the next thing"
 
 
 async def test_the_task_never_travels_in_argv(dsh, monkeypatch) -> None:
@@ -768,14 +931,9 @@ async def test_a_turn_that_never_ends_is_stopped_and_reported(
         def __post_init__(self) -> None:  # pragma: no cover - not used
             pass
 
-    class _HangingStdout:
-        async def readline(self) -> bytes:
-            await asyncio.sleep(30)
-            return b""
-
     async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
         proc = _FakeProc([])
-        proc.stdout = _HangingStdout()
+        proc.stdout = _ReadyThenHangs()
         return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
@@ -1313,6 +1471,19 @@ async def test_the_profile_is_read_per_turn_so_an_edit_does_not_wait_on_a_restar
     assert command[command.index("--profile") + 1] == "exam"
 
 
+async def _until(turn: Any, events: list[dict], frame_type: str) -> dict:
+    """Consume the turn up to its first frame of this type, and return it.
+
+    Every frame consumed on the way is kept, so the caller can go on draining
+    the rest into the same list and read the whole turn afterwards.
+    """
+    async for event in turn:
+        events.append(event)
+        if event.get("type") == frame_type:
+            return event
+    raise AssertionError(f"the turn ended without a {frame_type} frame")
+
+
 async def _answer_with(proc: _FakeProc) -> _FakeProc:
     """Spawn one prepared process, so a test can read how far its stdout got."""
     return proc
@@ -1363,20 +1534,19 @@ async def test_prose_reaches_the_surface_as_the_model_writes_it(dsh, monkeypatch
         _delta_line("text", "an answer"),
         _report(text="half an answer"),
     ]
-    proc = _FakeProc(lines)
+    proc = _FakeProc(lines, hold_report=True)
     monkeypatch.setattr(asyncio, "create_subprocess_exec",
                         lambda *a, **k: _answer_with(proc))
-    unread_at_first_frame = None
-    events = []
-    async for event in dsh._run_dsh_turn("row-1", "do the thing", None):
-        if unread_at_first_frame is None and event.get("type") == "stream_event":
-            unread_at_first_frame = len(proc.stdout._lines)
-        events.append(event)
+    turn = dsh._run_dsh_turn("row-1", "do the thing", None)
+    events: list[dict] = []
+    # Nothing that could end the turn has been written yet, so an adapter that
+    # held its deltas until the report would never get here.
+    first = await asyncio.wait_for(_until(turn, events, "stream_event"), timeout=5.0)
+    assert first["event"]["delta"]["text"] == "half "
+    proc.finish()
+    events.extend([event async for event in turn])
 
     assert _streamed(events, "text_delta") == ["half ", "an answer"]
-    # Two lines still unread: the second delta and the report. A buffered
-    # adapter would have drained all three before yielding anything.
-    assert unread_at_first_frame == 2
     # Reaching the surface is the point: an observer-only frame is published to
     # the session event stream and never handed to the bot.
     assert all(not event.get("_observer_only")
@@ -1463,12 +1633,6 @@ class _CheckStdin:
         return None
 
 
-class _HangingStdout:
-    async def readline(self) -> bytes:
-        await asyncio.sleep(30)
-        return b""
-
-
 @pytest.mark.parametrize("ending", ["timeout", "killed", "no-report", "unparseable"])
 async def test_a_turn_dsh_fired_no_stop_for_runs_the_minds_rotation_check(
     dsh, monkeypatch, tmp_path, ending,
@@ -1497,7 +1661,7 @@ async def test_a_turn_dsh_fired_no_stop_for_runs_the_minds_rotation_check(
             return proc
         if ending == "timeout":
             proc = _FakeProc([])
-            proc.stdout = _HangingStdout()
+            proc.stdout = _ReadyThenHangs()
             return proc
         if ending == "killed":
             state["killed"] = True
@@ -1546,20 +1710,18 @@ async def test_a_finished_message_is_delivered_while_the_turn_works_on(
         _message_line("Cypher is back: green."),
         _report(text="Cypher is back: green."),
     ]
-    proc = _FakeProc(lines)
+    proc = _FakeProc(lines, hold_report=True)
     monkeypatch.setattr(asyncio, "create_subprocess_exec",
                         lambda *a, **k: _answer_with(proc))
-    unread_at_first_message = None
-    events = []
-    async for event in dsh._run_dsh_turn("row-1", "do the thing", None):
-        if unread_at_first_message is None and event.get("type") == "assistant":
-            unread_at_first_message = len(proc.stdout._lines)
-        events.append(event)
+    turn = dsh._run_dsh_turn("row-1", "do the thing", None)
+    events: list[dict] = []
+    # The report is still being withheld, so the message that arrives here is
+    # one the turn handed over while it was still working.
+    first = await asyncio.wait_for(_until(turn, events, "assistant"), timeout=5.0)
+    assert first["message"]["content"][0]["text"] == "Dispatched three jobs."
+    proc.finish()
+    events.extend([event async for event in turn])
 
-    # The first whole message was handed over with three lines still unread:
-    # the second delta, its message, and the report. An adapter that waited
-    # for the turn would have drained every one of them first.
-    assert unread_at_first_message == 3
     assert _assistant_texts(events)[0] == "Dispatched three jobs."
     # Reaching the surface is the point.
     assert all(not event.get("_observer_only")
@@ -1604,3 +1766,204 @@ async def test_the_turn_ledger_still_gets_the_buffered_copy(
     events = await _drain(dsh)
 
     assert _assistant_texts(events) == ["the answer", "the answer"]
+
+
+# ---------------------------------------------------------------------------
+# One process per conversation, and what it says when no turn asked
+# ---------------------------------------------------------------------------
+
+def _chat_session(module, sid: str = "row-1", conversation_id: str = "conv-1") -> dict:
+    """A session on a surface that can take an unsolicited turn."""
+    state = _session(module, sid, conversation_id=conversation_id)
+    state["surface_label"] = "telegram"
+    state["client_ref"] = "8776938611"
+    return state
+
+
+async def _settle(times: int = 40) -> None:
+    """Let the reader task run. It is a task, not a coroutine the turn awaits,
+    so what it does after the turn's last frame needs a tick to happen in."""
+    for _ in range(times):
+        await asyncio.sleep(0)
+
+
+async def test_a_message_nobody_asked_for_is_handed_to_the_minds_surface(
+    dsh, monkeypatch
+) -> None:
+    """The point of the whole change. A background child settles after the turn
+    that dispatched it has closed, dsh opens a turn on the idle mind, and what
+    the mind says then has no request to answer — so it goes to the surface by
+    the proactive route rather than into a stream nobody is reading."""
+    _chat_session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+
+    spawn.procs[0].speak("Cypher is back: the build is green.")
+    await _settle()
+
+    assert dsh.PROACTIVE_BUFFER == [
+        {"chat_id": 8776938611, "text": "Cypher is back: the build is green."}]
+
+
+async def test_an_unsolicited_message_is_not_mistaken_for_the_next_turns_answer(
+    dsh, monkeypatch
+) -> None:
+    """It is delivered on its own. Folding it into the next turn would answer
+    Daniel's next question with a report about something else."""
+    _chat_session(dsh)
+    spawn = _Spawn([_report(text="the answer")])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    spawn.procs[0].speak("a delegate came back refused")
+    await _settle()
+
+    events = await _drain(dsh, "row-1", "and now the next thing")
+    assert _assistant_texts(events) == ["the answer"]
+
+
+async def test_a_surface_that_cannot_take_a_delivery_is_not_handed_one(
+    dsh, monkeypatch
+) -> None:
+    """A Discord snowflake is nineteen digits and `int()` takes it without
+    complaint, which is how one mind's unsolicited turn was posted at a
+    Telegram chat id that did not exist, sixty times over three hours."""
+    state = _chat_session(dsh)
+    state["surface_label"] = "discord"
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    spawn.procs[0].speak("a delegate came back refused")
+    await _settle()
+
+    assert dsh.PROACTIVE_BUFFER == []
+
+
+async def test_a_process_that_died_between_turns_is_replaced(dsh, monkeypatch) -> None:
+    """The conversation is on disk, so the next turn resumes it in a new
+    process. Writing to the dead one would be a turn with no reply at all."""
+    _session(dsh)
+    spawn = _Spawn([_report()], on_spawn=lambda: _persist(dsh, "conv-1"))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    await spawn.procs[0].wait()
+
+    events = await _drain(dsh, "row-1", "and now the next thing")
+    assert len(spawn.calls) == 2
+    assert "--resume" in spawn.argv
+    assert _result(events)["is_error"] is False
+
+
+async def test_a_conversation_picked_up_on_another_surface_gets_a_process_told_so(
+    dsh, monkeypatch
+) -> None:
+    """The surface a turn answers on rides in the process environment, so a
+    resident one spawned for Telegram would keep answering there after the
+    conversation moved to the browser."""
+    state = _chat_session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    state["surface_label"] = "terminal"
+    await _drain(dsh, "row-1", "and now from the terminal")
+
+    assert [call["env"].get("HIVE_SURFACE") for call in spawn.calls] == ["telegram", "terminal"]
+
+
+async def test_a_goal_dispatch_does_not_share_a_process_with_the_conversation(
+    dsh, monkeypatch
+) -> None:
+    """Two processes on one session store write colliding event sequence
+    numbers, and dsh then refuses to load the log for either resume or create —
+    which ends the conversation for good, not just the turn."""
+    _session(dsh)
+    _set_live(monkeypatch, dsh, "goal_rounds", 4)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert dsh.SESSIONS["row-1"].get("resident") is not None
+
+    await _drain(dsh, goal_rounds=4)
+    assert dsh.SESSIONS["row-1"].get("resident") is None
+    assert "--task-file" in spawn.argv
+    assert "--resident" not in spawn.argv
+
+
+async def test_an_idle_conversation_is_not_interrupted_out_of_its_residency(
+    dsh, monkeypatch
+) -> None:
+    """There is nothing to interrupt between turns, and killing the process
+    would take the one thing that can hear a background child settle."""
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+
+    answer = await dsh.interrupt_session("row-1")
+    assert answer["message"] == "nothing_running"
+    assert dsh.SESSIONS["row-1"].get("resident") is not None
+
+
+async def test_closing_a_session_ends_the_process_holding_it(dsh, monkeypatch) -> None:
+    """A conversation nobody is in must not leave a node process running."""
+    _session(dsh)
+    killed: list[int] = []
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid + 1000)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killed.append(pgid))
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+
+    await dsh.kill_session("row-1")
+    assert killed == [5242]
+
+
+class TestWhatOneLineFromAResidentProcessIs:
+    """The routing. Which of these a line is decides whether it reaches the
+    turn that is waiting, the turn that asked for it by id, or Daniel."""
+
+    def test_a_report_is_the_turn_it_names(self, dsh) -> None:
+        routed = dsh._resident_dispatch(_report(id="t7"))
+        assert (routed["kind"], routed["id"]) == ("report", "t7")
+
+    def test_a_report_is_never_read_as_a_message(self, dsh) -> None:
+        """It carries the final text beside `sessionId`, and reading it as a
+        message would deliver the answer twice."""
+        assert dsh._resident_dispatch(_report(text="the answer"))["kind"] == "report"
+
+    def test_a_message_with_no_turn_behind_it_is_unsolicited(self, dsh) -> None:
+        routed = dsh._resident_dispatch(
+            json.dumps({"message": "a child settled", "unsolicited": True}))
+        assert (routed["kind"], routed["text"]) == ("unsolicited", "a child settled")
+
+    def test_a_message_the_turn_asked_for_carries_that_turns_id(self, dsh) -> None:
+        routed = dsh._resident_dispatch(json.dumps({"message": "half an answer", "id": "t7"}))
+        assert (routed["kind"], routed["id"]) == ("frame", "t7")
+
+    def test_the_readiness_line_belongs_to_the_spawn(self, dsh) -> None:
+        assert dsh._resident_dispatch(_READY)["kind"] == "ready"
+
+    def test_a_line_the_runner_could_not_read_is_a_refusal(self, dsh) -> None:
+        routed = dsh._resident_dispatch(json.dumps({"refused": "not JSON"}))
+        assert (routed["kind"], routed["detail"]) == ("refused", "not JSON")
+
+    def test_nodes_own_chatter_is_not_a_frame(self, dsh) -> None:
+        assert dsh._resident_dispatch("(node:17) ExperimentalWarning\n") is None
+
+
+async def test_a_report_for_another_turn_does_not_answer_this_one(
+    dsh, monkeypatch
+) -> None:
+    """A turn that timed out is abandoned, and its report can still arrive. Read
+    as this turn's, it would hand Daniel the answer to the question before his
+    and record it in the ledger under the wrong one — so the id the request
+    carried is what the report is matched on."""
+    _session(dsh)
+    monkeypatch.setattr(
+        dsh_cli, "live_runtime", lambda: {**dsh_cli.RUNTIME, "turn_timeout_seconds": 0.2})
+    monkeypatch.setattr(asyncio, "create_subprocess_exec",
+                        _Spawn([_report(text="the other answer")], answer_id="t-stale"))
+
+    events = await _drain(dsh)
+    assert _result(events)["stop_reason"] == "timeout"
+    assert "the other answer" not in " ".join(_assistant_texts(events))
