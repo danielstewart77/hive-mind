@@ -69,7 +69,11 @@ async def scratch_dsn() -> str:
     async with claimed_database(ADMIN_DSN, "lucent_test_") as dsn:
         # Through the migration rather than two files by hand, so the
         # scratch database is what an install actually applies - the later
-        # numbered steps included. Two files were enough while every suite
+        # numbered steps included. One side effect worth knowing: step 7
+        # creates the `hive_staff` role, which is cluster-wide and so
+        # outlives the scratch database being dropped. It is guarded against
+        # existing already, and hive-data's own suite has always created it
+        # on the same server. Two files were enough while every suite
         # on this database touched only `core` and `memory`; the comms
         # routes now write the chief of staff's ledger too, and a fixture
         # that stops at `memory` fails those tests with a missing schema

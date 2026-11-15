@@ -94,6 +94,30 @@ STALLED = 900.0
 #: only while a reader is attached.
 TURN_TIMEOUT = 1800.0
 
+#: How long a sub-agent record that belongs to no conversation may stay open
+#: before the sweep writes its ending. Only those: a record with a
+#: conversation is decided by whether that conversation is still producing
+#: output, which is a real answer rather than a guess.
+#:
+#: Deliberately longer than any turn this hive allows a mind that has a
+#: bound - the longest configured is four hours - because the cost of the
+#: two errors is not symmetric. Retiring a child that is still running
+#: records work as abandoned that was not, and nothing afterwards can tell
+#: a reader it was wrong. Retiring a dead one late leaves a record open that
+#: every reader already draws as stale from its own clock. `STAFF_AGENT_GRACE`
+#: overrides it for a hive whose minds run longer still.
+GRACE = float(os.environ.get("STAFF_AGENT_GRACE") or 4 * 60 * 60)
+
+
+def generating_sessions(live: dict[str, Any]) -> set[str]:
+    """The conversations the feed says are producing output right now.
+
+    Only the generating half. A conversation the feed calls idle is one whose
+    turn has ended, and a child of that turn died with it.
+    """
+    return {str(entry.get("session_id") or "")
+            for entry in live.get("sessions") or []}
+
 
 class Refused(RuntimeError):
     """A pass that could not run, reported as itself rather than as empty."""
@@ -336,24 +360,34 @@ async def tick(now: float | None = None) -> dict[str, Any]:
             "its own conversation from the ones it is watching and would "
             "interrupt the mind mid-turn.")
 
-    # Before the live read, deliberately. `read_live` refuses the whole pass
-    # on any non-200 from comms, and a comms that is down or erroring is
-    # exactly the moment harnesses are being killed and sub-agent records
-    # left open - the one moment the sweep must not be skipped. A record that
-    # only *reads* as dead is live again in every other reader, so the ending
-    # is written down here.
-    #
-    # The window is this process's own longest turn rather than a number
-    # chosen in the data layer: the hive's minds do not share one, and a
-    # dsh mind can be configured to no bound at all.
-    retired = await staff.retire_stale_agents(now=moment,
-                                              timeout=TURN_TIMEOUT)
-
     live = read_live()
     tasks = await staff.tasks()
     for task in tasks:
         task["sessions"] = [row["session_id"] for row in
                             await staff.task_sessions(task["id"])]
+
+    # After the live read, and that ordering was wrong the first time. The
+    # earlier version swept before it, so that a comms outage could not skip
+    # the pass - but it had to pick a window with no way to tell a dead child
+    # from a slow one, and `TURN_TIMEOUT` here is this process's own stream
+    # limit rather than any mind's turn length. On a hive whose minds allow
+    # 900 seconds, 14400 seconds and no bound at all, that retired work that
+    # was still running and reported it as abandoned, which is the one thing
+    # a record of what ran must never say.
+    #
+    # So the sweep asks the live feed instead. A child dies with its turn's
+    # process, so a record whose conversation is no longer producing output
+    # is a record whose child is gone - whatever that mind's turn length. The
+    # grace window below is only for records that resolve to no conversation
+    # at all, where there is nothing to ask.
+    #
+    # The cost is that a pass refused by comms sweeps nothing. That is the
+    # right trade: the requirement is that a child nobody closed is retired
+    # *eventually*, and the first pass after comms returns does it. Retiring
+    # a live child early is a wrong record; retiring a dead one late is a
+    # record that arrives late.
+    retired = await staff.retire_stale_agents(
+        now=moment, timeout=GRACE, alive=generating_sessions(live))
 
     plan = decide(live, tasks, mind_id, moment)
 
@@ -375,7 +409,10 @@ async def tick(now: float | None = None) -> dict[str, Any]:
             "recorded_running": plan["running"], "mid_turn": plan["mid_turn"],
             "pending": plan["pending"], "woken": woken,
             "target": plan.get("target"),
-            "retired_agents": [row["id"] for row in retired]}
+            # The count rather than the ids. The first pass after a
+            # deployment can close a backlog of every child left open since
+            # the last one, and a pass's report is one line in a log.
+            "retired_agents": len(retired)}
 
 
 async def _connect() -> None:

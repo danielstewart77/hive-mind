@@ -443,12 +443,22 @@ class SubagentEventRequest(BaseModel):
     `kind` and `label` are optional because dsh's start event carries a
     parent session and a child session and nothing else. An absent label is
     stored absent; a placeholder would be an invented record.
+
+    `conversation` is required on every event, including the ones whose
+    harness payload does not repeat it, because it is part of the child's
+    identity: a harness agent id is unique inside the conversation that
+    spawned it and nowhere else. A reporter always knows which conversation
+    it is in - that is its own environment rather than anything it reads out
+    of an event - so there is nothing it cannot send. It may name a
+    conversation this hive does not know; what it may not do is leave the
+    field out, which would key one mind's reused id onto another of its own
+    children.
     """
 
     agent_id: str
     state: str
     mind_id: str
-    conversation: str | None = None
+    conversation: str
     kind: str = ""
     label: str = ""
     parent_agent_id: str | None = None
@@ -1242,20 +1252,25 @@ async def write_rotation_memory(
 # ---------------------------------------------------------------------------
 # Sub-agent telemetry
 # ---------------------------------------------------------------------------
-async def _resolve_reported_conversation(reported: str) -> str | None:
-    """This gateway's own session id for whatever id a harness reported.
+async def _resolve_reported_conversation(reported: str) -> dict | None:
+    """The conversation row for whatever id a harness reported.
 
     Three harnesses hold three kinds of id and none of them can tell which
     kind it has, so all three send what they have and this decides. Tried in
     order of how directly each names a session: the gateway's own id, which a
     codex or dsh spawn is given outright; the conversation id every spawn is
     handed; and the harness's own thread id, which is all a codex hook knows.
+    The order is not cosmetic - `harness_sid` carries no unique constraint,
+    so it is the weakest claim on a conversation and is asked last.
 
     None when it resolves to no conversation at all. That is an ordinary
     answer rather than a refusal: a harness spawning children outside any
     hive conversation - an operator's own session at a terminal, which shares
     this host's hooks and this mind's environment - is still a child that ran,
     and the record of it is worth keeping even though no page will draw it.
+
+    Returns the row rather than the id, because the caller has to check whose
+    conversation it is before it stores it.
     """
     if not reported:
         return None
@@ -1264,7 +1279,35 @@ async def _resolve_reported_conversation(reported: str) -> str | None:
         row = await core.get_session_by_conversation(reported)
     if row is None:
         row = await core.get_session_by_harness_sid(reported)
-    return None if row is None else row["id"]
+    return row
+
+
+def _printable(text: str) -> str:
+    """A label or a kind with the characters a surface cannot draw removed.
+
+    Nothing reads this route's answer, so refusing a record over a stray
+    control character in a label - which a harness can put there by quoting
+    a file name badly - would drop the whole child silently. The text is
+    worth less than the record.
+    """
+    return "".join(c for c in (text or "") if c.isprintable()).strip()
+
+
+def _reportable_outcome(outcome: str | None) -> str | None:
+    """The outcome as a reporter is allowed to state it.
+
+    The reserved word the sweep writes for an ending nobody reported is the
+    one ending a later report may replace, so a reporter must not be able to
+    send it. Rewritten to the ordinary undescribed ending rather than
+    refused: the harness did say its child was over, and that is the part
+    worth keeping.
+    """
+    if outcome is None:
+        return None
+    cleaned = _printable(outcome)
+    if not cleaned or cleaned in staff.RESERVED_OUTCOMES:
+        return staff.OUTCOME_UNKNOWN
+    return cleaned
 
 
 @app.post("/staff/agents/events")
@@ -1282,23 +1325,51 @@ async def record_subagent_event(body: SubagentEventRequest, request: Request):
     answer and must not wait on it - a hook that blocks a spawn until this
     returns has made a recording problem into a conversation problem - so
     this is deliberately cheap: one resolve and one statement.
+
+    And because nothing reads the answer, a refusal here is a record that
+    vanishes with nothing anywhere saying so. So this normalises what can be
+    normalised rather than refusing it: a reserved outcome becomes the
+    ordinary undescribed one, and control characters come out of the label.
+    Dropping a whole ending because its outcome used a word the machinery
+    reserves loses far more than rewriting that one word does. What is still
+    refused is what cannot be stored at all - no identity, no conversation,
+    or a state nobody defined - because there is nothing to normalise it to.
     """
     await _refuse_foreign_mind_in_body(request, body.mind_id)
     if not body.mind_id.strip():
         return JSONResponse({"error": "mind_id required"}, status_code=400)
     if not body.agent_id.strip():
         return JSONResponse({"error": "agent_id required"}, status_code=400)
-    session_id = await _resolve_reported_conversation(
-        (body.conversation or "").strip())
+    reported = body.conversation.strip()
+    if not reported:
+        return JSONResponse(
+            {"error": "conversation required: it is part of the child's "
+                      "identity, since a harness agent id is unique only "
+                      "inside the conversation that spawned it"},
+            status_code=400)
+    found = await _resolve_reported_conversation(reported)
+    # Two things travel in this body and both have to be held to the caller:
+    # the mind it files the child under, and the conversation it files it
+    # into. Checking only the first left the second open - a mind could name
+    # itself honestly and still drop its child into somebody else's
+    # conversation, which is the key the page narrows on, so the child would
+    # be drawn under another mind's work. Resolving to a conversation that is
+    # not the caller's is treated as resolving to none: the child still ran
+    # and the record still says so, it is simply not attached to a
+    # conversation this caller may claim.
+    session_id = None
+    if found is not None and await _names_own_mind(
+            _caller(request), found.get("mind_id") or ""):
+        session_id = found["id"]
     try:
         row = await staff.record_agent_event(
             body.agent_id.strip(), body.state,
             mind_id=body.mind_id.strip(),
-            agent_type=body.kind, label=body.label,
-            conversation_ref=(body.conversation or "").strip() or None,
+            agent_type=_printable(body.kind), label=_printable(body.label),
+            conversation_ref=reported,
             session_id=session_id,
             parent_agent_id=(body.parent_agent_id or "").strip() or None,
-            outcome=body.outcome,
+            outcome=_reportable_outcome(body.outcome),
         )
     except hive_data.errors.ValueRefused as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
