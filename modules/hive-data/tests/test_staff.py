@@ -810,20 +810,25 @@ async def test_a_later_event_carrying_less_does_not_erase_what_is_known(
         conversation_ref="conv-77", session_id="sess-9",
         parent_agent_id="a1b2c3", task_id=task["id"], now=clock)
 
+    # The conversation travels on every event, because it is part of the
+    # child's identity: a reporter always knows which conversation it is in.
+    # What this event carries *less* of is the kind, the label, the parent
+    # and the task.
     ended = await staff.record_agent_event(
-        "d4e5f6", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
-        now=clock + 30)
+        "d4e5f6", staff.EVENT_ENDED, mind_id=a_reporting_mind,
+        conversation_ref="conv-77", outcome="ok", now=clock + 30)
 
     assert ended["session_id"] == "sess-9"
     assert ended["conversation_ref"] == "conv-77"
-    assert ended["parent_agent_id"] == f"{a_reporting_mind}:a1b2c3"
+    assert ended["parent_agent_id"] == f"{a_reporting_mind}:conv-77:a1b2c3"
     assert ended["task_id"] == task["id"]
     stored = await inspector.fetchrow(
         "SELECT session_id, conversation_ref, parent_agent_id, task_id "
         "FROM staff.agents WHERE id = $1", ended["id"])
     assert dict(stored) == {"session_id": "sess-9",
                             "conversation_ref": "conv-77",
-                            "parent_agent_id": f"{a_reporting_mind}:a1b2c3",
+                            "parent_agent_id":
+                                f"{a_reporting_mind}:conv-77:a1b2c3",
                             "task_id": task["id"]}
 
 
@@ -1034,3 +1039,38 @@ async def test_a_child_of_no_conversation_is_retired_on_the_clock_alone(
     assert [r["id"] for r in retired
             if r["mind_id"] == a_reporting_mind] == [
         f"{a_reporting_mind}:a1b2c3"]
+
+
+async def test_one_id_reused_in_a_later_conversation_is_a_second_child(
+        a_reporting_mind, connected, clock):
+    """A harness id is unique inside the conversation that spawned it and
+    nowhere else. Keyed on the mind alone, the second child merged into the
+    first child's finished record, kept the first's kind and label, and a
+    reader saw no children at all in the second conversation."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind,
+        conversation_ref="conv-one", agent_type="explore", label="first",
+        now=clock)
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind,
+        conversation_ref="conv-one", outcome="ok", now=clock + 30)
+
+    second = await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind,
+        conversation_ref="conv-two", agent_type="plan", label="second",
+        now=clock + 60)
+
+    assert second["finished_at"] is None
+    assert second["agent_type"] == "plan"
+    assert second["about"] == "second"
+    assert len(await staff.agents(mind_id=a_reporting_mind)) == 2
+
+
+async def test_a_child_cannot_be_its_own_parent(
+        a_reporting_mind, connected, clock):
+    """A self-loop is a tree no reader can draw: the node hangs off nothing
+    and the walk that finds its parents does not end."""
+    with pytest.raises(hive_data.errors.ValueRefused):
+        await staff.record_agent_event(
+            "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind,
+            parent_agent_id="a1b2c3", now=clock)

@@ -32,9 +32,16 @@
 --     names the provider only when the child finishes. `agent_type` is the
 --     one field that means "what kind of child is this, as its own writer
 --     names it", and it is empty rather than null when the writer could not
---     say - the existing brief-file column keeps its own meaning for the
---     chief's delegates, so one reader is never handed `chase.md` and
---     `refute-tests` in the same field.
+--     say.
+--
+--     What that buys is one field to read rather than two, and `brief`
+--     keeping its own narrow meaning - the file the chief handed a delegate.
+--     What it does not buy is one vocabulary: this field holds `chase.md`
+--     from a delegate and `refute-tests` from a claude hook, because those
+--     are what those writers call the kind of child they spawned. Anything
+--     grouping on it is grouping names from several vocabularies, and the
+--     row says which writer it came from - a delegate has a brief, a
+--     reported child has a mind and a conversation.
 --
 --   * the id a harness hands out is unique inside its own process and
 --     nowhere else. dsh says so in as many words (run ids are "unique in

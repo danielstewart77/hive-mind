@@ -474,35 +474,52 @@ _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
         ELSE "agents"."outcome" END"""
 
 
-def agent_key(mind_id: str, agent_id: str) -> str:
+def agent_key(mind_id: str, agent_id: str,
+              conversation_ref: str | None = None) -> str:
     """The id a reported child is stored under, hive-wide.
 
-    A harness's own agent id is unique inside the process that spawned it and
-    nowhere else - dsh says so in as many words, and claude's sixteen hex
-    characters are minted per conversation. The primary key here covers every
-    mind in the hive, so two minds' children would collide: the second
-    child's start would be refused as a duplicate and the second mind's
-    ending would close the first mind's row with the wrong outcome and the
-    wrong time.
+    A harness's own agent id is unique inside the conversation that spawned
+    it and nowhere else - dsh says so in as many words ("unique in the parent
+    namespace") and claude mints its sixteen hex characters per conversation.
+    The primary key here covers every mind in the hive, so the key has to
+    carry everything the id's own uniqueness rests on.
+
+    Both halves above it, then. Without the mind, two minds' children
+    collide: the second start is refused as a duplicate and the second mind's
+    ending closes the first mind's row. Without the conversation, one mind
+    reusing an id in a later conversation collides with *itself*: the second
+    child merges into the first child's finished record, keeps the first's
+    kind and label, and the reporter is handed back a 200 describing
+    somebody else's work while a reader sees no children at all in the second
+    conversation. A reporter always knows which conversation it is in - that
+    is its own environment rather than anything it has to read out of an
+    event - so it is always available to send.
+
+    `conversation_ref` absent means a child that belongs to no conversation
+    this hive knows, and those key on the mind alone: there is nothing
+    narrower to use, and such children are not drawn anywhere.
 
     Composed in one place rather than by each reporter, so two writers cannot
-    disagree about it.
-
-    The separator is refused inside either half, because without that the
-    composition is not injective: a mind `m` with a child `a:b` and a mind
-    `m:a` with a child `b` would compose the same key and merge two minds'
-    children into one record.
+    disagree about it. The separator is refused inside every part, because
+    without that the composition is not injective: a mind `m` with a child
+    `a:b` and a mind `m:a` with a child `b` would compose the same key and
+    merge two children into one record.
     """
     _not_blank("agent mind", mind_id)
     _not_blank("agent id", agent_id)
-    for what, value in (("mind", mind_id), ("id", agent_id)):
+    parts = [("mind", mind_id)]
+    if conversation_ref:
+        _not_blank("agent conversation", conversation_ref)
+        parts.append(("conversation", conversation_ref))
+    parts.append(("id", agent_id))
+    for what, value in parts:
         if AGENT_SEPARATOR in value:
             raise ValueRefused(
                 f"a sub-agent {what} of {value!r} holds "
-                f"{AGENT_SEPARATOR!r}, which separates the mind from the "
-                "child in the stored key. Two different pairs would compose "
-                "the same key and merge two children into one record.")
-    return f"{mind_id}{AGENT_SEPARATOR}{agent_id}"
+                f"{AGENT_SEPARATOR!r}, which separates the parts of the "
+                "stored key. Two different sets of parts would compose the "
+                "same key and merge two children into one record.")
+    return AGENT_SEPARATOR.join(value for _, value in parts)
 
 
 async def record_agent_event(
@@ -524,9 +541,10 @@ async def record_agent_event(
       not resurrect it either, because the ending is already written and an
       ending is never unwritten.
 
-    `agent_id` is the harness's own id and is namespaced by `mind_id` before
-    it is stored; `parent_agent_id` is namespaced the same way, since a
-    child's parent ran in the same mind's process. `state` is one of
+    `agent_id` is the harness's own id and is namespaced by the mind and the
+    conversation before it is stored, because that is the scope its own
+    uniqueness rests on; `parent_agent_id` is namespaced the same way, since
+    a child's parent ran in the same process and the same conversation. `state` is one of
     `SPAWNED`, `EVENT_WORKING` or `EVENT_ENDED`.
 
     One limit, named rather than hidden: `started_at` is the moment this
@@ -565,14 +583,23 @@ async def record_agent_event(
                 "harness actually said.")
     moment = _now(now)
     ended = state == EVENT_ENDED
+    if parent_agent_id and parent_agent_id == agent_id:
+        raise ValueRefused(
+            f"a sub-agent cannot have spawned itself, and {agent_id!r} is "
+            "named as both the child and its parent. A self-loop is a tree "
+            "no reader can draw: the node hangs off nothing and the walk "
+            "that finds its parents does not end.")
     values = {
-        "id": agent_key(mind_id, agent_id),
+        "id": agent_key(mind_id, agent_id, conversation_ref),
         "mind_id": mind_id,
         "agent_type": agent_type,
         "about": label,
         "conversation_ref": conversation_ref,
         "session_id": session_id,
-        "parent_agent_id": (agent_key(mind_id, parent_agent_id)
+        # The parent ran in the same mind's process and the same
+        # conversation, so it is keyed on the same two things.
+        "parent_agent_id": (agent_key(mind_id, parent_agent_id,
+                                      conversation_ref)
                             if parent_agent_id else None),
         "task_id": task_id,
         "started_at": moment,
