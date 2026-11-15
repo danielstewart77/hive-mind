@@ -893,9 +893,11 @@
   // One notch is about 100 pixels of deltaY in Chrome and Edge and 3 lines
   // in Firefox, so a line counts as 33 pixels. A trackpad sends many small
   // pixel deltas and is proportional by construction. A trackpad pinch
-  // arrives as ctrl + wheel with deltas a tenth the size, so it is scaled
-  // up to match. Any single event is capped at one notch, so a wheel that
-  // reports 120 or a page-mode delta never jumps further than one step.
+  // arrives in Chrome and Firefox as ctrl + wheel with deltas a tenth the
+  // size, so it is scaled up to match. Safari's pinch is a gesture event,
+  // left to Cytoscape, and follows the fingers as a phone's does. Any
+  // single event is capped at one notch, so a wheel that reports 120 or a
+  // page-mode delta never jumps further than one step.
   var WHEEL_NOTCH_PX = 100;
   var WHEEL_LINE_PX = 33;
   var WHEEL_PINCH_GAIN = 10;
@@ -923,8 +925,7 @@
   // On the stage and in the capture phase, so it runs before Cytoscape's
   // own capture listener on #cos-cy. Not passive, or preventDefault is
   // ignored and ctrl + wheel zooms the browser too. Wheel over the barrel's
-  // list still scrolls it: only a vertical wheel over the graph zooms, and
-  // nothing zooms under a node being dragged.
+  // list still scrolls it: only a vertical wheel over the graph zooms.
   document.getElementById('cos-stage').addEventListener('wheel', function (e) {
     var graph = document.getElementById('cos-cy');
     if (cy === null || !graph.contains(e.target)) return;
@@ -933,11 +934,17 @@
     // aside. Standing aside means leaving the default alone, so a sideways
     // scroll or a page scroll still moves the page.
     e.stopPropagation();
+    // A sideways swipe is rarely exactly sideways, so "mostly" is enough.
+    if (Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
     var px = wheelPixels(e);
-    if (px === 0) return;
-    if (Date.now() - pageScrolledAt < PAGE_SCROLL_GRACE_MS) return;
+    // Not for a pinch: let through, ctrl + wheel would zoom the browser.
+    if (!e.ctrlKey && Date.now() - pageScrolledAt < PAGE_SCROLL_GRACE_MS) {
+      return;
+    }
     e.preventDefault();
-    if (cy.nodes(':grabbed').length) return;
+    // Not mid-drag, mid-pan or mid-box-select, which Cytoscape also refused.
+    if (!cy.userZoomingEnabled() || e.buttons !== 0 ||
+        cy.nodes(':grabbed').length) return;
     var box = graph.getBoundingClientRect();
     cy.zoom({
       level: cy.zoom() * Math.pow(2, -px / WHEEL_NOTCH_PX * WHEEL_STEP_LOG2),
