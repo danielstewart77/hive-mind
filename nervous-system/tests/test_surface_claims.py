@@ -653,3 +653,17 @@ def test_moving_a_mind_releases_the_claim_its_new_owner_does_not_hold(db_path):
     released, state = _run(go())
     assert released == ["telegram"]
     assert state.claimed is False
+
+
+def test_adoption_refuses_an_account_linked_to_somebody_other_than_the_owner(db_path):
+    async def go():
+        db = await _open(db_path)
+        try:
+            await _link("telegram", "6161", "sloan")
+            return await surface_claims.adopt_claim("m1", "telegram", "6161", now=1000.0)
+        finally:
+            await db.close()
+
+    outcome = _run(go())
+    assert outcome.claimed is False
+    assert outcome.reason == "not_linked"

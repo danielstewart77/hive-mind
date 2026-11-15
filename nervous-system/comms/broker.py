@@ -362,9 +362,20 @@ async def wakeup_and_collect(
             if existing:
                 session = existing
             else:
+                # The person is the one this mind's Discord bot is claimed
+                # by. A channel id in their place is nobody's account, so the
+                # bot's own reuse would refuse the binding (story 2.1.15) and
+                # Daniel's reply would land in a conversation that never saw
+                # the escalation. Failing here is loud; that was silent.
+                person = await _discord_claim(to_mind)
+                if not person:
+                    raise ValueError(
+                        f"{mind_name}'s Discord bot is unclaimed or its claim "
+                        "could not be read, so nobody can be answered in that "
+                        "channel")
                 session = await session_mgr.create_session(
                     surface=client_type,
-                    surface_id=await _discord_claim(to_mind) or channel_id,
+                    surface_id=person,
                     client_ref=client_ref,
                     mind_id=to_mind,
                     model=mind_model,

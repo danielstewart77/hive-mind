@@ -74,6 +74,14 @@ async def lifespan(app: FastAPI):
     # every request with a missing column.
     await hive_data.connect()
     try:
+        # Claims an older gateway made after step 11's backfill ran and
+        # before this restart carry no link, and since story 2.1.15 an
+        # unlinked sender is refused everywhere. The backfill is repeatable,
+        # so it runs here on every start and those bots keep answering.
+        linked = await broker_ops.link_claimed_accounts(linked_at=time.time())
+        if linked.get("rows"):
+            log.info("surface accounts: linked %s claimed accounts at startup",
+                     linked["rows"])
         await session_mgr.start()
 
         pending = await broker.recover_stranded_messages()
@@ -181,6 +189,36 @@ async def _refuse_foreign_session(request: Request, session_id: str) -> None:
     mind_id = await _session_mind(session_id)
     if not user_access.mind_is_named_in(keys, mind_id):
         raise HTTPException(404, "Session not found")
+
+
+async def _reachable(surface: object, sender: object, session: dict | None) -> dict | None:
+    """The conversation a bot's chat is bound to, if this sender may reach it.
+
+    A bound conversation is reused with no sender on the turn that follows,
+    so whoever reuses it has to be checked against the mind it runs on — not
+    the bot's own mind, which a `/switch` may have moved it away from
+    (story 2.1.15). None reads exactly as "no active session".
+    """
+    if not session:
+        return session
+    mind = session.get("mind_id") or await _session_mind(str(session.get("id") or ""))
+    if await surface_claims.sender_reaches(surface, sender, mind):
+        return session
+    return None
+
+
+async def _active_for(body) -> dict | None:
+    """The command's bound conversation, as `_reachable` lets this sender see it."""
+    active = await session_mgr.get_active_session(body.surface, body.client_ref)
+    return await _reachable(body.surface, body.surface_id, active)
+
+
+def _bot_surface(*values: object) -> str | None:
+    """The first of these naming a bot surface, kept whole for the check."""
+    for value in values:
+        if surface_claims.surface_of(value):
+            return str(value)
+    return None
 
 
 async def _require_own_session_mind(request: Request, session_id: str) -> None:
@@ -716,12 +754,18 @@ async def list_sessions(
         # linked to another person, or a binding from before accounts were
         # linked at all - answers as no conversation, and the bot falls
         # through to opening one, which checks the sender (story 2.1.15).
-        rows = [
-            row for row in rows
-            if await surface_claims.sender_reaches(
-                row.get("surface") or client_type,
-                row.get("surface_id"), row.get("mind_id"))
-        ]
+        #
+        # Only the row marked active is checked: it is the only one a bot
+        # reuses, and a chat's whole history checked row by row is two reads
+        # per conversation it ever had, on every message it sends.
+        kept = []
+        for row in rows:
+            if row.get("is_active") and not await _reachable(
+                row.get("surface") or client_type, row.get("surface_id"), row
+            ):
+                continue
+            kept.append(row)
+        rows = kept
     return rows
 
 
@@ -1146,6 +1190,13 @@ async def suspend_session(session_id: str):
 
 @app.post("/sessions/{session_id}/resume")
 async def resume_session(session_id: str, body: ActivateRequest):
+    # Resuming rebinds the client pair, so a bot's chat reaching a suspended
+    # conversation is checked exactly as an activation is (story 2.1.15).
+    bot = _bot_surface(body.surface, body.client_type)
+    if bot is not None and not await surface_claims.sender_reaches(
+        bot, body.surface_id, await _session_mind(session_id),
+    ):
+        return JSONResponse({"error": "Session not found"}, status_code=404)
     try:
         return await session_mgr.resume_session(
             session_id, body.client_type, body.client_ref
@@ -1210,8 +1261,9 @@ async def activate_session(session_id: str, body: ActivateRequest):
     conversation and did not, which is a refusal about a machine, not a
     statement about this row.
     """
-    if body.surface is not None and not await surface_claims.sender_reaches(
-        body.surface, body.surface_id, await _session_mind(session_id),
+    bot = _bot_surface(body.surface, body.client_type)
+    if bot is not None and not await surface_claims.sender_reaches(
+        bot, body.surface_id, await _session_mind(session_id),
     ):
         # Moving a conversation onto a bot is reaching its mind from that
         # bot's sender, so the sender is checked against the owner of the
@@ -1798,7 +1850,10 @@ async def _selectable(
     )
     keys = await user_access.visible_minds(caller)
     known = await user_access.all_mind_keys()
-    return user_access.filter_sessions(rows, caller, keys, known)
+    rows = user_access.filter_sessions(rows, caller, keys, known)
+    # A position addresses only a conversation this sender may reach, so a
+    # bot's list is cut to the minds its sender owns (story 2.1.15).
+    return await surface_claims.reachable_rows(body.surface, body.surface_id, rows)
 
 
 async def _resolve_target(
@@ -1858,9 +1913,7 @@ async def _handle_command(
             return {"error": "Session not found"}
         if not await _names_own_mind(caller, body.mind_id):
             return {"error": "Session not found"}
-        active = await session_mgr.get_active_session(
-            body.surface, body.client_ref
-        )
+        active = await _active_for(body)
         # A surface reference bound to a conversation on someone else's mind
         # is refused in the same words an absent one gets, so the command
         # cannot be used to find out which references are live.
@@ -1887,7 +1940,7 @@ async def _handle_command(
     if cmd in ("/new", "/clear"):
         # Kill active session (if any), run memory pipeline on it, then create a new one.
         # _run_memory_for_owner blocks inside create_session until the pipeline finishes.
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if active:
             await session_mgr.kill_session(active["id"])
         allowed_directories = parts[1:] if len(parts) > 1 else None
@@ -1900,7 +1953,7 @@ async def _handle_command(
         )
 
     if cmd == "/model":
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if len(parts) < 2:
             if not active:
                 return {"error": "No active session. Use /new first."}
@@ -1927,7 +1980,7 @@ async def _handle_command(
             return {"error": str(exc)}
 
     if cmd == "/effort":
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if not active:
             return {"error": "No active session. Use /new first."}
         try:
@@ -1942,7 +1995,7 @@ async def _handle_command(
         # Bare: what the mind offers, unavailable ones with their reason, and
         # where this conversation is. With a harness: that harness's models,
         # since the switch lands only once one is picked. With both: switch.
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if not active:
             return {"error": "No active session. Use /new first."}
         if len(parts) < 2:
@@ -1982,10 +2035,14 @@ async def _handle_command(
         target, error = await _resolve_target(parts[1], body, caller)
         if error:
             return error
+        if not await surface_claims.sender_reaches(
+            body.surface, body.surface_id, await _session_mind(target)
+        ):
+            return {"error": "Session not found"}
         return await session_mgr.kill_session(target)
 
     if cmd == "/prune":
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         active_id = active["id"] if active else None
         rows = await session_mgr.list_sessions(surface_id=body.surface_id)
         keys = await user_access.visible_minds(caller)
