@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Collection
 
 from . import _sql
 from .core import _execute, _execute_returning, _fetch, _fetch_one
@@ -59,9 +59,53 @@ _SETTABLE = frozenset({"name", "description", "status", "board_item",
 #: report, and the sitrep finds what moved by that column.
 _WATCHABLE = frozenset({"stopped_at", "woken_at", "updated_at"})
 
-#: What `finish_agent` may set. A sub-agent's brief, task and start never
-#: move: the row is a record of what ran, not a slot to be reused.
+#: What `finish_agent` and the sweep may set. A sub-agent's brief, task and
+#: start never move: the row is a record of what ran, not a slot to be
+#: reused.
 _AGENT_SETTABLE = frozenset({"finished_at", "outcome"})
+
+#: What a reported event may move on a row that already exists. The identity,
+#: the mind that owns it and the moment it started are what the row *is* and
+#: never move; everything here is something a later event can know better
+#: than the first one did - a dsh start carries no kind at all and the
+#: child's `finished` event is the first thing to name its provider.
+_AGENT_REPORTABLE = frozenset({
+    "agent_type", "about", "session_id", "conversation_ref",
+    "parent_agent_id", "active_at", "finished_at", "outcome", "task_id"})
+
+#: An end a harness reported without saying how it went. Distinct from an
+#: empty outcome, which is a row nobody has ended at all.
+OUTCOME_UNKNOWN = "unknown"
+
+#: What no reporter may send as an outcome of its own. `OUTCOME_ABANDONED`
+#: is the one ending a later report is allowed to replace, so a harness that
+#: could send it could have its own first ending overwritten by its own
+#: second one - and a reader could not tell the sweep's guess from something
+#: a harness actually said.
+#: Declared below the two values and used by `record_agent_event`.
+#:
+#: An end nobody ever reported, written by `retire_stale_agents`. Separate
+#: from `OUTCOME_UNKNOWN` on purpose: a child that finished cleanly and said
+#: nothing about it, and a child that was killed with its turn, are different
+#: facts, and a reader deciding whether anything went wrong needs to tell
+#: them apart. It is also the one outcome a real ending is allowed to
+#: replace.
+OUTCOME_ABANDONED = "abandoned"
+
+#: The three states a sub-agent record can be read as. Derived from the row
+#: and a clock rather than stored: a stored state is wrong the moment the
+#: child dies without writing, which is the ordinary way a child ends.
+ENDED = "ended"
+WORKING = "working"
+RUNNING = "running"
+
+#: What separates the mind from the harness's own id in a stored key, and is
+#: refused inside either half so the composition stays injective.
+AGENT_SEPARATOR = ":"
+
+#: Outcomes the machinery writes and a reporter may not. See the comment on
+#: `OUTCOME_ABANDONED`.
+RESERVED_OUTCOMES = frozenset({OUTCOME_ABANDONED})
 
 #: Characters that render as nothing but are not `str.isspace`. The schema's
 #: checks carry the same set.
@@ -299,11 +343,19 @@ async def delete_task(task_id: str, *, unit: Unit | None = None) -> Row:
 
 # ------------------------------------------------------------------ agents
 #
-# The sub-agents working a task, registered by the children themselves. A
-# sub-agent is an in-process child of a mind's turn, so nothing outside that
-# process can enumerate one: the child writes its own row on the way in and
-# closes it on the way out, and that row is the only record of it that
-# outlives the turn.
+# The sub-agents a mind has spawned. A sub-agent is an in-process child of a
+# mind's turn, so nothing outside that process can enumerate one: something
+# inside the turn writes the row on the way in and closes it on the way out,
+# and that row is the only record of it that outlives the turn.
+#
+# Two writers, one table. The chief of staff's delegate briefs register
+# themselves against the ledger task they were handed (`start_agent`,
+# `finish_agent`), which is what step 9 was built for. A harness reporting
+# its own children knows no task at all - it knows its mind, its
+# conversation, the kind of child and which child spawned it - and comes
+# through `record_agent_event`, which is idempotent in every direction a
+# detached reporter can get wrong. Both land in one shape, and `agent_state`
+# is the single reading of what a row says the child is doing.
 
 
 async def start_agent(task_id: str, brief: str, *, about: str = "",
@@ -322,6 +374,11 @@ async def start_agent(task_id: str, brief: str, *, about: str = "",
     sql, args = _sql.insert(AGENTS, {
         "id": agent_id if agent_id is not None else uuid.uuid4().hex,
         "task_id": task_id, "brief": brief, "about": about,
+        # The brief file *is* what kind of child this is, in this writer's
+        # vocabulary, so the kind field is populated for every row that has
+        # a brief rather than only for rows a harness wrote. A reader asking
+        # what kind of child this is never has to know which writer made it.
+        "agent_type": brief,
         "started_at": _now(now),
     }, returning=COLUMNS[AGENTS])
     return (await _execute_returning(unit, sql, *args)).get("row")
@@ -332,37 +389,344 @@ async def finish_agent(agent_id: str, *, outcome: str = "",
                        unit: Unit | None = None) -> Row | None:
     """Close a sub-agent's row. None when there is no such open agent.
 
-    Guarded by `finished_at IS NULL` in the statement, so the moment kept is
-    the first report rather than the latest: a brief that reports twice does
-    not move the time its work actually ended.
+    Guarded in the statement, so the moment kept is the first report rather
+    than the latest: a brief that reports twice does not move the time its
+    work actually ended.
+
+    One ending may be replaced, and only one: the `OUTCOME_ABANDONED` the
+    sweep writes for a child nobody ever closed. Without that, a sweep firing
+    one tick before the real ending arrives makes the truth unwritable for
+    ever - the row says abandoned, the child's own report matches no open row
+    and comes back as None, and the record is wrong permanently. A reported
+    outcome is never replaced by another reported outcome.
     """
-    clause, clause_args = _sql.where(AGENTS, {"finished_at": None}, start=4)
     sql, args = _sql.update(
         AGENTS, {"finished_at": _now(now), "outcome": outcome},
-        {"id": agent_id}, settable=_AGENT_SETTABLE, extra_where=clause,
+        {"id": agent_id}, settable=_AGENT_SETTABLE,
+        extra_where=f'"finished_at" IS NULL OR "outcome" = \'{OUTCOME_ABANDONED}\'',
         returning=COLUMNS[AGENTS])
-    return (await _execute_returning(unit, sql, *args, *clause_args)
-            ).get("row")
+    return (await _execute_returning(unit, sql, *args)).get("row")
 
 
-async def agents(*, task_id: str | None = None, working: bool = False,
+#: The events a reporter can send about one child, and the whole of them.
+#: A harness knows three things about a child and no more: that it began,
+#: that it is still producing work, and that it is over.
+SPAWNED = "spawned"
+EVENT_WORKING = "working"
+EVENT_ENDED = "ended"
+_EVENTS = (SPAWNED, EVENT_WORKING, EVENT_ENDED)
+
+#: How an event lands on a row that already exists.
+#:
+#: Written as one statement rather than a read and a write, because the two
+#: reporters of one child race by construction: a harness hook is detached
+#: so that a slow recorder can never delay a spawn, which means a short
+#: child's start and end are in flight at the same time and either may
+#: arrive first. A statement that reads, decides and writes would lose one
+#: of them.
+#:
+#: Bare column names here are the row as it stands; `EXCLUDED` is the event
+#: that just arrived. What the row *is* - its identity, its mind, when it
+#: started - never moves. Everything else is something a later event may
+#: know better than the first: dsh's start carries no kind at all, and the
+#: child's own ending is the first event to name its provider.
+#:
+#: A kind or a label already recorded is never replaced by an event that
+#: carries none, which is the ordinary shape of a stop report: claude's
+#: names the agent and nothing about what it was for, so taking the newest
+#: value would blank what the spawn said.
+#:
+#: And an activity report *reopens* a record the sweep abandoned. The sweep
+#: only ever guessed that the child was dead; a harness saying it is still
+#: producing work is the one piece of evidence that outranks the guess, and
+#: discarding it left `WORKING` unreachable for the rest of that child's
+#: life. A reported ending is never reopened this way - only the sweep's.
+_AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
+    "agent_type" = CASE WHEN "agents"."agent_type" = ''
+        THEN EXCLUDED."agent_type" ELSE "agents"."agent_type" END,
+    "about" = CASE WHEN "agents"."about" = ''
+        THEN EXCLUDED."about" ELSE "agents"."about" END,
+    "session_id" = COALESCE("agents"."session_id", EXCLUDED."session_id"),
+    "conversation_ref" = COALESCE("agents"."conversation_ref",
+                                  EXCLUDED."conversation_ref"),
+    "parent_agent_id" = COALESCE("agents"."parent_agent_id",
+                                 EXCLUDED."parent_agent_id"),
+    "task_id" = COALESCE("agents"."task_id", EXCLUDED."task_id"),
+    "active_at" = CASE WHEN EXCLUDED."active_at" IS NULL
+        THEN "agents"."active_at"
+        ELSE GREATEST(COALESCE("agents"."active_at", EXCLUDED."active_at"),
+                      EXCLUDED."active_at") END,
+    "finished_at" = CASE
+        WHEN EXCLUDED."active_at" IS NOT NULL
+             AND "agents"."outcome" = '{OUTCOME_ABANDONED}' THEN NULL
+        WHEN EXCLUDED."finished_at" IS NULL THEN "agents"."finished_at"
+        WHEN "agents"."finished_at" IS NULL
+             OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
+            THEN GREATEST(EXCLUDED."finished_at", "agents"."started_at")
+        ELSE "agents"."finished_at" END,
+    "outcome" = CASE
+        WHEN EXCLUDED."active_at" IS NOT NULL
+             AND "agents"."outcome" = '{OUTCOME_ABANDONED}' THEN ''
+        WHEN EXCLUDED."finished_at" IS NULL THEN "agents"."outcome"
+        WHEN "agents"."finished_at" IS NULL
+             OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
+            THEN EXCLUDED."outcome"
+        ELSE "agents"."outcome" END"""
+
+
+def agent_key(mind_id: str, agent_id: str,
+              conversation_ref: str | None = None) -> str:
+    """The id a reported child is stored under, hive-wide.
+
+    A harness's own agent id is unique inside the conversation that spawned
+    it and nowhere else - dsh says so in as many words ("unique in the parent
+    namespace") and claude mints its sixteen hex characters per conversation.
+    The primary key here covers every mind in the hive, so the key has to
+    carry everything the id's own uniqueness rests on.
+
+    Both halves above it, then. Without the mind, two minds' children
+    collide: the second start is refused as a duplicate and the second mind's
+    ending closes the first mind's row. Without the conversation, one mind
+    reusing an id in a later conversation collides with *itself*: the second
+    child merges into the first child's finished record, keeps the first's
+    kind and label, and the reporter is handed back a 200 describing
+    somebody else's work while a reader sees no children at all in the second
+    conversation. A reporter always knows which conversation it is in - that
+    is its own environment rather than anything it has to read out of an
+    event - so it is always available to send.
+
+    `conversation_ref` absent means a child that belongs to no conversation
+    this hive knows, and those key on the mind alone: there is nothing
+    narrower to use, and such children are not drawn anywhere.
+
+    Composed in one place rather than by each reporter, so two writers cannot
+    disagree about it. The separator is refused inside every part, because
+    without that the composition is not injective: a mind `m` with a child
+    `a:b` and a mind `m:a` with a child `b` would compose the same key and
+    merge two children into one record.
+    """
+    _not_blank("agent mind", mind_id)
+    _not_blank("agent id", agent_id)
+    parts = [("mind", mind_id)]
+    if conversation_ref:
+        _not_blank("agent conversation", conversation_ref)
+        parts.append(("conversation", conversation_ref))
+    parts.append(("id", agent_id))
+    for what, value in parts:
+        if AGENT_SEPARATOR in value:
+            raise ValueRefused(
+                f"a sub-agent {what} of {value!r} holds "
+                f"{AGENT_SEPARATOR!r}, which separates the parts of the "
+                "stored key. Two different sets of parts would compose the "
+                "same key and merge two children into one record.")
+    return AGENT_SEPARATOR.join(value for _, value in parts)
+
+
+async def record_agent_event(
+        agent_id: str, state: str, *, mind_id: str, agent_type: str = "",
+        label: str = "", conversation_ref: str | None = None,
+        session_id: str | None = None, parent_agent_id: str | None = None,
+        task_id: str | None = None, outcome: str | None = None,
+        now: float | None = None, unit: Unit | None = None) -> Row:
+    """Record one reported event about one sub-agent, and return its row.
+
+    The one way a harness's children reach the ledger, and idempotent in
+    every direction a detached reporter can get wrong:
+
+    * The same event twice - a retried write, a hook that fired twice -
+      lands once and changes nothing the second time.
+    * An ending that arrives before its own start creates the row already
+      ended, and the start arriving afterwards does not reopen it.
+    * A start that arrives after the sweep has retired that identity does
+      not resurrect it either, because the ending is already written and an
+      ending is never unwritten.
+
+    `agent_id` is the harness's own id and is namespaced by the mind and the
+    conversation before it is stored, because that is the scope its own
+    uniqueness rests on; `parent_agent_id` is namespaced the same way, since
+    a child's parent ran in the same process and the same conversation. `state` is one of
+    `SPAWNED`, `EVENT_WORKING` or `EVENT_ENDED`.
+
+    One limit, named rather than hidden: `started_at` is the moment this
+    recorder first heard of the child. When an ending arrives for a child
+    whose start report was lost or overtaken, the record it creates has its
+    start and its end at the same moment, and nothing can recover the real
+    duration - the start report that arrives afterwards is stamped later
+    still, because the clock here is the receipt clock. Such a record is
+    identifiable (its start equals its end) and is honest about knowing
+    nothing rather than inventing a plausible length.
+
+    `now` is the recorder's clock and stamps whichever moments this event
+    moves. It is deliberately not the reporting host's: minds run on other
+    machines and in containers, and a host running ahead would hold a child
+    in the future - reading as freshly active, and beyond the sweep's reach,
+    for as long as the drift lasted.
+
+    An `EVENT_ENDED` with no `outcome` is stored as `OUTCOME_UNKNOWN`: the
+    harness said the child is over and said nothing about how it went, which
+    is a different fact from a child nobody ended at all.
+    """
+    if state not in _EVENTS:
+        raise ValueRefused(
+            f"{state!r} is not a sub-agent event. A reporter knows that a "
+            f"child began, that it is still working, or that it is over: "
+            f"{', '.join(_EVENTS)}.")
+    if outcome is not None:
+        _not_blank("agent outcome", outcome)
+        if outcome in RESERVED_OUTCOMES:
+            raise ValueRefused(
+                f"{outcome!r} is the machinery's own word for an ending "
+                "nobody reported, and it is the one ending a later report "
+                "may replace. A reporter sending it could have its own "
+                "first ending overwritten by its own second one, and no "
+                "reader could tell the sweep's guess from something a "
+                "harness actually said.")
+    moment = _now(now)
+    ended = state == EVENT_ENDED
+    if parent_agent_id and parent_agent_id == agent_id:
+        raise ValueRefused(
+            f"a sub-agent cannot have spawned itself, and {agent_id!r} is "
+            "named as both the child and its parent. A self-loop is a tree "
+            "no reader can draw: the node hangs off nothing and the walk "
+            "that finds its parents does not end.")
+    values = {
+        "id": agent_key(mind_id, agent_id, conversation_ref),
+        "mind_id": mind_id,
+        "agent_type": agent_type,
+        "about": label,
+        "conversation_ref": conversation_ref,
+        "session_id": session_id,
+        # The parent ran in the same mind's process and the same
+        # conversation, so it is keyed on the same two things.
+        "parent_agent_id": (agent_key(mind_id, parent_agent_id,
+                                      conversation_ref)
+                            if parent_agent_id else None),
+        "task_id": task_id,
+        "started_at": moment,
+        "active_at": moment if state == EVENT_WORKING else None,
+        "finished_at": moment if ended else None,
+        "outcome": (outcome or OUTCOME_UNKNOWN) if ended else "",
+    }
+    sql, args = _sql.insert(AGENTS, values, on_conflict=_AGENT_UPSERT,
+                            returning=COLUMNS[AGENTS])
+    return (await _execute_returning(unit, sql, *args)).get("row")
+
+
+def agent_state(row: Row, *, now: float, fresh_within: float) -> str:
+    """What this record says the child is doing, read from the row and a clock.
+
+    One definition, because the page, the sweep and anything else reading
+    these rows must agree about it - and because the difference between the
+    two live states is the whole point of the feature. `RUNNING` is started
+    and not yet ended, which is all most harnesses can ever say. `WORKING` is
+    a harness positively reporting that the child is still producing work,
+    and it expires: `fresh_within` is how long a single activity report may
+    stand for, and it is deliberately short. A report that stood for a whole
+    turn would have one stamp spin a card for fifteen minutes after the
+    child died, which is the indicator claiming activity nobody reported.
+
+    Bounded at both ends, like the page's own freshness check: an `active_at`
+    in the future - a reporting host whose clock runs ahead, or a bad event -
+    must not read as fresh for as long as the drift lasts.
+    """
+    if row.get("finished_at") is not None:
+        return ENDED
+    active = row.get("active_at")
+    if active is not None and -fresh_within <= now - active <= fresh_within:
+        return WORKING
+    return RUNNING
+
+
+async def retire_stale_agents(*, now: float, timeout: float,
+                              alive: Collection[str] | None = None,
+                              unit: Unit | None = None) -> list[Row]:
+    """Close every open record whose child is gone, and return them.
+
+    A child dies with the process that spawned it. `agent_stale` answers for
+    a reader whether a record has outlived its turn; this writes the ending
+    down, because a record that only *reads* as dead is live again in every
+    other reader.
+
+    `alive` is the conversations still producing output, and it is what makes
+    this a reading rather than a guess: a record whose conversation is in it
+    is a record whose turn is still running, whatever that mind's turn length
+    is, and it is left alone. Pass None to mean "nothing is known about any
+    conversation", which retires on the clock alone - correct for a caller
+    that has no live feed, and the reason the parameter is optional rather
+    than required.
+
+    `timeout` is required and has no default, and applies only to records
+    that `alive` cannot speak for. A hive's minds do not share one turn
+    length - this hive has 900 seconds on one mind and 14400 on another, and
+    a dsh mind can be configured to no bound at all - so a number chosen here
+    would retire work still running on the slowest of them.
+
+    Keyed on the last moment the child was known alive, which is its activity
+    stamp when it has one and its start when it does not. Keyed on the start
+    alone, a child reporting work every minute would be retired mid-report at
+    the timeout; and the ending written is that last known moment rather than
+    the sweep's own clock, which would claim the child ran until somebody
+    happened to look.
+    """
+    args: list[Any] = [OUTCOME_ABANDONED, now - timeout]
+    spared = ""
+    if alive:
+        args.append(list(alive))
+        spared = ('AND ("session_id" IS NULL OR NOT ("session_id" = '
+                  f'ANY(${len(args)}::text[]))) ')
+    sql = (f"UPDATE {qualified(AGENTS)} "
+           f'SET "finished_at" = GREATEST("started_at", '
+           f'COALESCE("active_at", "started_at")), '
+           f'"outcome" = $1 '
+           f'WHERE "finished_at" IS NULL '
+           f'AND GREATEST("started_at", COALESCE("active_at", "started_at")) '
+           f"< $2 "
+           f"{spared}"
+           f"RETURNING {select_list(AGENTS)}")
+    return await _fetch(unit, sql, *args)
+
+
+async def agents(*, task_id: str | None = None, session_id: str | None = None,
+                 mind_id: str | None = None, since: float | None = None,
+                 working: bool = False,
                  unit: Unit | None = None) -> list[Row]:
-    """Sub-agent rows, newest first; one task's, or every task's.
+    """Sub-agent rows, newest first, narrowed by any of the filters.
 
     `working` keeps only those that have not reported. Note that a child
     still open is not the same as a child still alive - one dies with the
     turn's process and never writes `finished_at` - so a caller drawing
     live work decides staleness from `started_at` and its own clock.
+
+    `session_id`, `mind_id` and `since` are what make a record readable at
+    all once harnesses report their own children. Those rows carry no task:
+    a harness knows which conversation it is in and nothing about the
+    ledger, so a read filtered only by task cannot see one, and the question
+    "what ran overnight" is a read across every mind at once. An unfiltered
+    read is every child the hive has ever spawned, which is why the page
+    narrows by session and the operator narrows by when.
     """
     conditions: dict[str, Any] = {}
     if task_id is not None:
         conditions["task_id"] = task_id
+    if session_id is not None:
+        conditions["session_id"] = session_id
+    if mind_id is not None:
+        conditions["mind_id"] = mind_id
     where, args = ("", [])
     if conditions:
         where, args = _sql.where(AGENTS, conditions)
     clauses = [where] if where else []
     if working:
         clauses.append('"finished_at" IS NULL')
+    if since is not None:
+        args.append(since)
+        # Whether the child *ran* in that window, not whether it began in
+        # it. A read of the last four hours that matched the start alone
+        # missed the child that began at half past eleven and ran until six,
+        # which is precisely the overnight work the question is asked about.
+        clauses.append(f'("started_at" >= ${len(args)} '
+                       f'OR "finished_at" IS NULL '
+                       f'OR "finished_at" >= ${len(args)})')
     joined = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return await _fetch(
         unit, f"SELECT {select_list(AGENTS)} FROM {qualified(AGENTS)} "
