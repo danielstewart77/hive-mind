@@ -520,8 +520,6 @@ def embeddings(ctx: Ctx):
     models = []
     if plan.runs_here(a, "proxy"):
         models += [compose.EMBEDDING_MODEL, compose.CLASSIFIER_MODEL]
-    if "tools" in plan.installed(a):
-        models.append(str(a.get("tools_ollama_model") or "qwen3:4b"))
     for model in models:
         for argv in ollama_commands(model):
             ctx.sh.run([*ctx.compose, "exec", "-T", compose.OLLAMA, *argv], timeout=3600)
