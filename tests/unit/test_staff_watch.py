@@ -8,6 +8,7 @@ live feed and dropping the wake into a conversation — are driven by replacing
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import io
 import json
@@ -433,3 +434,80 @@ def test_a_wake_stream_that_genuinely_breaks_is_let_go(watch):
     watch._drain(Stream(), "sess-1")  # reported, never raised
 
 
+
+
+# ----------------------------------------- retiring the sub-agent records
+#
+# The pass also closes the sub-agent records nothing has been heard from.
+# The ordering is the whole of the behaviour: `read_live` refuses the pass
+# on any non-200 from comms, and a comms that is down is exactly when
+# harnesses are being killed and records left open.
+
+
+def test_the_sweep_is_told_which_conversations_are_still_producing_output(
+        watch, monkeypatch):
+    """The whole of why it runs after the live read rather than before it.
+    Without this the sweep has no way to tell a dead child from a slow one
+    and has to pick a window, and no window is right for a hive whose minds
+    allow 900 seconds, 14400 and no bound at all."""
+    swept: list[dict] = []
+
+    async def retire_stale_agents(*, now, timeout, alive):
+        swept.append({"now": now, "timeout": timeout, "alive": set(alive)})
+        return []
+
+    async def tasks():
+        return []
+
+    monkeypatch.setattr(watch.staff, "retire_stale_agents",
+                        retire_stale_agents)
+    monkeypatch.setattr(watch.staff, "tasks", tasks)
+    monkeypatch.setattr(watch, "read_live", lambda: _live(
+        generating=[_entry("sess-busy")], idle=[_entry("sess-quiet")]))
+    monkeypatch.setenv("MIND_ID", STASH)
+
+    asyncio.run(watch.tick(now=NOW))
+
+    assert swept == [{"now": NOW, "timeout": watch.GRACE,
+                      "alive": {"sess-busy"}}]
+
+
+def test_an_idle_conversation_does_not_shield_its_children(watch):
+    """A conversation the feed calls idle has ended its turn, and a child of
+    that turn died with it."""
+    alive = watch.generating_sessions(_live(
+        generating=[_entry("sess-busy")],
+        idle=[_entry("sess-quiet"), _entry("sess-done")]))
+
+    assert alive == {"sess-busy"}
+
+
+def test_the_grace_window_is_longer_than_any_turn_a_mind_here_allows(watch):
+    """Retiring a live child records work as abandoned that was not, and
+    nothing afterwards can tell a reader it was wrong. Retiring a dead one
+    late leaves a record every reader already draws as stale."""
+    assert watch.GRACE >= 4 * 60 * 60
+
+
+def test_the_sweep_reports_how_many_records_it_retired(watch, monkeypatch):
+    """A pass that closed somebody's child says so: it is the only record
+    that the child was killed rather than finished. The count rather than
+    the ids, because the first pass after a deployment can close every child
+    left open since the last one and a pass's report is one log line."""
+
+    async def retire_stale_agents(*, now, timeout, alive):
+        return [{"id": "mind-skippy:conv-1:a1b2c3"},
+                {"id": "mind-skippy:conv-2:d4e5f6"}]
+
+    async def tasks():
+        return []
+
+    monkeypatch.setattr(watch.staff, "retire_stale_agents",
+                        retire_stale_agents)
+    monkeypatch.setattr(watch.staff, "tasks", tasks)
+    monkeypatch.setattr(watch, "read_live", lambda: _live())
+    monkeypatch.setenv("MIND_ID", STASH)
+
+    report = asyncio.run(watch.tick(now=NOW))
+
+    assert report["retired_agents"] == 2
