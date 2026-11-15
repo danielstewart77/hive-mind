@@ -615,10 +615,14 @@ def resolve_models(ctx: Ctx):
         _ask_again(ctx, "classifier_model", chat, str(exc))
     a["embedding_model"], a["classifier_model"] = embedder, classifier
     ctx.set_env(**{compose.EMBEDDING_MODEL_VAR: embedder, compose.CLASSIFIER_MODEL_VAR: classifier})
-    # Lucent and the console started before the key and the models were
-    # known; `up -d` recreates whichever the .env change reaches.
+    # Lucent, the console and the tools service started before the key and
+    # the models were known; `up -d` recreates whichever the .env change
+    # reaches. The tools service sends a call naming no model to the
+    # classifier, so left out it would answer every such call unset.
+    pieces = plan.installed(a)
     ctx.sh.run([*ctx.compose, "up", "-d", compose.LUCENT,
-                *([compose.CONSOLE] if "console" in plan.installed(a) else [])], timeout=300)
+                *([compose.CONSOLE] if "console" in pieces else []),
+                *([tools.SERVICE] if "tools" in pieces else [])], timeout=300)
     return f"embedding {embedder} ({dims} dimensions), classifier {classifier}"
 
 

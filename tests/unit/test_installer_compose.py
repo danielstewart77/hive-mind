@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from installer import compose
+from installer.shell import Shell
+from installer.steps import Ctx
 
 from tests.unit.installer_helpers import (a_host, all_pieces, answers, installer_at, needs_compose,
                                           render)
@@ -67,10 +69,20 @@ def test_existing_services_and_bot_tokens_land_in_each_service_that_uses_them(tm
         "http://voice.corp.example:8422"
     tools_env = services["hive-tools"]["environment"]
     assert tools_env["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
-    assert tools_env["INFERENCE_PROXY_KEY"] == services[compose.LUCENT]["environment"][
-        "INFERENCE_PROXY_KEY"]
-    assert tools_env["HIVE_TOOLS_DEFAULT_MODEL"] == services[compose.LUCENT]["environment"][
-        "LUCENT_CLASSIFIER_MODEL"]
+    assert tools_env["INFERENCE_PROXY_KEY"] == "client-key-1"
+
+
+def test_the_tools_service_calls_models_through_the_proxy_with_the_hives_classifier(tmp_path):
+    inst = installer_at(tmp_path, answers(
+        pieces=["tools"], modes={"proxy": "existing"},
+        proxy_url="http://proxy.corp.example:8888", proxy_key="client-key-1"))
+    Ctx(inst, Shell(inst.home.log)).set_env(**{compose.CLASSIFIER_MODEL_VAR: "classifier-of-record"})
+
+    tools_env = render(inst)["services"]["hive-tools"]["environment"]
+
+    assert tools_env["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
+    assert tools_env["INFERENCE_PROXY_KEY"] == "client-key-1"
+    assert tools_env["HIVE_TOOLS_DEFAULT_MODEL"] == "classifier-of-record"
 
 
 def test_nothing_waits_on_a_service_that_is_not_rendered(tmp_path):
