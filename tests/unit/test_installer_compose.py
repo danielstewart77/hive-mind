@@ -65,8 +65,12 @@ def test_existing_services_and_bot_tokens_land_in_each_service_that_uses_them(tm
     assert console["KOKORO_VOICE_URL"] == "http://voice.corp.example:8422"
     assert services[compose.TERMINAL]["environment"]["VOICE_API_URL"] == \
         "http://voice.corp.example:8422"
-    assert services["hive-tools"]["environment"]["OLLAMA_BASE_URL"] == \
-        "http://gpu.corp.example:11434"
+    tools_env = services["hive-tools"]["environment"]
+    assert tools_env["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
+    assert tools_env["INFERENCE_PROXY_KEY"] == services[compose.LUCENT]["environment"][
+        "INFERENCE_PROXY_KEY"]
+    assert tools_env["HIVE_TOOLS_DEFAULT_MODEL"] == services[compose.LUCENT]["environment"][
+        "LUCENT_CLASSIFIER_MODEL"]
 
 
 def test_nothing_waits_on_a_service_that_is_not_rendered(tmp_path):

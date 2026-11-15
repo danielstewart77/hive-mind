@@ -452,8 +452,11 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         svc = base(tools.SERVICE, image="hive/tools:local", waits_on_db=True, build={
             "context": str(repo("hive-tools")), "additional_contexts": {"hive_data": hive_data},
             "args": tools.build_args(host)}, env={
-            **tools.environment(env_ref, dsn_ref=dsn, ollama_url=embeddings_url(answers),
-                                model=str(answers.get("tools_ollama_model") or "qwen3:4b")),
+            # The classifier the hive already checked through the proxy, with
+            # the hive's one proxy key, as lucent and the capture hook use.
+            **tools.environment(env_ref, dsn_ref=dsn, proxy_url=proxy_url(answers),
+                                key_ref=env_ref("MIND_PROXY_KEY"),
+                                model_ref=env_ref(CLASSIFIER_MODEL_VAR)),
             "COMMS_URL": COMMS_URL,
             "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", tools.SERVICE)),
             "LUCENT_URL": LUCENT_URL,
