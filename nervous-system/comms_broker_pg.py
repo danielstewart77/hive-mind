@@ -54,6 +54,13 @@ _TABLES = (
     "core.messages", "core.conversations", "core.surface_claims",
     "core.sessions", "core.active_sessions", "core.session_turns",
     "core.session_memory", "core.context_overhead",
+    # The chief of staff's ledger. The sub-agent records a harness reports
+    # are written through comms, and a scratch database outlives the test
+    # that wrote them - so one test's children would answer another test's
+    # read. The tasks and the pairings go too: `staff.agents.task_id`
+    # references a task, so truncating the children alone would leave a task
+    # behind for the next test to find.
+    "staff.agents", "staff.task_sessions", "staff.tasks",
 )
 
 
