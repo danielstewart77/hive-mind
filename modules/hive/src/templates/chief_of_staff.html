@@ -881,6 +881,71 @@
     if (cy !== null) { cy.resize(); paintDeco(); }
   });
 
+  // ── wheel zoom ──────────────────────────────────────────────────────
+  // Cytoscape's own wheel zoom multiplies by about two and a half per mouse
+  // notch, so the level Daniel wants sits between two ticks and cannot be
+  // reached. The page zooms on the wheel itself instead: about four percent
+  // a notch, and the same step back out, so a notch in and a notch out land
+  // where they started (except where minZoom or maxZoom clamped the first).
+  // Touch pinch on a phone is left to Cytoscape - it follows the fingers,
+  // which is already as fine as the hand moving them.
+  //
+  // One notch is about 100 pixels of deltaY in Chrome and Edge and 3 lines
+  // in Firefox, so a line counts as 33 pixels. A trackpad sends many small
+  // pixel deltas and is proportional by construction. A trackpad pinch
+  // arrives as ctrl + wheel with deltas a tenth the size, so it is scaled
+  // up to match. Any single event is capped at one notch, so a wheel that
+  // reports 120 or a page-mode delta never jumps further than one step.
+  var WHEEL_NOTCH_PX = 100;
+  var WHEEL_LINE_PX = 33;
+  var WHEEL_PINCH_GAIN = 10;
+  // log2 of the per-notch factor: 2 ** 0.06 is about 1.042.
+  var WHEEL_STEP_LOG2 = 0.06;
+
+  function wheelPixels(e) {
+    var dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= WHEEL_LINE_PX;
+    else if (e.deltaMode === 2) dy *= WHEEL_NOTCH_PX;
+    if (e.ctrlKey) dy *= WHEEL_PINCH_GAIN;
+    return Math.max(-WHEEL_NOTCH_PX, Math.min(WHEEL_NOTCH_PX, dy));
+  }
+
+  // A wheel that arrives while the page itself is scrolling is the page
+  // scroll carrying on under the pointer, not a request to zoom - the same
+  // allowance Cytoscape's own handler makes, so the graph does not trap a
+  // scroll on its way past to "Waiting on you".
+  var PAGE_SCROLL_GRACE_MS = 250;
+  var pageScrolledAt = 0;
+  window.addEventListener('scroll', function () {
+    pageScrolledAt = Date.now();
+  }, { passive: true });
+
+  // On the stage and in the capture phase, so it runs before Cytoscape's
+  // own capture listener on #cos-cy. Not passive, or preventDefault is
+  // ignored and ctrl + wheel zooms the browser too. Wheel over the barrel's
+  // list still scrolls it: only a vertical wheel over the graph zooms, and
+  // nothing zooms under a node being dragged.
+  document.getElementById('cos-stage').addEventListener('wheel', function (e) {
+    var graph = document.getElementById('cos-cy');
+    if (cy === null || !graph.contains(e.target)) return;
+    // Cytoscape never sees a wheel, whatever happens next: let through, its
+    // handler would zoom by its own coarse step whenever this one stood
+    // aside. Standing aside means leaving the default alone, so a sideways
+    // scroll or a page scroll still moves the page.
+    e.stopPropagation();
+    var px = wheelPixels(e);
+    if (px === 0) return;
+    if (Date.now() - pageScrolledAt < PAGE_SCROLL_GRACE_MS) return;
+    e.preventDefault();
+    if (cy.nodes(':grabbed').length) return;
+    var box = graph.getBoundingClientRect();
+    cy.zoom({
+      level: cy.zoom() * Math.pow(2, -px / WHEEL_NOTCH_PX * WHEEL_STEP_LOG2),
+      renderedPosition: { x: e.clientX - box.left - graph.clientLeft,
+                          y: e.clientY - box.top - graph.clientTop }
+    });
+  }, { capture: true, passive: false });
+
   // ── loading ─────────────────────────────────────────────────────────
   var inFlight = false;
   var sequence = 0;
