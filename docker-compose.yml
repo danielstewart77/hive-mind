@@ -42,9 +42,9 @@ services:
       # one from its own home directory, Docker would create that on the
       # host, and every run would re-download the base model.
       - HF_HOME=${HF_HOME:?set HF_HOME in .env}
-    # Deploy pushes a trained adapter to the Ollama on the machine that
-    # trained it — this host — which is a different endpoint from the shared
-    # inference box the ollama tool calls.
+    # The inference proxy runs as a host process, and deploy pushes a trained
+    # adapter to the Ollama on the machine that trained it — this host. Both
+    # are reached through the host gateway.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

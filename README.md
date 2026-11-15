@@ -18,7 +18,7 @@ than taking the service down.
 | `browser` | Fetch and extract page content |
 | `linkedin` | Post and read via the LinkedIn API |
 | `docker_ops` | Inspect and manage containers on the host daemon |
-| `ollama` | Chat, structured output, and model listing against Ollama |
+| `ollama` | Chat, structured output, and model listing through the hive's inference proxy (the paths keep their old name) |
 | `sms` | Send SMS through a self-hosted android-sms-gateway |
 | `training` | Curate captured turns and launch LoRA fine-tune runs |
 | `schema` | Serve the tool schemas minds use for discovery |

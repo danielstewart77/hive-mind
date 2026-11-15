@@ -58,7 +58,7 @@ CLI_RELATIVE = Path("tools/stateless/training_pipeline/training_pipeline.py")
 # Deploy targets the Ollama on the machine that did the training, because
 # that is where the adapter files are and where the GPU that produced them
 # lives. That is this host, not the shared inference box other tools point
-# at, so it is its own setting rather than a reuse of OLLAMA_BASE_URL.
+# at, so it is its own setting; model calls go through the inference proxy.
 OLLAMA_URL = os.environ.get("TRAINING_OLLAMA_URL", "http://host.docker.internal:11434")
 
 # Curation walks every row and hashes it; export renders several thousand
