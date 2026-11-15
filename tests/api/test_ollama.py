@@ -120,8 +120,19 @@ def test_a_chat_call_returns_the_proxys_text_for_the_model_the_caller_named(
     assert resp.json() == {"response": "hello from the proxy"}
     (body,) = proxy.bodies()
     assert body["model"] == "caller-model"
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
     assert "response_format" not in body
     assert proxy.sent[0].headers["Authorization"] == f"Bearer {KEY}"
+
+
+def test_a_structured_call_goes_to_the_model_the_caller_named(
+    client: TestClient, auth_headers: dict[str, str], proxy: _Proxy
+) -> None:
+    resp = client.post("/ollama/structured", headers=auth_headers,
+                       json={"prompt": "p", "schema": {"type": "object"}, "model": "caller-model"})
+
+    assert resp.status_code == 200, resp.text
+    assert [b["model"] for b in proxy.bodies()] == ["caller-model"]
 
 
 @pytest.mark.parametrize("content", ["not json at all", None, "[1, 2]"])
@@ -159,30 +170,60 @@ def test_the_model_list_is_the_proxys_chat_listing(
     assert sent.headers["Authorization"] == f"Bearer {KEY}"
 
 
-@pytest.mark.parametrize("unset", ["INFERENCE_PROXY_URL", "INFERENCE_PROXY_KEY",
-                                   "HIVE_TOOLS_DEFAULT_MODEL"])
+_CALLS = {
+    "chat": ("POST", "/ollama/chat", {"prompt": "hi"}),
+    "structured": ("POST", "/ollama/structured", {"prompt": "hi", "schema": {"type": "object"}}),
+    "models": ("GET", "/ollama/models", None),
+}
+
+
+def _call(client: TestClient, headers: dict[str, str], route: str):
+    method, path, body = _CALLS[route]
+    return client.request(method, path, headers=headers, json=body)
+
+
+@pytest.mark.parametrize(("route", "unset"), [
+    (route, unset)
+    for route in _CALLS
+    for unset in ("INFERENCE_PROXY_URL", "INFERENCE_PROXY_KEY", "HIVE_TOOLS_DEFAULT_MODEL")
+    if not (route == "models" and unset == "HIVE_TOOLS_DEFAULT_MODEL")
+])
 def test_an_unconfigured_proxy_is_named_and_nothing_is_sent(
     client: TestClient, auth_headers: dict[str, str], proxy: _Proxy,
-    monkeypatch: pytest.MonkeyPatch, unset: str
+    monkeypatch: pytest.MonkeyPatch, route: str, unset: str
 ) -> None:
     monkeypatch.delenv(unset)
 
-    resp = client.post("/ollama/chat", headers=auth_headers, json={"prompt": "hi"})
+    resp = _call(client, auth_headers, route)
 
     assert resp.status_code == 503
     assert unset in resp.json()["detail"]
     assert proxy.sent == []
 
 
-def test_a_key_the_proxy_refuses_is_reported_as_configuration_not_failure(
-    client: TestClient, auth_headers: dict[str, str], proxy: _Proxy
+@pytest.mark.parametrize("route", list(_CALLS))
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_credential_is_reported_as_configuration_not_failure(
+    client: TestClient, auth_headers: dict[str, str], proxy: _Proxy, route: str, status: int
 ) -> None:
-    proxy.status = 401
+    proxy.status = status
 
-    resp = client.post("/ollama/chat", headers=auth_headers, json={"prompt": "hi"})
+    resp = _call(client, auth_headers, route)
 
     assert resp.status_code == 503
-    assert "key" in resp.json()["detail"]
+    assert "credential was refused" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("route", list(_CALLS))
+def test_any_other_proxy_failure_is_a_502(
+    client: TestClient, auth_headers: dict[str, str], proxy: _Proxy, route: str
+) -> None:
+    proxy.status = 500
+
+    resp = _call(client, auth_headers, route)
+
+    assert resp.status_code == 502
+    assert "500" in resp.json()["detail"]
 
 
 def test_an_unreachable_proxy_is_a_502(

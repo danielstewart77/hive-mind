@@ -17,7 +17,7 @@ takes. Nothing here calls Ollama, and there is no fallback to it.
 
 A call that names no model gets `HIVE_TOOLS_DEFAULT_MODEL`. An unset proxy
 address, key or default model is a 503 naming the variable, never a guess;
-so is a key the proxy refuses. Any other proxy failure is a 502 carrying
+so is a refused credential. Any other proxy failure is a 502 carrying
 what the proxy said. HITL gating is per-endpoint.
 """
 from __future__ import annotations
@@ -90,12 +90,17 @@ def _model(asked: str | None) -> str:
 
 
 def _refused(resp: httpx.Response) -> HTTPException:
-    """What a proxy refusal becomes: a bad key is configuration, the rest are failures."""
+    """What a proxy refusal becomes: a refused credential is configuration, the rest failures.
+
+    The proxy passes an upstream provider's own 401 through, so a refusal is
+    not necessarily hive-tools' key; the detail carries the proxy's words.
+    """
     detail = resp.text[:500]
     if resp.status_code in (401, 403):
         return HTTPException(
             status_code=503,
-            detail=f"the inference proxy refused hive-tools' key ({resp.status_code}): {detail}",
+            detail=f"a credential was refused ({resp.status_code}): hive-tools' proxy key, "
+                   f"or the proxy's key for the model's provider: {detail}",
         )
     return HTTPException(
         status_code=502,
@@ -160,6 +165,7 @@ async def structured(
     also what HITL reads to tell a failed call from a successful one.
     """
     del caller
+    _proxy()  # an unset proxy is named before an unset default model
     raw = await _complete(
         model=_model(body.model), prompt=body.prompt, system=body.system, schema=body.json_schema
     )
@@ -180,6 +186,7 @@ async def chat(
 ) -> dict[str, str]:
     """Plain-text generation. Returns `{"response": "<text>"}`."""
     del caller
+    _proxy()  # an unset proxy is named before an unset default model
     text = await _complete(model=_model(body.model), prompt=body.prompt, system=body.system, schema=None)
     return {"response": text}
 
@@ -201,13 +208,16 @@ async def models(caller: str = Depends(require_api_token)) -> dict[str, Any]:
     del caller
     root, _ = _proxy()
     payload = await _send("GET", "/v1/models?purpose=chat")
+    listed = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(listed, list):
+        raise HTTPException(status_code=502, detail="inference proxy answered no model list")
     flat = [
         {
             "name": m.get("id", ""),
             "label": m.get("label"),
             "context_window": m.get("context_window"),
         }
-        for m in payload.get("data", [])
+        for m in listed
         if isinstance(m, dict)
     ]
     return {
