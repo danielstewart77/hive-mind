@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 import hive_data
+from hive_data import migrate
 from hive_data.testing import claimed_database, sweep_stale
 
 #: Where the server is. Named in the environment with no default, because a
@@ -66,15 +67,14 @@ async def scratch_dsn() -> str:
     finally:
         await admin.close()
     async with claimed_database(ADMIN_DSN, "lucent_test_") as dsn:
-        target = await asyncpg.connect(dsn)
-        try:
-            # `core` first: `memory.edges.mind_id` is a real foreign key into
-            # `core.minds`, which is the kind of thing that could not exist
-            # while each store was its own file.
-            await target.execute((_SCHEMA_DIR / "core.sql").read_text())
-            await target.execute((_SCHEMA_DIR / "memory.sql").read_text())
-        finally:
-            await target.close()
+        # Through the migration rather than two files by hand, so the
+        # scratch database is what an install actually applies - the later
+        # numbered steps included. Two files were enough while every suite
+        # on this database touched only `core` and `memory`; the comms
+        # routes now write the chief of staff's ledger too, and a fixture
+        # that stops at `memory` fails those tests with a missing schema
+        # rather than with anything about the code.
+        await migrate.apply(dsn)
         yield dsn
 
 

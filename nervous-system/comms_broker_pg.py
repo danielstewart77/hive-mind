@@ -54,6 +54,10 @@ _TABLES = (
     "core.messages", "core.conversations", "core.surface_claims",
     "core.sessions", "core.active_sessions", "core.session_turns",
     "core.session_memory", "core.context_overhead",
+    # The sub-agent records a harness reports. Written through comms, so a
+    # scratch database outliving the test that wrote them would have one
+    # test's children answer another test's read.
+    "staff.agents",
 )
 
 

@@ -37,6 +37,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 import uuid
 from typing import Any
 
@@ -126,6 +127,17 @@ def _parser() -> argparse.ArgumentParser:
 
     listed_agents = sub.add_parser("agents", help="sub-agent rows")
     listed_agents.add_argument("--task")
+    # A child a harness reported carries no task - it knows its mind and its
+    # conversation and nothing about the ledger - so a read filtered only by
+    # task cannot see one, and "what ran overnight" is a read across every
+    # mind at once. Without these there is no way to read those rows short of
+    # a database client.
+    listed_agents.add_argument("--mind", help="only this mind's children")
+    listed_agents.add_argument("--session",
+                               help="only this conversation's children")
+    listed_agents.add_argument(
+        "--since", type=float,
+        help="only children that began in the last SECONDS")
     listed_agents.add_argument("--working", action="store_true",
                                help="only those that have not reported")
 
@@ -218,8 +230,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                           "unchanged")
         return {"agent": row}
     if command == "agents":
-        return {"agents": await staff.agents(task_id=args.task,
-                                             working=args.working)}
+        since = None if args.since is None else time.time() - args.since
+        return {"agents": await staff.agents(
+            task_id=args.task, mind_id=args.mind, session_id=args.session,
+            since=since, working=args.working)}
     if command == "attach":
         await staff.attach_session(args.task, args.session)
         return {"task": args.task, "session": args.session, "attached": True}
