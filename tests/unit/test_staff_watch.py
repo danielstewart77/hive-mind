@@ -511,3 +511,24 @@ def test_the_sweep_reports_how_many_records_it_retired(watch, monkeypatch):
     report = asyncio.run(watch.tick(now=NOW))
 
     assert report["retired_agents"] == 2
+
+
+# ------------------------------------------- a hive_data that is behind it
+
+
+def test_the_watch_finds_what_a_pass_calls_in_the_hive_data_beside_it(watch):
+    assert watch.missing() == []
+
+
+def test_a_hive_data_with_no_sweep_ends_the_watch_by_name_before_any_pass(
+        watch, capsys, monkeypatch):
+    # Inside the loop a pass's failure is logged and the next one tried, so
+    # a library behind the watch would fail once a minute in a log nobody
+    # reads; at start it ends the process, and the container's restarts say so.
+    monkeypatch.delenv("HIVE_DATABASE_URL", raising=False)
+    monkeypatch.delattr(watch.staff, "retire_stale_agents")
+    code = watch.main(["run"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "behind the staff watch" in out["error"]
+    assert "retire_stale_agents" in out["error"]
