@@ -176,8 +176,92 @@ def test_a_child_names_the_child_that_spawned_it(gateway):
             conversation=CONVERSATION_ID)
 
     rows = {r["id"]: r for r in asyncio.run(_rows())}
-    child = rows[f"{SKIPPY}:d4e5f6"]
-    assert child["parent_agent_id"] == f"{SKIPPY}:a1b2c3"
+    key = f"{SKIPPY}:{CONVERSATION_ID}"
+    child = rows[f"{key}:d4e5f6"]
+    assert child["parent_agent_id"] == f"{key}:a1b2c3"
+
+
+def test_a_child_is_not_filed_into_another_minds_conversation(gateway):
+    """Two things travel in this body and both have to be held to the
+    caller. Checking only the mind left the conversation open, and the
+    conversation is the key the page narrows on - so a mind naming itself
+    honestly could still have its child drawn under another mind's work."""
+    answer = _report(gateway, token=MORDECAI_TOKEN,  # secret-guard: allow
+                     mind_id=MORDECAI, conversation=CONVERSATION_ID)
+
+    assert answer.status_code == 200, "the child still ran and is recorded"
+    rows = asyncio.run(_rows())
+    assert len(rows) == 1
+    assert rows[0]["mind_id"] == MORDECAI
+    assert rows[0]["session_id"] is None, "not attached to skippy's work"
+    assert rows[0]["conversation_ref"] == CONVERSATION_ID
+
+
+def test_a_child_is_not_filed_in_by_a_foreign_harness_thread_id_either(
+        gateway):
+    """The weakest of the three claims on a conversation, and the one a
+    check on the conversation id alone would have missed."""
+    answer = _report(gateway, token=MORDECAI_TOKEN,  # secret-guard: allow
+                     mind_id=MORDECAI, conversation=HARNESS_SID)
+
+    assert answer.status_code == 200
+    assert asyncio.run(_rows())[0]["session_id"] is None
+
+
+def test_the_gateways_own_id_outranks_a_harness_thread_id_that_matches(
+        gateway):
+    """`harness_sid` carries no unique constraint, so it is the weakest
+    claim and is asked last. With one conversation's thread id equal to
+    another's own id, the order is what decides which child is drawn where.
+    """
+    asyncio.run(execute(
+        'INSERT INTO core."sessions" (id, conversation_id, surface, '
+        "surface_id, mind_id, created_at, last_active, status, harness_sid) "
+        "VALUES ($1, NULL, 'telegram', '222', $2, 0, 0, 'idle', $3)",
+        "sess-0002", SKIPPY, SESSION_ID))
+
+    assert _report(gateway, conversation=SESSION_ID).status_code == 200
+
+    assert asyncio.run(_rows())[0]["session_id"] == SESSION_ID
+
+
+def test_a_report_with_no_conversation_is_refused(gateway):
+    """It is part of the child's identity, so a report without one would key
+    a reused harness id onto another of the same mind's children."""
+    answer = _report(gateway, conversation="   ")
+
+    assert answer.status_code == 400
+    assert asyncio.run(_rows()) == []
+
+
+def test_a_reporter_sending_the_reserved_outcome_still_gets_its_ending_kept(
+        gateway):
+    """Nothing reads this route's answer, so refusing the record would drop
+    the ending entirely and leave the child open until the sweep wrote the
+    same word anyway. The harness did say its child was over, and that is
+    the part worth keeping."""
+    _report(gateway, conversation=CONVERSATION_ID)
+
+    answer = _report(gateway, state="ended", outcome="abandoned",
+                     conversation=CONVERSATION_ID)
+
+    assert answer.status_code == 200
+    row = asyncio.run(_rows())[0]
+    assert row["finished_at"] is not None
+    assert row["outcome"] == "unknown"
+
+
+def test_a_label_a_surface_cannot_draw_does_not_cost_the_whole_record(
+        gateway):
+    """A harness can put a control character in a label by quoting a file
+    name badly. The text is worth less than the record."""
+    answer = _report(gateway, conversation=CONVERSATION_ID,
+                     label="story\x00 6.9.1", kind="refute-edges")
+
+    assert answer.status_code == 200
+    row = asyncio.run(_rows())[0]
+    assert row["about"] == "story 6.9.1"
+    assert row["agent_type"] == "refute-edges"
 
 
 def test_a_state_nobody_defined_is_refused_rather_than_stored(gateway):
