@@ -33,8 +33,18 @@ async def _open(_dsn: str) -> _Pool:
     """
     await hive_data.connect()
     if await hive_data.core.get_mind("m1") is None:
-        await put_mind("m1")
+        # Owned, because claiming a bot links the sender to the mind's owner
+        # (story 2.1.15) and a mind nobody owns has nobody to link them to.
+        await put_mind("m1", owner="daniel")
     return _Pool()
+
+
+async def _link(surface: str, ref: str, username: str) -> None:
+    """An account already somebody's, as setup rather than subject."""
+    from comms_broker_pg import execute
+    await execute(
+        "INSERT INTO core.surface_accounts (surface, account_ref, username, "
+        "linked_at) VALUES ($1, $2, $3, 0)", surface, ref, username)
 
 
 def _run(coro):
@@ -393,6 +403,9 @@ def test_an_installs_single_allow_list_entry_becomes_its_claim(db_path):
     async def go():
         db = await _open(db_path)
         try:
+            # The operator's own account, linked as the backfill links it:
+            # adoption confirms a link and never makes one.
+            await _link("telegram", "8776938611", "daniel")
             outcome = await surface_claims.adopt_claim(
                 "m1", "telegram", "8776938611", now=1000.0
             )
@@ -446,6 +459,9 @@ def test_a_registered_bot_that_was_never_claimed_still_adopts(db_path):
     async def go():
         db = await _open(db_path)
         try:
+            # The operator's own account, linked as the backfill links it:
+            # adoption confirms a link and never makes one.
+            await _link("telegram", "8776938611", "daniel")
             await surface_claims.record_bot(
                 "m1", "telegram", "hive_m1_bot", now=1000.0
             )
@@ -497,6 +513,7 @@ def test_a_phrase_nobody_sent_stops_blocking_adoption_once_it_expires(db_path):
     async def go():
         db = await _open(db_path)
         try:
+            await _link("telegram", "8776938611", "daniel")
             await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             expired = 1000.0 + surface_claims.PHRASE_TTL_SECONDS + 1.0
             outcome = await surface_claims.adopt_claim(
@@ -530,3 +547,123 @@ def test_a_phrase_still_within_its_window_does_block_adoption(db_path):
     outcome, state = _run(go())
     assert outcome.claimed is False
     assert state.claimed_ref == ""
+
+
+# ------------------------------------------- story 2.1.15: claims link people
+
+def test_claiming_a_bot_links_the_sender_to_the_minds_owner(db_path):
+    async def go():
+        db = await _open(db_path)
+        try:
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "555", phrase, now=1001.0)
+            return await surface_claims.account_owner("telegram", "555")
+        finally:
+            await db.close()
+
+    assert _run(go()) == "daniel"
+
+
+def test_an_account_linked_to_another_person_cannot_claim_and_the_phrase_survives(db_path):
+    """One surface account is never recorded against two people. The phrase
+    stays on offer, because the person it was minted for has not sent it."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            await _link("telegram", "777", "sloan")
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            refused = await surface_claims.attempt_claim(
+                "m1", "telegram", "777", phrase, now=1001.0)
+            after = await surface_claims.claim_state("m1", "telegram", now=1001.0)
+            owner = await surface_claims.account_owner("telegram", "777")
+            rightful = await surface_claims.attempt_claim(
+                "m1", "telegram", "888", phrase, now=1002.0)
+            return refused, after, owner, rightful
+        finally:
+            await db.close()
+
+    refused, after, owner, rightful = _run(go())
+    assert refused.claimed is False
+    assert refused.reason == "linked_elsewhere"
+    assert after.claimed is False and after.phrase_pending is True
+    assert owner == "sloan"
+    assert rightful.claimed is True
+
+
+def test_one_account_claiming_two_peoples_bots_at_once_is_linked_to_one(db_path):
+    async def go():
+        db = await _open(db_path)
+        try:
+            if await hive_data.core.get_mind("m2") is None:
+                await put_mind("m2", owner="sloan")
+            p1 = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            p2 = await surface_claims.mint_phrase("m2", "telegram", now=1000.0)
+            a, b = await asyncio.gather(
+                surface_claims.attempt_claim("m1", "telegram", "999", p1, now=1001.0),
+                surface_claims.attempt_claim("m2", "telegram", "999", p2, now=1001.0),
+            )
+            owner = await surface_claims.account_owner("telegram", "999")
+            s1 = await surface_claims.claim_state("m1", "telegram", now=1001.0)
+            s2 = await surface_claims.claim_state("m2", "telegram", now=1001.0)
+            return a, b, owner, s1, s2
+        finally:
+            await db.close()
+
+    a, b, owner, s1, s2 = _run(go())
+    assert sorted([a.claimed, b.claimed]) == [False, True]
+    claimed_on = "m1" if s1.claimed else "m2"
+    assert owner == {"m1": "daniel", "m2": "sloan"}[claimed_on]
+    assert [s1.claimed, s2.claimed].count(True) == 1
+
+
+def test_adoption_refuses_an_account_nobody_linked_to_the_owner(db_path):
+    """A YAML entry on whatever box runs the mind does not decide whose an
+    account is; the bot stays undecided so a phrase can still claim it."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            outcome = await surface_claims.adopt_claim(
+                "m1", "telegram", "4242", now=1000.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1000.0)
+            owner = await surface_claims.account_owner("telegram", "4242")
+            return outcome, state, owner
+        finally:
+            await db.close()
+
+    outcome, state, owner = _run(go())
+    assert outcome.claimed is False
+    assert outcome.reason == "not_linked"
+    assert state.claimed is False
+    assert owner == ""
+
+
+def test_moving_a_mind_releases_the_claim_its_new_owner_does_not_hold(db_path):
+    async def go():
+        db = await _open(db_path)
+        try:
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "321", phrase, now=1001.0)
+            from comms_broker_pg import execute
+            await execute("UPDATE core.minds SET owner = 'sloan' WHERE mind_id = 'm1'")
+            released = await surface_claims.release_claims_not_owned("m1", now=1002.0)
+            return released, await surface_claims.claim_state("m1", "telegram", now=1002.0)
+        finally:
+            await db.close()
+
+    released, state = _run(go())
+    assert released == ["telegram"]
+    assert state.claimed is False
+
+
+def test_adoption_refuses_an_account_linked_to_somebody_other_than_the_owner(db_path):
+    async def go():
+        db = await _open(db_path)
+        try:
+            await _link("telegram", "6161", "sloan")
+            return await surface_claims.adopt_claim("m1", "telegram", "6161", now=1000.0)
+        finally:
+            await db.close()
+
+    outcome = _run(go())
+    assert outcome.claimed is False
+    assert outcome.reason == "not_linked"

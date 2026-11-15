@@ -36,6 +36,10 @@ async def test_session_shutdown_runs_before_the_database_is_closed(monkeypatch):
     monkeypatch.setattr(comms_server.hive_data, "connect", fake_connect)
     monkeypatch.setattr(comms_server.hive_data, "close", fake_close)
     monkeypatch.setattr(comms_server.broker, "recover_stranded_messages", fake_recover)
+    monkeypatch.setattr(
+        comms_server.broker_ops, "link_claimed_accounts",
+        AsyncMock(return_value={"rows": 0}),
+    )
     monkeypatch.setattr(comms_server.session_mgr, "start", AsyncMock())
     monkeypatch.setattr(comms_server.session_mgr, "shutdown", fake_shutdown)
     monkeypatch.setattr(
