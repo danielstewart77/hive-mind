@@ -508,6 +508,29 @@ is pending while the first is set and the second is null or older, so the
 watch keeps no queue and has nothing to clear.
 `hive_data.staff` is the only way the chief of staff and its tick reach it.
 
+Step 9 adds `staff.agents`, the sub-agents a mind has spawned, and step 10
+widens it from the chief's own delegates to the children any harness
+reports. Two writers, one table: a delegate registers itself against the
+ledger task it was handed, while a harness knows its mind, its conversation,
+the kind of child and which child spawned it, and knows nothing about the
+ledger — so a reported child carries no task and its task is derived from
+its conversation when the row is read. `record_agent_event` is the one way a
+reported child lands and is idempotent in every direction a detached
+reporter can get wrong: the same event twice, an ending that arrives before
+its own start, a start that arrives after the sweep retired that identity.
+The id is namespaced by the mind, because a harness's agent id is unique
+inside its own process and the primary key here covers the hive.
+
+`agent_state` is the single reading of what a row says the child is doing —
+`ended`, `working` while a harness is positively reporting ongoing work, and
+`running` for everything else, which is all two of the three harnesses can
+ever say. `retire_stale_agents` writes the ending for a child nobody closed
+and takes its window as a required parameter: this hive's minds have turn
+timeouts of 900 and 14400 seconds and a dsh mind can be configured to none
+at all, so a number chosen in the package would retire work still running on
+the slowest of them. Every moment on these rows is the recorder's clock, not
+the reporting host's.
+
 Two things are deliberately outside it. **hive-health** is not part of the one
 database at all. The **inference proxy** keeps SQLAlchemy and its own store:
 all six of its foreign keys are internal to its own schema, nothing else in

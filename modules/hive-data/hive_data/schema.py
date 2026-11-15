@@ -112,11 +112,14 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "name", "description", "status", "created_at", "updated_at",
         "stopped_at", "woken_at", "board_item", "question"),
     "staff.task_sessions": ("session_id", "task_id", "attached_at"),
-    #: The sub-agents working a task, registered by the children themselves
-    #: because nothing outside a mind's turn can see one (step 9).
+    #: The sub-agents a mind has spawned. Step 9 made this for the chief's
+    #: own delegates, which register themselves because nothing outside a
+    #: mind's turn can see one; step 10 widened it to the children a harness
+    #: reports, which know a mind and a conversation rather than a task.
     "staff.agents": (
         "id", "task_id", "brief", "about", "outcome", "started_at",
-        "finished_at"),
+        "finished_at", "mind_id", "agent_type", "session_id",
+        "conversation_ref", "parent_agent_id", "active_at"),
     #: Lucent's half. Qualified keys, not bare ones, and that is the point:
     #: `credentials` exists in both `core` and `memory`, the 12 holders that
     #: appear in both share no `token_sha`, and a bare name could only ever

@@ -210,6 +210,28 @@ async def get_session_by_conversation(
         conversation_id)
 
 
+async def get_session_by_harness_sid(
+    harness_sid: str, *, unit: Unit | None = None,
+) -> Row | None:
+    """The conversation a harness's own thread id belongs to, or None.
+
+    A third kind of id, and the reason this lookup exists. A session has the
+    gateway's own id, the conversation id every spawn is handed, and - for a
+    harness that mints one of its own and reports it back, which codex does -
+    a `harness_sid`. A codex hook knows only that third one, so a recorder
+    handed it can resolve the conversation through nothing else.
+
+    Most recently active first, because `harness_sid` carries no unique
+    constraint: a thread id reused across two rows resolves to the one that
+    is actually in use rather than to an arbitrary one.
+    """
+    return await _fetch_one(
+        unit,
+        f'SELECT {select_list("sessions")} FROM core."sessions" '
+        'WHERE "harness_sid" = $1 ORDER BY "last_active" DESC LIMIT 1',
+        harness_sid)
+
+
 async def list_sessions(
     *, surfaces: Sequence[str] | Any = UNSET, status: str | Any = UNSET,
     mind_id: str | Any = UNSET,
