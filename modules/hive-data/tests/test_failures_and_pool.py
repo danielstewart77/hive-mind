@@ -166,13 +166,10 @@ async def test_pointing_the_configuration_at_another_database_reads_that_one(
 
     scratch = await open_claimed(ADMIN_DSN, "hive_data_other_")
     other_dsn = scratch.dsn
-    setup = await asyncpg.connect(other_dsn)
-    try:
-        from pathlib import Path
-        await setup.execute(
-            (Path(hive_data.__file__).parent / "schema" / "core.sql").read_text())
-    finally:
-        await setup.close()
+    # Every step, as a real install has it: a `core` table added by a
+    # numbered step is as much the schema as one in `core.sql`.
+    from hive_data import migrate
+    await migrate.apply(other_dsn)
 
     try:
         await hive_data.connect(hive_data.Settings(dsn=scratch_dsn))

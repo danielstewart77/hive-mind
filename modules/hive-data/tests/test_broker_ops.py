@@ -288,3 +288,40 @@ async def test_a_bot_whose_phrase_expired_unsent_is_adopted(
     row = await _claim_row(inspector, a_mind)
     assert (row["claimed_ref"], row["phrase_hash"]) == ("42", None)
 
+
+
+# --------------------------------------------------------- surface accounts
+
+async def test_an_account_linked_to_one_person_is_never_relinked_to_another(
+        connected, inspector, clock):
+    # Story 2.1.15: one surface account is never recorded against two people.
+    # The second link is answered with whose the account already is, and the
+    # stored row still names the first person.
+    ref = _name("tg-")
+    first = await broker_ops.link_surface_account(
+        surface="telegram", account_ref=ref, username="sloan", linked_at=clock)
+    second = await broker_ops.link_surface_account(
+        surface="telegram", account_ref=ref, username="daniel",
+        linked_at=clock + 1)
+
+    stored = await inspector.fetchrow(
+        'SELECT username, linked_at FROM core."surface_accounts" '
+        'WHERE surface = $1 AND account_ref = $2', "telegram", ref)
+    assert first["username"] == "sloan"
+    assert second["username"] == "sloan"
+    assert stored["username"] == "sloan"
+    assert stored["linked_at"] == clock
+
+
+async def test_one_account_id_on_two_surfaces_is_two_accounts(
+        connected, inspector, clock):
+    ref = _name("id-")
+    await broker_ops.link_surface_account(
+        surface="telegram", account_ref=ref, username="sloan", linked_at=clock)
+    other = await broker_ops.link_surface_account(
+        surface="discord", account_ref=ref, username="aiden", linked_at=clock)
+
+    assert other["username"] == "aiden"
+    assert [r["surface"] for r in
+            await broker_ops.surface_accounts_of("sloan")
+            if r["account_ref"] == ref] == ["telegram"]

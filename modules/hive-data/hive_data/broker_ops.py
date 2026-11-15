@@ -207,6 +207,86 @@ async def list_credentials(*, unit: Unit | None = None) -> list[Row]:
 
 
 # ---------------------------------------------------------------------------
+# surface accounts: which person a Telegram or Discord account is
+# ---------------------------------------------------------------------------
+
+async def surface_account(surface: str, account_ref: str, *,
+                          unit: Unit | None = None) -> Row | None:
+    """The link for one account on one surface, or None if it is nobody's."""
+    return await _fetch_one(
+        unit,
+        f'SELECT {select_list("surface_accounts")} '
+        'FROM core."surface_accounts" '
+        'WHERE "surface" = $1 AND "account_ref" = $2',
+        surface, account_ref)
+
+
+async def link_surface_account(
+    *, surface: str, account_ref: str, username: str, linked_at: float,
+    unit: Unit | None = None,
+) -> Row:
+    """Record an account against a person, and hand back whose it now is.
+
+    Inserted, never overwritten: an account already linked keeps the person
+    it was linked to, and the row returned says who that is. The caller
+    compares it with the person it asked for, which is the only way two
+    people racing to link one account can both learn the truth - an upsert
+    would tell each of them they had won.
+    """
+    await _execute(
+        unit,
+        'INSERT INTO core."surface_accounts" '
+        '("surface", "account_ref", "username", "linked_at") '
+        'VALUES ($1, $2, $3, $4) '
+        'ON CONFLICT ("surface", "account_ref") DO NOTHING',
+        surface, account_ref, username, linked_at)
+    row = await surface_account(surface, account_ref, unit=unit)
+    if row is None:
+        # Deleted between the insert and the read: nobody's now, and the
+        # caller learns that rather than being told it won.
+        return {"surface": surface, "account_ref": account_ref,
+                "username": "", "linked_at": None}
+    return row
+
+
+async def link_claimed_accounts(*, linked_at: float,
+                                unit: Unit | None = None) -> Row:
+    """Link every claimed account to its minds' owner, where there is one.
+
+    The backfill of step 11, repeatable: an account already linked is left
+    as it is, and an account claimed on minds of two owners - or on a mind
+    with none - is left unlinked rather than guessed. Reports how many links
+    it added.
+    """
+    return await _execute(
+        unit,
+        'INSERT INTO core."surface_accounts" '
+        '("surface", "account_ref", "username", "linked_at") '
+        'SELECT c."surface", c."claimed_ref", '
+        'min(lower(btrim(m."owner"))), $1 '
+        'FROM core."surface_claims" c '
+        'JOIN core."minds" m ON m."mind_id" = c."mind_id" '
+        'WHERE c."claimed_ref" IS NOT NULL AND btrim(c."claimed_ref") <> \'\' '
+        'AND c."surface" IN (\'telegram\', \'discord\') '
+        'GROUP BY c."surface", c."claimed_ref" '
+        'HAVING count(DISTINCT lower(btrim(m."owner"))) = 1 '
+        'AND bool_and(m."owner" IS NOT NULL AND btrim(m."owner") <> \'\') '
+        'ON CONFLICT ("surface", "account_ref") DO NOTHING',
+        linked_at)
+
+
+async def surface_accounts_of(username: str, *,
+                              unit: Unit | None = None) -> list[Row]:
+    """Every account linked to one person, surface then account order."""
+    return await _fetch(
+        unit,
+        f'SELECT {select_list("surface_accounts")} '
+        'FROM core."surface_accounts" WHERE "username" = $1 '
+        'ORDER BY "surface", "account_ref"',
+        username)
+
+
+# ---------------------------------------------------------------------------
 # surface claims
 # ---------------------------------------------------------------------------
 

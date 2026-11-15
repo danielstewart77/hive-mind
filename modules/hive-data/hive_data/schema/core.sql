@@ -311,6 +311,27 @@ CREATE TABLE core.surface_claims (
 
 
 --
+-- Name: surface_accounts; Type: TABLE; Schema: core; Owner: -
+--
+-- Which person a Telegram or Discord account is. Also created by step 11,
+-- which is how a database that predates it gets it; see that step for why.
+--
+
+CREATE TABLE core.surface_accounts (
+    surface text NOT NULL,
+    account_ref text NOT NULL,
+    username text NOT NULL,
+    linked_at double precision NOT NULL,
+    CONSTRAINT surface_accounts_pkey PRIMARY KEY (surface, account_ref),
+    CONSTRAINT surface_accounts_surface_known CHECK (surface IN ('telegram', 'discord')),
+    CONSTRAINT surface_accounts_ref_not_blank CHECK (btrim(account_ref) <> ''),
+    CONSTRAINT surface_accounts_username_lower CHECK (username = lower(btrim(username)) AND username <> '')
+);
+
+CREATE INDEX surface_accounts_username ON core.surface_accounts USING btree (username);
+
+
+--
 -- Name: users; Type: TABLE; Schema: core; Owner: -
 --
 

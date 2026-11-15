@@ -107,6 +107,21 @@ def steps(directory: Path | None = None) -> list[Step]:
     return out
 
 
+_CREATES_TABLE = re.compile(
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+
+def _added_by_steps(chosen: list[Step], schema: str) -> set[str]:
+    """Tables in `schema` that a numbered step, not its baseline, creates."""
+    return {
+        table
+        for step in chosen if step.schema is None
+        for where, table in _CREATES_TABLE.findall(_code(step.sql))
+        if where == schema
+    }
+
+
 def _declared(schema: str) -> set[str]:
     return {bare(t) for t in COLUMNS if schema_of(t) == schema}
 
@@ -155,7 +170,12 @@ async def _plan(connection, chosen: list[Step]) -> dict[str, Any]:
             continue
         if step.schema is not None:
             have = await _tables(connection, step.schema)
-            wanted = _declared(step.schema)
+            # A table a numbered step adds to a baseline schema is not part
+            # of that baseline: a database applied before the record existed
+            # predates it, is still the whole baseline, and gets the table
+            # when the step that adds it runs.
+            wanted = _declared(step.schema) - _added_by_steps(
+                chosen, step.schema)
             if have is not None and wanted <= have:
                 adopt.append(step)
                 continue
