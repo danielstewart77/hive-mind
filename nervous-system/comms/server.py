@@ -635,6 +635,16 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
+    # The bot's credential says which box is calling, not who is talking.
+    # On a Telegram or Discord surface the person is the sender's account,
+    # and they reach only a mind they own (story 2.1.15). Refused in the same
+    # words as a mind that is not theirs, which is what it is.
+    if not await surface_claims.sender_reaches(
+        body.surface, body.surface_id, body.mind_id
+    ):
+        return JSONResponse(
+            {"error": "Mind not found"}, status_code=404
+        )
     # Naming is its own small capability and stays that way on the way in.
     # `require_rename_bearer` guards `PUT .../name` precisely so that
     # `COMMS_BEARER_TOKEN` — held by every surface bot and every mind
@@ -698,7 +708,21 @@ async def list_sessions(
         client_ref=client_ref,
     )
     caller, keys, known = await _owned_mind_keys(request)
-    return user_access.filter_sessions(rows, caller, keys, known)
+    rows = user_access.filter_sessions(rows, caller, keys, known)
+    if client_ref is not None and surface_claims.surface_of(client_type):
+        # This is how a bot finds the conversation a chat is already bound to
+        # before it sends a turn, and a turn carries no sender. So a binding
+        # made by somebody who may no longer reach that mind - an account
+        # linked to another person, or a binding from before accounts were
+        # linked at all - answers as no conversation, and the bot falls
+        # through to opening one, which checks the sender (story 2.1.15).
+        rows = [
+            row for row in rows
+            if await surface_claims.sender_reaches(
+                row.get("surface") or client_type,
+                row.get("surface_id"), row.get("mind_id"))
+        ]
+    return rows
 
 
 @app.get("/sessions/names")
@@ -1186,6 +1210,13 @@ async def activate_session(session_id: str, body: ActivateRequest):
     conversation and did not, which is a refusal about a machine, not a
     statement about this row.
     """
+    if body.surface is not None and not await surface_claims.sender_reaches(
+        body.surface, body.surface_id, await _session_mind(session_id),
+    ):
+        # Moving a conversation onto a bot is reaching its mind from that
+        # bot's sender, so the sender is checked against the owner of the
+        # conversation being moved, never the bot's own mind (story 2.1.15).
+        return JSONResponse({"error": "Session not found"}, status_code=404)
     try:
         return await session_mgr.activate_session(
             session_id, body.client_type, body.client_ref,
@@ -1812,6 +1843,14 @@ async def _handle_command(
     cmd: str, parts: list[str], body: CommandRequest,
     caller: user_access.Caller,
 ):
+    if not await surface_claims.sender_reaches(
+        body.surface, body.surface_id, body.mind_id
+    ):
+        # Every command a bot relays is the sender acting on this mind, the
+        # read-only ones included: `/sessions` lists its conversations. The
+        # admin credential is not exempt, because no bot holds it and the
+        # sender is the person either way (story 2.1.15).
+        return {"error": "Session not found"}
     if cmd in _MIND_BOUND_COMMANDS and not caller.sees_everything():
         if not await user_access.owns_mind(
             caller, body.mind_id
@@ -1928,6 +1967,10 @@ async def _handle_command(
         target, error = await _resolve_target(parts[1], body, caller)
         if error:
             return error
+        if not await surface_claims.sender_reaches(
+            body.surface, body.surface_id, await _session_mind(target)
+        ):
+            return {"error": "Session not found"}
         return await session_mgr.activate_session(
             target, body.surface, body.client_ref,
             surface=body.surface, surface_id=body.surface_id,
@@ -2250,6 +2293,12 @@ async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
         return JSONResponse({"error": str(exc)}, status_code=422)
     if result is None:
         return JSONResponse({"error": f"Mind '{mind_id}' not found"}, status_code=404)
+    # A bot claimed by the old owner's account would go on answering them
+    # while every conversation it opened was refused, and the scheduler and
+    # the broker would keep delivering the mind's messages to them. So the
+    # claims whose account is not the new owner's are released with the move
+    # (story 2.1.15); the new owner claims the bot with a fresh phrase.
+    await surface_claims.release_claims_not_owned(str(result.get("mind_id") or mind_id))
     return result
 
 

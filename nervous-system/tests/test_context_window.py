@@ -84,6 +84,15 @@ async def _register(mind_id: str = MIND, *, name: str = "ada",
         mind_id, name, MIND_URL, harness, now,
     )
 
+    # The Telegram senders these tests drive, linked to the mind's owner as a
+    # claim links them (story 2.1.15).
+    for ref in ("123", "789"):
+        await execute(
+            "INSERT INTO core.surface_accounts (surface, account_ref, username, "
+            "linked_at) VALUES ('telegram', $1, 'daniel', 0) ON CONFLICT DO NOTHING",
+            ref,
+        )
+
 
 async def _manager(harness: str = "claude_cli") -> SessionManager:
     mgr = await make_manager()
