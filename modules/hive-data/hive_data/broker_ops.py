@@ -241,8 +241,38 @@ async def link_surface_account(
         'ON CONFLICT ("surface", "account_ref") DO NOTHING',
         surface, account_ref, username, linked_at)
     row = await surface_account(surface, account_ref, unit=unit)
-    assert row is not None
+    if row is None:
+        # Deleted between the insert and the read: nobody's now, and the
+        # caller learns that rather than being told it won.
+        return {"surface": surface, "account_ref": account_ref,
+                "username": "", "linked_at": None}
     return row
+
+
+async def link_claimed_accounts(*, linked_at: float,
+                                unit: Unit | None = None) -> Row:
+    """Link every claimed account to its minds' owner, where there is one.
+
+    The backfill of step 11, repeatable: an account already linked is left
+    as it is, and an account claimed on minds of two owners - or on a mind
+    with none - is left unlinked rather than guessed. Reports how many links
+    it added.
+    """
+    return await _execute(
+        unit,
+        'INSERT INTO core."surface_accounts" '
+        '("surface", "account_ref", "username", "linked_at") '
+        'SELECT c."surface", c."claimed_ref", '
+        'min(lower(btrim(m."owner"))), $1 '
+        'FROM core."surface_claims" c '
+        'JOIN core."minds" m ON m."mind_id" = c."mind_id" '
+        'WHERE c."claimed_ref" IS NOT NULL AND btrim(c."claimed_ref") <> \'\' '
+        'AND c."surface" IN (\'telegram\', \'discord\') '
+        'GROUP BY c."surface", c."claimed_ref" '
+        'HAVING count(DISTINCT lower(btrim(m."owner"))) = 1 '
+        'AND bool_and(m."owner" IS NOT NULL AND btrim(m."owner") <> \'\') '
+        'ON CONFLICT ("surface", "account_ref") DO NOTHING',
+        linked_at)
 
 
 async def surface_accounts_of(username: str, *,

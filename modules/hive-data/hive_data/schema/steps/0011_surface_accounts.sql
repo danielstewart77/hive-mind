@@ -46,7 +46,13 @@ CREATE INDEX IF NOT EXISTS surface_accounts_username ON core.surface_accounts US
 -- conflict this table exists to stop, and guessing which of them it belongs
 -- to is how an account changes hands in silence. Such an account is left
 -- unlinked, so the gateway refuses it everywhere until an operator decides -
--- loud, rather than wrong.
+-- loud, rather than wrong. A claim on a mind with no owner counts as such a
+-- conflict too: nobody is not one of the owners.
+--
+-- `broker_ops.link_claimed_accounts` is this same statement, run by the
+-- gateway every time it starts, for the claims an older gateway made between
+-- this step being applied and the gateway restarting onto the code that
+-- links as it claims.
 --
 INSERT INTO core.surface_accounts (surface, account_ref, username, linked_at)
 SELECT c.surface, c.claimed_ref, min(lower(btrim(m.owner))),
@@ -56,8 +62,7 @@ JOIN core.minds m ON m.mind_id = c.mind_id
 WHERE c.claimed_ref IS NOT NULL
   AND btrim(c.claimed_ref) <> ''
   AND c.surface IN ('telegram', 'discord')
-  AND m.owner IS NOT NULL
-  AND btrim(m.owner) <> ''
 GROUP BY c.surface, c.claimed_ref
 HAVING count(DISTINCT lower(btrim(m.owner))) = 1
+   AND bool_and(m.owner IS NOT NULL AND btrim(m.owner) <> '')
 ON CONFLICT (surface, account_ref) DO NOTHING;
