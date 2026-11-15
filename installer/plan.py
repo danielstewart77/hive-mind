@@ -41,8 +41,8 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
     Piece("comms", "Comms (gateway, broker, sessions)", required=True,
           needs=("postgres",), repos=("hive-mind", "hive-data")),
     # Lucent embeds through the proxy. The local models (Ollama) are only the
-    # backend of a proxy installed here, or of the tools service: never
-    # ticked, installed exactly when one of those needs them (`installed`).
+    # backend of a proxy installed here: never ticked, installed exactly when
+    # it needs them (`installed`).
     Piece("lucent", "Lucent (memory and knowledge graph)", required=True,
           needs=("postgres", "proxy"), repos=("hive-mind", "hive-data")),
     Piece("embeddings", "Local models for the proxy installed here (Ollama)",
@@ -60,7 +60,8 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
           repos=("hive", "hive-data")),
     Piece("voice", "Voice server", needs=("comms",), repos=("hive-mind",),
           modes=(NONE, HERE, EXISTING)),
-    Piece("tools", "Tools service", needs=("postgres", "embeddings"),
+    # Its model calls go through the proxy, like every other service's.
+    Piece("tools", "Tools service", needs=("postgres", "proxy"),
           repos=("hive-tools", "hive-data")),
     # A bot is claimed by its person on the console, which mints the pass
     # phrase it is claimed with; without the console nobody can claim it.
@@ -137,7 +138,7 @@ def installed(answers: dict) -> set[str]:
     pieces = closure(answers.get("pieces") or ())
     # The local models follow what uses them, whatever was ticked or saved.
     pieces.discard("embeddings")
-    if ("proxy" in pieces and mode(answers, "proxy") == HERE) or "tools" in pieces:
+    if "proxy" in pieces and mode(answers, "proxy") == HERE:
         pieces |= closure(["embeddings"])
     for p in PIECES.values():
         if NONE in p.modes:
@@ -222,9 +223,6 @@ def questions(answers: dict) -> list[Question]:
     if mode(answers, "voice") == EXISTING:
         qs.append(Question("voice_url", "Voice server address"))
     pieces = installed(answers)
-    if "tools" in pieces:
-        qs.append(Question("tools_ollama_model", "Ollama model the tools service classifies with",
-                           default="qwen3:4b"))
     if "telegram" in pieces:
         qs.append(Question("telegram_token", "Telegram bot token", "secret", keep_blank=True))
     if "discord" in pieces:

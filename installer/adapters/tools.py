@@ -2,8 +2,9 @@
 
 As built: build args UID, GID, DOCKER_GID; CPU-safe (no NVIDIA runtime).
 Port 9421, GET /health. Required env HIVE_DATABASE_URL (tools schema),
-HT_SECRET_KEY, HT_ADMIN_PASSWORD; OLLAMA_BASE_URL and OLLAMA_DEFAULT_MODEL
-naming a model that Ollama has. Build context the repo plus the extra context
+HT_SECRET_KEY, HT_ADMIN_PASSWORD; INFERENCE_PROXY_URL and INFERENCE_PROXY_KEY
+(its model calls go through the proxy, never Ollama — story 10.16.1) and
+HIVE_TOOLS_DEFAULT_MODEL naming a chat model the proxy serves. Build context the repo plus the extra context
 `hive_data`. Every mount optional. A token is minted inside the container
 with `auth_api.generate_token(name)`, which adds a new token on every call —
 so the installer mints once and keeps what it got.
@@ -34,13 +35,15 @@ def build_args(host) -> dict[str, str]:
     return {"UID": str(host.uid), "GID": str(host.gid), "DOCKER_GID": str(host.docker_gid)}
 
 
-def environment(env_ref, *, dsn_ref: str, ollama_url: str, model: str) -> dict[str, str]:
+def environment(env_ref, *, dsn_ref: str, proxy_url: str, key_ref: str,
+                model_ref: str) -> dict[str, str]:
     return {
         "HIVE_DATABASE_URL": dsn_ref,
         "HT_SECRET_KEY": env_ref("HT_SECRET_KEY"),
         "HT_ADMIN_PASSWORD": env_ref("HT_ADMIN_PASSWORD"),
-        "OLLAMA_BASE_URL": ollama_url,
-        "OLLAMA_DEFAULT_MODEL": model,
+        "INFERENCE_PROXY_URL": proxy_url,
+        "INFERENCE_PROXY_KEY": key_ref,
+        "HIVE_TOOLS_DEFAULT_MODEL": model_ref,
     }
 
 
