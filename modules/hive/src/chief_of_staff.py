@@ -42,7 +42,8 @@ signal.
 No SQL here and no second opinion about anything. The ledger comes through
 `hive_data.staff`, the board through `kanban_data`, and whether a sub-agent
 has outlived its turn is `staff.agent_stale`, which the ledger's own tick
-and tooling read the same way.
+and tooling read the same way. Whether a sub-agent is working or merely
+running is `staff.agent_state`, the one reading the sweep shares.
 """
 
 from __future__ import annotations
@@ -70,6 +71,32 @@ BOARD_DONE = "done"
 #: so one still open past it was killed and could not write its own ending.
 #: `turn_timeout_seconds` for the chief of staff, which is 900.
 AGENT_TIMEOUT = 15 * 60
+
+#: How often the page asks for the tree. The template's own `REFRESH_MS`,
+#: in seconds; named here because the working window below is derived
+#: from it.
+REFRESH = 20
+
+#: How long one activity report from a harness lets a sub-agent read as
+#: working. Three refreshes, which is also how long the page goes on
+#: trusting a payload of its own before it takes every spinner off: a child
+#: whose reporter samples on the page's cadence has a fresh stamp at every
+#: reload, and one whose stamp is older than three reloads is no longer
+#: evidence of work. Deliberately short - see `staff.agent_state`.
+FRESH_WITHIN = 3 * REFRESH
+
+#: The longest kind and the longest label a sub-agent card draws. The card
+#: is a 112-pixel circle with an 84-pixel text column at 10px, which holds
+#: about fourteen characters a line and five lines; the kind takes at most
+#: two of them and the label the rest. Cut rather than dropped, as the
+#: session name is.
+AGENT_KIND_LIMIT = 24
+AGENT_LABEL_LIMIT = 40
+
+#: What a sub-agent card says when its writer has named neither its kind nor
+#: its work yet - a dsh start carries neither, and its ending fills them in.
+#: A blank circle is not a status indicator.
+AGENT_FALLBACK = "sub-agent"
 
 #: How long a session may be silent and still count as working. The same
 #: turn timeout, for the same reason read from the other end: a session that
@@ -137,11 +164,13 @@ async def _assigned(session_ids: list[str], names: dict[str, str],
     alive = False
     fresh = False
     rows: list[dict[str, Any]] = []
+    present: set[str] = set()
     for session_id in session_ids:
         row = await core.get_session(session_id)
         if row is None:
             continue
         alive = True
+        present.add(session_id)
         age = now - float(row["last_active"])
         # Bounded at both ends. A `last_active` in the future - a host whose
         # clock runs ahead - would otherwise read as fresh for as long as the
@@ -176,7 +205,7 @@ async def _assigned(session_ids: list[str], names: dict[str, str],
         if session_name:
             session_names.append(session_name[:NAME_LIMIT])
     return {"minds": minds, "alive": alive, "fresh": fresh,
-            "session_names": session_names}
+            "session_names": session_names, "present": present}
 
 
 def _activity(task: dict[str, Any], sessions: list[str], alive: bool) -> str:
@@ -326,6 +355,102 @@ def _unique_edges(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _cut(text: str, limit: int) -> str:
+    """The text, or as much as fits with an ellipsis saying it was cut."""
+    return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+
+def _agent_label(agent: dict[str, Any]) -> str:
+    """What a sub-agent card says: its kind, and the work it was given.
+
+    A delegate the chief registered keeps its brief as its label, as it
+    always has - the brief file is that writer's name for the work. A child a
+    harness reported carries its kind and its one line on two lines, because
+    requirement 9 asks for both and neither alone says which child this is.
+    """
+    brief = (agent.get("brief") or "").strip()
+    if brief:
+        return brief
+    kind = _cut((agent.get("agent_type") or "").strip(), AGENT_KIND_LIMIT)
+    about = _cut((agent.get("about") or "").strip(), AGENT_LABEL_LIMIT)
+    lines = [part for part in (kind, about) if part]
+    if len(lines) == 2 and lines[0] == lines[1]:
+        lines = lines[:1]
+    return "\n".join(lines) or AGENT_FALLBACK
+
+
+def _place_agents(rows: list[dict[str, Any]]) -> dict[str, str | None]:
+    """Where each open record hangs: its drawn ancestor, None for the task.
+
+    `rows` is every record this task's work has produced, ended ones
+    included, because an ended record is still the evidence that a child's
+    parent existed. Returns an entry only for the records that are drawn.
+
+    * A record whose parent is open and drawn hangs beneath it.
+    * A record whose parent has ended hangs beneath that parent's nearest
+      ancestor still drawn, or beneath the task when none is: the parent has
+      left the tree, as every ended child does, and the child is still its
+      descendant and still this task's work.
+    * A record whose parent resolves to nothing - never recorded, or a chain
+      that loops back on itself - is not drawn at all. The migration that
+      made the column says so: a parent that resolves to nothing draws as
+      unplaceable, and an unplaceable child is left off the tree rather than
+      hung under work it cannot be shown to belong to.
+    """
+    by_id = {row["id"]: row for row in rows}
+    placed: dict[str, str | None] = {}
+    for row in rows:
+        if row.get("finished_at") is not None:
+            continue
+        anchor: str | None = None
+        seen = {row["id"]}
+        parent = row.get("parent_agent_id")
+        ok = True
+        while parent:
+            if parent in seen or parent not in by_id:
+                ok = False
+                break
+            seen.add(parent)
+            ancestor = by_id[parent]
+            if ancestor.get("finished_at") is None:
+                anchor = parent
+                break
+            parent = ancestor.get("parent_agent_id")
+        if ok:
+            placed[row["id"]] = anchor
+    # A record is drawn only when its chain of open anchors reaches the task.
+    # Resolved here rather than in the walk, because a parent that is open
+    # but unplaceable takes its whole subtree off the tree with it, and two
+    # open records naming each other anchor on each other and reach nothing.
+    def _reaches_task(agent_id: str) -> bool:
+        visited: set[str] = set()
+        current: str | None = agent_id
+        while current is not None:
+            if current in visited or current not in placed:
+                return False
+            visited.add(current)
+            current = placed[current]
+        return True
+
+    return {agent_id: anchor for agent_id, anchor in placed.items()
+            if _reaches_task(agent_id)}
+
+
+async def _task_agents(task_id: str,
+                       sessions: list[str]) -> list[dict[str, Any]]:
+    """Every record of this task's work: the chief's delegates and the
+    children harnesses reported from the task's own conversations.
+
+    The task is resolved when the record is read, not when it is written: a
+    harness knows its conversation and nothing about the ledger, so a
+    reported child belongs to whichever task its session is paired with now.
+    """
+    rows = list(await staff.agents(task_id=task_id))
+    for session_id in sessions:
+        rows.extend(await staff.agents(session_id=session_id))
+    return _unique(rows)
+
+
 def _chief_face(chief: str,
                 minds: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The chief of staff's own face, when the chief is a registered mind.
@@ -368,7 +493,6 @@ async def get_tree(*, chief: str = "Stash",
     stories = board["stories"]
     numbers = await kanban_data.backlog_numbers()
     kinds = _work_kinds(epics, features, stories)
-    agent_rows = await staff.agents()
 
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -415,28 +539,49 @@ async def get_tree(*, chief: str = "Stash",
                          for e in sub_edges)
             barrel.extend(sub_barrel)
 
-        # Sub-agents are drawn exactly as they were. A child is a brief, not
-        # a mind: it has no registry row, so no face, and its own status is
-        # not the live record a spinner is allowed to read, so no spinner
-        # either. The one thing it gains is the work-type icon every card
-        # carries.
-        for agent in (a for a in agent_rows if a["task_id"] == task["id"]):
-            if agent.get("finished_at") is not None:
-                barrel.append(_node(
-                    agent["id"], agent["brief"], "agent", status=DONE,
-                    work_kind="agent", about=agent.get("about", ""),
-                    outcome=agent.get("outcome", ""),
-                    finished_at=agent["finished_at"]))
-                continue
-            stale = staff.agent_stale(agent, now=moment,
-                                      timeout=AGENT_TIMEOUT)
+        # Sub-agents: only the ones still running, beneath the work they
+        # belong to. An ended one leaves the tree and goes nowhere - not the
+        # barrel, which holds finished tasks and stories only, so a task's
+        # many short-lived children cannot bury the work Daniel reads there
+        # (DECIDED 2026-11-14). A child has no registry row, so no face.
+        agent_rows = await _task_agents(task["id"], sessions)
+        placed = _place_agents(agent_rows)
+        # Oldest first. The layout places siblings in the order it is handed
+        # them, so newest-first would push every older child sideways each
+        # time another spawned.
+        drawn = sorted((a for a in agent_rows if a["id"] in placed),
+                       key=lambda a: (a["started_at"], a["id"]))
+        for agent in drawn:
+            # One reading of what the record says, shared with the sweep:
+            # working only while a harness's activity report is fresh, and
+            # running otherwise - which is all most harnesses can ever say,
+            # and all the chief's own delegates ever say.
+            state = staff.agent_state(agent, now=moment,
+                                      fresh_within=FRESH_WITHIN)
+            # Orphaned: a running record whose child cannot still be alive.
+            # For the chief's own delegates that is the clock, because their
+            # turn timeout is `AGENT_TIMEOUT`. A reported child runs inside
+            # some other mind's turn, which may be hours long or unbounded,
+            # so the clock cannot judge it - but a child cannot outlive its
+            # conversation, and comms deletes the session row when the
+            # conversation ends, so a reported child whose session is gone is
+            # certainly dead. Anything short of that certainty is the watch's
+            # sweep to retire, which knows what is still producing output.
+            if agent.get("brief"):
+                stale = staff.agent_stale(agent, now=moment,
+                                          timeout=AGENT_TIMEOUT)
+            else:
+                stale = agent.get("session_id") not in working["present"]
+            stale = stale and state == staff.RUNNING
             nodes.append(_node(
-                agent["id"], agent["brief"], "agent",
-                status="orphaned" if stale else "working",
-                work_kind="agent", active=False,
+                agent["id"], _agent_label(agent), "agent",
+                status="orphaned" if stale else state,
+                work_kind="agent", active=state == staff.WORKING,
+                agent_type=agent.get("agent_type", ""),
                 about=agent.get("about", ""), stale=stale,
                 started_at=agent["started_at"]))
-            edges.append({"source": task["id"], "target": agent["id"]})
+            edges.append({"source": placed[agent["id"]] or task["id"],
+                          "target": agent["id"]})
 
     root = _node(CHIEF_ID, chief, "chief", questions=len(questions),
                  work_kind="chief", active=False)

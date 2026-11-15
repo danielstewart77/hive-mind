@@ -43,6 +43,12 @@
     border-top-color:#22c55e; animation:cos-rotate .9s linear infinite;
   }
   @keyframes cos-rotate { to { transform:rotate(360deg); } }
+  /* A sub-agent known only to be unfinished: still, and never green. The
+     spinner beside it is reserved for a child a harness has reported as
+     producing work, and the difference between the two is the point. */
+  .cos-run {
+    border-radius:50%; border:2px solid #2dd4bf; background:rgba(45,212,191,0.18);
+  }
   @media (prefers-reduced-motion: reduce) {
     .cos-spin { animation-duration:3s; }
   }
@@ -287,7 +293,10 @@
     { selector: 'node[kind = "agent"]', style: {
         'background-color': '#042f2e', 'border-color': KIND_COLOR.agent,
         'shape': 'ellipse', 'width': 112, 'height': 112,
-        'font-size': '10px', 'text-max-width': '84px' } },
+        'font-size': '10px', 'text-max-width': '84px',
+        // A kind is one hyphenated word ("refute-requirements"), and a
+        // label wrapped at spaces alone would run out of the circle.
+        'text-overflow-wrap': 'anywhere' } },
     { selector: 'node[kind = "bubble"]', style: {
         'background-color': KIND_COLOR.bubble, 'color': '#3b2708',
         'shape': 'ellipse', 'width': 34, 'height': 34,
@@ -299,6 +308,11 @@
         'border-color': ACTIVITY_BORDER.stopped } },
     { selector: 'node[activity = "unassigned"]', style: {
         'border-color': ACTIVITY_BORDER.unassigned } },
+    // A sub-agent's working state is said by its spinner alone, never by
+    // its border. A stale payload takes the spinners off; a green border
+    // would stay behind and go on claiming activity nobody reported.
+    { selector: 'node[kind = "agent"][activity = "working"]', style: {
+        'border-color': KIND_COLOR.agent } },
     { selector: 'node[activity = "orphaned"]', style: {
         'border-color': ACTIVITY_BORDER.orphaned,
         'border-style': 'dashed' } },
@@ -431,7 +445,7 @@
     return cy.nodes().map(function (n) {
       var d = n.data();
       return [d.id, d.kind, d.workKind, d.faceId, d.faceVersion,
-              d.active ? 1 : 0].join(':');
+              d.active ? 1 : 0, d.activity].join(':');
     }).join('|');
   }
 
@@ -476,6 +490,12 @@
         entry.spin = document.createElement('span');
         entry.spin.className = 'cos-spin';
         deco.appendChild(entry.spin);
+      } else if (d.kind === 'agent' && d.activity === 'running') {
+        // Sits where the spinner would, so the two states read side by side.
+        entry.spin = document.createElement('span');
+        entry.spin.className = 'cos-run';
+        entry.still = true;
+        deco.appendChild(entry.spin);
       }
 
       decoFor[d.id] = entry;
@@ -516,7 +536,8 @@
       if (entry.spin) {
         // A stale or failed load knows nothing about what is running, so the
         // spinner goes rather than carrying on over a frozen tree.
-        var show = spinnersOn && !hidden;
+        // The still marker claims nothing, so it stays on a stale page.
+        var show = (entry.still || spinnersOn) && !hidden;
         entry.spin.style.display = show ? '' : 'none';
         if (show) {
           var ss = Math.max(8, Math.min(16, 12 * zoom));
@@ -567,7 +588,11 @@
       : '<p class="cos-empty">Nothing yet.</p>';
 
     var live = data.nodes.filter(function (n) { return n.kind === 'task'; });
-    var agents = data.nodes.filter(function (n) { return n.kind === 'agent'; });
+    // Delegates still running. An orphaned card is drawn so its death is
+    // visible, but it is not somebody working.
+    var agents = data.nodes.filter(function (n) {
+      return n.kind === 'agent' && n.status !== 'orphaned';
+    });
     document.getElementById('cos-tasks').textContent = live.length;
     document.getElementById('cos-agents').textContent = agents.length;
     document.getElementById('cos-asks-n').textContent = data.questions.length;
