@@ -381,6 +381,11 @@ class CreateSessionRequest(BaseModel):
     surface_prompt: str | None = None
     allowed_directories: list[str] | None = None
     mind_id: str
+    # A label for the conversation, set as it is created rather than by a
+    # second call that can be skipped or lost. Both are guarded by the rename
+    # credential — see the route.
+    name: str | None = None
+    color: str | None = None
 
 
 class ImageAttachment(BaseModel):
@@ -589,6 +594,34 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
+    # Naming is its own small capability and stays that way on the way in.
+    # `require_rename_bearer` guards `PUT .../name` precisely so that
+    # `COMMS_BEARER_TOKEN` — held by every surface bot and every mind
+    # container on this hive, the ones on the kids' machines included —
+    # cannot put a label on a conversation. Owning the mind has never been
+    # enough for that, and it is not enough here either: `core.bind_surface`
+    # replaces whatever binding a `client_ref` already had, so a create may
+    # repoint an existing chat at a conversation of the caller's own — and a
+    # name and colour on that row are exactly the disguise the token exists
+    # to deny. Checked only when a label was actually sent, so the creates
+    # that have never carried one are guarded exactly as they were. The admin
+    # token is accepted the ordinary way, so an operator and the chief of
+    # staff need no second secret.
+    if body.name is not None or body.color is not None:
+        require_rename_bearer(
+            x_rename_token=request.headers.get("x-rename-token", ""),
+            authorization=request.headers.get("authorization", ""),
+        )
+    # The colour is checked here, where this route can answer 400 for that
+    # case alone. A blanket `except ValueError` below would also turn the
+    # refusals already raised in `create_session` — no model, a harness that
+    # is not available, a mind deregistered mid-create — into 400s, which is
+    # a different route answering differently for everything but the value
+    # the caller actually got wrong.
+    try:
+        sessions.validated_color(body.color)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     try:
         session = await session_mgr.create_session(
             surface=body.surface,
@@ -598,6 +631,8 @@ async def create_session(body: CreateSessionRequest, request: Request):
             surface_prompt=body.surface_prompt,
             allowed_directories=body.allowed_directories,
             mind_id=body.mind_id,
+            name=body.name,
+            color=body.color,
         )
         return session
     except ConnectionError:
