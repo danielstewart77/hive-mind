@@ -131,17 +131,6 @@ async def test_the_same_board_item_under_two_tasks_is_drawn_once():
 # ----------------------------------------------------------- the barrel
 
 
-async def test_a_finished_task_leaves_the_tree_for_the_barrel():
-    """Daniel's instruction: the child disappears and goes to the right."""
-    done = await _task("Shipped", status="done")
-    live = await _task("Still going")
-
-    tree = await cos.get_tree(now=NOW)
-
-    assert _ids(tree["nodes"], "task") == [live["id"]]
-    assert _ids(tree["barrel"]) == [done["id"]]
-
-
 async def test_a_finished_story_leaves_the_tree_for_the_barrel():
     epic = await kanban_data.create_epic("Chief of Staff")
     feature = await kanban_data.create_feature(epic["id"], "Visualization")
@@ -157,9 +146,11 @@ async def test_a_finished_story_leaves_the_tree_for_the_barrel():
     assert _ids(tree["barrel"], "story") == [shipped["id"]]
 
 
-async def test_a_feature_whose_every_story_is_done_leaves_the_tree():
+async def test_a_feature_whose_every_story_is_done_leaves_its_stories_in_the_barrel():
     """Only a story carries a status, so a finished feature is one with
-    nothing left under it, and it is not a place to hang live children."""
+    nothing left under it, and it is not a place to hang live children. The
+    barrel holds finished stories only (2026-11-15), so they go and it does
+    not."""
     epic = await kanban_data.create_epic("Chief of Staff")
     feature = await kanban_data.create_feature(epic["id"], "Done one")
     story = await kanban_data.create_story("Under it",
@@ -170,7 +161,8 @@ async def test_a_feature_whose_every_story_is_done_leaves_the_tree():
     tree = await cos.get_tree(now=NOW)
 
     assert _ids(tree["nodes"], "story") == []
-    assert _ids(tree["barrel"], "feature") == [feature["id"]]
+    assert _ids(tree["nodes"], "feature") == []
+    assert _ids(tree["barrel"]) == [story["id"]]
 
 
 async def test_a_feature_with_one_story_left_stays_in_the_tree():
@@ -853,3 +845,253 @@ async def test_a_long_reported_child_in_a_live_conversation_is_still_running():
                   child["id"])
 
     assert node["status"] == "running"
+
+
+# ----------------------------------------------- one chain (2026-11-15)
+#
+# Protected behaviour b: work under the same epic and feature is drawn as one
+# chain - the feature, its stories beneath it, each story's sub-agents
+# beneath that story - and nothing in a chain is drawn beside its parent.
+
+
+def _parents(tree, node_id):
+    return [e["source"] for e in tree["edges"] if e["target"] == node_id]
+
+
+async def test_a_story_task_hangs_beneath_the_task_covering_its_feature():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    feature_task = await _task("The feature", board_item=feature["id"])
+    story_task = await _paired_task("sess-rep", name="The robot")
+    await staff.update_task(story_task["id"], board_item=story["id"], now=NOW)
+    child = await _reported("a1")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _parents(tree, feature_task["id"]) == [cos.CHIEF_ID]
+    assert _parents(tree, story_task["id"]) == [feature_task["id"]]
+    assert _parents(tree, child["id"]) == [story_task["id"]]
+    # The story is drawn once, as the task working it.
+    assert story["id"] not in _ids(tree["nodes"])
+
+
+async def test_a_story_task_alone_hangs_beneath_its_feature_drawn_from_the_board():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    await kanban_data.create_story("Nobody on it", feature_id=feature["id"])
+    story_task = await _task("The robot", board_item=story["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _ids(tree["nodes"], "feature") == [feature["id"]]
+    assert _by_id(tree, feature["id"])["work_kind"] == "feature"
+    assert _parents(tree, feature["id"]) == [cos.CHIEF_ID]
+    assert _parents(tree, story_task["id"]) == [feature["id"]]
+    # A heading for the live work, not a second copy of the board.
+    assert [e["target"] for e in tree["edges"]
+            if e["source"] == feature["id"]] == [story_task["id"]]
+
+
+async def test_a_feature_task_beneath_an_epic_task_takes_the_feature_s_place():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    epic_task = await _task("The epic", board_item=epic["id"])
+    feature_task = await _task("The feature", board_item=feature["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert feature["id"] not in _ids(tree["nodes"])
+    assert _parents(tree, feature_task["id"]) == [epic_task["id"]]
+    assert _parents(tree, story["id"]) == [feature_task["id"]]
+
+
+async def test_work_under_an_epic_task_hangs_beneath_it_when_its_feature_is_not_drawn():
+    """A feature whose stories are all done is not drawn by its epic's
+    expansion, so a live task on it, or on one of its stories, still needs
+    the epic's task above it - as does a story sitting straight on the
+    epic."""
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "All done")
+    story = await kanban_data.create_story("Reopened",
+                                           feature_id=feature["id"])
+    await kanban_data.update_story(story["id"], status="done")
+    other = await kanban_data.create_feature(epic["id"], "Also done")
+    under_other = await kanban_data.create_story("Shipped",
+                                                 feature_id=other["id"])
+    await kanban_data.update_story(under_other["id"], status="done")
+    loose = await kanban_data.create_story("On the epic", epic_id=epic["id"])
+    epic_task = await _task("The epic", board_item=epic["id"])
+    story_task = await _task("Reopened", board_item=story["id"])
+    feature_task = await _task("Also done", board_item=other["id"])
+    loose_task = await _task("On the epic", board_item=loose["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _parents(tree, feature["id"]) == [epic_task["id"]]
+    assert _parents(tree, story_task["id"]) == [feature["id"]]
+    assert _parents(tree, feature_task["id"]) == [epic_task["id"]]
+    assert _parents(tree, loose_task["id"]) == [epic_task["id"]]
+
+
+async def test_a_second_task_on_a_story_hangs_beside_the_first():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    feature_task = await _task("The feature", board_item=feature["id"])
+    await _task("Building the robot", board_item=story["id"])
+    second = await staff.create_task("A question about the robot",
+                                     "in progress", now=NOW + 5)
+    await staff.update_task(second["id"], board_item=story["id"], now=NOW + 5)
+
+    tree = await cos.get_tree(now=NOW + 6)
+
+    assert _parents(tree, second["id"]) == [feature_task["id"]]
+
+
+# ---------------------------------------- the barrel's one kind (2026-11-15)
+#
+# Protected behaviour c: the barrel holds only finished stories, never an
+# agent, a task or anything else.
+
+
+async def test_the_barrel_holds_finished_stories_and_nothing_else():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    finished = await kanban_data.create_feature(epic["id"], "All done")
+    under_finished = await kanban_data.create_story(
+        "Shipped first", feature_id=finished["id"])
+    await kanban_data.update_story(under_finished["id"], status="done")
+    going = await kanban_data.create_feature(epic["id"], "Half done")
+    shipped = await kanban_data.create_story("Shipped",
+                                             feature_id=going["id"])
+    await kanban_data.update_story(shipped["id"], status="done")
+    await kanban_data.create_story("Left", feature_id=going["id"])
+    elsewhere = await kanban_data.create_feature(epic["id"], "Elsewhere")
+    by_a_task = await kanban_data.create_story("Closed by its task",
+                                               feature_id=elsewhere["id"])
+    await kanban_data.update_story(by_a_task["id"], status="done")
+
+    epic_task = await _task("The epic", board_item=epic["id"])
+    await _task("A plain finished task", status="done")
+    await _task("Its story's task", status="done", board_item=by_a_task["id"])
+    # Under an epic nobody is watching, so nothing but its task reaches it.
+    unwatched = await kanban_data.create_epic("Unwatched")
+    aside = await kanban_data.create_feature(unwatched["id"], "Aside")
+    still_open = await kanban_data.create_story("Closed early",
+                                                feature_id=aside["id"])
+    await _task("Closed before its story", status="done",
+                board_item=still_open["id"])
+    delegate = await staff.start_agent(epic_task["id"], "chase.md", now=NOW)
+    await staff.finish_agent(delegate["id"], now=NOW + 1)
+
+    tree = await cos.get_tree(now=NOW + 2)
+
+    assert sorted(_ids(tree["barrel"])) == sorted(
+        [under_finished["id"], shipped["id"], by_a_task["id"]])
+    assert {row["kind"] for row in tree["barrel"]} == {"story"}
+
+
+async def test_a_live_task_on_a_story_the_board_marks_done_stays_live_work():
+    """The ledger is the authority on whether a task is over."""
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    await kanban_data.update_story(story["id"], status="done")
+    feature_task = await _task("The feature", board_item=feature["id"])
+    story_task = await _task("The robot", board_item=story["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _ids(tree["barrel"]) == []
+    assert _parents(tree, story_task["id"]) == [feature_task["id"]]
+
+
+# ------------------------------- a story working through its child (2026-11-15)
+#
+# Protected behaviour a: a story with a working sub-agent beneath it shows as
+# working, and a working sub-agent shows its spinner.
+
+
+async def _story_task_with_a_child():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    await _task("The feature", board_item=feature["id"])
+    story_task = await _paired_task("sess-rep", name="The robot")
+    await staff.update_task(story_task["id"], board_item=story["id"], now=NOW)
+    # The watch saw the story's own conversation stop, so whatever spins it
+    # is its child and not itself.
+    await staff.note_stopped(story_task["id"], now=NOW)
+    await _reported("p1")
+    child = await _reported("c1", parent="p1")
+    return story_task, child
+
+
+async def test_a_story_with_a_working_child_beneath_it_is_working():
+    story_task, child = await _story_task_with_a_child()
+    await _reported("c1", "working", parent="p1", now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 11)
+
+    # Lent to the story only: a feature's state is its stories'.
+    feature_task = _parents(tree, story_task["id"])[0]
+    assert _by_id(tree, feature_task)["active"] is False
+    assert _by_id(tree, child["id"])["active"] is True
+    assert _by_id(tree, story_task["id"])["active"] is True
+
+
+async def test_a_story_whose_child_only_runs_shows_what_it_showed_before():
+    story_task, child = await _story_task_with_a_child()
+    await _reported("c1", "working", parent="p1", now=NOW + 10)
+
+    aged = await cos.get_tree(now=NOW + 10 + cos.FRESH_WITHIN + 1)
+
+    assert _by_id(aged, child["id"])["active"] is False
+    assert _by_id(aged, story_task["id"])["active"] is False
+
+
+async def test_the_task_opened_first_holds_the_chain_whichever_moved_last():
+    """Two tasks on one feature: the chain must not jump between them each
+    time the watch touches one."""
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    first = await staff.create_task("The work", "in progress", now=NOW)
+    await staff.update_task(first["id"], board_item=feature["id"], now=NOW)
+    second = await staff.create_task("A question", "in progress", now=NOW + 5)
+    await staff.update_task(second["id"], board_item=feature["id"],
+                            now=NOW + 5)
+    await staff.note_stopped(second["id"], now=NOW + 10)
+    await staff.update_task(second["id"], name="A question, moved", now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 11)
+
+    assert _parents(tree, story["id"]) == [first["id"]]
+    assert _parents(tree, second["id"]) == [cos.CHIEF_ID]
+
+
+async def test_a_story_two_tasks_are_on_works_on_both_when_one_has_a_working_child():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The robot",
+                                           feature_id=feature["id"])
+    watching = await _task("Watching the robot", board_item=story["id"])
+    working = await _paired_task("sess-rep", name="Building the robot")
+    await staff.update_task(working["id"], board_item=story["id"], now=NOW)
+    await staff.note_stopped(working["id"], now=NOW)
+    await _reported("c1")
+    await _reported("c1", "working", now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 11)
+
+    assert _by_id(tree, watching["id"])["active"] is True
+    assert _by_id(tree, working["id"])["active"] is True

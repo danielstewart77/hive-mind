@@ -204,14 +204,16 @@
   // The work-type glyph each card wears in its upper-left. Inline rather
   // than fetched so a card is never briefly typeless, and sized here
   // because an SVG with no width and height draws nothing in Firefox.
+  // A crown for an epic, a trophy for a feature, an open book for a story
+  // (Daniel, 2026-11-15). The chief has none: his node is his own face.
+  // A sub-agent's robot is not a corner glyph but the whole node.
   var KIND_ICON = {
-    epic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>',
-    feature: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 7v10"/><path d="M13 7v6"/><path d="M18 7v3"/></svg>',
-    story: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v5h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>',
+    epic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18 5 7l4 4 3-6 3 6 4-4 2 11Z"/><path d="M4 21h16"/></svg>',
+    feature: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M7 6H4a3 3 0 0 0 3 4"/><path d="M17 6h3a3 3 0 0 1-3 4"/></svg>',
+    story: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5h6a4 4 0 0 1 4 4v11a3 3 0 0 0-3-3H2Z"/><path d="M22 5h-6a4 4 0 0 0-4 4v11a3 3 0 0 1 3-3h7Z"/></svg>',
     bug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v3a4 4 0 0 0 8 0V2"/><rect x="6" y="7" width="12" height="12" rx="6"/><path d="M3 11h3"/><path d="M18 11h3"/><path d="M4 17h3"/><path d="M17 17h3"/></svg>',
     task: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>',
-    agent: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 4v4"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>',
-    chief: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18 5 7l4 4 3-6 3 6 4-4 2 11Z"/><path d="M4 21h16"/></svg>'
+    agent: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 4v4"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>'
   };
 
   // Quotes included. The site-wide helper escapes them and this page's own
@@ -248,23 +250,78 @@
         detail: n.about || n.description || ''
       } });
     });
+    var lifts = liftedAgents(data);
     data.edges.forEach(function (e) {
+      var depth = lifts[e.source + '>' + e.target] || 0;
+      // Drawn straight from the parent to its child, but kept out of the
+      // layout when the child is lifted: the spacer chain beside it is what
+      // gives the child its row.
       out.push({ data: { id: 'e:' + e.source + ':' + e.target,
-                         source: e.source, target: e.target, rel: 'tree' } });
+                         source: e.source, target: e.target,
+                         rel: depth ? 'lifted' : 'tree' } });
+      if (!depth) return;
+      var prev = e.source;
+      for (var i = 1; i <= depth; i++) {
+        var sp = 'sp:' + e.source + ':' + i;
+        if (!out.some(function (o) { return o.data.id === sp; })) {
+          out.push({ data: { id: sp, label: '', kind: 'spacer', activity: '',
+                             workKind: '', active: false, faceId: '',
+                             faceInitial: '', faceVersion: 0, detail: '' } });
+          out.push({ data: { id: 'e:' + prev + ':' + sp, source: prev,
+                             target: sp, rel: 'spacer' } });
+        }
+        prev = sp;
+      }
+      out.push({ data: { id: 'e:' + prev + ':' + e.target + ':lift',
+                         source: prev, target: e.target, rel: 'spacer',
+                         last: true } });
     });
-    // One bubble per question, hanging off the node that holds it and tied
-    // back to the chief, because the thing Daniel reads off this page is
-    // that an answer is owed and which work stops without it.
+    // One bubble per question, beside the node that holds it and tied back
+    // to the chief, because the thing Daniel reads off this page is that an
+    // answer is owed and which work stops without it. It takes no rank in
+    // the tree: it is placed to the right of its node once the tree is laid
+    // out (Daniel, 2026-11-15), so it is joined to the chief only.
     data.questions.forEach(function (q) {
       var id = 'q:' + q.task;
       out.push({ data: { id: id, label: '?', kind: 'bubble',
                          activity: 'question', workKind: '', active: false,
                          faceId: '', faceInitial: '', faceVersion: 0,
-                         detail: q.question } });
-      out.push({ data: { id: 'e:' + id, source: q.task, target: id,
-                         rel: 'asks' } });
+                         owner: q.task, detail: q.question } });
       out.push({ data: { id: 'e:up:' + id, source: id, target: 'chief',
                          rel: 'bubble' } });
+    });
+    return out;
+  }
+
+  // Which sub-agents are lifted off their parent's row, and by how many
+  // rows. A task covering a whole feature or epic has sub-agents of its own
+  // that belong to no one story, and hung straight beneath it they would sit
+  // on the same row as its stories - the side-by-side drawing Daniel asked
+  // to be rid of (2026-11-15). Each is lifted to the row below the deepest
+  // work beneath that parent, so reading down a chain passes feature, then
+  // story, then agent. Keyed 'parent>child'.
+  function liftedAgents(data) {
+    var kindOf = {};
+    data.nodes.forEach(function (n) { kindOf[n.id] = n.kind; });
+    var kids = {};
+    data.edges.forEach(function (e) {
+      (kids[e.source] = kids[e.source] || []).push(e.target);
+    });
+    function height(id, seen) {
+      if (seen[id]) return 0;
+      seen[id] = true;
+      var best = 0;
+      (kids[id] || []).forEach(function (c) {
+        if (kindOf[c] === 'agent') return;
+        best = Math.max(best, 1 + height(c, seen));
+      });
+      return best;
+    }
+    var out = {};
+    data.edges.forEach(function (e) {
+      if (kindOf[e.target] !== 'agent' || kindOf[e.source] === 'agent') return;
+      var h = height(e.source, {});
+      if (h > 0) out[e.source + '>' + e.target] = h;
     });
     return out;
   }
@@ -273,15 +330,22 @@
     { selector: 'node', style: {
         'label': 'data(label)', 'color': '#e2e8f0', 'font-size': '11px',
         'text-valign': 'center', 'text-halign': 'center',
-        'text-wrap': 'wrap', 'text-max-width': '116px',
+        'text-wrap': 'wrap', 'text-max-width': '100px',
         'shape': 'round-rectangle', 'width': 174, 'height': 62,
         'padding': '6px', 'background-color': '#1e293b',
         'border-width': 2, 'border-color': '#334155'
     } },
+    // A plain circle that Stash's own face fills, with nothing else on it:
+    // no card, no crown (Daniel, 2026-11-15). His name and the count of
+    // answers owed sit beneath it, because the count is what the page is
+    // read for and a circle filled by a face has no room for it.
     { selector: 'node[kind = "chief"]', style: {
-        'background-color': KIND_COLOR.chief, 'color': '#06202e',
+        'shape': 'ellipse', 'width': 96, 'height': 96,
+        'background-color': '#0b1220', 'border-color': KIND_COLOR.chief,
+        'border-width': 3, 'color': '#e2e8f0',
         'font-size': '14px', 'font-weight': 'bold',
-        'width': 224, 'height': 72, 'border-color': KIND_COLOR.chief } },
+        'text-valign': 'bottom', 'text-margin-y': 8,
+        'text-max-width': '200px' } },
     { selector: 'node[kind = "task"]', style: {
         'background-color': '#1e1b4b', 'border-color': KIND_COLOR.task } },
     { selector: 'node[kind = "feature"]', style: {
@@ -290,13 +354,20 @@
         'background-color': '#111827', 'border-color': KIND_COLOR.story,
         'width': 156, 'height': 50, 'font-size': '10px',
         'text-max-width': '104px' } },
+    // A sub-agent is its robot and nothing else: no circle, no card, no
+    // face (Daniel, 2026-11-15). The node is only the robot's footprint,
+    // drawn by the decoration layer, and its few words sit beneath it the
+    // way a session name sits beneath a card's own name.
     { selector: 'node[kind = "agent"]', style: {
-        'background-color': '#042f2e', 'border-color': KIND_COLOR.agent,
-        'shape': 'ellipse', 'width': 112, 'height': 112,
-        'font-size': '10px', 'text-max-width': '84px',
-        // A kind is one hyphenated word ("refute-requirements"), and a
-        // label wrapped at spaces alone would run out of the circle.
-        'text-overflow-wrap': 'anywhere' } },
+        'shape': 'round-rectangle', 'width': 40, 'height': 40,
+        'background-opacity': 0, 'border-width': 0,
+        'color': '#99f6e4', 'font-size': '10px',
+        'text-valign': 'bottom', 'text-margin-y': 4,
+        'text-max-width': '130px', 'text-overflow-wrap': 'anywhere' } },
+    // What lifts a whole feature's own sub-agents onto the row below its
+    // stories. Takes up a rank in the layout and nothing on the screen.
+    { selector: 'node[kind = "spacer"]', style: {
+        'width': 1, 'height': 1, 'opacity': 0, 'events': 'no', 'label': '' } },
     { selector: 'node[kind = "bubble"]', style: {
         'background-color': KIND_COLOR.bubble, 'color': '#3b2708',
         'shape': 'ellipse', 'width': 34, 'height': 34,
@@ -316,14 +387,22 @@
     { selector: 'node[activity = "orphaned"]', style: {
         'border-color': ACTIVITY_BORDER.orphaned,
         'border-style': 'dashed' } },
+    { selector: 'node[kind = "agent"][activity = "orphaned"]', style: {
+        'border-width': 2 } },
     { selector: 'edge', style: {
         'width': 1.6, 'line-color': 'rgba(129,140,248,0.45)',
         'target-arrow-color': 'rgba(129,140,248,0.55)',
         'target-arrow-shape': 'triangle', 'curve-style': 'taxi',
         'taxi-direction': 'downward' } },
-    { selector: 'edge[rel = "asks"]', style: {
-        'line-color': 'rgba(251,191,36,0.6)', 'target-arrow-shape': 'none',
-        'curve-style': 'bezier' } },
+    // The line to a lifted child runs through its spacers, which have a
+    // column of their own, so it never crosses the cards on the row it
+    // passes. The direct edge is kept for the data and not drawn.
+    { selector: 'edge[rel = "spacer"]', style: {
+        'target-arrow-shape': 'none', 'events': 'no' } },
+    { selector: 'edge[rel = "spacer"][?last]', style: {
+        'target-arrow-shape': 'triangle' } },
+    { selector: 'edge[rel = "lifted"]', style: {
+        'opacity': 0, 'events': 'no' } },
     // The bubble's own rise to the chief: dashed, arrowless and behind
     // everything, so it reads as a thing floating up rather than as
     // another line of command.
@@ -334,8 +413,115 @@
         'z-index': 0 } }
   ];
 
-  var LAYOUT = { name: 'breadthfirst', directed: true, roots: ['chief'],
-                 padding: 24, spacingFactor: 1.15, animate: false };
+  // Gaps between siblings and between rows, in model pixels.
+  var COLUMN_GAP = 28;
+  var ROW_GAP = 70;
+
+  // A tidy tree rather than Cytoscape's breadthfirst. Breadthfirst spreads
+  // each row on its own, so a story's sub-agents land wherever their row
+  // has room - under some other story, or under another chain altogether -
+  // and the chain Daniel asked for (2026-11-15) is there in the lines but
+  // not in the drawing. Here every node sits centred over the children it
+  // has, each subtree in its own band, so reading straight down a chain
+  // passes feature, then story, then agent. Rows are as deep as their
+  // deepest node. Bubbles take no part; the drawn edge of a lifted child
+  // takes no part either, its spacers do.
+  function runLayout() {
+    var kids = {};
+    var hasParent = {};
+    cy.edges().forEach(function (e) {
+      var rel = e.data('rel');
+      if (rel === 'bubble' || rel === 'lifted') return;
+      var src = e.data('source'), dst = e.data('target');
+      if (hasParent[dst]) return;
+      hasParent[dst] = true;
+      (kids[src] = kids[src] || []).push(dst);
+    });
+    var nodes = cy.nodes().filter(function (n) {
+      return n.data('kind') !== 'bubble';
+    });
+    // A node holding a question gets the room its bubble needs beside it,
+    // so the bubble never lands on the next card along.
+    var asks = {};
+    cy.nodes('[kind = "bubble"]').forEach(function (b) {
+      asks[b.data('owner')] = 2 * (b.outerWidth() + 6);
+    });
+    var widthOf = {};
+    var depthOf = {};
+    var seen = {};
+    function measure(id, depth) {
+      if (seen[id]) return 0;
+      seen[id] = true;
+      depthOf[id] = depth;
+      var own = cy.getElementById(id).outerWidth() + COLUMN_GAP +
+                (asks[id] || 0);
+      var sum = 0;
+      (kids[id] || []).forEach(function (c) { sum += measure(c, depth + 1); });
+      widthOf[id] = Math.max(own, sum);
+      return widthOf[id];
+    }
+    var roots = ['chief'];
+    nodes.forEach(function (n) {
+      if (n.id() !== 'chief' && !hasParent[n.id()]) roots.push(n.id());
+    });
+    roots.forEach(function (r) { if (cy.getElementById(r).length) measure(r, 0); });
+    var rowHeight = {};
+    nodes.forEach(function (n) {
+      var d = depthOf[n.id()] || 0;
+      rowHeight[d] = Math.max(rowHeight[d] || 0, n.outerHeight());
+    });
+    var rowTop = {};
+    var y = 0;
+    for (var d = 0; rowHeight[d] !== undefined; d++) {
+      rowTop[d] = y;
+      y += rowHeight[d] + ROW_GAP;
+    }
+    var at = {};
+    var placed = {};
+    function put(id, left) {
+      if (placed[id]) return;
+      placed[id] = true;
+      var d = depthOf[id] || 0;
+      at[id] = { x: left + widthOf[id] / 2, y: rowTop[d] + rowHeight[d] / 2 };
+      var children = kids[id] || [];
+      var sum = 0;
+      children.forEach(function (c) { sum += widthOf[c] || 0; });
+      var x = left + (widthOf[id] - sum) / 2;
+      children.forEach(function (c) { put(c, x); x += widthOf[c] || 0; });
+    }
+    var left = 0;
+    roots.forEach(function (r) {
+      if (widthOf[r] === undefined) return;
+      put(r, left);
+      left += widthOf[r];
+    });
+    cy.batch(function () {
+      nodes.forEach(function (n) { if (at[n.id()]) n.position(at[n.id()]); });
+    });
+    placeBubbles();
+  }
+
+  // Each bubble to the right of the node it belongs to, level with it, and
+  // again whenever that node moves - a dragged card takes its question with
+  // it rather than leaving it hanging where the layout put it.
+  var placingBubbles = false;
+  function placeBubbles() {
+    if (cy === null || placingBubbles) return;
+    placingBubbles = true;
+    try {
+      cy.nodes('[kind = "bubble"]').forEach(function (b) {
+        var owner = cy.getElementById(b.data('owner'));
+        if (!owner.length) return;
+        var at = owner.position();
+        // Clear of the card: its drawn width includes padding and border,
+        // which `width()` leaves out.
+        b.position({ x: at.x + owner.outerWidth() / 2 + 6 +
+                        b.outerWidth() / 2, y: at.y });
+      });
+    } finally {
+      placingBubbles = false;
+    }
+  }
 
   var cy = null;
   var lastGoodAt = 0;
@@ -358,12 +544,14 @@
     if (cy === null) {
       cy = cytoscape({
         container: document.getElementById('cos-cy'),
-        elements: els, style: STYLE, layout: LAYOUT,
+        elements: els, style: STYLE, layout: { name: 'preset' },
         minZoom: 0.15, maxZoom: 3,
         userZoomingEnabled: true, userPanningEnabled: true
       });
       shape = next;
+      runLayout();
       openReadably();
+      cy.on('position', 'node[kind != "bubble"]', placeBubbles);
       cy.on('render', paintDeco);
       cy.on('position', paintDeco);
       cy.on('tap', 'node', function (evt) {
@@ -390,7 +578,7 @@
       cy.add(els);
     });
     shape = next;
-    cy.layout(LAYOUT).run();
+    runLayout();
     // The shape changed, so the old view may point at nothing — but it is
     // still the view he chose, so it is restored rather than refitted.
     cy.zoom(zoom);
@@ -456,7 +644,7 @@
     decoFor = {};
     cy.nodes().forEach(function (node) {
       var d = node.data();
-      if (d.kind === 'bubble') return;
+      if (d.kind === 'bubble' || d.kind === 'spacer') return;
       var entry = { node: node };
 
       var icon = KIND_ICON[d.workKind];
@@ -469,6 +657,16 @@
         deco.appendChild(entry.kind);
       }
 
+      if (!d.faceId && d.kind === 'chief') {
+        // A chief who is not a registered mind has no face to fetch; his
+        // circle still says who he is rather than standing empty.
+        entry.face = document.createElement('span');
+        entry.face.className = 'cos-face';
+        var only = document.createElement('span');
+        only.textContent = (d.label || '?').trim().charAt(0).toUpperCase();
+        entry.face.appendChild(only);
+        deco.appendChild(entry.face);
+      }
       if (d.faceId) {
         entry.face = document.createElement('span');
         entry.face.className = 'cos-face';
@@ -518,17 +716,27 @@
       var box = entry.node.renderedBoundingBox({ includeLabels: false });
       var w = box.x2 - box.x1;
       var hidden = w <= 0;
+      var kind = entry.node.data('kind');
       if (entry.kind) {
         entry.kind.style.display = hidden ? 'none' : '';
-        if (!hidden) {
+        if (!hidden && kind === 'agent') {
+          // The robot is the node.
+          place(entry.kind, box.x1, box.y1, w);
+          entry.kind.style.padding = (w * 0.1) + 'px';
+        } else if (!hidden) {
           place(entry.kind, box.x1 + inset, box.y1 + inset, size);
           entry.kind.style.padding = (size * 0.12) + 'px';
         }
       }
       if (entry.face) {
-        var fs = size * 1.35;
+        // Half again as large as the corner face used to be (Daniel,
+        // 2026-11-15); the chief's fills his whole circle.
+        var fs = kind === 'chief' ? w : size * 1.35 * 1.5;
         entry.face.style.display = hidden ? 'none' : '';
-        if (!hidden) {
+        if (!hidden && kind === 'chief') {
+          place(entry.face, box.x1, box.y1, fs);
+          entry.face.style.fontSize = (fs * 0.45) + 'px';
+        } else if (!hidden) {
           place(entry.face, box.x2 - inset - fs, box.y1 + inset, fs);
           entry.face.style.fontSize = (fs * 0.6) + 'px';
         }
@@ -541,7 +749,12 @@
         entry.spin.style.display = show ? '' : 'none';
         if (show) {
           var ss = Math.max(8, Math.min(16, 12 * zoom));
-          place(entry.spin, box.x1 + w / 2 - ss / 2, box.y2 - inset - ss, ss);
+          if (kind === 'agent') {
+            // Against the robot's lower right, clear of the words beneath.
+            place(entry.spin, box.x2 - ss * 0.6, box.y2 - ss * 0.9, ss);
+          } else {
+            place(entry.spin, box.x1 + w / 2 - ss / 2, box.y2 - inset - ss, ss);
+          }
           entry.spin.style.borderWidth = Math.max(1.5, ss * 0.16) + 'px';
         }
       }
@@ -598,7 +811,16 @@
     document.getElementById('cos-asks-n').textContent = data.questions.length;
     document.getElementById('cos-done').textContent = data.barrel.length;
     document.getElementById('cos-done-n').textContent = data.barrel.length;
-    var total = live.length + data.barrel.length;
+    // The barrel holds finished stories only, so the bar is stories over
+    // stories: finished ones against every story on the page.
+    // One story counts once, however many tasks are on it.
+    var liveStories = {};
+    data.nodes.forEach(function (n) {
+      if (n.work_kind === 'story' || n.work_kind === 'bug') {
+        liveStories[n.board_item || n.id] = true;
+      }
+    });
+    var total = Object.keys(liveStories).length + data.barrel.length;
     var pct = total ? Math.round((data.barrel.length / total) * 100) : 0;
     document.getElementById('cos-progress').style.width = pct + '%';
     document.getElementById('cos-pct').textContent = pct + '%';
