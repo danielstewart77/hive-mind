@@ -207,6 +207,56 @@ async def list_credentials(*, unit: Unit | None = None) -> list[Row]:
 
 
 # ---------------------------------------------------------------------------
+# surface accounts: which person a Telegram or Discord account is
+# ---------------------------------------------------------------------------
+
+async def surface_account(surface: str, account_ref: str, *,
+                          unit: Unit | None = None) -> Row | None:
+    """The link for one account on one surface, or None if it is nobody's."""
+    return await _fetch_one(
+        unit,
+        f'SELECT {select_list("surface_accounts")} '
+        'FROM core."surface_accounts" '
+        'WHERE "surface" = $1 AND "account_ref" = $2',
+        surface, account_ref)
+
+
+async def link_surface_account(
+    *, surface: str, account_ref: str, username: str, linked_at: float,
+    unit: Unit | None = None,
+) -> Row:
+    """Record an account against a person, and hand back whose it now is.
+
+    Inserted, never overwritten: an account already linked keeps the person
+    it was linked to, and the row returned says who that is. The caller
+    compares it with the person it asked for, which is the only way two
+    people racing to link one account can both learn the truth - an upsert
+    would tell each of them they had won.
+    """
+    await _execute(
+        unit,
+        'INSERT INTO core."surface_accounts" '
+        '("surface", "account_ref", "username", "linked_at") '
+        'VALUES ($1, $2, $3, $4) '
+        'ON CONFLICT ("surface", "account_ref") DO NOTHING',
+        surface, account_ref, username, linked_at)
+    row = await surface_account(surface, account_ref, unit=unit)
+    assert row is not None
+    return row
+
+
+async def surface_accounts_of(username: str, *,
+                              unit: Unit | None = None) -> list[Row]:
+    """Every account linked to one person, surface then account order."""
+    return await _fetch(
+        unit,
+        f'SELECT {select_list("surface_accounts")} '
+        'FROM core."surface_accounts" WHERE "username" = $1 '
+        'ORDER BY "surface", "account_ref"',
+        username)
+
+
+# ---------------------------------------------------------------------------
 # surface claims
 # ---------------------------------------------------------------------------
 

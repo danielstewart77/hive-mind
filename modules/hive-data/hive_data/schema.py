@@ -61,6 +61,9 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "mind_id", "surface", "claimed_ref", "claimed_at", "phrase_hash",
         "phrase_issued_at", "phrase_expires_at", "bot_ref", "phrase_attempts",
         "released_at"),
+    #: Which person a Telegram or Discord account is (step 11). The bare
+    #: name is `core`'s, like every other table above.
+    "surface_accounts": ("surface", "account_ref", "username", "linked_at"),
     "users": (
         "id", "username", "password_hash", "created_at", "disabled_at",
         "must_change", "email", "domain_account", "session_version"),
