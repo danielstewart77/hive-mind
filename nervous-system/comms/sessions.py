@@ -321,10 +321,14 @@ def validated_color(color: str | None) -> str | None:
     """A tile colour as the row stores it, or ``ValueError``.
 
     Exactly the rule the rename write has always applied, in one place now
-    that creation applies it too: a value that is sent and not empty must
-    match as sent, so a hex value with whitespace around it is refused rather
-    than quietly trimmed into one. An empty string is not a colour, it is the
-    absence of one — which is how a colour is cleared.
+    that creation applies it too: a value that is sent and not empty is
+    matched as sent, so `" #fff"` is refused rather than quietly trimmed into
+    a colour. Not quite every form of it — a regex `$` matches before a
+    trailing newline as well, so `"#fff\n"` is accepted and stored stripped.
+    Left as it is deliberately: it is what every colour on this hive was
+    stored by, and tightening it here would refuse a value some tile already
+    holds. An empty string is not a colour, it is the absence of one — which
+    is how a colour is cleared.
     """
     if color is None:
         return None

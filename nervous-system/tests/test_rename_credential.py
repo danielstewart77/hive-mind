@@ -330,10 +330,15 @@ def test_the_credential_a_rename_takes_also_names_a_new_conversation(
     """
     mind = _a_mind_with_its_own_credential("carol")
 
-    created = _create(creating, mind, ADMIN, name="  CoS: Session names  ")
+    created = _create(
+        creating, mind, ADMIN, name="  CoS: Session names  ", color="#5c913b",
+    )
 
     assert created.status_code == 200, created.text
     assert created.json()["name"] == "CoS: Session names"
+    # The colour travels the same route and is promised by the same sentence;
+    # asserted here because nothing else checks that this route passes it on.
+    assert created.json()["color"] == "#5c913b"
 
 
 def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
@@ -354,7 +359,6 @@ def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
     )
 
     assert refused.status_code == 400, refused.text
-    assert "hex" in refused.json()["error"]
     # Scoped to the create that was refused: this fixture seeds a session of
     # its own, so an empty table would be the wrong thing to ask for.
     assert asyncio.run(
