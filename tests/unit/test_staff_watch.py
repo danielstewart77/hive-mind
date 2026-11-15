@@ -8,6 +8,7 @@ live feed and dropping the wake into a conversation — are driven by replacing
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.util
 import io
@@ -532,3 +533,42 @@ def test_a_hive_data_with_no_sweep_ends_the_watch_by_name_before_any_pass(
     assert code == 1
     assert "behind the staff watch" in out["error"]
     assert "retire_stale_agents" in out["error"]
+
+
+def test_every_call_the_watch_makes_on_hive_data_is_one_it_checks_for(watch):
+    tree = ast.parse(Path(watch.__file__).read_text())
+    unchecked = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "staff"):
+            name = node.func.attr
+            keywords = {k.arg for k in node.keywords if k.arg}
+            if name not in watch.NEEDS or keywords - set(watch.NEEDS[name]):
+                unchecked.append(name)
+    assert unchecked == []
+
+
+def test_a_sweep_that_predates_the_live_feed_ends_the_watch_by_name(
+        watch, capsys, monkeypatch):
+    # The shape the step-10 sweep had before it asked the live feed.
+    async def retire_stale_agents(*, now=None, timeout=None, unit=None):
+        raise AssertionError("reached the library")
+
+    monkeypatch.delenv("HIVE_DATABASE_URL", raising=False)
+    monkeypatch.setattr(watch.staff, "retire_stale_agents", retire_stale_agents)
+    code = watch.main(["run"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "retire_stale_agents(alive=)" in out["error"]
+
+
+def test_a_hive_data_with_no_ledger_module_ends_the_watch_by_name(
+        watch, capsys, monkeypatch):
+    monkeypatch.delenv("HIVE_DATABASE_URL", raising=False)
+    monkeypatch.setattr(watch, "staff", None)
+    code = watch.main(["tick"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "behind the staff watch" in out["error"]
+    assert "hive_data.staff" in out["error"]

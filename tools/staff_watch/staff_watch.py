@@ -69,8 +69,12 @@ import hive_data
 
 try:
     from hive_data import staff
-except ImportError:  # a hive-data checkout with no ledger module: named below
+    _STAFF_UNIMPORTABLE = ""
+except ImportError as exc:  # a hive-data with no ledger module: named below
     staff = None
+    # Kept, because the same ImportError is also a dependency the image
+    # never installed, and "pull hive-data" does not fix that one.
+    _STAFF_UNIMPORTABLE = f" (importing it raised {exc!r})"
 
 #: Statuses that are watched and recorded but never ping anybody. `on hold`
 #: is the overnight case the morning brief reads; `with Daniel` is work he
@@ -456,7 +460,8 @@ def _level() -> None:
         where = getattr(hive_data, "__file__", None) or "an unknown path"
         raise Refused(
             f"hive_data at {where} is behind the staff watch: it has no "
-            f"{', '.join(absent)}. Bring hive-data level with the hive_mind "
+            f"{', '.join(absent)}{_STAFF_UNIMPORTABLE}. Bring hive-data level "
+            "with the hive_mind "
             "checkout; a container that bakes its own copy needs the host's "
             "mounted over it, or a rebuild.")
 

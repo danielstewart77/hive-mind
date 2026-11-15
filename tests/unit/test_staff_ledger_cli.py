@@ -9,6 +9,7 @@ the refusals that keep a mistyped command from writing anything.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -141,3 +142,33 @@ def test_a_hive_data_with_no_ledger_module_is_named_as_behind(
     assert code == 1
     assert out["kind"] == "HiveDataBehind"
     assert "hive_data.staff" in out["error"]
+
+
+def _staff_calls(module):
+    """Every `staff.<name>(...)` the module's source makes, with its keywords."""
+    tree = ast.parse(Path(module.__file__).read_text())
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "staff"):
+            yield node.func.attr, {k.arg for k in node.keywords if k.arg}
+
+
+def test_every_call_the_tool_makes_on_hive_data_is_one_it_checks_for(ledger):
+    checked: dict[str, set[str]] = {}
+    for needs in ledger.NEEDS.values():
+        for name, keywords in needs.items():
+            checked.setdefault(name, set()).update(keywords)
+    unchecked = [(name, sorted(keywords - checked.get(name, set())))
+                 for name, keywords in _staff_calls(ledger)
+                 if name not in checked or keywords - checked[name]]
+    assert unchecked == []
+
+
+def test_every_field_an_edit_can_write_is_one_it_checks_for(ledger):
+    # `edit` hands update_task its fields as **kwargs, which no reading of
+    # the source can see, so they are taken from what `_edits` produces.
+    written = set(_edit(ledger, "--name", "n", "--description", "d",
+                        "--board-item", "b", "--question", "q"))
+    written |= set(_edit(ledger, "--answered"))
+    assert written <= set(ledger.NEEDS["edit"]["update_task"])
