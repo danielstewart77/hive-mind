@@ -46,9 +46,20 @@ from typing import Any
 #: suite points it at a temporary directory.
 IMAGE_DIR = Path("/data/mind-images")
 
-#: The largest upload accepted, before any decoding. Generous for a face and
-#: far below anything that would trouble the request body.
-MAX_BYTES = 2 * 1024 * 1024
+#: The largest upload accepted, before any decoding. Ten megabytes, and the
+#: number is not load-bearing: nothing outside this module constrains it.
+#: There is no reverse-proxy body limit in front of the console, no framework
+#: cap, and no database column to fit — the bytes go to a file. The first
+#: value here was two megabytes, chosen as "generous for a face", which it
+#: was not: an ordinary exported PNG lands just over it and Daniel could not
+#: upload a single one. What this cap is actually worth is small, so it is
+#: set loosely. The decode cost of the chart is bounded by `MAX_PIXELS`
+#: below, which is the rail that matters and is unchanged; the format check
+#: in `sniff` is what keeps a non-image out. Raising this costs at most this
+#: many bytes of transient memory per upload and this many bytes on disk per
+#: mind, against a versioned, year-cached URL the browser fetches once per
+#: replacement.
+MAX_BYTES = 10 * 1024 * 1024
 
 #: The largest image accepted, per side. A card draws the image at 28 pixels;
 #: this is two orders of magnitude of headroom and still bounds the decode.

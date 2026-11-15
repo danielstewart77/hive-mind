@@ -279,10 +279,10 @@ def test_a_picture_whose_header_cannot_be_measured_is_refused(signed_in,
 
 
 def test_a_picture_over_the_byte_cap_is_refused(signed_in, registered):
-    """Three megabytes, spelled out. Reading the cap off the module would
+    """Eleven megabytes, spelled out. Reading the cap off the module would
     build a payload that grew with it, so raising the cap would make this
     test raise its own bar and pass — which is the bug, not the guard."""
-    oversized = _png() + b"\x00" * (3 * 1024 * 1024)
+    oversized = _png() + b"\x00" * (11 * 1024 * 1024)
 
     refused = signed_in.post(
         f"/api/minds/{registered}/image",
@@ -290,6 +290,26 @@ def test_a_picture_over_the_byte_cap_is_refused(signed_in, registered):
 
     assert refused.status_code == 400
     assert mind_images.stored_image(registered) is None
+
+
+def test_a_picture_of_several_megabytes_is_accepted(signed_in, registered):
+    """The size that sent Daniel here. Every PNG he exported for a mind came
+    out a little over two megabytes and the original cap refused all of them,
+    so a picture of ordinary photographic weight has to be storable. Five
+    megabytes, spelled out, and well clear of two in both directions: a
+    payload derived from the cap would pass at any cap, including the one
+    that was the bug."""
+    ordinary = _png() + b"\x00" * (5 * 1024 * 1024)
+
+    accepted = signed_in.post(
+        f"/api/minds/{registered}/image",
+        files={"file": ("face.png", ordinary, "image/png")})
+
+    assert accepted.status_code == 200
+    assert accepted.json()["size_bytes"] == len(ordinary)
+    stored = mind_images.stored_image(registered)
+    assert stored is not None
+    assert stored.read_bytes() == ordinary
 
 
 def test_a_picture_for_a_mind_that_is_not_registered_is_refused(signed_in):
