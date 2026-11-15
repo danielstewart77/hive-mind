@@ -286,6 +286,53 @@ HANDOVER_MAX_BYTES = 120_000
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 
 
+def normalised_name(name: str | None) -> str | None:
+    """A conversation's name as the row stores it, or ``None`` for no name.
+
+    One function for both writes that can set one — creating a conversation
+    and renaming it. The trim, the cap and the empty-means-none rule were an
+    inline expression in `set_session_name` while a rename was the only way a
+    name could arrive; a second caller copying that expression is how the two
+    drift until a name set at creation is stored at a length a rename would
+    have cut, and no test fails.
+
+    The text is laundered here rather than left to the insert, because a name
+    is a label and losing one must never cost the conversation it labels —
+    the same rule the broker states where it names a standing wake. Two
+    characters would otherwise cost it: a NUL, which a `text` column refuses,
+    and an unpaired surrogate, which no UTF-8 encoder will take. The rename
+    path survives both because `_update_session` launders through `_storable`
+    and the write is its own; a name given at creation rides the same unit of
+    work as the session row and its surface binding, so either one would roll
+    back the whole create and answer as though the mind were unreachable.
+    """
+    if name is None:
+        return None
+    # `errors="replace"` rather than a wider `_storable`: that helper carries
+    # every text column in this module, turn content included, and a lone
+    # surrogate there is a different question from one in a forty-character
+    # label.
+    trimmed = name.strip()[:MAX_SESSION_NAME_CHARS]
+    storable = _storable(trimmed).encode("utf-8", errors="replace").decode("utf-8")
+    return storable or None
+
+
+def validated_color(color: str | None) -> str | None:
+    """A tile colour as the row stores it, or ``ValueError``.
+
+    Exactly the rule the rename write has always applied, in one place now
+    that creation applies it too: a value that is sent and not empty must
+    match as sent, so a hex value with whitespace around it is refused rather
+    than quietly trimmed into one. An empty string is not a colour, it is the
+    absence of one — which is how a colour is cleared.
+    """
+    if color is None:
+        return None
+    if color and not _COLOR_RE.match(color):
+        raise ValueError("color must be a hex value")
+    return color.strip() or None
+
+
 def effort_levels_of(model_row: dict | None) -> list[str]:
     """The effort levels a mind's model row declares; empty means none."""
     levels = (model_row or {}).get("effort_levels")
@@ -607,14 +654,30 @@ class SessionManager:
         allowed_directories: list[str] | None = None,
         *,
         mind_id: str,
+        name: str | None = None,
+        color: str | None = None,
     ) -> dict:
         """Create a new session, spawn process, return session info.
 
         Always a conversation that has no past. A rotation and a harness
         switch both replace the harness conversation under a row that
         already exists (see ``_replace_conversation``), so nothing reaches
-        here carrying a handover, an inherited name or a predecessor's id.
+        here carrying a handover, an *inherited* name or a predecessor's id.
+
+        A name the caller chose is another matter, and it is stamped on the
+        row in the same insert. A mind that opens a conversation for a job —
+        the chief of staff opens one per task — could otherwise only label it
+        with a second call, and a second call is a thing that gets skipped,
+        refused, or lost with the turn that was going to make it: the row
+        stays unnamed and every picker draws it as the mind's own name. One
+        call cannot half-happen.
         """
+        # Both checked before anything is written. The row and its surface
+        # binding go in one unit of work and the harness is spawned after it,
+        # so a value refused any later would have to be refused by undoing a
+        # conversation that already exists.
+        session_name = normalised_name(name)
+        session_color = validated_color(color)
         # The mind's preferred model lives in its registration (set from each
         # mind's own config). The caller can override per-session, but absent
         # that, the mind picks. No comms-wide silent fallback.
@@ -655,7 +718,8 @@ class SessionManager:
                 id=session_id, surface=surface, surface_id=surface_id,
                 mind_id=mind_id, created_at=now, last_active=now,
                 status="running", conversation_id=conversation_id, model=model,
-                harness=harness or None, conversation_started_at=now, unit=unit,
+                harness=harness or None, conversation_started_at=now,
+                name=session_name, color=session_color, unit=unit,
             )
             await core.bind_surface(
                 client_type=surface, client_ref=client_ref,
@@ -850,9 +914,9 @@ class SessionManager:
         """
         if name is None and color is None:
             raise ValueError("nothing to set: give a name, a colour, or both")
-        if color:
-            if not _COLOR_RE.match(color):
-                raise ValueError("color must be a hex value")
+        # Refused before the row is read, as it always was: a colour this
+        # module will not store is not a reason to go looking for a session.
+        checked_color = validated_color(color)
         row = await self._get_row(session_id)
         if not row:
             raise LookupError(f"Session not found: {session_id}")
@@ -874,9 +938,9 @@ class SessionManager:
 
         fields: dict[str, Any] = {}
         if name is not None:
-            fields["name"] = name.strip()[:MAX_SESSION_NAME_CHARS] or None
+            fields["name"] = normalised_name(name)
         if color is not None:
-            fields["color"] = color.strip() or None
+            fields["color"] = checked_color
         await _update_session(session_id, **fields)
         return await self._session_dict(session_id)
 

@@ -15,14 +15,25 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from comms_broker_pg import broker_db, execute, put_mind, scratch_dsn  # noqa: F401
+from comms_broker_pg import (  # noqa: F401 - fixtures
+    broker_db,
+    execute,
+    fetchval,
+    put_credential_row,
+    put_mind,
+    scratch_dsn,
+)
 
 ADMIN = "admin-bearer"  # secret-guard: allow
+#: Whose minds these are. `owns_mind` resolves a conversation to a person,
+#: and a mind credential answers for its owner.
+OPERATOR = "daniel"
 REACHES_EVERYTHING = {"Authorization": f"Bearer {ADMIN}"}
 
 
@@ -218,3 +229,134 @@ def test_the_names_listing_answers_the_service_token(client) -> None:
     """
     assert client.get("/sessions/names", headers=REACHES_EVERYTHING).status_code == 200
     assert client.get("/sessions/names").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Naming a conversation as it is created is the same capability
+# ---------------------------------------------------------------------------
+def _a_mind_with_its_own_credential(mind_id: str = "bob") -> str:
+    """A second mind, owned by the operator, holding a credential of its own.
+
+    The digest is computed by `user_access.digest` rather than by this file,
+    so a change to how a credential is stored fails the test instead of
+    passing against a hash written here. The mind declares no harness, so no
+    harness listing is asked of it on the way through the create.
+    """
+    from comms import user_access
+
+    async def seed():
+        await put_mind(mind_id, harness="", owner=OPERATOR)
+        await put_credential_row(
+            holder=mind_id, username=OPERATOR, role=user_access.MIND,
+            token_sha=user_access.digest(_own_credential(mind_id)),
+        )
+
+    asyncio.run(seed())
+    return mind_id
+
+
+def _own_credential(mind_id: str) -> str:
+    return f"{mind_id}-own-credential"  # secret-guard: allow
+
+
+@pytest.fixture
+def creating(client):
+    """The create route with the spawn and the prompt composition stubbed —
+    the transport to the mind and to lucent, and nothing nearer."""
+    async def blocks(**_kw):
+        return "<soul>seed</soul>"
+
+    async def spawn(_self, _session_id, _model, **_kw):
+        return None
+
+    from comms.sessions import SessionManager
+
+    with patch("comms.bootstrap_loader.compose_prompt_blocks", blocks), \
+            patch.object(SessionManager, "_spawn", spawn):
+        yield client
+
+
+def _create(http, mind_id, token, **body):
+    return http.post(
+        "/sessions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "surface": "web", "surface_id": "terminal",
+            "client_ref": f"staff-{body.get('name', 'bare')}",
+            "mind_id": mind_id, **body,
+        },
+    )
+
+
+def test_a_minds_own_credential_cannot_name_the_conversation_it_creates(
+    creating,
+) -> None:
+    """R8 reaches the create: owning the mind was never enough to label.
+
+    The same credential makes both requests, and the one without a label
+    succeeds — so the refusal is this guard and not the service gate or the
+    ownership check above it. It matters because `core.bind_surface` replaces
+    whatever binding a `client_ref` already had: a create may repoint an
+    existing chat at a conversation of the caller's own, and a name and colour
+    on that row are the disguise the rename token exists to deny. Breaks the
+    moment the create stamps a name without checking for the credential.
+    """
+    mind = _a_mind_with_its_own_credential()
+    token = _own_credential(mind)
+
+    bare = _create(creating, mind, token)
+    assert bare.status_code == 200, bare.text
+    assert bare.json()["name"] is None
+
+    labelled = _create(creating, mind, token, name="deploy-prod — approve")
+    assert labelled.status_code == 401, labelled.text
+
+    coloured = _create(creating, mind, token, color="#5c913b")
+    assert coloured.status_code == 401, coloured.text
+
+
+def test_the_credential_a_rename_takes_also_names_a_new_conversation(
+    creating,
+) -> None:
+    """R8, R4: the operator's own credential needs no second secret.
+
+    `require_rename_bearer` answers an admin caller presenting it the ordinary
+    way, which is what the chief of staff holds — so naming at creation has to
+    work on that credential alone, or the guard above has simply closed the
+    feature. The answer carries the stored name, which is the only way a
+    caller can tell a gateway that understood the field from one that ignored
+    it. Breaks if the create stops passing the label down, or if the guard
+    starts demanding the rename header from an admin.
+    """
+    mind = _a_mind_with_its_own_credential("carol")
+
+    created = _create(creating, mind, ADMIN, name="  CoS: Session names  ")
+
+    assert created.status_code == 200, created.text
+    assert created.json()["name"] == "CoS: Session names"
+
+
+def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
+    creating,
+) -> None:
+    """R3: 400 for the value the caller got wrong, and nothing written.
+
+    The route answers this one itself rather than mapping every `ValueError`
+    out of `create_session`: no model, an unavailable harness and a mind
+    deregistered mid-create all raise that too, and they are not the caller
+    sending a bad colour. Breaks if the check leaves the route, which turns
+    this into the 500 the manager's refusal becomes on its own.
+    """
+    mind = _a_mind_with_its_own_credential("dave")
+
+    refused = _create(
+        creating, mind, ADMIN, color="red; content:url(x)",
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "hex" in refused.json()["error"]
+    # Scoped to the create that was refused: this fixture seeds a session of
+    # its own, so an empty table would be the wrong thing to ask for.
+    assert asyncio.run(
+        fetchval("SELECT COUNT(*) FROM core.sessions WHERE mind_id = $1", mind)
+    ) == 0
