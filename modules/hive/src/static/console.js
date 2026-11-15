@@ -107,11 +107,34 @@
     const app = document.querySelector("[data-console-app]");
     if (app) {
         document.querySelectorAll("[data-sidebar-open]").forEach(function (button) {
-            button.addEventListener("click", function () { app.classList.add("sidebar-open"); });
+            button.addEventListener("click", function () {
+                app.classList.add("sidebar-open");
+                /* The nav pushes the page aside, and a page carrying its own
+                   push panel (the Chief of Staff done barrel) would then have
+                   two of them open at once — on a 375px phone that leaves the
+                   content no width at all. The nav wins and the page's panel
+                   closes, which is also what a reader reaching for navigation
+                   means. */
+                document.dispatchEvent(new CustomEvent("hive:close-push-panels"));
+            });
         });
         document.querySelectorAll("[data-sidebar-close]").forEach(function (button) {
             button.addEventListener("click", function () { app.classList.remove("sidebar-open"); });
         });
+        /* `sidebar-open` is a mobile state and nothing was dropping it on the
+           way back to desktop, so a large phone or tablet rotated past 820px
+           and back reopened a nav nobody asked for — and on desktop the class
+           pushed the page aside with the rail already in the layout. */
+        const wide = window.matchMedia("(min-width: 821px)");
+        const onWide = function (event) {
+            if (event.matches) app.classList.remove("sidebar-open");
+        };
+        /* Safari before 14 has no addEventListener on a MediaQueryList, and
+           an unguarded throw here is inside this file's one IIFE — every
+           binding below it, the nav flyouts, whole-row navigation and the
+           copy buttons, would never be installed, site-wide, silently. */
+        if (wide.addEventListener) wide.addEventListener("change", onWide);
+        else if (wide.addListener) wide.addListener(onWide);
     }
 
     document.querySelectorAll("[data-nav-flyout-toggle]").forEach(function (button) {

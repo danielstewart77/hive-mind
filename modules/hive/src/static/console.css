@@ -365,7 +365,18 @@ a { color: inherit; }
     .console-app.sidebar-open .console-sidebar { transform: translateX(0); }
     .console-app.sidebar-open .console-overlay { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110; }
     .sidebar-close { display: inline-flex !important; }
-    .console-main { margin-left: 0; }
+    .console-main { margin-left: 0; transition: transform .2s ease; }
+    /* The nav pushes the page aside rather than covering it. Translated
+       rather than narrowed: on a 375px phone a 232px rail would reflow every
+       page into 143px, which is not "aside", it is ruined. The page slides
+       out of the way instead and slides back when the nav closes. The
+       dimmed overlay stays — it is what closing by tapping beside the nav
+       is, and a push with no way back is a trap on a phone. */
+    .console-app.sidebar-open .console-main { transform: translateX(var(--console-sidebar-width)); }
+    /* The push would otherwise give the document 232px of horizontal scroll:
+       scroll right, close the nav, and the page is left looking blank until
+       you scroll back. */
+    .console-app.sidebar-open { overflow-x: hidden; }
     .console-mobile-header { height: 55px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--console-line); background: #101316; }
     .mobile-brand { display: inline-flex; align-items: center; gap: 8px; color: var(--console-text); text-decoration: none; font-weight: 700; }
     .mobile-brand img { width: 23px; height: 23px; }

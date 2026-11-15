@@ -196,7 +196,15 @@ TABLE.add(
     "GET /settings/{section}",
 )
 
-TABLE.add(Rule(OWNER, param="mind_id"), "GET /minds/{mind_id}")
+TABLE.add(
+    Rule(OWNER, param="mind_id"),
+    "GET /minds/{mind_id}",
+    # A mind's picture, read and set. Keyed by id rather than by name, like
+    # the page above it and unlike the per-name routes below, because the
+    # file on disk has to survive a rename — see `mind_images`.
+    "GET /api/minds/{mind_id}/image",
+    "POST /api/minds/{mind_id}/image",
+)
 TABLE.add(
     Rule(OWNER, param="name"),
     "GET /api/minds/{name}/configuration",

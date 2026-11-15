@@ -4,15 +4,55 @@
   .cos-head { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap; }
   .cos-head h1 { margin:0; }
   .cos-sub { color:#94a3b8; font-size:0.9rem; }
-  .cos-wrap { display:flex; gap:1rem; margin-top:1rem; align-items:stretch; }
-  #cos-cy {
-    flex:1 1 auto; min-height:72vh; height:72vh;
-    background:#0a0e19; border-radius:10px; border:1px solid rgba(56,189,248,0.18);
+
+  /* The three panes. The graph and the barrel sit in one row that slides:
+     "pushes the graph aside" is Daniel's phrase for it, so the graph moves
+     over rather than being squeezed into the strip a 280px barrel leaves on
+     a 375px phone. The questions are NOT in the barrel — see below. */
+  .cos-stage { position:relative; overflow:hidden; margin-top:1rem; }
+  .cos-wrap {
+    display:flex; gap:1rem; align-items:stretch;
+    transition:transform .2s ease;
   }
+  #cos-cy {
+    flex:0 0 100%; min-height:62vh; height:62vh;
+    background:#0a0e19; border-radius:10px; border:1px solid rgba(56,189,248,0.18);
+    position:relative;
+  }
+  /* Every decoration a card carries — the work-type icon, the assigned
+     mind's face and the activity spinner — lives in this layer rather than
+     on the Cytoscape node. One mechanism instead of two: a spinner has to
+     animate, which a canvas-drawn node style cannot, and a face that fails
+     to load has to fall back to a letter, which a background image cannot.
+     Never a hit target: it sits over the canvas, and swallowing taps would
+     cost the panning and pinch-zoom the page is read on a phone with. */
+  .cos-deco { position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:2; }
+  .cos-deco > * { position:absolute; will-change:transform; }
+  .cos-kind, .cos-face {
+    display:flex; align-items:center; justify-content:center;
+    border-radius:5px; overflow:hidden; box-sizing:border-box;
+  }
+  .cos-kind { color:#cbd5e1; background:rgba(2,6,23,0.72); }
+  .cos-kind svg { width:100%; height:100%; display:block; }
+  .cos-face { background:#0b1220; border:1px solid rgba(148,163,184,0.45); border-radius:50%; }
+  .cos-face img { width:100%; height:100%; object-fit:cover; display:block; }
+  .cos-face span { color:#e2e8f0; font-weight:600; line-height:1; }
+  .cos-kind svg, .cos-face img { pointer-events:none; }
+  .cos-spin {
+    border-radius:50%; border-style:solid; border-color:rgba(34,197,94,0.25);
+    border-top-color:#22c55e; animation:cos-rotate .9s linear infinite;
+  }
+  @keyframes cos-rotate { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .cos-spin { animation-duration:3s; }
+  }
+
+  /* The barrel. Collapsed to the right by default and brought in by the
+     handle; on desktop the media query below opens it. */
   .cos-barrel {
     flex:0 0 280px; max-width:280px; box-sizing:border-box;
     background:#0a0e19; border:1px solid rgba(56,189,248,0.18);
-    border-radius:10px; padding:1rem; overflow-y:auto; height:72vh;
+    border-radius:10px; padding:1rem; overflow-y:auto; height:62vh;
     font-size:0.82rem; color:#cbd5e1;
   }
   .cos-barrel h2 { font-size:0.85rem; letter-spacing:0.08em; text-transform:uppercase;
@@ -24,13 +64,33 @@
   }
   .cos-done .k { color:#4ade80; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.06em; }
   .cos-empty { color:#64748b; font-style:italic; }
-  .cos-asks { margin-top:1rem; }
+
+  .cos-handle {
+    position:absolute; top:0; right:0; z-index:10;
+    display:inline-flex; align-items:center; gap:.4rem;
+    padding:.35rem .6rem; border:1px solid rgba(56,189,248,0.3);
+    border-radius:0 10px 0 10px; background:#0d1424; color:#cbd5e1;
+    font-size:.75rem; cursor:pointer;
+  }
+  .cos-handle b { color:#4ade80; }
+
+  /* The questions are their own pane and are never inside the barrel. The
+     count of answers the hive is waiting on is the one thing this page is
+     read for, so collapsing "Done" on a phone must not take it with it. */
+  .cos-asks-pane {
+    margin-top:0.85rem; padding:0.7rem 0.85rem; border-radius:10px;
+    background:#0a0e19; border:1px solid rgba(251,191,36,0.28);
+  }
+  .cos-asks-pane h2 { font-size:0.8rem; letter-spacing:0.08em; text-transform:uppercase;
+    color:#fbbf24; margin:0 0 0.6rem 0; }
   .cos-ask {
     padding:0.55rem 0.65rem; margin-bottom:0.5rem; border-radius:8px;
     background:rgba(251,191,36,0.10); border:1px solid rgba(251,191,36,0.35);
+    font-size:0.85rem; color:#e2e8f0;
   }
   .cos-ask .who { color:#fbbf24; font-size:0.72rem; text-transform:uppercase;
     letter-spacing:0.06em; display:block; margin-bottom:0.2rem; }
+
   .cos-foot {
     display:flex; gap:1.5rem; flex-wrap:wrap; align-items:center;
     margin-top:0.85rem; padding:0.7rem 1rem; border-radius:10px;
@@ -41,6 +101,27 @@
   .cos-bar { flex:1 1 180px; height:8px; border-radius:99px; background:rgba(148,163,184,0.18); overflow:hidden; }
   .cos-bar span { display:block; height:100%; background:#38bdf8; }
   .cos-error { color:#f87171; }
+  .cos-stale { color:#fbbf24; }
+
+  /* Desktop: the barrel is open, and the graph gives it the room rather
+     than sliding out from under it. 820px is the site's one mobile
+     breakpoint and this uses it rather than inventing a second. */
+  /* Collapsed means gone, at every width. The barrel used to keep its 280
+     pixels whatever the class said, so on a workstation the handle toggled a
+     class, flipped aria-expanded and changed nothing on screen. */
+  .cos-stage:not(.barrel-open) .cos-barrel { display:none; }
+
+  @media (min-width: 821px) {
+    #cos-cy { flex:1 1 auto; }
+    .cos-stage.barrel-open .cos-wrap { transform:none; }
+  }
+  @media (max-width: 820px) {
+    /* The row is the graph at full width plus the barrel beyond the right
+       edge; opening slides the row left by exactly the barrel and its gap. */
+    .cos-stage.barrel-open .cos-wrap { transform:translateX(calc(-280px - 1rem)); }
+    #cos-cy { min-height:68vh; height:68vh; }
+    .cos-barrel { height:68vh; }
+  }
 </style>
 
 <div class="cos-head">
@@ -49,20 +130,30 @@
   <span class="cos-sub" id="cos-detail"></span>
 </div>
 
-<div class="cos-wrap">
-  <div id="cos-cy"></div>
-  <aside class="cos-barrel">
-    <h2>Waiting on you</h2>
-    <div id="cos-asks" class="cos-asks"><p class="cos-empty">Nothing.</p></div>
-    <h2 style="margin-top:1.25rem">Done</h2>
-    <div id="cos-barrel"><p class="cos-empty">Nothing yet.</p></div>
-  </aside>
+<div class="cos-stage" id="cos-stage" data-push-panel="barrel-open">
+  <div class="cos-wrap">
+    <div id="cos-cy">
+      <button type="button" class="cos-handle" id="cos-barrel-toggle"
+              aria-expanded="false" aria-controls="cos-barrel-pane">
+        Done <b id="cos-done-n">0</b>
+      </button>
+      <div class="cos-deco" id="cos-deco"></div>
+    </div>
+    <aside class="cos-barrel" id="cos-barrel-pane">
+      <h2>Done</h2>
+      <div id="cos-barrel"><p class="cos-empty">Nothing yet.</p></div>
+    </aside>
+  </div>
+</div>
+
+<div class="cos-asks-pane">
+  <h2>Waiting on you (<span id="cos-asks-n">0</span>)</h2>
+  <div id="cos-asks"><p class="cos-empty">Nothing.</p></div>
 </div>
 
 <div class="cos-foot">
   <span><b id="cos-tasks">0</b> live</span>
   <span><b id="cos-agents">0</b> delegates</span>
-  <span><b id="cos-asks-n">0</b> questions</span>
   <span><b id="cos-done">0</b> done</span>
   <div class="cos-bar"><span id="cos-progress" style="width:0%"></span></div>
   <span id="cos-pct">0%</span>
@@ -76,6 +167,21 @@
   // pushed to: what it shows changes on the order of a minute, which is the
   // tick's own cadence, and a socket per open tab buys nothing for that.
   var REFRESH_MS = 20000;
+  // A request that never answers must not leave the page claiming work is
+  // running. Past this the load is abandoned and the page says it is stale.
+  var FETCH_TIMEOUT_MS = 12000;
+  // Past this age the payload is no longer evidence of anything live, so the
+  // spinners come off. An absence of fresh data is not an absence of work,
+  // but it is certainly not proof of work.
+  var STALE_AFTER_MS = REFRESH_MS * 3;
+  // The site's one mobile breakpoint, matching console.css.
+  var MOBILE = '(max-width: 820px)';
+  // Below this the chart is unreadable on a phone, which is the whole of
+  // Daniel's complaint: fit-to-everything shrinks nine nodes to nothing.
+  // The view opens no smaller than this and he zooms out if he wants to.
+  var MIN_READABLE_ZOOM = 0.55;
+  // Where the chief sits when the view has been zoomed in to stay readable.
+  var TOP_MARGIN = 54;
 
   var KIND_COLOR = {
     chief: '#38bdf8', task: '#818cf8', feature: '#a78bfa',
@@ -89,9 +195,26 @@
     unassigned: '#f87171', orphaned: '#f87171'
   };
 
+  // The work-type glyph each card wears in its upper-left. Inline rather
+  // than fetched so a card is never briefly typeless, and sized here
+  // because an SVG with no width and height draws nothing in Firefox.
+  var KIND_ICON = {
+    epic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>',
+    feature: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 7v10"/><path d="M13 7v6"/><path d="M18 7v3"/></svg>',
+    story: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v5h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>',
+    bug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v3a4 4 0 0 0 8 0V2"/><rect x="6" y="7" width="12" height="12" rx="6"/><path d="M3 11h3"/><path d="M18 11h3"/><path d="M4 17h3"/><path d="M17 17h3"/></svg>',
+    task: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>',
+    agent: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 4v4"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>',
+    chief: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18 5 7l4 4 3-6 3 6 4-4 2 11Z"/><path d="M4 21h16"/></svg>'
+  };
+
+  // Quotes included. The site-wide helper escapes them and this page's own
+  // did not; anything written into an attribute needs them, and a session
+  // name is unconstrained text from the registry.
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function elements(data) {
@@ -100,9 +223,22 @@
       var label = n.kind === 'chief'
         ? n.label + (n.questions ? '  (' + n.questions + '?)' : '')
         : n.label;
+      // The session name sits beside the work's own name rather than
+      // replacing it: the task name is what the work is, the session name is
+      // which conversation is on it, and Daniel asked to see the second
+      // without losing the first. It is on this node only — a child of an
+      // assigned item carries no name, which is the payload's doing.
+      var names = n.session_names || [];
+      if (names.length) label = label + '\n· ' + names[0];
+      var face = (n.minds || [])[0] || null;
       out.push({ data: {
         id: n.id, label: label, kind: n.kind,
         activity: n.activity || n.status || '',
+        workKind: n.work_kind || '',
+        active: n.active === true,
+        faceId: face ? face.mind_id : '',
+        faceInitial: face ? face.initial : '',
+        faceVersion: face ? face.image_version : 0,
         detail: n.about || n.description || ''
       } });
     });
@@ -116,7 +252,9 @@
     data.questions.forEach(function (q) {
       var id = 'q:' + q.task;
       out.push({ data: { id: id, label: '?', kind: 'bubble',
-                         activity: 'question', detail: q.question } });
+                         activity: 'question', workKind: '', active: false,
+                         faceId: '', faceInitial: '', faceVersion: 0,
+                         detail: q.question } });
       out.push({ data: { id: 'e:' + id, source: q.task, target: id,
                          rel: 'asks' } });
       out.push({ data: { id: 'e:up:' + id, source: id, target: 'chief',
@@ -125,82 +263,291 @@
     return out;
   }
 
-  function render(data) {
-    var cy = cytoscape({
-      container: document.getElementById('cos-cy'),
-      elements: elements(data),
-      style: [
-        { selector: 'node', style: {
-            'label': 'data(label)', 'color': '#e2e8f0', 'font-size': '11px',
-            'text-valign': 'center', 'text-halign': 'center',
-            'text-wrap': 'wrap', 'text-max-width': '150px',
-            'shape': 'round-rectangle', 'width': 170, 'height': 46,
-            'padding': '6px', 'background-color': '#1e293b',
-            'border-width': 2, 'border-color': '#334155'
-        } },
-        { selector: 'node[kind = "chief"]', style: {
-            'background-color': KIND_COLOR.chief, 'color': '#06202e',
-            'font-size': '14px', 'font-weight': 'bold',
-            'width': 220, 'height': 64, 'border-color': KIND_COLOR.chief } },
-        { selector: 'node[kind = "task"]', style: {
-            'background-color': '#1e1b4b', 'border-color': KIND_COLOR.task } },
-        { selector: 'node[kind = "feature"]', style: {
-            'background-color': '#2e1065', 'border-color': KIND_COLOR.feature } },
-        { selector: 'node[kind = "story"]', style: {
-            'background-color': '#111827', 'border-color': KIND_COLOR.story,
-            'width': 150, 'height': 38, 'font-size': '10px' } },
-        { selector: 'node[kind = "agent"]', style: {
-            'background-color': '#042f2e', 'border-color': KIND_COLOR.agent,
-            'shape': 'ellipse', 'width': 110, 'height': 110,
-            'font-size': '10px', 'text-max-width': '90px' } },
-        { selector: 'node[kind = "bubble"]', style: {
-            'background-color': KIND_COLOR.bubble, 'color': '#3b2708',
-            'shape': 'ellipse', 'width': 34, 'height': 34,
-            'font-size': '18px', 'font-weight': 'bold',
-            'border-color': '#fde68a' } },
-        { selector: 'node[activity = "working"]', style: {
-            'border-color': ACTIVITY_BORDER.working } },
-        { selector: 'node[activity = "stopped"]', style: {
-            'border-color': ACTIVITY_BORDER.stopped } },
-        { selector: 'node[activity = "unassigned"]', style: {
-            'border-color': ACTIVITY_BORDER.unassigned } },
-        { selector: 'node[activity = "orphaned"]', style: {
-            'border-color': ACTIVITY_BORDER.orphaned,
-            'border-style': 'dashed' } },
-        { selector: 'edge', style: {
-            'width': 1.6, 'line-color': 'rgba(129,140,248,0.45)',
-            'target-arrow-color': 'rgba(129,140,248,0.55)',
-            'target-arrow-shape': 'triangle', 'curve-style': 'taxi',
-            'taxi-direction': 'downward' } },
-        { selector: 'edge[rel = "asks"]', style: {
-            'line-color': 'rgba(251,191,36,0.6)', 'target-arrow-shape': 'none',
-            'curve-style': 'bezier' } },
-        // The bubble's own rise to the chief: dashed, arrowless and behind
-        // everything, so it reads as a thing floating up rather than as
-        // another line of command.
-        { selector: 'edge[rel = "bubble"]', style: {
-            'line-color': 'rgba(251,191,36,0.35)', 'line-style': 'dashed',
-            'target-arrow-shape': 'none', 'curve-style': 'unbundled-bezier',
-            'control-point-distances': [-80], 'control-point-weights': [0.5],
-            'z-index': 0 } }
-      ],
-      layout: { name: 'breadthfirst', directed: true, roots: ['chief'],
-                padding: 24, spacingFactor: 1.15, animate: false }
+  var STYLE = [
+    { selector: 'node', style: {
+        'label': 'data(label)', 'color': '#e2e8f0', 'font-size': '11px',
+        'text-valign': 'center', 'text-halign': 'center',
+        'text-wrap': 'wrap', 'text-max-width': '116px',
+        'shape': 'round-rectangle', 'width': 174, 'height': 62,
+        'padding': '6px', 'background-color': '#1e293b',
+        'border-width': 2, 'border-color': '#334155'
+    } },
+    { selector: 'node[kind = "chief"]', style: {
+        'background-color': KIND_COLOR.chief, 'color': '#06202e',
+        'font-size': '14px', 'font-weight': 'bold',
+        'width': 224, 'height': 72, 'border-color': KIND_COLOR.chief } },
+    { selector: 'node[kind = "task"]', style: {
+        'background-color': '#1e1b4b', 'border-color': KIND_COLOR.task } },
+    { selector: 'node[kind = "feature"]', style: {
+        'background-color': '#2e1065', 'border-color': KIND_COLOR.feature } },
+    { selector: 'node[kind = "story"]', style: {
+        'background-color': '#111827', 'border-color': KIND_COLOR.story,
+        'width': 156, 'height': 50, 'font-size': '10px',
+        'text-max-width': '104px' } },
+    { selector: 'node[kind = "agent"]', style: {
+        'background-color': '#042f2e', 'border-color': KIND_COLOR.agent,
+        'shape': 'ellipse', 'width': 112, 'height': 112,
+        'font-size': '10px', 'text-max-width': '84px' } },
+    { selector: 'node[kind = "bubble"]', style: {
+        'background-color': KIND_COLOR.bubble, 'color': '#3b2708',
+        'shape': 'ellipse', 'width': 34, 'height': 34,
+        'font-size': '18px', 'font-weight': 'bold',
+        'border-color': '#fde68a' } },
+    { selector: 'node[activity = "working"]', style: {
+        'border-color': ACTIVITY_BORDER.working } },
+    { selector: 'node[activity = "stopped"]', style: {
+        'border-color': ACTIVITY_BORDER.stopped } },
+    { selector: 'node[activity = "unassigned"]', style: {
+        'border-color': ACTIVITY_BORDER.unassigned } },
+    { selector: 'node[activity = "orphaned"]', style: {
+        'border-color': ACTIVITY_BORDER.orphaned,
+        'border-style': 'dashed' } },
+    { selector: 'edge', style: {
+        'width': 1.6, 'line-color': 'rgba(129,140,248,0.45)',
+        'target-arrow-color': 'rgba(129,140,248,0.55)',
+        'target-arrow-shape': 'triangle', 'curve-style': 'taxi',
+        'taxi-direction': 'downward' } },
+    { selector: 'edge[rel = "asks"]', style: {
+        'line-color': 'rgba(251,191,36,0.6)', 'target-arrow-shape': 'none',
+        'curve-style': 'bezier' } },
+    // The bubble's own rise to the chief: dashed, arrowless and behind
+    // everything, so it reads as a thing floating up rather than as
+    // another line of command.
+    { selector: 'edge[rel = "bubble"]', style: {
+        'line-color': 'rgba(251,191,36,0.35)', 'line-style': 'dashed',
+        'target-arrow-shape': 'none', 'curve-style': 'unbundled-bezier',
+        'control-point-distances': [-80], 'control-point-weights': [0.5],
+        'z-index': 0 } }
+  ];
+
+  var LAYOUT = { name: 'breadthfirst', directed: true, roots: ['chief'],
+                 padding: 24, spacingFactor: 1.15, animate: false };
+
+  var cy = null;
+  var lastGoodAt = 0;
+  var deco = document.getElementById('cos-deco');
+  var shape = '';
+  var spinnersOn = true;
+
+  function signature(els) {
+    return els.map(function (e) { return e.data.id; }).sort().join('|');
+  }
+
+  // One instance for the life of the page. The old page built a new
+  // Cytoscape every 20 seconds, which threw away the pan and zoom with it —
+  // so "it can be panned and zoomed" was true for at most 20 seconds at a
+  // time, which on a phone is the same as false. Elements are diffed in and
+  // the layout is re-run only when the set of nodes actually changed.
+  function draw(data) {
+    var els = elements(data);
+    var next = signature(els);
+    if (cy === null) {
+      cy = cytoscape({
+        container: document.getElementById('cos-cy'),
+        elements: els, style: STYLE, layout: LAYOUT,
+        minZoom: 0.15, maxZoom: 3,
+        userZoomingEnabled: true, userPanningEnabled: true
+      });
+      shape = next;
+      openReadably();
+      cy.on('render', paintDeco);
+      cy.on('position', paintDeco);
+      cy.on('tap', 'node', function (evt) {
+        var d = evt.target.data();
+        document.getElementById('cos-detail').textContent =
+          d.detail ? d.label.split('\n')[0] + ' — ' + d.detail : d.label;
+      });
+      return;
+    }
+    if (next === shape) {
+      // Same tree, new readings. Update in place so nothing moves under
+      // Daniel's finger and his view is left exactly where he put it.
+      els.forEach(function (e) {
+        var found = cy.getElementById(e.data.id);
+        if (found.length) found.data(e.data);
+      });
+      paintDeco();
+      return;
+    }
+    var pan = cy.pan();
+    var zoom = cy.zoom();
+    cy.batch(function () {
+      cy.elements().remove();
+      cy.add(els);
     });
-    // A node's own detail — the task's description, the brief a delegate was
-    // handed, the question a bubble carries — would not fit on the node and
-    // would make every node unreadable if it did.
-    cy.on('tap', 'node', function (evt) {
-      var d = evt.target.data();
-      document.getElementById('cos-detail').textContent =
-        d.detail ? d.label + ' — ' + d.detail : d.label;
+    shape = next;
+    cy.layout(LAYOUT).run();
+    // The shape changed, so the old view may point at nothing — but it is
+    // still the view he chose, so it is restored rather than refitted.
+    cy.zoom(zoom);
+    cy.pan(pan);
+    paintDeco();
+  }
+
+  // Fit, but never below readable. Daniel's complaint was that the graph
+  // opens tiny on a phone; `fit` alone guarantees exactly that as the tree
+  // grows, because it shrinks whatever it is given to the width available.
+  function openReadably() {
+    cy.resize();
+    cy.fit(undefined, 28);
+    if (cy.zoom() < MIN_READABLE_ZOOM) {
+      cy.zoom({ level: MIN_READABLE_ZOOM,
+                renderedPosition: { x: cy.width() / 2, y: 0 } });
+      var root = cy.getElementById('chief');
+      if (root.length) {
+        cy.center(root);
+        // `center` puts the chief half way down, which on a phone spends the
+        // top half of the screen on nothing and pushes his tasks off the
+        // bottom — the tree hangs downward, so the root belongs near the top
+        // and the work below it is what the space is for.
+        cy.panBy({ x: 0, y: TOP_MARGIN - cy.height() / 2 });
+      }
+    }
+  }
+
+  function faceUrl(d) {
+    return '/api/minds/' + encodeURIComponent(d.faceId) + '/image?v=' +
+           encodeURIComponent(d.faceVersion);
+  }
+
+  // The decorations are built as elements, not as markup, and only when the
+  // set of them actually changes. Two reasons, both learned the hard way.
+  //
+  // A face needs an error handler, and writing one as an `onerror="..."`
+  // attribute meant concatenating a value into a quoted attribute — which
+  // broke the attribute on every card (the initial is JSON-quoted, and the
+  // attribute was quoted too), so the fallback never ran and a mind named
+  // with a quote would have escaped into it. `textContent` on a real element
+  // cannot be parsed as markup at all, which is the fix rather than another
+  // layer of escaping.
+  //
+  // And `render` fires every frame of a pan or a pinch. Rebuilding the
+  // markup each time recreated every `img`, which re-requests the picture
+  // and flickers; positioning existing elements does not.
+  var decoFor = {};
+  var decoKey = '';
+
+  function decoSignature() {
+    return cy.nodes().map(function (n) {
+      var d = n.data();
+      return [d.id, d.kind, d.workKind, d.faceId, d.faceVersion,
+              d.active ? 1 : 0].join(':');
+    }).join('|');
+  }
+
+  function buildDeco() {
+    // Cleared wholesale: a node that has left the tree must not leave its
+    // face or its spinner hanging over the canvas.
+    deco.textContent = '';
+    decoFor = {};
+    cy.nodes().forEach(function (node) {
+      var d = node.data();
+      if (d.kind === 'bubble') return;
+      var entry = { node: node };
+
+      var icon = KIND_ICON[d.workKind];
+      if (icon) {
+        entry.kind = document.createElement('span');
+        entry.kind.className = 'cos-kind';
+        // Our own constant, chosen by key from a table in this file — never
+        // anything that came off a row.
+        entry.kind.innerHTML = icon;
+        deco.appendChild(entry.kind);
+      }
+
+      if (d.faceId) {
+        entry.face = document.createElement('span');
+        entry.face.className = 'cos-face';
+        var img = document.createElement('img');
+        img.alt = '';
+        img.src = faceUrl(d);
+        var initial = d.faceInitial || '?';
+        var holder = entry.face;
+        img.addEventListener('error', function () {
+          var letter = document.createElement('span');
+          letter.textContent = initial;
+          holder.replaceChildren(letter);
+        });
+        entry.face.appendChild(img);
+        deco.appendChild(entry.face);
+      }
+
+      if (d.active === true) {
+        entry.spin = document.createElement('span');
+        entry.spin.className = 'cos-spin';
+        deco.appendChild(entry.spin);
+      }
+
+      decoFor[d.id] = entry;
     });
-    return cy;
+  }
+
+  function place(el, left, top, size) {
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+    el.style.width = size + 'px';
+    el.style.height = size + 'px';
+  }
+
+  function placeDeco() {
+    var zoom = cy.zoom();
+    var size = Math.max(9, Math.min(20, 15 * zoom));
+    var inset = 5 * zoom;
+    Object.keys(decoFor).forEach(function (id) {
+      var entry = decoFor[id];
+      var box = entry.node.renderedBoundingBox({ includeLabels: false });
+      var w = box.x2 - box.x1;
+      var hidden = w <= 0;
+      if (entry.kind) {
+        entry.kind.style.display = hidden ? 'none' : '';
+        if (!hidden) {
+          place(entry.kind, box.x1 + inset, box.y1 + inset, size);
+          entry.kind.style.padding = (size * 0.12) + 'px';
+        }
+      }
+      if (entry.face) {
+        var fs = size * 1.35;
+        entry.face.style.display = hidden ? 'none' : '';
+        if (!hidden) {
+          place(entry.face, box.x2 - inset - fs, box.y1 + inset, fs);
+          entry.face.style.fontSize = (fs * 0.6) + 'px';
+        }
+      }
+      if (entry.spin) {
+        // A stale or failed load knows nothing about what is running, so the
+        // spinner goes rather than carrying on over a frozen tree.
+        var show = spinnersOn && !hidden;
+        entry.spin.style.display = show ? '' : 'none';
+        if (show) {
+          var ss = Math.max(8, Math.min(16, 12 * zoom));
+          place(entry.spin, box.x1 + w / 2 - ss / 2, box.y2 - inset - ss, ss);
+          entry.spin.style.borderWidth = Math.max(1.5, ss * 0.16) + 'px';
+        }
+      }
+    });
+  }
+
+  function paintDeco() {
+    if (cy === null) return;
+    var key = decoSignature();
+    if (key !== decoKey) {
+      decoKey = key;
+      buildDeco();
+    }
+    placeDeco();
   }
 
   function paint(data) {
-    document.getElementById('cos-when').textContent =
-      'as of ' + new Date(data.generated_at * 1000).toLocaleTimeString();
+    // Measured against this browser's own last successful load, never
+    // against the server's clock. Comparing `Date.now()` to the host's
+    // `generated_at` made the whole activity protection hostage to clock
+    // skew: a phone a minute ahead of the host reads every fresh payload as
+    // stale and never spins a card however hard the hive is working, and a
+    // phone a minute behind keeps spinning after the data stopped arriving.
+    lastGoodAt = Date.now();
+    spinnersOn = true;
+    var stamp = new Date(data.generated_at * 1000).toLocaleString();
+    document.getElementById('cos-when').textContent = 'as of ' + stamp;
 
     var asks = document.getElementById('cos-asks');
     asks.innerHTML = data.questions.length
@@ -213,8 +560,9 @@
     var barrel = document.getElementById('cos-barrel');
     barrel.innerHTML = data.barrel.length
       ? data.barrel.map(function (d) {
-          return '<div class="cos-done"><span class="k">' + esc(d.kind) +
-                 '</span><span>' + esc(d.label) + '</span></div>';
+          return '<div class="cos-done"><span class="k">' +
+                 esc(d.work_kind || d.kind) + '</span><span>' +
+                 esc(d.label) + '</span></div>';
         }).join('')
       : '<p class="cos-empty">Nothing yet.</p>';
 
@@ -224,29 +572,124 @@
     document.getElementById('cos-agents').textContent = agents.length;
     document.getElementById('cos-asks-n').textContent = data.questions.length;
     document.getElementById('cos-done').textContent = data.barrel.length;
+    document.getElementById('cos-done-n').textContent = data.barrel.length;
     var total = live.length + data.barrel.length;
     var pct = total ? Math.round((data.barrel.length / total) * 100) : 0;
     document.getElementById('cos-progress').style.width = pct + '%';
     document.getElementById('cos-pct').textContent = pct + '%';
 
-    render(data);
+    draw(data);
   }
 
+  // ── the barrel, and what opening it does to the graph ────────────────
+  // Safari before 14 has no addEventListener on a MediaQueryList. Unguarded
+  // it throws here, and this line runs before the first load — so the page
+  // would sit on "loading…" forever and never fetch anything at all.
+  function listenMedia(query, handler) {
+    if (query.addEventListener) { query.addEventListener('change', handler); }
+    else if (query.addListener) { query.addListener(handler); }
+  }
+
+  var stage = document.getElementById('cos-stage');
+  var toggle = document.getElementById('cos-barrel-toggle');
+  var mobile = window.matchMedia(MOBILE);
+
+  function setBarrel(open) {
+    stage.classList.toggle('barrel-open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // Cytoscape only measures its container on a window resize, so a panel
+    // that changes the graph's width by a CSS class leaves the canvas
+    // stretched and every tap landing on the wrong node. Told after the
+    // transition, and immediately as well, so it is right either way.
+    if (cy !== null) {
+      cy.resize();
+      window.setTimeout(function () { if (cy) { cy.resize(); paintDeco(); } }, 220);
+    }
+  }
+
+  toggle.addEventListener('click', function () {
+    var open = !stage.classList.contains('barrel-open');
+    setBarrel(open);
+    // Two push panels open at once on a 375px phone leaves the graph no
+    // width at all, so the nav yields to the barrel.
+    if (open) document.querySelector('[data-console-app]')
+      .classList.remove('sidebar-open');
+  });
+
+  // Desktop opens with it; a phone does not. Re-decided when the viewport
+  // crosses the breakpoint, so a rotated phone does not keep a default it
+  // was never given.
+  function applyDefault() { setBarrel(!mobile.matches); }
+  listenMedia(mobile, applyDefault);
+  applyDefault();
+
+  // The nav is the other push panel on this page, and it closes this one
+  // through the real toggle rather than by stripping the class, so
+  // aria-expanded cannot be left saying "true" on a closed barrel.
+  document.addEventListener('hive:close-push-panels', function () {
+    setBarrel(false);
+  });
+
+  window.addEventListener('resize', function () {
+    if (cy !== null) { cy.resize(); paintDeco(); }
+  });
+
+  // ── loading ─────────────────────────────────────────────────────────
+  var inFlight = false;
+  var sequence = 0;
+
   function load() {
-    fetch('/api/chief-of-staff', { credentials: 'same-origin' })
+    // One at a time. Two overlapping fetches can answer out of order and
+    // paint the older tree last, which on this page means showing work as
+    // running after it stopped.
+    if (inFlight) return;
+    inFlight = true;
+    var mine = ++sequence;
+    var abort = new AbortController();
+    var timer = window.setTimeout(function () { abort.abort(); },
+                                  FETCH_TIMEOUT_MS);
+    fetch('/api/chief-of-staff', { credentials: 'same-origin',
+                                   signal: abort.signal })
       .then(function (r) {
         if (!r.ok) { throw new Error('HTTP ' + r.status); }
         return r.json();
       })
-      .then(paint)
+      .then(function (data) {
+        if (mine !== sequence) return;
+        paint(data);
+      })
       .catch(function (err) {
+        // A page that cannot read the hive knows nothing about what is
+        // running, so it stops claiming anything is.
+        spinnersOn = false;
+        paintDeco();
         document.getElementById('cos-when').innerHTML =
-          '<span class="cos-error">' + esc(err.message) + '</span>';
+          '<span class="cos-error">' +
+          esc(err.name === 'AbortError' ? 'the hive did not answer' : err.message) +
+          '</span>';
+      })
+      .finally(function () {
+        window.clearTimeout(timer);
+        inFlight = false;
       });
+  }
+
+  // A load that keeps failing leaves the last tree on screen; this is what
+  // stops that tree going on claiming work is running.
+  function checkStale() {
+    var stale = lastGoodAt !== 0 &&
+                (Date.now() - lastGoodAt) > STALE_AFTER_MS;
+    if (stale && spinnersOn) {
+      spinnersOn = false;
+      paintDeco();
+      document.getElementById('cos-when').innerHTML =
+        '<span class="cos-stale">stale — the hive has not answered</span>';
+    }
   }
 
   load();
   setInterval(load, REFRESH_MS);
+  setInterval(checkStale, 5000);
 })();
 </script>
 {% endblock %}
