@@ -121,3 +121,93 @@ def test_a_command_from_an_account_that_is_not_the_owners_is_refused(gateway):
 
     assert refused.json() == {"error": "Session not found"}
     assert isinstance(allowed.json(), list)
+
+
+def test_a_bare_bot_surface_with_no_colon_is_still_checked(gateway):
+    http, server_module = gateway
+    created = {"id": "new-session", "mind_id": SKIPPY}
+    with patch.object(server_module.session_mgr, "create_session",
+                      new=AsyncMock(return_value=created)):
+        response = http.post("/sessions", json={
+            "surface": "telegram", "surface_id": STRANGER_TG,
+            "client_ref": STRANGER_TG, "mind_id": SKIPPY,
+        })
+
+    assert response.status_code == 404
+
+
+def test_a_second_users_discord_account_reaches_their_mind_and_not_skippy(gateway):
+    http, server_module = gateway
+    http.portal.call(lambda: link_account("discord", "77001", "sloan"))
+    created = {"id": "new-session", "mind_id": ARNOLD}
+
+    def open_on(mind_id):
+        with patch.object(server_module.session_mgr, "create_session",
+                          new=AsyncMock(return_value=created)):
+            return http.post("/sessions", json={
+                "surface": f"discord:{mind_id}", "surface_id": "77001",
+                "client_ref": "chan-1", "mind_id": mind_id,
+            })
+
+    assert open_on(ARNOLD).status_code == 200
+    assert open_on(SKIPPY).status_code == 404
+
+
+def test_moving_a_conversation_onto_a_bot_checks_the_conversations_own_mind(gateway):
+    """Daniel's chat on Skippy's bot is his, but Arnold's conversation is
+    Sloan's: activating it onto that chat is refused, by the route and by
+    `/switch` alike."""
+    http, _ = gateway
+    http.portal.call(lambda: seed_session(
+        "sess-arnold", surface="web", surface_id="terminal", mind_id=ARNOLD))
+
+    activated = http.post("/sessions/sess-arnold/activate", json={
+        "client_type": f"telegram:{SKIPPY}", "client_ref": DANIEL_TG,
+        "surface": f"telegram:{SKIPPY}", "surface_id": DANIEL_TG,
+    })
+    switched = http.post("/command", json={
+        "content": "/switch sess-arnold", "surface": f"telegram:{SKIPPY}",
+        "surface_id": DANIEL_TG, "client_ref": DANIEL_TG, "mind_id": SKIPPY,
+    })
+    killed = http.post("/command", json={
+        "content": "/kill sess-arnold", "surface": f"telegram:{SKIPPY}",
+        "surface_id": DANIEL_TG, "client_ref": DANIEL_TG, "mind_id": SKIPPY,
+    })
+
+    assert activated.status_code == 404
+    assert switched.json() == {"error": "Session not found"}
+    assert killed.json() == {"error": "Session not found"}
+
+
+def test_a_command_never_acts_on_a_bound_conversation_its_sender_cannot_reach(gateway):
+    """A chat left bound to another person's conversation by an earlier
+    switch: the commands that act on "the active conversation" see none."""
+    http, _ = gateway
+    http.portal.call(lambda: seed_session(
+        "sess-foreign", surface=f"telegram:{SKIPPY}", surface_id=SLOAN_TG,
+        mind_id=ARNOLD, bind=(f"telegram:{SKIPPY}", DANIEL_TG)))
+
+    answer = http.post("/command", json={
+        "content": "/model", "surface": f"telegram:{SKIPPY}",
+        "surface_id": DANIEL_TG, "client_ref": DANIEL_TG, "mind_id": SKIPPY,
+    })
+
+    assert "No active session" in answer.json()["error"]
+
+
+def test_moving_a_mind_to_another_owner_releases_its_old_owners_claim(gateway):
+    http, _ = gateway
+
+    async def claimed():
+        from comms_pg_fixture import execute
+        await execute(
+            "INSERT INTO core.surface_claims (mind_id, surface, claimed_ref, "
+            "claimed_at) VALUES ($1, 'telegram', $2, 1)", SKIPPY, DANIEL_TG)
+    http.portal.call(claimed)
+
+    moved = http.put(f"/broker/minds/{SKIPPY}/owner", json={"owner": "sloan"})
+    state = http.get(f"/broker/minds/{SKIPPY}/surface-claim",
+                     params={"surface": "telegram"})
+
+    assert moved.status_code == 200, moved.text
+    assert state.json()["claimed"] is False

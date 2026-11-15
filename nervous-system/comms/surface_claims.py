@@ -77,6 +77,10 @@ class _LinkedElsewhere(Exception):
     """The sender's account is already another person's; nothing is written."""
 
 
+class _NoOwner(Exception):
+    """The mind has no owner to link the sender to; nothing is written."""
+
+
 class _ClaimLost(Exception):
     """Another claim won the bot inside the same unit; the link goes too."""
 
@@ -152,6 +156,34 @@ async def account_owner(surface: str, account_ref: object) -> str:
         return ""
     row = await broker_ops.surface_account(_check_surface(surface), ref)
     return str(row["username"]) if row else ""
+
+
+async def reachable_rows(surface: object, sender: object, rows: list[dict]) -> list[dict]:
+    """The rows whose mind this sender may reach, every row for a non-bot.
+
+    One account read and one owner read per distinct mind, rather than two
+    reads per row: a chat's list can run to hundreds of conversations.
+    """
+    key = surface_of(surface)
+    if key is None:
+        return list(rows)
+    person = await account_owner(key, sender)
+    if not person:
+        return []
+    owners: dict[str, str] = {}
+    kept = []
+    for row in rows:
+        mind = str(row.get("mind_id") or "")
+        if mind not in owners:
+            owners[mind] = await _owner(mind)
+        if owners[mind] == person:
+            kept.append(row)
+    return kept
+
+
+def _mind_lock(mind_id: str) -> str:
+    """One key for everything that decides who a mind's bots answer."""
+    return f"surface-claims-mind:{mind_id}"
 
 
 async def sender_reaches(surface: object, sender: object, mind_id: object) -> bool:
@@ -363,19 +395,26 @@ async def attempt_claim(
             )
             return ClaimOutcome(False, "too_many_attempts")
         return ClaimOutcome(False, "mismatch")
-    owner = await _owner(mind_id)
-    if not owner:
-        # Every mind has an owner (story 2.1.8); one that somehow has none
-        # has nobody to link the sender to, and a claim with no person behind
-        # it is the unattributed bot this story removes.
-        return ClaimOutcome(False, "no_owner")
     # Claiming a bot is how a person links their account (story 2.1.15), so
     # the link and the claim are one change. Apart, two bots on two people's
     # minds claimed by one account at the same instant would both stand,
     # with the account linked to whichever wrote second.
+    #
+    # The owner is read inside the unit, under the lock a change of owner
+    # takes too: read before it, a mind moved mid-claim would be claimed for
+    # its old owner after the move had already released what it could see.
     try:
         async with hive_data.transaction() as unit:
-            await unit.hold(f"surface-account:{key}:{ref}")
+            # One hold per unit, and it is the mind's. Two links of one
+            # account need none: the second insert waits on the first's key
+            # and then reads whose the account became.
+            await unit.hold(_mind_lock(mind_id))
+            mind = await core.get_mind_by_id_or_name(mind_id, unit=unit)
+            owner = str((mind or {}).get("owner") or "").strip().lower()
+            if not owner:
+                # Every mind has an owner (story 2.1.8); one that somehow has
+                # none has nobody to link the sender to.
+                raise _NoOwner()
             linked = await broker_ops.link_surface_account(
                 surface=key, account_ref=ref, username=owner,
                 linked_at=moment, unit=unit)
@@ -393,6 +432,8 @@ async def attempt_claim(
             )
             if won["rows"] != 1:
                 raise _ClaimLost()
+    except _NoOwner:
+        return ClaimOutcome(False, "no_owner")
     except _LinkedElsewhere:
         # Refused before anything changed: the phrase stays on offer, because
         # the person it was minted for has not had their turn yet.
@@ -432,21 +473,34 @@ async def release_claims_not_owned(
 
     Answers with the surfaces released, so the caller can say what changed.
     """
-    owner = await _owner(mind_id)
+    moment = time.time() if now is None else now
     released: list[str] = []
-    for key in SURFACES:
-        row = await _row(mind_id, key)
-        ref = str((row or {}).get("claimed_ref") or "")
-        if not ref:
-            continue
-        if owner and await account_owner(key, ref) == owner:
-            continue
-        await clear_claim(mind_id, key, now=now)
+    async with hive_data.transaction() as unit:
+        # The lock a phrase claim takes, so a claim that read the old owner
+        # has either landed before this looks or reads the new one.
+        await unit.hold(_mind_lock(mind_id))
+        mind = await core.get_mind_by_id_or_name(mind_id, unit=unit)
+        owner = str((mind or {}).get("owner") or "").strip().lower()
+        for key in SURFACES:
+            row = await core.get_claim(mind_id, key, unit=unit)
+            ref = str((row or {}).get("claimed_ref") or "")
+            if not ref:
+                continue
+            linked = await broker_ops.surface_account(key, ref, unit=unit)
+            if owner and linked and str(linked["username"]) == owner:
+                continue
+            await broker_ops.update_claim(
+                mind_id, key, claimed_ref=None, claimed_at=None,
+                phrase_hash=None, phrase_issued_at=None,
+                phrase_expires_at=None, phrase_attempts=0,
+                released_at=moment, unit=unit,
+            )
+            released.append(key)
+    for key in released:
         log.info(
             "surface_claims: released a claim the mind's owner does not hold "
             "mind=%s surface=%s", mind_id, key,
         )
-        released.append(key)
     return released
 
 
@@ -489,7 +543,8 @@ async def adopt_claim(
         # unadoptable and dark.
         existing = str(row["claimed_ref"] or "")
         return ClaimOutcome(existing == ref, "already_decided", existing)
-    if await account_owner(key, ref) != await _owner(mind_id):
+    owner = await _owner(mind_id)
+    if not owner or await account_owner(key, ref) != owner:
         # Adoption confirms a link; it never makes one. The reference comes
         # from a YAML file on whatever box the mind runs on, so a link made
         # here would let any mind's own credential decide whose account an
