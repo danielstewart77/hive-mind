@@ -113,6 +113,14 @@ CMD ["/opt/venv/bin/python3", "server.py"]
 # From a build context rather than git because the repository is private;
 # asyncpg is its one dependency. Built with `target: mind-ledger` and
 # `additional_contexts: hive_data:` in that mind's compose fragment.
+#
+# The baked copy is for the dependencies and the metadata, not the code the
+# container runs: the fragment mounts the host's hive-data/hive_data
+# read-only over /opt/venv/lib/python3.12/site-packages/hive_data, as comms
+# does. The ledger tool is bind-mounted live from this checkout, so a baked
+# library stands still while the tool moves; on 2026-11-15 that left Stash
+# unable to record a question, link a board item or register a sub-agent.
+# Both tools refuse by name when the library they loaded is behind them.
 FROM mind AS mind-ledger
 USER root
 COPY --from=hive_data . /tmp/hive-data
