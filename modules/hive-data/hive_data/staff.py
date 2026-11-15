@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Collection
 
 from . import _sql
 from .core import _execute, _execute_returning, _fetch, _fetch_one
@@ -77,6 +77,13 @@ _AGENT_REPORTABLE = frozenset({
 #: empty outcome, which is a row nobody has ended at all.
 OUTCOME_UNKNOWN = "unknown"
 
+#: What no reporter may send as an outcome of its own. `OUTCOME_ABANDONED`
+#: is the one ending a later report is allowed to replace, so a harness that
+#: could send it could have its own first ending overwritten by its own
+#: second one - and a reader could not tell the sweep's guess from something
+#: a harness actually said.
+#: Declared below the two values and used by `record_agent_event`.
+#:
 #: An end nobody ever reported, written by `retire_stale_agents`. Separate
 #: from `OUTCOME_UNKNOWN` on purpose: a child that finished cleanly and said
 #: nothing about it, and a child that was killed with its turn, are different
@@ -91,6 +98,14 @@ OUTCOME_ABANDONED = "abandoned"
 ENDED = "ended"
 WORKING = "working"
 RUNNING = "running"
+
+#: What separates the mind from the harness's own id in a stored key, and is
+#: refused inside either half so the composition stays injective.
+AGENT_SEPARATOR = ":"
+
+#: Outcomes the machinery writes and a reporter may not. See the comment on
+#: `OUTCOME_ABANDONED`.
+RESERVED_OUTCOMES = frozenset({OUTCOME_ABANDONED})
 
 #: Characters that render as nothing but are not `str.isspace`. The schema's
 #: checks carry the same set.
@@ -415,6 +430,17 @@ _EVENTS = (SPAWNED, EVENT_WORKING, EVENT_ENDED)
 #: started - never moves. Everything else is something a later event may
 #: know better than the first: dsh's start carries no kind at all, and the
 #: child's own ending is the first event to name its provider.
+#:
+#: A kind or a label already recorded is never replaced by an event that
+#: carries none, which is the ordinary shape of a stop report: claude's
+#: names the agent and nothing about what it was for, so taking the newest
+#: value would blank what the spawn said.
+#:
+#: And an activity report *reopens* a record the sweep abandoned. The sweep
+#: only ever guessed that the child was dead; a harness saying it is still
+#: producing work is the one piece of evidence that outranks the guess, and
+#: discarding it left `WORKING` unreachable for the rest of that child's
+#: life. A reported ending is never reopened this way - only the sweep's.
 _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
     "agent_type" = CASE WHEN "agents"."agent_type" = ''
         THEN EXCLUDED."agent_type" ELSE "agents"."agent_type" END,
@@ -431,12 +457,16 @@ _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
         ELSE GREATEST(COALESCE("agents"."active_at", EXCLUDED."active_at"),
                       EXCLUDED."active_at") END,
     "finished_at" = CASE
+        WHEN EXCLUDED."active_at" IS NOT NULL
+             AND "agents"."outcome" = '{OUTCOME_ABANDONED}' THEN NULL
         WHEN EXCLUDED."finished_at" IS NULL THEN "agents"."finished_at"
         WHEN "agents"."finished_at" IS NULL
              OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
             THEN GREATEST(EXCLUDED."finished_at", "agents"."started_at")
         ELSE "agents"."finished_at" END,
     "outcome" = CASE
+        WHEN EXCLUDED."active_at" IS NOT NULL
+             AND "agents"."outcome" = '{OUTCOME_ABANDONED}' THEN ''
         WHEN EXCLUDED."finished_at" IS NULL THEN "agents"."outcome"
         WHEN "agents"."finished_at" IS NULL
              OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
@@ -457,10 +487,22 @@ def agent_key(mind_id: str, agent_id: str) -> str:
 
     Composed in one place rather than by each reporter, so two writers cannot
     disagree about it.
+
+    The separator is refused inside either half, because without that the
+    composition is not injective: a mind `m` with a child `a:b` and a mind
+    `m:a` with a child `b` would compose the same key and merge two minds'
+    children into one record.
     """
     _not_blank("agent mind", mind_id)
     _not_blank("agent id", agent_id)
-    return f"{mind_id}:{agent_id}"
+    for what, value in (("mind", mind_id), ("id", agent_id)):
+        if AGENT_SEPARATOR in value:
+            raise ValueRefused(
+                f"a sub-agent {what} of {value!r} holds "
+                f"{AGENT_SEPARATOR!r}, which separates the mind from the "
+                "child in the stored key. Two different pairs would compose "
+                "the same key and merge two children into one record.")
+    return f"{mind_id}{AGENT_SEPARATOR}{agent_id}"
 
 
 async def record_agent_event(
@@ -487,6 +529,15 @@ async def record_agent_event(
     child's parent ran in the same mind's process. `state` is one of
     `SPAWNED`, `EVENT_WORKING` or `EVENT_ENDED`.
 
+    One limit, named rather than hidden: `started_at` is the moment this
+    recorder first heard of the child. When an ending arrives for a child
+    whose start report was lost or overtaken, the record it creates has its
+    start and its end at the same moment, and nothing can recover the real
+    duration - the start report that arrives afterwards is stamped later
+    still, because the clock here is the receipt clock. Such a record is
+    identifiable (its start equals its end) and is honest about knowing
+    nothing rather than inventing a plausible length.
+
     `now` is the recorder's clock and stamps whichever moments this event
     moves. It is deliberately not the reporting host's: minds run on other
     machines and in containers, and a host running ahead would hold a child
@@ -502,6 +553,16 @@ async def record_agent_event(
             f"{state!r} is not a sub-agent event. A reporter knows that a "
             f"child began, that it is still working, or that it is over: "
             f"{', '.join(_EVENTS)}.")
+    if outcome is not None:
+        _not_blank("agent outcome", outcome)
+        if outcome in RESERVED_OUTCOMES:
+            raise ValueRefused(
+                f"{outcome!r} is the machinery's own word for an ending "
+                "nobody reported, and it is the one ending a later report "
+                "may replace. A reporter sending it could have its own "
+                "first ending overwritten by its own second one, and no "
+                "reader could tell the sweep's guess from something a "
+                "harness actually said.")
     moment = _now(now)
     ended = state == EVENT_ENDED
     values = {
@@ -550,20 +611,28 @@ def agent_state(row: Row, *, now: float, fresh_within: float) -> str:
 
 
 async def retire_stale_agents(*, now: float, timeout: float,
+                              alive: Collection[str] | None = None,
                               unit: Unit | None = None) -> list[Row]:
-    """Close every open record nothing has been heard from, and return them.
+    """Close every open record whose child is gone, and return them.
 
-    A child dies with the process that spawned it, so a record left open past
-    the longest turn its mind allows is an orphan rather than work in flight -
-    the child was killed and could not write its own ending. `agent_stale`
-    answers the same question for a reader; this writes it down, because a
-    record that only *reads* as dead is live again in every other reader.
+    A child dies with the process that spawned it. `agent_stale` answers for
+    a reader whether a record has outlived its turn; this writes the ending
+    down, because a record that only *reads* as dead is live again in every
+    other reader.
 
-    `timeout` is required and has no default. A hive's minds do not share one
-    turn length - this hive has 900 seconds on one mind and 14400 on another,
-    and a dsh mind can be configured to no bound at all - so a number chosen
-    here would retire work that is still running on the slowest of them. The
-    caller passes the longest turn it believes in.
+    `alive` is the conversations still producing output, and it is what makes
+    this a reading rather than a guess: a record whose conversation is in it
+    is a record whose turn is still running, whatever that mind's turn length
+    is, and it is left alone. Pass None to mean "nothing is known about any
+    conversation", which retires on the clock alone - correct for a caller
+    that has no live feed, and the reason the parameter is optional rather
+    than required.
+
+    `timeout` is required and has no default, and applies only to records
+    that `alive` cannot speak for. A hive's minds do not share one turn
+    length - this hive has 900 seconds on one mind and 14400 on another, and
+    a dsh mind can be configured to no bound at all - so a number chosen here
+    would retire work still running on the slowest of them.
 
     Keyed on the last moment the child was known alive, which is its activity
     stamp when it has one and its start when it does not. Keyed on the start
@@ -572,15 +641,22 @@ async def retire_stale_agents(*, now: float, timeout: float,
     the sweep's own clock, which would claim the child ran until somebody
     happened to look.
     """
+    args: list[Any] = [OUTCOME_ABANDONED, now - timeout]
+    spared = ""
+    if alive:
+        args.append(list(alive))
+        spared = ('AND ("session_id" IS NULL OR NOT ("session_id" = '
+                  f'ANY(${len(args)}::text[]))) ')
     sql = (f"UPDATE {qualified(AGENTS)} "
            f'SET "finished_at" = GREATEST("started_at", '
            f'COALESCE("active_at", "started_at")), '
            f'"outcome" = $1 '
            f'WHERE "finished_at" IS NULL '
            f'AND GREATEST("started_at", COALESCE("active_at", "started_at")) '
-           f"<= $2 "
+           f"< $2 "
+           f"{spared}"
            f"RETURNING {select_list(AGENTS)}")
-    return await _fetch(unit, sql, OUTCOME_ABANDONED, now - timeout)
+    return await _fetch(unit, sql, *args)
 
 
 async def agents(*, task_id: str | None = None, session_id: str | None = None,
@@ -617,7 +693,13 @@ async def agents(*, task_id: str | None = None, session_id: str | None = None,
         clauses.append('"finished_at" IS NULL')
     if since is not None:
         args.append(since)
-        clauses.append(f'"started_at" >= ${len(args)}')
+        # Whether the child *ran* in that window, not whether it began in
+        # it. A read of the last four hours that matched the start alone
+        # missed the child that began at half past eleven and ran until six,
+        # which is precisely the overnight work the question is asked about.
+        clauses.append(f'("started_at" >= ${len(args)} '
+                       f'OR "finished_at" IS NULL '
+                       f'OR "finished_at" >= ${len(args)})')
     joined = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return await _fetch(
         unit, f"SELECT {select_list(AGENTS)} FROM {qualified(AGENTS)} "

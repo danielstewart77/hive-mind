@@ -625,9 +625,13 @@ async def test_a_child_nothing_was_heard_from_is_recorded_as_abandoned(
     open_child = await staff.record_agent_event(
         "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
     fresh = await staff.record_agent_event(
-        "d4e5f6", staff.SPAWNED, mind_id=a_reporting_mind, now=clock + 1700)
+        "d4e5f6", staff.SPAWNED, mind_id=a_reporting_mind, now=clock + 1900)
 
-    retired = await staff.retire_stale_agents(now=clock + 1800,
+    # The sweep deliberately runs later than the window, so that the moment
+    # it *would* write if it used its own clock is distinct from the moment
+    # the child was last known alive. With the two equal, a sweep stamping
+    # `now - timeout` passes this test by arithmetic coincidence.
+    retired = await staff.retire_stale_agents(now=clock + 2000,
                                               timeout=1800.0)
 
     mine = [r for r in retired if r["mind_id"] == a_reporting_mind]
@@ -637,7 +641,7 @@ async def test_a_child_nothing_was_heard_from_is_recorded_as_abandoned(
     # The ending is the last moment the child was known alive, not the
     # moment somebody happened to sweep.
     assert retired[0]["finished_at"] == clock
-    assert staff.agent_state(retired[0], now=clock + 1800,
+    assert staff.agent_state(retired[0], now=clock + 2000,
                              fresh_within=60.0) == staff.ENDED
     still_open = await inspector.fetchrow(
         "SELECT finished_at FROM staff.agents WHERE id = $1", fresh["id"])
@@ -748,6 +752,12 @@ async def test_what_ran_overnight_is_readable_by_mind_and_by_when(
     and "what ran overnight" is a read across every mind at once."""
     await staff.record_agent_event("a1b2c3", staff.SPAWNED,
                                    mind_id=a_reporting_mind, now=clock)
+    # Ended before the window opens. A child still open is still running,
+    # so it belongs in every later window by the overlap rule and could not
+    # be used to show that the filter narrows anything.
+    await staff.record_agent_event("a1b2c3", staff.EVENT_ENDED,
+                                   mind_id=a_reporting_mind, outcome="ok",
+                                   now=clock + 20)
     await staff.record_agent_event("d4e5f6", staff.SPAWNED,
                                    mind_id=other_mind, now=clock + 500)
 
@@ -780,3 +790,247 @@ async def test_an_event_nobody_defined_is_refused_rather_than_stored(
     with pytest.raises(hive_data.errors.ValueRefused):
         await staff.record_agent_event("a1b2c3", "pondering",
                                        mind_id=a_reporting_mind, now=clock)
+
+
+async def test_a_later_event_carrying_less_does_not_erase_what_is_known(
+        a_reporting_mind, connected, inspector, clock):
+    """Three harnesses send three different subsets of the same facts.
+
+    Dsh's `finished` event names the child and its provider and nothing
+    about the conversation; a working report names no parent. Each of those
+    arrives as an event carrying nulls where the start carried values, and a
+    record that took the newest value for every field would blank the
+    conversation it belongs to and the child that spawned it - requirements
+    1 and 6 failing silently, on the ordinary path rather than on a
+    failure.
+    """
+    task = await staff.create_task("Watched work", "in progress", now=clock)
+    await staff.record_agent_event(
+        "d4e5f6", staff.SPAWNED, mind_id=a_reporting_mind,
+        conversation_ref="conv-77", session_id="sess-9",
+        parent_agent_id="a1b2c3", task_id=task["id"], now=clock)
+
+    ended = await staff.record_agent_event(
+        "d4e5f6", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 30)
+
+    assert ended["session_id"] == "sess-9"
+    assert ended["conversation_ref"] == "conv-77"
+    assert ended["parent_agent_id"] == f"{a_reporting_mind}:a1b2c3"
+    assert ended["task_id"] == task["id"]
+    stored = await inspector.fetchrow(
+        "SELECT session_id, conversation_ref, parent_agent_id, task_id "
+        "FROM staff.agents WHERE id = $1", ended["id"])
+    assert dict(stored) == {"session_id": "sess-9",
+                            "conversation_ref": "conv-77",
+                            "parent_agent_id": f"{a_reporting_mind}:a1b2c3",
+                            "task_id": task["id"]}
+
+
+async def test_an_activity_stamp_in_the_future_does_not_read_as_working(
+        a_reporting_mind, connected, clock):
+    """A reporting host whose clock runs ahead, or one bad event.
+
+    Bounded at both ends for the reason the page bounds its own freshness
+    check: an unbounded upper reading would hold the child as working for as
+    long as the drift lasted, and that is the one state the whole feature
+    exists to keep honest.
+    """
+    window = 60.0
+    row = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 10 * window)
+
+    assert staff.agent_state(row, now=clock,
+                             fresh_within=window) == staff.RUNNING
+
+
+async def test_a_delegate_reporting_late_replaces_the_sweep_s_guess(
+        a_reporting_mind, connected, clock):
+    """The chief's own delegates are swept on the same window as anybody's
+    children, so the ending they report afterwards has to land the same way
+    a harness's does. Without it, a sweep firing one tick early makes the
+    truth unwritable for ever through this path too.
+    """
+    task = await staff.create_task("Watched work", "in progress", now=clock)
+    agent = await staff.start_agent(task["id"], "chase.md", now=clock)
+    await staff.retire_stale_agents(now=clock + 1800, timeout=1800.0)
+
+    corrected = await staff.finish_agent(agent["id"], outcome="finished",
+                                         now=clock + 1805)
+    again = await staff.finish_agent(agent["id"], outcome="failed",
+                                     now=clock + 1900)
+
+    assert corrected is not None
+    assert corrected["outcome"] == "finished"
+    assert again is None, "one report must not overwrite another"
+
+
+async def test_an_ending_carrying_no_kind_does_not_blank_the_one_recorded(
+        a_reporting_mind, connected, clock):
+    """The ordinary shape of a stop report: claude's names the agent and
+    nothing about what it was for. Taking the newest value for every field
+    would blank what the spawn said."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind,
+        agent_type="refute-tests", label="story 6.9.1", now=clock)
+
+    ended = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 30)
+
+    assert ended["agent_type"] == "refute-tests"
+    assert ended["about"] == "story 6.9.1"
+
+
+async def test_an_activity_stamp_is_not_erased_by_a_later_quiet_event(
+        a_reporting_mind, connected, clock):
+    """Only a working report carries a stamp, so every other event carries a
+    null one - and a record that took the newest value would forget that the
+    child was ever observed working at all."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 10)
+
+    after = await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock + 20)
+
+    assert after["active_at"] == clock + 10
+
+
+async def test_two_activity_reports_out_of_order_keep_the_later_moment(
+        a_reporting_mind, connected, clock):
+    """The reports are detached and race, so the one that arrives second is
+    not always the one that was observed second."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 90)
+
+    older = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 30)
+
+    assert older["active_at"] == clock + 90
+
+
+async def test_a_child_reporting_work_after_the_sweep_is_live_again(
+        a_reporting_mind, connected, clock):
+    """The sweep only ever guessed that the child was dead. A harness saying
+    it is still producing work is the one piece of evidence that outranks
+    the guess, and discarding it left working unreachable for the rest of
+    that child's life."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+    await staff.retire_stale_agents(now=clock + 2000, timeout=1800.0)
+
+    alive = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 2100)
+
+    assert alive["finished_at"] is None
+    assert alive["outcome"] == ""
+    assert staff.agent_state(alive, now=clock + 2100,
+                             fresh_within=60.0) == staff.WORKING
+
+
+async def test_a_reported_ending_is_not_reopened_by_a_later_activity_report(
+        a_reporting_mind, connected, clock):
+    """Only the sweep's guess gives way. A harness that said its child was
+    over has said the one thing nothing else knows better."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 30)
+
+    late = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 40)
+
+    assert late["finished_at"] == clock + 30
+    assert late["outcome"] == "ok"
+
+
+async def test_a_reporter_may_not_send_the_machinerys_own_abandoned_outcome(
+        a_reporting_mind, connected, clock):
+    """It is the one ending a later report may replace, so a reporter able
+    to send it could have its own first ending overwritten by its own
+    second one."""
+    with pytest.raises(hive_data.errors.ValueRefused):
+        await staff.record_agent_event(
+            "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind,
+            outcome=staff.OUTCOME_ABANDONED, now=clock)
+
+
+async def test_an_outcome_that_renders_as_nothing_is_refused(
+        a_reporting_mind, connected, clock):
+    with pytest.raises(hive_data.errors.ValueRefused):
+        await staff.record_agent_event(
+            "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind,
+            outcome="​", now=clock)
+
+
+async def test_the_stored_key_refuses_its_own_separator_in_either_half(
+        connected, clock):
+    """Without this the composition is not injective: mind `m` with child
+    `a:b` and mind `m:a` with child `b` compose one key and merge two minds'
+    children into one record."""
+    with pytest.raises(hive_data.errors.ValueRefused):
+        staff.agent_key("mind-one", "a:b")
+    with pytest.raises(hive_data.errors.ValueRefused):
+        staff.agent_key("mind:one", "ab")
+
+
+async def test_what_ran_overnight_includes_a_child_that_began_before_it(
+        a_reporting_mind, connected, clock):
+    """A read of the last four hours matching the start alone missed the
+    child that began at half past eleven and ran until six, which is
+    precisely the overnight work the question is asked about."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 30_000)
+    await staff.record_agent_event(
+        "d4e5f6", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+    await staff.record_agent_event(
+        "d4e5f6", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 50)
+
+    recent = await staff.agents(mind_id=a_reporting_mind, since=clock + 100)
+
+    assert [r["id"] for r in recent] == [f"{a_reporting_mind}:a1b2c3"]
+
+
+async def test_a_child_of_a_conversation_still_producing_output_is_spared(
+        a_reporting_mind, connected, clock):
+    """The sweep's one real reading rather than a guess. A child dies with
+    its turn's process, so a conversation still producing output has not
+    ended its turn - whatever that mind's turn length is, and this hive's
+    minds allow 900 seconds, 14400 and no bound at all."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind,
+        session_id="sess-live", now=clock)
+    await staff.record_agent_event(
+        "d4e5f6", staff.SPAWNED, mind_id=a_reporting_mind,
+        session_id="sess-quiet", now=clock)
+
+    retired = await staff.retire_stale_agents(
+        now=clock + 20_000, timeout=1800.0, alive=["sess-live"])
+
+    mine = [r["id"] for r in retired if r["mind_id"] == a_reporting_mind]
+    assert mine == [f"{a_reporting_mind}:d4e5f6"]
+
+
+async def test_a_child_of_no_conversation_is_retired_on_the_clock_alone(
+        a_reporting_mind, connected, clock):
+    """Nothing can be asked about it, so the grace window is all there is."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+
+    retired = await staff.retire_stale_agents(
+        now=clock + 20_000, timeout=1800.0, alive=["sess-live"])
+
+    assert [r["id"] for r in retired
+            if r["mind_id"] == a_reporting_mind] == [
+        f"{a_reporting_mind}:a1b2c3"]

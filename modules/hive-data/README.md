@@ -524,12 +524,24 @@ inside its own process and the primary key here covers the hive.
 `agent_state` is the single reading of what a row says the child is doing —
 `ended`, `working` while a harness is positively reporting ongoing work, and
 `running` for everything else, which is all two of the three harnesses can
-ever say. `retire_stale_agents` writes the ending for a child nobody closed
-and takes its window as a required parameter: this hive's minds have turn
-timeouts of 900 and 14400 seconds and a dsh mind can be configured to none
-at all, so a number chosen in the package would retire work still running on
-the slowest of them. Every moment on these rows is the recorder's clock, not
-the reporting host's.
+ever say. `retire_stale_agents` writes the ending for a child nobody closed.
+It is told which conversations are still producing output and leaves their
+children alone, which is what makes it a reading rather than a guess: a
+child dies with its turn's process, so a conversation still generating has
+not ended its turn whatever that mind's turn length is. The clock window
+applies only to records that belong to no conversation, and is a required
+parameter with no default — this hive's minds have turn timeouts of 900 and
+14400 seconds and a dsh mind can be configured to none at all. Every moment
+on these rows is the recorder's clock, not the reporting host's.
+
+A reserved outcome marks the sweep's own guess and a reporter may not send
+it: it is the one ending a later report may replace, so a harness able to
+send it could have its own first ending overwritten by its own second. An
+activity report reopens a record the sweep abandoned, because a harness
+saying its child is still working is the one piece of evidence that outranks
+the guess. `since` asks whether a child *ran* in that window rather than
+whether it began in it, so the read of the last four hours includes the
+child that started at half past eleven and ran until six.
 
 Two things are deliberately outside it. **hive-health** is not part of the one
 database at all. The **inference proxy** keeps SQLAlchemy and its own store:
