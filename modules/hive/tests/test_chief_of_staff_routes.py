@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 
 import accounts
 import auth
+import kanban_data
 import main as main_mod
 from hive_data import staff
 from hive_site import testing as suite
@@ -61,14 +62,21 @@ def test_one_call_answers_with_the_tree_the_barrel_and_the_questions(
             await staff.add_status(name)
         live = await staff.create_task("Live work", "in progress", now=NOW)
         await staff.update_task(live["id"], question="Which model?", now=NOW)
-        await staff.create_task("Shipped", "done", now=NOW)
+        epic = await kanban_data.create_epic("Chief of Staff")
+        feature = await kanban_data.create_feature(epic["id"], "The page")
+        story = await kanban_data.create_story("Shipped",
+                                               feature_id=feature["id"])
+        await kanban_data.update_story(story["id"], status="done")
+        shipped = await staff.create_task("Shipped", "done", now=NOW)
+        await staff.update_task(shipped["id"], board_item=story["id"], now=NOW)
     suite.run(rows())
 
     data = signed_in.get("/api/chief-of-staff").json()
 
     assert [n["label"] for n in data["nodes"] if n["kind"] == "task"] == [
         "Live work"]
-    assert [b["label"] for b in data["barrel"]] == ["Shipped"]
+    assert [b["label"].split(" ", 1)[1] for b in data["barrel"]] == [
+        "Shipped"]
     assert [q["question"] for q in data["questions"]] == ["Which model?"]
     assert next(n for n in data["nodes"]
                 if n["kind"] == "chief")["questions"] == 1

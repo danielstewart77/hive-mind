@@ -85,18 +85,18 @@ REFRESH = 20
 #: evidence of work. Deliberately short - see `staff.agent_state`.
 FRESH_WITHIN = 3 * REFRESH
 
-#: The longest kind and the longest label a sub-agent card draws. The card
-#: is a 112-pixel circle with an 84-pixel text column at 10px, which holds
-#: about fourteen characters a line and five lines; the kind takes at most
-#: two of them and the label the rest. Cut rather than dropped, as the
-#: session name is.
-AGENT_KIND_LIMIT = 24
-AGENT_LABEL_LIMIT = 40
-
-#: What a sub-agent card says when its writer has named neither its kind nor
-#: its work yet - a dsh start carries neither, and its ending fills them in.
-#: A blank circle is not a status indicator.
+#: What a sub-agent node says when its writer has named nothing it could
+#: be called by - a dsh start carries neither kind nor work, and its ending
+#: fills them in. A robot with no words under it is not a status indicator.
 AGENT_FALLBACK = "sub-agent"
+
+#: The kinds of board item a story is. A bug is a story with a subtype, so
+#: wherever this page asks "is this a story" - the barrel, the chain, the
+#: spinner a working child lends - a bug is one.
+STORY_KINDS = ("story", "bug")
+
+#: What a brief file's name ends in, and is stripped of before it is shown.
+BRIEF_EXTENSIONS = (".md", ".markdown", ".txt")
 
 #: How long a session may be silent and still count as working. The same
 #: turn timeout, for the same reason read from the other end: a session that
@@ -260,6 +260,17 @@ def _work_kinds(epics: list[dict[str, Any]], features: list[dict[str, Any]],
     return kinds
 
 
+def _board_label(item: dict[str, Any], numbers: dict[str, str]) -> str:
+    return f"{numbers.get(item['id'], '')} {item['title']}".strip()
+
+
+def _barrel_story(story: dict[str, Any], numbers: dict[str, str],
+                  kinds: dict[str, str]) -> dict[str, Any]:
+    """A finished story as the barrel draws it, by its own board id."""
+    return _node(story["id"], _board_label(story, numbers), "story",
+                 status=DONE, work_kind=kinds.get(story["id"], "story"))
+
+
 def _board_children(item_id: str, features: list[dict[str, Any]],
                     stories: list[dict[str, Any]],
                     numbers: dict[str, str],
@@ -269,13 +280,16 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
     """The live sub-tree under a board item, plus what of it is finished.
 
     Returns nodes, edges and the finished rows for the barrel. A story that
-    is done is in the barrel and not in the tree. So is a feature every one
-    of whose stories is done: only a story carries a status on this board, so
-    a finished feature is one with nothing left under it, and leaving it in
-    the tree would draw a branch with no live work on it.
+    is done is in the barrel and not in the tree. A feature every one of
+    whose stories is done leaves the tree too - only a story carries a status
+    on this board, so a finished feature is one with nothing left under it -
+    but it goes nowhere: the barrel holds finished stories and nothing else
+    (requirement 8 of 2026-11-15), so its stories go in its stead.
 
-    None of these children carries an assigned mind, a session name or a
-    spinner. The assignment is on the item a session was dispatched to, and
+    None of these children carries an assigned mind or a session name, and
+    none spins of its own accord; a story spins only when a working child is
+    drawn beneath it, which `get_tree` decides once the tree is whole. The
+    assignment is on the item a session was dispatched to, and
     copying it down the tree is the one thing Daniel said it must not do:
     a story drawn under an assigned feature is not itself assigned to
     anybody.
@@ -291,8 +305,7 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
             label = f"{numbers.get(story['id'], '')} {story['title']}".strip()
             work_kind = kinds.get(story["id"], "story")
             if story.get("status") == BOARD_DONE:
-                barrel.append(_node(story["id"], label, "story", status=DONE,
-                                    work_kind=work_kind))
+                barrel.append(_barrel_story(story, numbers, kinds))
                 continue
             nodes.append(_node(story["id"], label, "story",
                                status=story.get("status", ""),
@@ -314,8 +327,11 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
         label = f"{numbers.get(feature['id'], '')} {feature['title']}".strip()
         mine = [s for s in stories if s.get("feature_id") == feature["id"]]
         if mine and all(s.get("status") == BOARD_DONE for s in mine):
-            barrel.append(_node(feature["id"], label, "feature", status=DONE,
-                                work_kind="feature"))
+            # The feature leaves the tree and goes nowhere: the barrel holds
+            # finished stories and nothing else (2026-11-15). Its stories are
+            # finished stories, so they still go.
+            for story in mine:
+                barrel.append(_barrel_story(story, numbers, kinds))
             continue
         nodes.append(_node(feature["id"], label, "feature", status="",
                            work_kind="feature", active=False))
@@ -342,41 +358,45 @@ def _unique(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _unique_edges(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The edges, one per pair, for the reason `_unique` gives."""
-    seen: set[tuple[str, str]] = set()
-    out: list[dict[str, Any]] = []
-    for edge in edges:
-        pair = (edge["source"], edge["target"])
-        if pair in seen:
-            continue
-        seen.add(pair)
-        out.append(edge)
-    return out
-
-
 def _cut(text: str, limit: int) -> str:
     """The text, or as much as fits with an ellipsis saying it was cut."""
     return text if len(text) <= limit else text[:limit - 1] + "\u2026"
 
 
-def _agent_label(agent: dict[str, Any]) -> str:
-    """What a sub-agent card says: its kind, and the work it was given.
+def _brief_words(brief: str) -> str:
+    """A brief file's name as the words it is made of.
 
-    A delegate the chief registered keeps its brief as its label, as it
-    always has - the brief file is that writer's name for the work. A child a
-    harness reported carries its kind and its one line on two lines, because
-    requirement 9 asks for both and neither alone says which child this is.
+    `read-and-judge.md` is the only record of what one of the chief's own
+    delegates is doing, so it is what the node says - but as words. The
+    file name itself is what Daniel asked to stop seeing (2026-11-15), so
+    the folder, the extension and the separators all go.
+    """
+    stem = brief.replace("\\", "/").rsplit("/", 1)[-1]
+    # Only an extension a brief file actually has: a dot inside the name
+    # ("v1.2-notes") is part of the words.
+    for extension in BRIEF_EXTENSIONS:
+        if stem.lower().endswith(extension) and len(stem) > len(extension):
+            stem = stem[:-len(extension)]
+            break
+    return " ".join(stem.replace("-", " ").replace("_", " ").split())
+
+
+def _agent_label(agent: dict[str, Any]) -> str:
+    """What a sub-agent node says: a few words of what it is doing.
+
+    Shown the way a session name is shown, and cut to the same length
+    (requirement 1 of 2026-11-15). A reported child's own one-line
+    description is what it is doing; its kind is only what it is, so it is
+    the fallback rather than a second line. A delegate the chief registered
+    says what its brief is called, as words.
     """
     brief = (agent.get("brief") or "").strip()
     if brief:
-        return brief
-    kind = _cut((agent.get("agent_type") or "").strip(), AGENT_KIND_LIMIT)
-    about = _cut((agent.get("about") or "").strip(), AGENT_LABEL_LIMIT)
-    lines = [part for part in (kind, about) if part]
-    if len(lines) == 2 and lines[0] == lines[1]:
-        lines = lines[:1]
-    return "\n".join(lines) or AGENT_FALLBACK
+        words = _brief_words(brief)
+    else:
+        words = ((agent.get("about") or "").strip()
+                 or (agent.get("agent_type") or "").strip())
+    return _cut(words, NAME_LIMIT) if words else AGENT_FALLBACK
 
 
 def _place_agents(rows: list[dict[str, Any]]) -> dict[str, str | None]:
@@ -467,6 +487,111 @@ def _chief_face(chief: str,
     return None
 
 
+def _place_work(nodes: dict[str, dict[str, Any]], parent: dict[str, str],
+                board_nodes: dict[str, dict[str, Any]],
+                board_parent: dict[str, str], claimed: dict[str, str],
+                extra: list[str], by_id: dict[str, dict[str, Any]],
+                kinds: dict[str, str], numbers: dict[str, str]) -> None:
+    """Hang every task and every board node beneath the one parent it has.
+
+    Requirement 3 of 2026-11-15: work under the same epic and feature is one
+    chain - the feature, its stories beneath it, each story's sub-agents
+    beneath that. A board item is drawn once, so where a task covers an item
+    some other task's expansion also draws, the task takes the item's place
+    and the item is not drawn as itself. A task covering a story hangs
+    beneath that story's feature wherever the feature is drawn, and when no
+    task draws it the feature is drawn from the board for the purpose,
+    carrying only the stories tasks cover: it is a heading for live work, not
+    a second copy of the board.
+
+    Nothing here climbs the board. A feature's parent counts only when it is
+    an epic and a story's only when it is a feature or an epic, one step,
+    because the board lets a feature sit beneath a feature and lets two
+    items name each other, and a walk up that would loop.
+    """
+    def drawn(item_id: str | None) -> str | None:
+        if not item_id:
+            return None
+        if item_id in claimed:
+            return claimed[item_id]
+        return item_id if item_id in nodes else None
+
+    def epic_of(item: dict[str, Any]) -> str | None:
+        epic_id = item.get("epic_id")
+        return epic_id if kinds.get(epic_id or "") == "epic" else None
+
+    for node_id, node in board_nodes.items():
+        if node_id in claimed:
+            continue
+        nodes[node_id] = node
+        source = board_parent[node_id]
+        parent[node_id] = claimed.get(source, source)
+
+    for item_id, task_id in claimed.items():
+        kind = kinds[item_id]
+        item = by_id[item_id]
+        if item_id in board_parent:
+            source = board_parent[item_id]
+            parent[task_id] = claimed.get(source, source)
+        elif kind in STORY_KINDS:
+            feature_id = item.get("feature_id")
+            if kinds.get(feature_id or "") == "feature":
+                if drawn(feature_id) is None:
+                    feature = by_id[feature_id]
+                    nodes[feature_id] = _node(
+                        feature_id, _board_label(feature, numbers), "feature",
+                        status="", work_kind="feature", active=False)
+                    parent[feature_id] = drawn(epic_of(feature)) or CHIEF_ID
+                parent[task_id] = drawn(feature_id)
+            else:
+                parent[task_id] = drawn(epic_of(item)) or CHIEF_ID
+        elif kind == "feature":
+            parent[task_id] = drawn(epic_of(item)) or CHIEF_ID
+        else:
+            parent[task_id] = CHIEF_ID
+
+    # A second task on the same item is the same work seen twice - one
+    # watching it, one watching a question about it - so it hangs beside
+    # the first rather than taking a place of its own.
+    for task_id in extra:
+        parent[task_id] = parent[claimed[nodes[task_id]["board_item"]]]
+    for node_id, node in nodes.items():
+        if node["kind"] == "task":
+            parent.setdefault(node_id, CHIEF_ID)
+
+
+def _lend_activity(nodes: dict[str, dict[str, Any]],
+                   parent: dict[str, str]) -> None:
+    """A story with a working sub-agent anywhere beneath it is working too.
+
+    Requirement 2 of 2026-11-15. Only a working child lends it - one only
+    known to be unfinished claims nothing - and it is lent to stories alone:
+    a feature's state is its stories'. A story with no working child keeps
+    exactly what it had.
+    """
+    lent: set[str] = set()
+    for node in nodes.values():
+        if node["kind"] != "agent" or node.get("active") is not True:
+            continue
+        seen: set[str] = set()
+        current = parent.get(node["id"])
+        while current is not None and current not in seen:
+            seen.add(current)
+            above = nodes.get(current)
+            if above is None:
+                break
+            if above.get("work_kind") in STORY_KINDS:
+                above["active"] = True
+                lent.add(above.get("board_item") or above["id"])
+            current = parent.get(current)
+    # A story two tasks are on is one story, drawn twice: it is working or
+    # it is not, and both its nodes say the same.
+    for node in nodes.values():
+        if (node.get("work_kind") in STORY_KINDS
+                and (node.get("board_item") or node["id"]) in lent):
+            node["active"] = True
+
+
 async def get_tree(*, chief: str = "Stash",
                    now: float | None = None) -> dict[str, Any]:
     """Everything the page draws, in one answer.
@@ -494,19 +619,47 @@ async def get_tree(*, chief: str = "Stash",
     numbers = await kanban_data.backlog_numbers()
     kinds = _work_kinds(epics, features, stories)
 
-    nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
+    # Every drawn node has exactly one parent, recorded here as it is placed
+    # and turned into edges only at the end. A node handed two parents is
+    # drawn by the layout at the shallower of the two - a story task with an
+    # edge from the chief as well as one from its feature sits beside the
+    # feature, not beneath it, which is the side-by-side drawing requirement
+    # 3 of 2026-11-15 removes.
+    nodes: dict[str, dict[str, Any]] = {}
+    parent: dict[str, str] = {}
     barrel: list[dict[str, Any]] = []
     questions: list[dict[str, Any]] = []
+    # The board's own nodes, drawn by a task's expansion, kept apart until
+    # the tasks are placed: a board item a task covers is drawn as that task
+    # and not a second time as itself.
+    board_nodes: dict[str, dict[str, Any]] = {}
+    board_parent: dict[str, str] = {}
+    # The first live task covering each board item takes that item's place.
+    claimed: dict[str, str] = {}
+    extra: list[str] = []
+    finished_items: list[str] = []
+    by_id = {row["id"]: row for row in (*epics, *features, *stories)}
+    # Which task takes a board item's place is decided once, by which was
+    # opened first, never by the order the ledger lists them in: that is
+    # most recently moved first, so a watch noting a stop on one of two
+    # tasks covering a feature would hand the feature's stories from one to
+    # the other and back, and redraw the whole tree each time.
+    for task in sorted((t for t in tasks if t["status"] != DONE),
+                       key=lambda t: (t["created_at"], t["id"])):
+        item = task.get("board_item")
+        if kinds.get(item or "", TASK_KIND) != TASK_KIND:
+            claimed.setdefault(item, task["id"])
 
     for task in tasks:
         label = task["name"]
         board_item = task.get("board_item")
         work_kind = kinds.get(board_item or "", TASK_KIND)
         if task["status"] == DONE:
-            barrel.append(_node(task["id"], label, "task", status=DONE,
-                                work_kind=work_kind,
-                                finished_at=task.get("updated_at")))
+            # A finished task leaves the tree and goes nowhere. When the
+            # work it was is a board story, the story is what finished, and
+            # the barrel holds finished stories (requirement 8).
+            if work_kind in STORY_KINDS:
+                finished_items.append(board_item)
             continue
 
         sessions = [p["session_id"]
@@ -514,7 +667,7 @@ async def get_tree(*, chief: str = "Stash",
         working = await _assigned(sessions, names, now=moment)
         activity = _activity(task, sessions, working["alive"])
         question = task.get("question")
-        nodes.append(_node(
+        nodes[task["id"]] = _node(
             task["id"], label, "task", status=task["status"],
             activity=activity, work_kind=work_kind,
             active=_active(activity, working["fresh"]),
@@ -522,28 +675,29 @@ async def get_tree(*, chief: str = "Stash",
             sessions=sessions, question=question,
             board_item=board_item,
             board_number=numbers.get(board_item or "", ""),
-            description=task.get("description", "")))
-        edges.append({"source": CHIEF_ID, "target": task["id"]})
+            description=task.get("description", ""))
         if question:
             questions.append({"task": task["id"], "name": label,
                               "question": question})
 
-        if board_item:
-            sub_nodes, sub_edges, sub_barrel = _board_children(
-                board_item, features, stories, numbers, kinds)
-            nodes.extend(sub_nodes)
-            # The board item's own children hang off the task node, which is
-            # the item: there is no second node for the feature itself.
-            edges.extend({"source": task["id"], "target": e["target"]}
-                         if e["source"] == board_item else e
-                         for e in sub_edges)
-            barrel.extend(sub_barrel)
+        if work_kind != TASK_KIND:
+            if claimed[board_item] != task["id"]:
+                extra.append(task["id"])
+            else:
+                sub_nodes, sub_edges, sub_barrel = _board_children(
+                    board_item, features, stories, numbers, kinds)
+                for node in sub_nodes:
+                    board_nodes.setdefault(node["id"], node)
+                for edge in sub_edges:
+                    board_parent.setdefault(edge["target"], edge["source"])
+                barrel.extend(sub_barrel)
 
         # Sub-agents: only the ones still running, beneath the work they
         # belong to. An ended one leaves the tree and goes nowhere - not the
-        # barrel, which holds finished tasks and stories only, so a task's
-        # many short-lived children cannot bury the work Daniel reads there
-        # (DECIDED 2026-11-14). A child has no registry row, so no face.
+        # barrel, which holds finished stories only, so a task's many
+        # short-lived children cannot bury the work Daniel reads there
+        # (DECIDED 2026-11-14, narrowed 2026-11-15). A child has no registry
+        # row, so no face.
         agent_rows = await _task_agents(task["id"], sessions)
         placed = _place_agents(agent_rows)
         # Oldest first. The layout places siblings in the order it is handed
@@ -573,21 +727,36 @@ async def get_tree(*, chief: str = "Stash",
             else:
                 stale = agent.get("session_id") not in working["present"]
             stale = stale and state == staff.RUNNING
-            nodes.append(_node(
+            nodes.setdefault(agent["id"], _node(
                 agent["id"], _agent_label(agent), "agent",
                 status="orphaned" if stale else state,
                 work_kind="agent", active=state == staff.WORKING,
                 agent_type=agent.get("agent_type", ""),
                 about=agent.get("about", ""), stale=stale,
                 started_at=agent["started_at"]))
-            edges.append({"source": placed[agent["id"]] or task["id"],
-                          "target": agent["id"]})
+            parent.setdefault(agent["id"], placed[agent["id"]] or task["id"])
+
+    _place_work(nodes, parent, board_nodes, board_parent, claimed, extra,
+                by_id, kinds, numbers)
+    _lend_activity(nodes, parent)
+
+    # A story still being worked is not finished, whatever the board says:
+    # the ledger is the authority on whether a task is over.
+    live_items = {node.get("board_item") for node in nodes.values()}
+    live_items.update(nodes)
+    for item_id in finished_items:
+        story = by_id.get(item_id)
+        if story is not None and story.get("status") == BOARD_DONE:
+            barrel.append(_barrel_story(story, numbers, kinds))
+    barrel = [row for row in _unique(barrel) if row["id"] not in live_items]
 
     root = _node(CHIEF_ID, chief, "chief", questions=len(questions),
                  work_kind="chief", active=False)
     chief_face = _chief_face(chief, mind_rows)
     if chief_face is not None:
         root["minds"] = [chief_face]
-    return {"nodes": [root, *_unique(nodes)], "edges": _unique_edges(edges),
-            "barrel": _unique(barrel), "questions": questions,
+    return {"nodes": [root, *nodes.values()],
+            "edges": [{"source": source, "target": target}
+                      for target, source in parent.items()],
+            "barrel": barrel, "questions": questions,
             "generated_at": moment}
