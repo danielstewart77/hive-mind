@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import sys
 import time
@@ -42,7 +43,15 @@ import uuid
 from typing import Any
 
 import hive_data
-from hive_data import staff
+
+try:
+    from hive_data import staff
+    _STAFF_UNIMPORTABLE = ""
+except ImportError as exc:  # a hive-data with no ledger module: named below
+    staff = None
+    # Kept, because the same ImportError is also a dependency the image
+    # never installed, and "pull hive-data" does not fix that one.
+    _STAFF_UNIMPORTABLE = f" (importing it raised {exc!r})"
 
 #: The status a task opens in unless told otherwise.
 OPENED = "in progress"
@@ -50,6 +59,76 @@ OPENED = "in progress"
 
 class Refused(Exception):
     """An operation that ran and changed nothing the caller asked for."""
+
+
+class HiveDataBehind(Exception):
+    """The `hive_data` this tool loaded predates something a command calls.
+
+    The tool and the library arrive by different routes - this file from the
+    hive_mind checkout, the library from wherever the interpreter finds it -
+    so they can stand at different commits. Behind, a call fails as a
+    `TypeError` about one keyword or an `AttributeError` about one function,
+    which reads as a bug in the call rather than as a stale library. On
+    2026-11-15 that cost the page every question and every sub-agent Stash
+    tried to record, from a container whose image had baked a copy three
+    steps old.
+    """
+
+
+#: What each command calls on `hive_data.staff`, and the keywords it passes.
+#: Checked before the database is touched, so a library that is behind is
+#: named as behind. A call added to `_run` is added here with it.
+NEEDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "open": {"create_task": ("description", "unit"),
+             "attach_session": ("unit",)},
+    "show": {"task": (), "task_sessions": ()},
+    "list": {"tasks": ("status",), "task_sessions": ()},
+    "set-status": {"update_task": ("status", "expected_status"),
+                   "task": (), "statuses": ()},
+    "edit": {"update_task": ("name", "description", "board_item",
+                             "question"),
+             "task": ()},
+    "agent-start": {"start_agent": ("about",)},
+    "agent-done": {"finish_agent": ("outcome",)},
+    "agents": {"agents": ("task_id", "mind_id", "session_id", "since",
+                          "working")},
+    "attach": {"attach_session": ()},
+    "detach": {"detach_session": ()},
+    "find": {"task_for_session": ()},
+    "statuses": {"statuses": ()},
+    "delete": {"delete_task": ()},
+}
+
+
+def missing(command: str) -> list[str]:
+    """What `command` calls that the loaded `hive_data.staff` lacks."""
+    if staff is None:
+        return ["hive_data.staff"]
+    absent: list[str] = []
+    for name, keywords in NEEDS.get(command, {}).items():
+        function = getattr(staff, name, None)
+        if function is None:
+            absent.append(f"hive_data.staff.{name}")
+            continue
+        params = inspect.signature(function).parameters
+        if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            continue
+        absent += [f"{name}({keyword}=)" for keyword in keywords
+                   if keyword not in params]
+    return absent
+
+
+def _level(command: str) -> None:
+    """Refuse `command` when the loaded `hive_data` is behind it."""
+    absent = missing(command)
+    if absent:
+        where = getattr(hive_data, "__file__", None) or "an unknown path"
+        raise HiveDataBehind(
+            f"hive_data at {where} is behind this ledger tool: it has no "
+            f"{', '.join(absent)}{_STAFF_UNIMPORTABLE}. Bring hive-data level "
+            "with the hive_mind "
+            "checkout this tool came from; a container that bakes its own "
+            "copy needs the host's mounted over it, or a rebuild.")
 
 
 def _session_id(value: str) -> str:
@@ -266,6 +345,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        _level(args.command)
         out = asyncio.run(_main(args))
     except Exception as exc:  # every failure is reported, none is raised
         print(json.dumps({"error": str(exc), "kind": type(exc).__name__}))
