@@ -145,6 +145,11 @@ TABLE.add(
     "PUT /sms/inbound/enabled",
     "GET /linkedin/auth",
     "GET /linkedin/callback",
+    # A harness reporting its own sub-agents. Addressed by the mind and the
+    # harness's own agent id rather than by a conversation, so there is
+    # nothing here for an owner check to scope; the handler holds the write
+    # to the caller's own mind the way the rotation write does.
+    "POST /staff/agents/events",
 )
 
 # --- Admin only ------------------------------------------------------------

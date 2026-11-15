@@ -8,6 +8,7 @@ live feed and dropping the wake into a conversation — are driven by replacing
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import io
 import json
@@ -433,3 +434,56 @@ def test_a_wake_stream_that_genuinely_breaks_is_let_go(watch):
     watch._drain(Stream(), "sess-1")  # reported, never raised
 
 
+
+
+# ----------------------------------------- retiring the sub-agent records
+#
+# The pass also closes the sub-agent records nothing has been heard from.
+# The ordering is the whole of the behaviour: `read_live` refuses the pass
+# on any non-200 from comms, and a comms that is down is exactly when
+# harnesses are being killed and records left open.
+
+
+def test_the_sweep_runs_even_when_the_live_feed_refuses_the_pass(
+        watch, monkeypatch):
+    """Ordered before the live read. After it, the one moment the sweep is
+    needed is the one moment it is skipped."""
+    swept: list[dict] = []
+
+    async def retire_stale_agents(*, now, timeout):
+        swept.append({"now": now, "timeout": timeout})
+        return []
+
+    def read_live():
+        raise watch.Refused("comms is not answering")
+
+    monkeypatch.setattr(watch.staff, "retire_stale_agents",
+                        retire_stale_agents)
+    monkeypatch.setattr(watch, "read_live", read_live)
+    monkeypatch.setenv("MIND_ID", STASH)
+
+    with pytest.raises(watch.Refused):
+        asyncio.run(watch.tick(now=NOW))
+
+    assert swept == [{"now": NOW, "timeout": watch.TURN_TIMEOUT}]
+
+
+def test_the_sweep_reports_which_records_it_retired(watch, monkeypatch):
+    """A pass that closed somebody's child says so: it is the only record
+    that the child was killed rather than finished."""
+
+    async def retire_stale_agents(*, now, timeout):
+        return [{"id": "mind-skippy:a1b2c3"}]
+
+    async def tasks():
+        return []
+
+    monkeypatch.setattr(watch.staff, "retire_stale_agents",
+                        retire_stale_agents)
+    monkeypatch.setattr(watch.staff, "tasks", tasks)
+    monkeypatch.setattr(watch, "read_live", lambda: _live())
+    monkeypatch.setenv("MIND_ID", STASH)
+
+    report = asyncio.run(watch.tick(now=NOW))
+
+    assert report["retired_agents"] == ["mind-skippy:a1b2c3"]

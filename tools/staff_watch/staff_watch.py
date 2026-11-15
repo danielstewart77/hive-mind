@@ -320,7 +320,14 @@ def _drain(answer: Any, session_id: str) -> None:
 
 
 async def tick(now: float | None = None) -> dict[str, Any]:
-    """One pass. Reports what it recorded and what it woke, as data."""
+    """One pass. Reports what it recorded and what it woke, as data.
+
+    Also retires the sub-agent records nothing has been heard from, which is
+    the one piece of work here that is not about tasks at all. It lives in
+    this process because this is the hive's only timer holding the ledger's
+    own database role, and it runs before the live feed is read so that a
+    comms outage cannot skip it.
+    """
     moment = time.time() if now is None else now
     mind_id = (os.environ.get("MIND_ID") or "").strip()
     if not mind_id:
@@ -328,6 +335,19 @@ async def tick(now: float | None = None) -> dict[str, Any]:
             "MIND_ID must name the chief of staff, or the pass cannot tell "
             "its own conversation from the ones it is watching and would "
             "interrupt the mind mid-turn.")
+
+    # Before the live read, deliberately. `read_live` refuses the whole pass
+    # on any non-200 from comms, and a comms that is down or erroring is
+    # exactly the moment harnesses are being killed and sub-agent records
+    # left open - the one moment the sweep must not be skipped. A record that
+    # only *reads* as dead is live again in every other reader, so the ending
+    # is written down here.
+    #
+    # The window is this process's own longest turn rather than a number
+    # chosen in the data layer: the hive's minds do not share one, and a
+    # dsh mind can be configured to no bound at all.
+    retired = await staff.retire_stale_agents(now=moment,
+                                              timeout=TURN_TIMEOUT)
 
     live = read_live()
     tasks = await staff.tasks()
@@ -354,7 +374,8 @@ async def tick(now: float | None = None) -> dict[str, Any]:
     return {"at": moment, "recorded_stopped": plan["stopped"],
             "recorded_running": plan["running"], "mid_turn": plan["mid_turn"],
             "pending": plan["pending"], "woken": woken,
-            "target": plan.get("target")}
+            "target": plan.get("target"),
+            "retired_agents": [row["id"] for row in retired]}
 
 
 async def _connect() -> None:

@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 import hive_data
-from hive_data import broker_ops, core
+from hive_data import broker_ops, core, staff
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -422,6 +422,37 @@ class RemoteControlResponse(BaseModel):
     url: str
     session_id: str
     rc_pid: int
+
+
+class SubagentEventRequest(BaseModel):
+    """One report about one sub-agent, from whichever harness spawned it.
+
+    Sent by a harness's own start and stop hooks. All three harnesses can
+    report that a child began and that it is over; only one can observe that
+    a child is still producing work, so `working` is a state a reporter sends
+    when it genuinely knows and never on a timer.
+
+    `conversation` is whatever id the reporting harness actually holds, and
+    the three hold three different kinds: claude's hook carries the
+    conversation id every spawn is handed, codex's carries the thread id
+    codex minted for itself, and a codex or dsh spawn is additionally given
+    this gateway's own session id. Which kind it is is resolved here rather
+    than asked of three hooks, because this is the only place that can read
+    the session table at all.
+
+    `kind` and `label` are optional because dsh's start event carries a
+    parent session and a child session and nothing else. An absent label is
+    stored absent; a placeholder would be an invented record.
+    """
+
+    agent_id: str
+    state: str
+    mind_id: str
+    conversation: str | None = None
+    kind: str = ""
+    label: str = ""
+    parent_agent_id: str | None = None
+    outcome: str | None = None
 
 
 class RotationMemoryRequest(BaseModel):
@@ -1206,6 +1237,72 @@ async def write_rotation_memory(
         created_at=float(int(time.time())),
     )
     return {"ok": True, "id": written["row"]["id"]}
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent telemetry
+# ---------------------------------------------------------------------------
+async def _resolve_reported_conversation(reported: str) -> str | None:
+    """This gateway's own session id for whatever id a harness reported.
+
+    Three harnesses hold three kinds of id and none of them can tell which
+    kind it has, so all three send what they have and this decides. Tried in
+    order of how directly each names a session: the gateway's own id, which a
+    codex or dsh spawn is given outright; the conversation id every spawn is
+    handed; and the harness's own thread id, which is all a codex hook knows.
+
+    None when it resolves to no conversation at all. That is an ordinary
+    answer rather than a refusal: a harness spawning children outside any
+    hive conversation - an operator's own session at a terminal, which shares
+    this host's hooks and this mind's environment - is still a child that ran,
+    and the record of it is worth keeping even though no page will draw it.
+    """
+    if not reported:
+        return None
+    row = await core.get_session(reported)
+    if row is None:
+        row = await core.get_session_by_conversation(reported)
+    if row is None:
+        row = await core.get_session_by_harness_sid(reported)
+    return None if row is None else row["id"]
+
+
+@app.post("/staff/agents/events")
+async def record_subagent_event(body: SubagentEventRequest, request: Request):
+    """Record one report about one sub-agent.
+
+    Held to the mind in the body exactly as the rotation write is, and for the
+    same reason: this is addressed by a mind and a harness's own agent id
+    rather than by a conversation the caller could own, so there is nothing
+    here for an owner check to scope. The class admits every mind's own
+    credential and every surface bot's service value, so an unchecked
+    `mind_id` is one any holder could file a child under any mind.
+
+    Answers 200 with the record as stored. A reporter does not read the
+    answer and must not wait on it - a hook that blocks a spawn until this
+    returns has made a recording problem into a conversation problem - so
+    this is deliberately cheap: one resolve and one statement.
+    """
+    await _refuse_foreign_mind_in_body(request, body.mind_id)
+    if not body.mind_id.strip():
+        return JSONResponse({"error": "mind_id required"}, status_code=400)
+    if not body.agent_id.strip():
+        return JSONResponse({"error": "agent_id required"}, status_code=400)
+    session_id = await _resolve_reported_conversation(
+        (body.conversation or "").strip())
+    try:
+        row = await staff.record_agent_event(
+            body.agent_id.strip(), body.state,
+            mind_id=body.mind_id.strip(),
+            agent_type=body.kind, label=body.label,
+            conversation_ref=(body.conversation or "").strip() or None,
+            session_id=session_id,
+            parent_agent_id=(body.parent_agent_id or "").strip() or None,
+            outcome=body.outcome,
+        )
+    except hive_data.errors.ValueRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"ok": True, "agent": row}
 
 
 # ---------------------------------------------------------------------------
