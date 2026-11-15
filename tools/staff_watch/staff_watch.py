@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -65,7 +66,11 @@ import urllib.request
 from typing import Any, Iterable
 
 import hive_data
-from hive_data import staff
+
+try:
+    from hive_data import staff
+except ImportError:  # a hive-data checkout with no ledger module: named below
+    staff = None
 
 #: Statuses that are watched and recorded but never ping anybody. `on hold`
 #: is the overnight case the morning brief reads; `with Daniel` is work he
@@ -415,6 +420,47 @@ async def tick(now: float | None = None) -> dict[str, Any]:
             "retired_agents": len(retired)}
 
 
+#: What a pass calls on `hive_data.staff`, and the keywords it passes.
+#: The library reaches this process by a different route from this file, so
+#: the two can stand at different commits; checked at start, a library that
+#: is behind ends the watch with its name rather than failing one pass a
+#: minute in a log nobody reads. A call added to `tick` is added here with it.
+NEEDS: dict[str, tuple[str, ...]] = {
+    "tasks": (), "task_sessions": (), "wake_pending": (),
+    "retire_stale_agents": ("now", "timeout", "alive"),
+    "note_running": (), "note_stopped": ("now",), "note_woken": ("now",),
+}
+
+
+def missing() -> list[str]:
+    """What a pass calls that the loaded `hive_data.staff` lacks."""
+    if staff is None:
+        return ["hive_data.staff"]
+    absent: list[str] = []
+    for name, keywords in NEEDS.items():
+        function = getattr(staff, name, None)
+        if function is None:
+            absent.append(f"hive_data.staff.{name}")
+            continue
+        params = inspect.signature(function).parameters
+        if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            continue
+        absent += [f"{name}({keyword}=)" for keyword in keywords
+                   if keyword not in params]
+    return absent
+
+
+def _level() -> None:
+    absent = missing()
+    if absent:
+        where = getattr(hive_data, "__file__", None) or "an unknown path"
+        raise Refused(
+            f"hive_data at {where} is behind the staff watch: it has no "
+            f"{', '.join(absent)}. Bring hive-data level with the hive_mind "
+            "checkout; a container that bakes its own copy needs the host's "
+            "mounted over it, or a rebuild.")
+
+
 async def _connect() -> None:
     if not (os.environ.get("HIVE_DATABASE_URL") or "").strip():
         raise Refused("HIVE_DATABASE_URL must name the ledger.")
@@ -456,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
                      help=f"seconds between passes (default {EVERY:g})")
     args = parser.parse_args(argv)
     try:
+        _level()
         if args.command == "tick":
             return asyncio.run(_once())
         return asyncio.run(_forever(args.every))
