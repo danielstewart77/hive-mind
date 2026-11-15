@@ -353,12 +353,26 @@ def test_a_conversation_created_with_a_name_holds_it_from_birth(comms_db) -> Non
 
             labels = await mgr.session_names()
             assert labels[named["id"]]["name"] == "CoS: Session names"
+            assert labels[named["id"]]["color"] == "#5c913b"
 
             # The create that names nothing is the one every surface bot
             # already makes, and it has to come out exactly as it did.
             assert bare["name"] is None
             assert bare["color"] is None
             assert bare["id"] not in labels
+
+            # Empty is not a short name, it is no name — so a conversation
+            # created with one is indistinguishable from one created with
+            # none, and the rail falls back rather than drawing a blank tile.
+            with _a_registered_mind([]):
+                blank = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-3",
+                    mind_id="ada", name="   ",
+                )
+            assert blank["name"] is None
+            assert await fetchval(
+                "SELECT name FROM core.sessions WHERE id = $1", blank["id"]
+            ) is None
         finally:
             await close_manager(mgr)
 
@@ -374,7 +388,10 @@ def test_a_name_is_normalised_the_same_at_creation_as_at_a_rename(comms_db) -> N
     written and drifts later — a name stored at a length a rename would have
     cut, with nothing failing. So the two paths are given the same awkward
     input and their stored values compared to each other rather than to a
-    literal. Breaks the moment either path stops calling `normalised_name`.
+    literal. Breaks when the two paths normalise *differently* — which is the
+    whole of what a behavioural test can see here. An exact copy of the
+    expression in either path passes this and always will; nothing short of
+    reading the code catches that, and it is not what drift looks like.
     """
     async def scenario() -> None:
         mgr = await _make_manager()
@@ -469,7 +486,6 @@ def test_a_name_that_cannot_be_stored_costs_the_label_and_not_the_conversation(
             assert created["id"]
             assert stored == created["name"]
             assert "\x00" not in stored
-            assert stored.encode("utf-8")
             assert stored.startswith("CoS: re")
         finally:
             await close_manager(mgr)

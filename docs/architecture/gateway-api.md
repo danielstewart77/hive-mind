@@ -43,11 +43,27 @@ Content-Type: application/json
   "client_ref": "terminal-1",
   "model": "sonnet",
   "surface_prompt": "Optional context prepended to the session",
-  "allowed_directories": ["<external-project-path>"]
+  "allowed_directories": ["<external-project-path>"],
+  "name": "CoS: Session names",
+  "color": "#5c913b"
 }
 ```
 
 `allowed_directories` grants Claude Code access to paths outside the default working directory (`/usr/src/app`). See [Directory Access](#directory-access) below.
+
+`name` and `color` label the conversation, and are stamped on the row as it is
+created — a mind opening a conversation for a job should not have to name it
+with a second call, because a second call is one that can be skipped or lost
+with the turn that was going to make it, leaving a row every picker draws as
+the mind's own name. The name is trimmed and cut to 40 characters, so read the
+stored value back off the response rather than assuming what was sent: that is
+also the only way to tell a gateway that understood these fields from an older
+one, which ignores them and answers 200 with `"name": null`.
+
+Both are guarded by the same credential as `PUT /sessions/{id}/name` — the
+rename token, or the admin token presented the ordinary way in
+`Authorization`. A create carrying neither field needs no such credential.
+An invalid `color` is refused with 400 and no session is created.
 
 ## Sending a Message
 
