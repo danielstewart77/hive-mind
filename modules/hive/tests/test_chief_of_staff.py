@@ -251,15 +251,16 @@ async def test_a_sub_agent_still_working_hangs_off_the_task_it_works():
     assert _by_id(tree, agent["id"])["about"] == "session 1a2b"
 
 
-async def test_a_sub_agent_that_reported_goes_to_the_barrel():
+async def test_a_sub_agent_that_ended_disappears_and_does_not_go_to_the_barrel():
+    """DECIDED 2026-11-14: the barrel holds finished tasks and stories only."""
     task = await _task()
     agent = await staff.start_agent(task["id"], "chase.md", now=NOW)
     await staff.finish_agent(agent["id"], outcome="waiting", now=NOW + 30)
 
     tree = await cos.get_tree(now=NOW + 60)
 
-    assert _ids(tree["nodes"], "agent") == []
-    assert _ids(tree["barrel"], "agent") == [agent["id"]]
+    assert agent["id"] not in _ids(tree["nodes"])
+    assert agent["id"] not in _ids(tree["barrel"])
 
 
 async def test_a_sub_agent_open_past_the_turn_timeout_is_drawn_as_orphaned():
@@ -270,7 +271,7 @@ async def test_a_sub_agent_open_past_the_turn_timeout_is_drawn_as_orphaned():
     working = await cos.get_tree(now=NOW + cos.AGENT_TIMEOUT - 1)
     orphaned = await cos.get_tree(now=NOW + cos.AGENT_TIMEOUT + 1)
 
-    assert _by_id(working, agent["id"])["status"] == "working"
+    assert _by_id(working, agent["id"])["status"] == "running"
     assert _by_id(orphaned, agent["id"])["status"] == "orphaned"
 
 
@@ -512,16 +513,16 @@ async def test_work_whose_sessions_have_all_ended_is_not_active():
     assert _by_id(tree, task["id"])["active"] is False
 
 
-async def test_a_sub_agent_is_never_drawn_as_active():
-    """A child's own status says "working" for as long as it is unfinished,
-    and that is not the live record a spinner is allowed to read."""
+async def test_a_delegate_known_only_to_be_unfinished_reads_as_running():
+    """Nothing reports a delegate's ongoing work, so it is running and does
+    not spin."""
     task = await _task()
     agent = await staff.start_agent(task["id"], "refute-edges", now=NOW)
 
     tree = await cos.get_tree(now=NOW)
 
     node = _by_id(tree, agent["id"])
-    assert node["status"] == "working"
+    assert node["status"] == "running"
     assert node["active"] is False
 
 
@@ -692,3 +693,163 @@ async def test_a_session_whose_clock_runs_ahead_does_not_spin_forever():
     tree = await cos.get_tree(now=NOW)
 
     assert _by_id(tree, task["id"])["active"] is False
+
+
+# ------------------------------------------- what harnesses report (6.9.5)
+#
+# Protected behaviours 3 and 4: a sub-agent is drawn as working only while a
+# harness has genuinely reported ongoing work, and it is placed beneath its
+# own parent or not at all - never beneath work it cannot be tied to.
+
+MIND = "mind-reporter"
+CONVERSATION = "conv-reported"
+
+
+async def _reported(agent_id, state="spawned", *, session_id="sess-rep",
+                    parent=None, kind="refute-edges", label="", now=NOW):
+    return await staff.record_agent_event(
+        agent_id, state, mind_id=MIND, agent_type=kind, label=label,
+        conversation_ref=CONVERSATION, session_id=session_id,
+        parent_agent_id=parent, now=now)
+
+
+async def _paired_task(session_id="sess-rep", name="Some work"):
+    """A live task whose conversation is still open, so comms has its row."""
+    task = await _task(name)
+    await _session(await _mind(), session_id)
+    await staff.attach_session(task["id"], session_id, now=NOW)
+    return task
+
+
+async def test_a_reported_child_hangs_beneath_the_task_its_conversation_works():
+    task = await _paired_task()
+    child = await _reported("a1")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert child["id"] in _ids(tree["nodes"], "agent")
+    assert {"source": task["id"], "target": child["id"]} in tree["edges"]
+
+
+async def test_a_child_is_drawn_beneath_its_own_task_and_not_another():
+    mine = await _paired_task("sess-mine", name="Mine")
+    other = await _paired_task("sess-other", name="Other")
+    child = await _reported("a1", session_id="sess-mine")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert {"source": mine["id"], "target": child["id"]} in tree["edges"]
+    assert {"source": other["id"], "target": child["id"]} not in tree["edges"]
+
+
+async def test_a_child_reported_working_spins_and_stops_when_the_report_ages():
+    await _paired_task()
+    await _reported("a1")
+    child = await _reported("a1", "working", now=NOW + 10)
+
+    # Three page refreshes of twenty seconds: a single report must not spin
+    # a card for longer than the page itself trusts a payload.
+    fresh = _by_id(await cos.get_tree(now=NOW + 10 + 3 * 20 - 1), child["id"])
+    aged = _by_id(await cos.get_tree(now=NOW + 10 + 3 * 20 + 1), child["id"])
+
+    assert (fresh["status"], fresh["active"]) == ("working", True)
+    assert (aged["status"], aged["active"]) == ("running", False)
+
+
+async def test_a_child_nobody_reported_working_is_running_and_does_not_spin():
+    await _paired_task()
+    child = await _reported("a1")
+
+    node = _by_id(await cos.get_tree(now=NOW + 1), child["id"])
+
+    assert (node["status"], node["active"]) == ("running", False)
+
+
+async def test_a_child_spawned_by_a_child_hangs_beneath_that_child():
+    task = await _paired_task()
+    parent = await _reported("p1")
+    child = await _reported("c1", parent="p1")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert {"source": parent["id"], "target": child["id"]} in tree["edges"]
+    assert {"source": task["id"], "target": child["id"]} not in tree["edges"]
+
+
+async def test_a_child_whose_parent_was_never_recorded_is_not_drawn():
+    await _paired_task()
+    child = await _reported("c1", parent="never-reported")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert child["id"] not in _ids(tree["nodes"])
+
+
+async def test_a_child_whose_parent_ended_hangs_beneath_the_nearest_live_work():
+    task = await _paired_task()
+    grand = await _reported("g1")
+    await _reported("p1", parent="g1")
+    await _reported("p1", "ended", parent="g1", now=NOW + 5)
+    child = await _reported("c1", parent="p1")
+
+    tree = await cos.get_tree(now=NOW + 10)
+
+    assert {"source": grand["id"], "target": child["id"]} in tree["edges"]
+    assert {"source": task["id"], "target": child["id"]} not in tree["edges"]
+
+
+async def test_children_whose_parents_loop_are_not_drawn():
+    await _paired_task()
+    first = await _reported("x1", parent="x2")
+    second = await _reported("x2", parent="x1")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert first["id"] not in _ids(tree["nodes"])
+    assert second["id"] not in _ids(tree["nodes"])
+
+
+async def test_a_child_beneath_a_parent_that_cannot_be_placed_is_not_drawn():
+    await _paired_task()
+    parent = await _reported("p1", parent="never-reported")
+    child = await _reported("c1", parent="p1")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert parent["id"] not in _ids(tree["nodes"])
+    assert child["id"] not in _ids(tree["nodes"])
+
+
+async def test_a_child_whose_ended_ancestors_loop_is_not_drawn():
+    await _paired_task()
+    await _reported("x1", "ended", parent="x2")
+    await _reported("x2", "ended", parent="x1")
+    child = await _reported("c1", parent="x1")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert child["id"] not in _ids(tree["nodes"])
+
+
+async def test_a_reported_child_whose_conversation_has_ended_is_orphaned():
+    """A child cannot outlive its conversation, and comms deletes the
+    session row when the conversation ends."""
+    await _paired_task()
+    child = await _reported("a1")
+    await core.delete_session("sess-rep")
+
+    node = _by_id(await cos.get_tree(now=NOW + 1), child["id"])
+
+    assert node["status"] == "orphaned"
+
+
+async def test_a_long_reported_child_in_a_live_conversation_is_still_running():
+    """The chief's turn timeout is not the reporting mind's, so the clock
+    alone does not orphan a reported child."""
+    await _paired_task()
+    child = await _reported("a1")
+
+    node = _by_id(await cos.get_tree(now=NOW + cos.AGENT_TIMEOUT + 60),
+                  child["id"])
+
+    assert node["status"] == "running"
