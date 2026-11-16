@@ -166,10 +166,32 @@ def _started_at(entries: list[dict]) -> float | None:
     return None
 
 
+def delegate_turn(event: dict) -> bool:
+    """Whether this Stop is for a delegate's turn rather than the mind's.
+
+    dsh fires every hook for a delegate's turn with the mind's environment,
+    so without asking, a delegate's log over the threshold would report its
+    size against the mind's conversation and arm a rotation of it. Only a
+    header that says so is a delegate's: an unreadable or missing log is
+    judged as the mind's, so the mind's own rotation never stops on it.
+    """
+    raw = str(event.get("transcript_path") or "")
+    if not raw:
+        return False
+    origin = dsh_transcript.log_origin(Path(raw))
+    if origin == "unknown":
+        # Judged as the mind's. Logged, because a delegate's log too large to
+        # read in time lands here too, and that case should be visible.
+        hive.log(NAME, f"unreadable log judged as the mind's "
+                       f"sid={event.get('session_id')} path={raw}")
+    return origin == "delegate"
+
+
 def assess(event: dict) -> dict | None:
-    """Measure, report, and decide. None when there is no conversation to judge."""
+    """Measure, report, and decide. None when there is no conversation to
+    judge, which a delegate's turn never is."""
     conversation_id = str(event.get("session_id") or "")
-    if not conversation_id:
+    if not conversation_id or delegate_turn(event):
         return None
     entries = _entries(event)
     measured = measure(event, entries)
