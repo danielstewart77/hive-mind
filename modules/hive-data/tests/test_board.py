@@ -239,6 +239,28 @@ async def test_an_epic_numbers_as_a_root_even_when_it_holds_a_parent(
     assert "." not in numbers[adopted]
 
 
+async def test_a_task_with_no_parent_is_written_and_numbers_as_its_own_root(
+        connected, inspector):
+    """Story 3.7.4: a task is the one kind that may stand alone. It is a row
+    of its own kind with no parent, and the board numbers it at the top level
+    beside the epics rather than under anything."""
+    ids = await _board()
+    task = _id("t")
+    await board.create_work_item(task, "task", "stands alone", 99)
+
+    landed = await inspector.fetchrow(
+        'SELECT kind, parent_id, status FROM board."work_items" WHERE id = $1',
+        task)
+    assert dict(landed) == {"kind": "task", "parent_id": None,
+                            "status": "backlog"}
+    assert [row["id"] for row in await board.work_items(kind="task")
+            if row["id"] == task] == [task]
+
+    numbers = await board.backlog_numbers()
+    assert "." not in numbers[task]
+    assert int(numbers[task]) > int(numbers[ids["epic"]])
+
+
 async def test_a_row_whose_parent_is_not_in_the_rows_numbers_as_nothing():
     """A half-loaded board renders. An empty string rather than a missing
     key, because the number is put on the page and a KeyError there is a page

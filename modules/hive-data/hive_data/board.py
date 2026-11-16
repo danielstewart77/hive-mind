@@ -60,8 +60,9 @@ EDGE_MINDS = "board.edge_mind_settings"
 REQUESTERS = "board.operation_requesters"
 ATTACHMENTS = "board.work_item_attachments"
 
-#: The three levels of the board, as `kind` spells them.
-KINDS = ("epic", "feature", "story")
+#: The kinds of item on the board, as `kind` spells them. A task is the one
+#: kind that may stand alone with no parent at all (story 3.7.4).
+KINDS = ("epic", "feature", "story", "task")
 
 #: The lowest position a row may be given. A row below it is one somebody
 #: placed deliberately, which is what `first_position` returns.
@@ -240,12 +241,18 @@ async def first_position(*, unit: Unit | None = None) -> int:
 #: under `story_id`, and the numbering reads only `parent_id`, `feature_id`
 #: and `epic_id`. Both of these are arguably wrong and neither is this
 #: story's to change.
+#:
+#: A **task** numbers under whatever it hangs off, and as a root when it
+#: stands alone - the one kind made to have no parent (story 3.7.4). A
+#: story under a task numbers beneath it: no such row predates tasks, so
+#: that renames nothing.
 def numbering_parent(row: Row) -> str | None:
     """The id this row is numbered under, or None when it numbers as a root."""
     kind = row.get("kind")
-    if kind == "feature":
+    if kind in ("feature", "task"):
         return row.get("parent_id")
-    if kind == "story" and row.get("parent_kind") in ("feature", "epic"):
+    if kind == "story" and row.get("parent_kind") in ("feature", "epic",
+                                                       "task"):
         return row.get("parent_id")
     return None
 
@@ -305,7 +312,7 @@ _ITEM_FIELDS = frozenset({
 
 async def create_work_item(item_id: str, kind: str, title: str,
                            position: int, *, parent_id: str | None = None,
-                           status: str | None = None, subtype: str = "",
+                           status: str = "backlog", subtype: str = "",
                            description: str = "", requirements: str = "",
                            acceptance_criteria: str = "", qa_tests: str = "",
                            unit: Unit | None = None) -> Row:
@@ -337,19 +344,20 @@ async def update_work_item(item_id: str, fields: dict[str, Any], *,
     return await _execute(unit, sql, *args)
 
 
-async def retype(item_id: str, kind: str, *, status: str | None = None,
+async def retype(item_id: str, kind: str, *, status: str = "backlog",
                  subtype: str = "", parent_id: str | None = None,
                  position: int, unit: Unit | None = None) -> Row:
     """Change what an item *is*, in one statement.
 
     Its own operation rather than a settable `kind` on `update_work_item`,
     because a retype is one fact made of five columns and every one of them
-    follows from the new kind. An epic has no status and a story has one; a
-    bug is a story carrying the bug subtype; a row becoming an epic loses its
+    follows from the new kind. A bug is a story carrying the bug subtype; a row becoming an epic loses its
     parent, and a row that moves parents needs a position, since the number
     it held was only unique under the parent it left. Written one column at a
-    time, the board is briefly a feature with a story's status or a row at a
-    duplicate number - and the console reads it in between.
+    time, the board is briefly a story with an epic's subtype or a row at a
+    duplicate number - and the console reads it in between. The status rides
+    along so a retype is one statement whatever the caller decided for it;
+    every kind carries one (step 13).
 
     `update_work_item` is deliberately left unable to do this. The title, the
     prose and the status are the operator's to edit from a form; the kind is

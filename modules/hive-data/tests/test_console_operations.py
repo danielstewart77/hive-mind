@@ -335,7 +335,7 @@ async def test_two_pages_of_a_browsed_table_do_not_overlap(connected):
 async def test_a_retype_moves_every_column_the_new_kind_decides_at_once(
         connected, inspector):
     """A retype is one fact made of five columns. Written one at a time the
-    board is briefly a feature carrying a story's status, or a row at a
+    board is briefly a feature carrying a story's subtype, or a row at a
     number another row already holds, and the console reads it in between."""
     epic = _name("e")
     story = _name("s")
@@ -343,14 +343,14 @@ async def test_a_retype_moves_every_column_the_new_kind_decides_at_once(
     await board.create_work_item(story, "story", "a story", 2,
                                  parent_id=epic, status="backlog")
 
-    await board.retype(story, "feature", status=None, subtype="",
+    await board.retype(story, "feature", status="done", subtype="",
                        parent_id=epic, position=9)
 
     row = await inspector.fetchrow(
         'SELECT "kind", "status", "subtype", "parent_id", "position" '
         'FROM board."work_items" WHERE "id" = $1', story)
     assert row["kind"] == "feature"
-    assert row["status"] is None
+    assert row["status"] == "done"
     assert row["subtype"] == ""
     assert row["parent_id"] == epic
     assert row["position"] == 9
@@ -358,8 +358,8 @@ async def test_a_retype_moves_every_column_the_new_kind_decides_at_once(
 
 async def test_a_retype_to_a_kind_the_board_has_no_lane_for_is_refused(
         connected):
-    """The three kinds are the board's whole vocabulary; a fourth is a row
-    that renders in none of the three lanes."""
+    """The four kinds are the board's whole vocabulary; any other is a row
+    the board draws nowhere."""
     item = _name("s")
     await board.create_work_item(item, "story", "a story", 1)
     with pytest.raises(ValueRefused):
