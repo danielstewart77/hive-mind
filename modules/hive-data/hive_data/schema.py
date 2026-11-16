@@ -118,7 +118,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "board.work_item_attachments": (
         "id", "item_id", "filename", "content_type", "size_bytes", "content",
         "created_at"),
-    #: Role Management (step 15, feature 10.18).
+    #: Role Management (step 16, feature 10.18).
     "board.roles": (
         "id", "slug", "name", "skills", "hooks", "model", "tools",
         "kept_against", "created_at", "updated_at"),

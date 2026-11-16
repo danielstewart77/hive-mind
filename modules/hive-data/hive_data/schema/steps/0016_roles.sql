@@ -1,5 +1,5 @@
 --
--- Step 15: roles, the agents holding them, and skills submitted by people
+-- Step 16: roles, the agents holding them, and skills submitted by people
 -- (feature 10.18, Role Management).
 --
 -- A role is a named set of four grants: skills, hooks, a model and the
