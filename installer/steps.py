@@ -177,13 +177,18 @@ def clone_repos(ctx: Ctx):
         partial.rename(path)
     head = ctx.sh.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"]).stdout.strip()
     # Every module, then each brought to the newest commit of its branch.
-    proc = ctx.sh.run(["bash", str(path / "scripts" / "modules.sh"), str(path)],
+    # Under `timeout`, which signals the whole process group: a deadline that
+    # killed only the shell would leave its git clones running on.
+    proc = ctx.sh.run(["timeout", "--kill-after=15", "1780",
+                       "bash", str(path / "scripts" / "modules.sh"), str(path)],
                       env={"HIVE_REPO_BASE": REPO_BASE}, timeout=1800, check=False)
     if proc.returncode != 0:
         raise StepFailed("hive-mind's modules could not all be brought to the latest: "
                          + ((proc.stderr or proc.stdout or "").strip() or "no detail"))
-    modules = [line.split(":", 1)[0].removeprefix("modules/") + "@" + line.rsplit(" ", 1)[-1]
-               for line in (proc.stdout or "").splitlines() if line.startswith("modules/")]
+    # Each module's own line, as the script says it: "<branch> at <commit>",
+    # "pinned at <commit>", or "left on <branch> (work in progress)".
+    modules = [line.removeprefix("modules/") for line in (proc.stdout or "").splitlines()
+               if line.startswith("modules/")]
     # An install made before the manifest cloned each repository beside
     # hive-mind. Those clones are no longer built from or updated; any work in
     # them is the operator's to move, so they are named and left alone.

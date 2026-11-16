@@ -20,7 +20,7 @@ DEFAULT_HOME = "~/hive"
 #: scripts/modules.sh. All public, so no token is needed.
 REPOS = (
     "hive-mind", "hive-data", "hive", "terminal", "inference-proxy",
-    "hive-tools", "hive-harness-dsh",
+    "hive-tools", "hive-harness-dsh", "hive-surfaces",
 )
 #: Where hive-mind keeps its modules, relative to its own checkout.
 MODULES = "modules"

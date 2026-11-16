@@ -211,8 +211,11 @@ def test_services_build_from_hive_minds_modules_and_minds_cannot_read_them(tmp_p
     services = render(inst)["services"]
     modules = inst.home.root / "repos" / "hive-mind" / "modules"
 
-    assert services["hive-tools"]["build"]["context"] == str(modules / "hive-tools")
-    assert services[compose.CONSOLE]["build"]["context"] == str(modules / "hive")
+    builds = {name: svc["build"]["context"] for name, svc in services.items() if "build" in svc}
+    assert builds["hive-tools"] == str(modules / "hive-tools")
+    assert builds[compose.CONSOLE] == str(modules / "hive")
+    assert builds[compose.TERMINAL] == str(modules / "terminal")
+    assert builds["inference-proxy"] == str(modules / "inference-proxy")
     console_mounts = {v["target"]: v for v in services[compose.CONSOLE]["volumes"]}
     assert console_mounts["/hive_tools_repo"]["source"] == str(modules / "hive-tools")
     assert console_mounts["/hive_tools_repo"]["read_only"] is True
