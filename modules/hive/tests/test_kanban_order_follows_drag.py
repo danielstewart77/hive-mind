@@ -6,67 +6,29 @@ a real Chromium served by the app itself, because the tree a person drags in
 is drawn by the page, and a page that numbered on its own showed numbers the
 item page and the board cards did not.
 
-Needs `playwright` (requirements-dev.txt) and its Chromium:
-`.venv/bin/python -m playwright install chromium`.
+Driven through `browser_page`, which needs playwright and its Chromium.
 """
 
 from contextlib import contextmanager
 
-from playwright.sync_api import sync_playwright
-from starlette.testclient import TestClient
-
-import accounts
-import auth
 import kanban_data
-import main as main_mod
+from browser_page import ORIGIN, browser, signed_in_client
 from hive_site.testing import run
-
-ORIGIN = "http://testserver"
-# Fonts and the icon set are fetched from third parties; nothing here needs them.
-_DROPPED = ("fonts.googleapis.com", "fonts.gstatic.com", "unpkg.com")
-_HOP_HEADERS = {"content-length", "content-encoding", "transfer-encoding"}
 
 
 def _client(monkeypatch):
-    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = accounts.make_user("order", "secret-pass", is_admin=True, replace=True)
-    client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
-    return client
+    return signed_in_client(monkeypatch, "order")
 
 
 @contextmanager
 def _page(client, path):
-    """The page the app renders, answered in-process by the TestClient."""
-    closing = []
-
-    def handle(route, request):
-        url = request.url
-        if closing or any(host in url for host in _DROPPED):
-            return route.abort()
-        if not url.startswith(ORIGIN):
-            return route.continue_()
-        headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
-        response = client.request(request.method, url[len(ORIGIN):],
-                                  headers=headers, content=request.post_data_buffer)
-        route.fulfill(status=response.status_code,
-                      headers={k: v for k, v in response.headers.items()
-                               if k.lower() not in _HOP_HEADERS},
-                      body=response.content)
-
-    with sync_playwright() as p:
-        chromium = p.chromium.launch()
-        try:
-            context = chromium.new_context(viewport={"width": 1280, "height": 900})
-            context.route("**/*", handle)
-            page = context.new_page()
-            page.goto(ORIGIN + path)
-            page.wait_for_function(
-                "document.getElementById('kanban-feedback').textContent === ''")
-            yield page
-        finally:
-            closing.append(True)
-            chromium.close()
+    """The page the app renders, loaded and drawn."""
+    with browser(client) as context:
+        page = context(1280, 900).new_page()
+        page.goto(ORIGIN + path)
+        page.wait_for_function(
+            "document.getElementById('kanban-feedback').textContent === ''")
+        yield page
 
 
 # Every row of the backlog tree, top to bottom: its id and the label it shows.
@@ -206,3 +168,96 @@ def test_a_reorder_drop_before_an_items_own_child_is_refused_and_nothing_moves(m
 
     assert response.status_code == 400
     assert run(kanban_data.backlog_numbers()) == before
+
+
+def test_an_item_dropped_before_a_row_drawn_at_the_top_level_lands_at_the_top_level_before_it(monkeypatch):
+    # A story under a story is drawn and numbered at the top level whatever
+    # parent it stores. Given that stored parent, the dropped feature went
+    # under a story and out of the place it was dropped.
+    client = _client(monkeypatch)
+    epic = run(kanban_data.create_epic("Epic"))
+    feature = run(kanban_data.create_feature(epic["id"], "Feature"))
+    host = run(kanban_data.create_story("Host", epic_id=epic["id"]))
+    guest = run(kanban_data.create_story("Guest", epic_id=epic["id"]))
+    run(kanban_data.set_parent(guest["id"], host["id"]))
+
+    response = client.patch(f"/api/kanban/features/{feature['id']}",
+                            json={"before_id": guest["id"]})
+
+    assert response.status_code == 200
+    numbers = run(kanban_data.backlog_numbers())
+    assert (numbers[epic["id"]], numbers[host["id"]], numbers[feature["id"]],
+            numbers[guest["id"]]) == ("1", "1.1", "2", "3")
+
+
+def test_an_epic_dropped_before_a_feature_is_refused_and_nothing_moves(monkeypatch):
+    # An epic numbers at the top level whatever its parent: stored under the
+    # feature's epic it would be drawn elsewhere, and deleting that epic
+    # would take it along unseen.
+    client = _client(monkeypatch)
+    host = run(kanban_data.create_epic("Host"))
+    feature = run(kanban_data.create_feature(host["id"], "Feature"))
+    dropped = run(kanban_data.create_epic("Dropped"))
+    before = run(kanban_data.backlog_numbers())
+
+    response = client.patch(f"/api/kanban/epics/{dropped['id']}",
+                            json={"before_id": feature["id"]})
+
+    assert response.status_code == 400
+    assert run(kanban_data.backlog_numbers()) == before
+    assert run(kanban_data.item_relations(dropped["id"]))["parent"] is None
+
+
+def test_a_type_change_naming_an_items_own_child_as_parent_is_refused_and_nothing_moves(monkeypatch):
+    client = _client(monkeypatch)
+    epic = run(kanban_data.create_epic("Epic"))
+    outer = run(kanban_data.create_feature(epic["id"], "Outer"))
+    inner = run(kanban_data.create_feature(epic["id"], "Inner"))
+    run(kanban_data.set_parent(inner["id"], outer["id"]))
+    before = run(kanban_data.backlog_numbers())
+
+    response = client.patch(f"/api/kanban/features/{outer['id']}",
+                            json={"type": "story", "parent_id": inner["id"]})
+
+    assert response.status_code == 400
+    assert run(kanban_data.backlog_numbers()) == before
+
+
+def test_a_retype_that_sends_children_to_the_top_level_puts_them_last_and_no_epic_moves():
+    # A feature retyped to a story makes its stories stories-under-a-story,
+    # which number at the top level. Holding the positions of the list they
+    # left, they landed among the epics and an epic nobody touched moved.
+    second = run(kanban_data.create_epic("Second"))
+    first = run(kanban_data.create_epic("First"))
+    run(kanban_data.place_before(second["id"], first["id"]))
+    feature = run(kanban_data.create_feature(first["id"], "Feature"))
+    earlier = run(kanban_data.create_story("Earlier", feature_id=feature["id"]))
+    later = run(kanban_data.create_story("Later", feature_id=feature["id"]))
+    run(kanban_data.place_before(later["id"], earlier["id"]))
+    before = run(kanban_data.backlog_numbers())
+    assert (before[second["id"]], before[first["id"]]) == ("1", "2")
+
+    run(kanban_data.change_type(feature["id"], "story"))
+
+    numbers = run(kanban_data.backlog_numbers())
+    assert (numbers[second["id"]], numbers[first["id"]], numbers[feature["id"]],
+            numbers[later["id"]], numbers[earlier["id"]]) == ("1", "2", "2.1", "3", "4")
+
+
+def test_a_feature_nested_onto_a_story_is_drawn_under_it_with_its_number(monkeypatch):
+    client = _client(monkeypatch)
+    epic = run(kanban_data.create_epic("Epic"))
+    host = run(kanban_data.create_story("Host", epic_id=epic["id"]))
+    feature = run(kanban_data.create_feature(epic["id"], "Feature"))
+    below = run(kanban_data.create_story("Below", feature_id=feature["id"]))
+    run(kanban_data.set_parent(feature["id"], host["id"]))
+
+    with _page(client, "/kanban/backlog") as page:
+        tree = page.evaluate(_TREE)
+
+    assert tree == [
+        [epic["id"], "1 Epic"],
+        [host["id"], "1.1 Host"],
+        [feature["id"], "1.1.1 Feature"],
+        [below["id"], "1.1.1.1 Below"],
+    ]
