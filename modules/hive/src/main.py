@@ -2663,13 +2663,15 @@ async def canvas_submit(request: Request):
         if target is None or not (user.get("is_admin") or target in own):
             raise HTTPException(status_code=404, detail=f"no mind of yours named {asked!r}")
     else:
+        # The page sends no choice yet, so a drawer with several minds and
+        # none of them this console's default gets the first by name rather
+        # than a refusal they have no control to answer.
         default = route_access.find_mind(own, os.getenv("MIND_NAME", "skippy"))
-        target = default or (own[0] if len(own) == 1 else None)
+        ordered = sorted(own, key=lambda m: str(m.get("name") or ""))
+        target = default or (ordered[0] if ordered else None)
         if target is None:
             raise HTTPException(
-                status_code=400,
-                detail="say which of your minds should look" if own
-                else "you have no mind to send the drawing to")
+                status_code=400, detail="you have no mind to send the drawing to")
     target_name = str(target.get("name") or "")
     mind_id = str(target.get("id") or "")
 
@@ -4081,11 +4083,15 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
                 "Restart it on its host to activate the new model."
             ),
         )
+    try:
+        project_path = mind_mounts.hive_mind_project_path()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = await _hive_tools_request(
         "POST",
         "/docker/restart",
         params={
-            "path": mind_mounts.hive_mind_project_path(),
+            "path": project_path,
             "service": name,
         },
     )

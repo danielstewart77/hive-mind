@@ -412,3 +412,16 @@ async def test_a_second_users_design_session_names_them_not_daniel(store, gatewa
     assert "Sloan submitted feedback" in content
     assert "Sloan asks: Why this?" in content
     assert "Daniel" not in content
+
+
+async def test_the_build_and_accept_messages_name_the_owner_and_nobody_else(store):
+    record = await _session_with_feedback(store)
+
+    build = design_delivery.compose_message(record, "requirements", "build", "aiden")
+    accept = design_delivery.compose_message(record, "requirements", "accept", "aiden")
+    nobody = design_delivery.compose_message(record, "requirements", "build", "")
+
+    assert "Aiden pressed Build" in build
+    assert "Aiden accepted the requirements page" in accept
+    assert "The owner pressed Build" in nobody
+    assert all("Daniel" not in text for text in (build, accept, nobody))

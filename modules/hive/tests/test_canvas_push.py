@@ -264,3 +264,30 @@ def test_a_second_users_canvas_submit_reaches_their_own_mind_and_names_them(tmp_
     assert sent["to_mind"] == ARNOLD_ID
     assert "Sloan finished a drawing pass" in sent["content"]
     assert "Daniel" not in sent["content"]
+
+
+def test_a_second_user_naming_a_mind_that_is_not_theirs_is_refused(tmp_path, monkeypatch):
+    import auth
+
+    client = _authed_submit_client(tmp_path, monkeypatch)
+    # The page is admin-only until story 2.1.18, so the gate is passed with an
+    # admin cookie and the handler is shown a non-admin: what decides is the
+    # canvas's own rule that a named mind must be the drawer's.
+    sloan = run(auth.create_user("sloan", "secret-pass", is_admin=True, replace=True))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(sloan)))
+    monkeypatch.setattr(main_mod, "get_current_user_from_request",
+                        lambda request: _as_coroutine({"username": "sloan", "is_admin": False}))
+    _FakeClient.last = None
+
+    response = client.post("/canvas/submit", json={"mind": "skippy"})
+
+    assert response.status_code == 404
+    assert _FakeClient.last is None
+
+
+async def _resolved(value):
+    return value
+
+
+def _as_coroutine(value):
+    return _resolved(value)

@@ -222,7 +222,13 @@ async def deliver_notice(notice_id: int) -> bool:
         if not conversation_id:
             await design_data.release_notice(notice_id)
             return False
-        person = await route_access.owner_of_mind(str(record.get("mind_id") or "")) or ""
+        # A session opened before any mind attached names its conversation
+        # but no mind; the conversation's own mind is then the owner's.
+        person = (
+            await route_access.owner_of_mind(str(record.get("mind_id") or ""))
+            if record.get("mind_id")
+            else await route_access.owner_of_session(conversation_id)
+        ) or ""
         content = compose_message(record, notice["page"], notice["kind"], person)
         await adopt_conversation(record["id"], conversation_id)
         await send_turn(conversation_id, content)
