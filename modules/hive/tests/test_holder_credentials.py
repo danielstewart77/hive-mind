@@ -41,6 +41,8 @@ def hive(tmp_path, monkeypatch):
         COMMS_TOKEN_ADA="ada-old",
         COMMS_TOKEN_BILBY_BOT="bilby-bot-old",  # secret-guard: allow — invented fixture
         LUCENT_TOKEN_ADA="ada-lucent-old",  # secret-guard: allow — invented fixture
+        # Read off the file at each call, so issuing it restarts nothing.
+        PROXY_CREDENTIAL_ADMIN_KEY="proxy-minting-key-for-tests",  # secret-guard: allow — invented fixture
     )
     own = tmp_path / "skippy.env"
     _write_env(own, COMMS_BEARER_TOKEN="skippy-old", OTHER_KEY="untouched")
@@ -55,6 +57,8 @@ def hive(tmp_path, monkeypatch):
     monkeypatch.setattr(credentials_data, "BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-for-tests")
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", "lucent-admin-for-tests")
+    monkeypatch.delenv("PROXY_CREDENTIAL_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.invalid:8899")
     return {"shared": shared, "own": own}
 
 
@@ -83,7 +87,8 @@ def service(monkeypatch):
                 "the service did not answer", request=request
             )
         body = _json.loads(request.content)
-        sent.append({"url": str(request.url), **body})
+        sent.append({"url": str(request.url),
+                     "bearer": request.headers.get("authorization", ""), **body})
         status = state["status"]
         for fragment, refusal in state["refuse"].items():
             if fragment in str(request.url):
@@ -265,9 +270,9 @@ def test_a_new_minds_credentials_are_minted_as_a_mind_under_its_uuid(hive, servi
 
     mints = [call for call in service["sent"] if call.get("token")]
     assert failed is None
-    assert [call["role"] for call in mints] == ["mind", "mind"]
-    assert [call.get("mind_id") for call in mints] == [None, "uuid-1234"]
-    assert {entry["service"] for entry in minted} == {"comms", "lucent"}
+    assert [call["role"] for call in mints] == ["mind", "mind", "mind"]
+    assert [call.get("mind_id") for call in mints] == [None, "uuid-1234", None]
+    assert {entry["service"] for entry in minted} == {"comms", "lucent", "proxy"}
 
 
 def test_one_service_refusing_still_reports_the_credential_that_landed(hive, service):
@@ -280,7 +285,7 @@ def test_one_service_refusing_still_reports_the_credential_that_landed(hive, ser
         holder_credentials.provision_mind("quokka", "uuid-1234", "daniel")
     )
 
-    assert [entry["service"] for entry in minted] == ["comms"]
+    assert [entry["service"] for entry in minted] == ["comms", "proxy"]
     assert "memory store" in failed
 
 
@@ -289,7 +294,26 @@ def test_a_new_minds_variables_are_added_to_the_shared_file(hive, service):
 
     assert _value(hive["shared"], "COMMS_TOKEN_QUOKKA")
     assert _value(hive["shared"], "LUCENT_TOKEN_QUOKKA")
+    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA")
     assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
+
+
+def test_a_new_mind_is_given_its_own_proxy_key_and_holds_the_one_the_proxy_took(hive, service):
+    """Story 2.1.9, DECIDED 2026-11-15 by Daniel: one proxy key per mind,
+    issued when the mind is created, so its usage is its own. The value the
+    proxy was handed for this mind is the value written where the mind reads
+    it, asked for with the console's own proxy key."""
+    minted, failed = _run(holder_credentials.provision_mind("quokka", "uuid-1234", "sloan"))
+
+    assert failed is None
+    to_proxy = [call for call in service["sent"]
+                if call.get("token") and call["url"].startswith("http://proxy.invalid:8899/")]
+    assert [call["url"] for call in to_proxy] == ["http://proxy.invalid:8899/credentials/quokka"]
+    assert to_proxy[0]["bearer"] == "Bearer proxy-minting-key-for-tests"  # secret-guard: allow - invented fixture
+    assert to_proxy[0]["role"] == "mind"
+    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA") == to_proxy[0]["token"]
+    others = [call["token"] for call in service["sent"] if call.get("token") and call is not to_proxy[0]]
+    assert to_proxy[0]["token"] not in others
 
 
 def test_adding_a_variable_never_lands_on_the_last_line(hive, service):
@@ -446,3 +470,25 @@ def test_a_name_another_holder_already_has_is_named_as_taken(hive, service):
 
     assert taken == holder_credentials.SERVICES["comms"].label
     assert free is None
+
+
+def test_a_mind_whose_proxy_mint_failed_at_creation_can_be_given_its_key_later(hive, service):
+    """The proxy down while a mind is created leaves it a variable and no
+    client. Its row is still on the page, and rotating it issues the key."""
+    service["state"]["refuse"]["proxy.invalid"] = 503
+    minted, failed = _run(holder_credentials.provision_mind("quokka", "uuid-1234", "sloan"))
+    assert "inference proxy" in failed
+    assert not _value(hive["shared"], "PROXY_TOKEN_QUOKKA")
+    proxy = holder_credentials.SERVICES["proxy"]
+    service["state"]["holders"] = []
+
+    rows = _run(holder_credentials.holder_rows(proxy))
+    assert [(r["holder"], r["rotatable"]) for r in rows] == [("quokka", True)]
+
+    del service["state"]["refuse"]["proxy.invalid"]
+    _run(holder_credentials.rotate(proxy, "quokka"))
+
+    last = [call for call in service["sent"] if call.get("token")][-1]
+    assert last["url"] == "http://proxy.invalid:8899/credentials/quokka"
+    assert last["role"] == "mind"
+    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA") == last["token"]

@@ -21,11 +21,13 @@ import configuration_data
 import main as main_mod
 import accounts
 
+# A container mind starts on a model the inference proxy serves, since that
+# is what it calls (story 2.1.9).
 _PAIRS = [
     ("claude_cli", "anthropic", "claude-sonnet-5"),
-    ("claude_cli", "ollama", "qwen3:8b"),
-    ("codex_cli", "openai", "gpt-5.4"),
-    ("codex_cli", "ollama", "qwen3:8b"),
+    ("claude_cli", "ollama", "gpt-oss:20b-32k"),
+    ("codex_cli", "openai", "gpt-5.6-terra"),
+    ("codex_cli", "ollama", "gpt-oss:20b-32k"),
 ]
 
 
@@ -70,7 +72,7 @@ def test_every_pair_scaffolds_a_runnable_mind(client, harness, provider, model):
     )
     service = compose["services"]["atlas"]
     assert service["container_name"] == "hive-mind-atlas"
-    assert service["command"][-1] == f"minds.harness.{harness}"
+    assert service["command"][-2:] == ["-m", "minds.mind_server"]
     assert "hivemind" in service["networks"]
 
 
@@ -97,10 +99,7 @@ def test_each_harness_gets_the_config_dir_variable_its_cli_reads(
 
 def test_ollama_env_block_is_the_whole_provider_switch(client):
     """The harness modules branch on this env block, not on `provider`."""
-    assert _create(
-        client, harness="claude_cli", provider="ollama",
-        ollama_url="http://host.docker.internal:8899", ollama_api_key="hmp-abc",
-    ).status_code == 200
+    assert _create(client, harness="claude_cli", provider="ollama").status_code == 200
     claude_env = yaml.safe_load(
         (client.minds_dir / "atlas" / "runtime.yaml").read_text()
     )["env"]
@@ -109,14 +108,12 @@ def test_ollama_env_block_is_the_whole_provider_switch(client):
 
     assert _create(
         client, name="bilby-two", harness="codex_cli", provider="ollama",
-        ollama_url="http://host.docker.internal:8899", ollama_api_key="hmp-abc",
     ).status_code == 200
     codex_env = yaml.safe_load(
         (client.minds_dir / "bilby-two" / "runtime.yaml").read_text()
     )["env"]
     # Codex speaks the OpenAI-compatible dialect, served under /v1.
     assert codex_env["OLLAMA_BASE_URL"] == "http://host.docker.internal:8899/v1"
-    assert codex_env["OPENAI_API_KEY"] == "hmp-abc"
 
 
 def test_a_first_party_mind_gets_no_env_block(client):
@@ -125,11 +122,13 @@ def test_a_first_party_mind_gets_no_env_block(client):
     assert "env" not in runtime
 
 
-def test_ollama_defaults_to_the_metering_proxy(client, monkeypatch):
-    """Every Ollama mind in this hive goes through the inference proxy so its
-    usage is attributable; defaulting to raw Ollama would silently skip that."""
-    monkeypatch.delenv("OLLAMA_URL", raising=False)
-    with patch.object(main_mod, "get_capability_endpoint", return_value=""):
+def test_an_ollama_mind_calls_the_proxy_even_where_the_hive_names_a_bare_daemon(client, monkeypatch):
+    """Story 2.1.9: a mind talks to the proxy with its own key. Pointed at a
+    bare Ollama daemon instead, its calls go unmetered and its proxy key is
+    sent to a host that is not the proxy."""
+    monkeypatch.setenv("OLLAMA_URL", "http://192.168.4.64:11434")
+    with patch.object(main_mod, "get_capability_endpoint",
+                      new=AsyncMock(return_value="http://192.168.4.64:11434")):
         assert _create(client, provider="ollama").status_code == 200
 
     runtime = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())
@@ -193,7 +192,7 @@ def test_register_sends_the_scaffolded_identity_to_the_broker(client):
         "mind_id": mind_id,
         "name": "atlas",
         "gateway_url": "http://atlas:8420",
-        "model": "gpt-5.4",
+        "model": "gpt-5.6-terra",
         # Already the broker's vocabulary — no translation step.
         "harness": "codex_cli",
         # A new mind is the registering admin's unless another owner is named.
@@ -265,3 +264,27 @@ def test_the_form_offers_only_pairs_the_api_accepts(client):
     assert 'value="codex_cli"' in page
     # Identity is deliberately not scaffolded here.
     assert "soul" in page.lower()
+
+
+@pytest.mark.parametrize("harness,provider,model", _PAIRS)
+def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
+    client, harness, provider, model
+):
+    """Story 2.1.9: the key the mind is given at creation is how it talks to
+    the proxy, whatever its harness - read from the variable the mint writes,
+    and not stamped over by its runtime env at spawn."""
+    import holder_credentials
+
+    assert _create(client, harness=harness, provider=provider).status_code == 200
+
+    own = holder_credentials.variable_name(holder_credentials.SERVICES["proxy"], "atlas")
+    compose = yaml.safe_load(
+        (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text())
+    environment = dict(
+        item.split("=", 1) for item in compose["services"]["atlas"]["environment"])
+    for login in ("ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"):
+        assert environment[login] == "${" + own + "}"
+    assert environment["ANTHROPIC_BASE_URL"] == configuration_data.DEFAULT_OLLAMA_BASE_URL
+    runtime_env = yaml.safe_load(
+        (client.minds_dir / "atlas" / "runtime.yaml").read_text()).get("env") or {}
+    assert not {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"} & set(runtime_env)

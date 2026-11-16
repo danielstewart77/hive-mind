@@ -131,15 +131,19 @@ _HARNESS_SCAFFOLD = {
 # The provider switch is entirely this env block — the harness modules read
 # `provider` but branch on these. Base URLs default to the host
 # inference-proxy, which is how every Ollama mind in this hive is metered.
+#
+# The key is written only when one was given for a non-proxy Ollama host. On
+# the proxy the mind logs in with its own proxy key, which its compose file
+# supplies; a placeholder here would be applied over it at every spawn.
 _OLLAMA_ENV = {
     "claude_cli": lambda base, key: {
-        "ANTHROPIC_AUTH_TOKEN": key or "ollama",
         "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_BASE_URL": base,
+        **({"ANTHROPIC_AUTH_TOKEN": key} if key else {}),
     },
     "codex_cli": lambda base, key: {
         "OLLAMA_BASE_URL": f"{base}/v1",
-        "OPENAI_API_KEY": key,
+        **({"OPENAI_API_KEY": key} if key else {}),
     },
 }
 
@@ -168,6 +172,14 @@ def _comms_variable(name: str) -> str:
 
     return holder_credentials.variable_name(
         holder_credentials.SERVICES["comms"], name
+    )
+
+
+def _proxy_variable(name: str) -> str:
+    import holder_credentials
+
+    return holder_credentials.variable_name(
+        holder_credentials.SERVICES["proxy"], name
     )
 
 
@@ -265,6 +277,18 @@ def scaffold_internal_mind(
                     # start, and POST /broker/minds is an admin route.
                     "COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}",
                     "HIVEMIND_BROKER_URL=http://hive-comms:8424",
+                    # Every harness logs in to the inference proxy with this
+                    # mind's own key, minted when it was created, so every
+                    # call is metered to it (story 2.1.9) - never a host
+                    # login, and never another mind's key.
+                    f"INFERENCE_PROXY_URL={DEFAULT_OLLAMA_BASE_URL}",
+                    f"ANTHROPIC_BASE_URL={DEFAULT_OLLAMA_BASE_URL}",
+                    f"ANTHROPIC_AUTH_TOKEN=${{{_proxy_variable(name)}}}",
+                    "ANTHROPIC_API_KEY=",
+                    f"OPENAI_BASE_URL={DEFAULT_OLLAMA_BASE_URL}/v1",
+                    f"OPENAI_API_KEY=${{{_proxy_variable(name)}}}",
+                    f"DSH_PROXY_BASE_URL={DEFAULT_OLLAMA_BASE_URL}/v1",
+                    f"DSH_API_KEY=${{{_proxy_variable(name)}}}",
                     "GATEWAY_URL=http://server:8420",
                     "SPECS_DIR=/usr/src/app/specs/data-classes",
                     f"AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/{name}/data/auto-remember",
@@ -276,11 +300,10 @@ def scaffold_internal_mind(
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
                 "tmpfs": ["/tmp"],
-                "command": [
-                    "/opt/venv/bin/python3",
-                    "-m",
-                    f"minds.harness.{harness}",
-                ],
+                # The mind server, as every container mind here runs; it
+                # picks the harness from runtime.yaml. The harness modules
+                # have no entry point of their own.
+                "command": ["/opt/venv/bin/python3", "-m", "minds.mind_server"],
             }
         }
     }
