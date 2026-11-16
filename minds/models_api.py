@@ -36,7 +36,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
-from minds.runtime_api import authorize_admin, load_runtime
+from minds.runtime_api import authorize_gateway, load_runtime
 
 _TIMEOUT = aiohttp.ClientTimeout(total=6)
 
@@ -234,7 +234,9 @@ def install_models_route(
 
     @app.get("/models")
     async def get_models(request: Request, harness: str = "") -> Any:
-        refusal = authorize_admin(request)
+        # The gateway asks while it switches a conversation's model, with
+        # this mind's session credential (see `authorize_gateway`).
+        refusal = authorize_gateway(request, Path(path).parent)
         if refusal is not None:
             return refusal
         try:

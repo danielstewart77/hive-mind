@@ -19,3 +19,10 @@ models:
   sonnet: anthropic
   opus: anthropic
   haiku: anthropic
+
+# The one person whose minds may still be sent the gateway's admin
+# credential on a model or harness switch, as a fallback for minds running
+# code that refuses their own session credential there. Empty: nobody. Every
+# other mind is sent only its own credential. COMMS_ADMIN_CREDENTIAL_OWNER
+# overrides it.
+admin_credential_owner: ""

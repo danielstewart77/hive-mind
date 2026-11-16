@@ -515,7 +515,7 @@ async def release_idle_chat(sid: str) -> str | None:
 @app.get("/harnesses")
 async def get_harnesses(request: Request) -> Any:
     """Which harnesses a conversation here may run on, and why not the rest."""
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     return harness_report()
@@ -533,7 +533,7 @@ async def handover(request: Request) -> Any:
     the switch would lose the conversation it was moving, so it is refused
     and the old harness keeps running.
     """
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     body = await request.json()
@@ -606,7 +606,7 @@ async def skills_check(request: Request) -> Any:
     where the render pass is not installed: a 200 that rendered nothing would
     let a switch go ahead on stale copies with every surface reporting fine.
     """
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     check_all = getattr(skills_api, "check_all", None)

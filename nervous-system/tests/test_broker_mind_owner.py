@@ -14,7 +14,9 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from comms_broker_pg import broker_db, put_mind, scratch_dsn  # noqa: F401 - fixtures
+from comms_broker_pg import (  # noqa: F401 - fixtures
+    broker_db, put_credential_row, put_mind, scratch_dsn,
+)
 
 MIND_A = "11111111-1111-4111-8111-111111111111"
 ADMIN = {"Authorization": "Bearer admin-bearer"}
@@ -203,3 +205,59 @@ def test_a_pre_owner_row_registering_with_an_owner_is_listed_under_it(
         )
         assert again.status_code == 200
         assert _listed(client)[MIND_A]["owner"] == "sloan"
+
+
+# ---------------------------------------------------------------------------
+# A mind's own credential registers a mind of its own person, nobody else's
+# (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+# credentials). A kid's box that could register a fresh row owned by Daniel,
+# at a server of its own, would be sent his admin credential there.
+# ---------------------------------------------------------------------------
+KID = "kid-own-credential"  # secret-guard: allow
+
+
+def _a_kids_credential() -> dict:
+    from comms import user_access
+
+    asyncio.run(put_credential_row(
+        holder="arnold", username="sloan", role=user_access.MIND,
+        token_sha=user_access.digest(KID),
+    ))
+    return {"Authorization": f"Bearer {KID}"}
+
+
+def test_a_mind_cannot_register_a_mind_owned_by_someone_else(app_client) -> None:
+    kid = _a_kids_credential()
+
+    forged = app_client.post("/broker/minds", headers=kid, json=_registration(
+        mind_id="arnold", name="x1", gateway_url="http://evil:9999", owner="daniel"))
+
+    assert forged.status_code == 403
+    assert "arnold" not in _listed(app_client)
+
+
+def test_a_minds_own_registration_lands_under_its_credentials_person(app_client) -> None:
+    kid = _a_kids_credential()
+
+    unnamed = app_client.post("/broker/minds", headers=kid, json=_registration(
+        mind_id="arnold", name="arnold", gateway_url="http://192.168.5.64:8433"))
+
+    assert unnamed.status_code == 200
+    assert _listed(app_client)["arnold"]["owner"] == "sloan"
+
+
+def test_the_listing_marks_which_minds_may_be_sent_the_admin_credential(
+    app_client, monkeypatch,
+) -> None:
+    """The console reads this, so it withholds from the same minds."""
+    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "daniel")
+    app_client.post("/broker/minds", json=_registration(owner="Daniel"))
+    app_client.post("/broker/minds", json=_registration(
+        mind_id="22222222-2222-4222-8222-222222222222", name="arnold", owner="sloan"))
+
+    listed = _listed(app_client)
+    assert listed[MIND_A]["admin_credential_allowed"] is True
+    assert listed["22222222-2222-4222-8222-222222222222"]["admin_credential_allowed"] is False
+
+    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "")
+    assert _listed(app_client)[MIND_A]["admin_credential_allowed"] is False
