@@ -88,6 +88,11 @@ TERMINAL = frozenset({"done", "refused", "failed"})
 HEARTBEAT = 180.0
 
 DEADLINE = 2 * 60 * 60.0
+#: The longest wait a request may ask for. The unit's TimeoutStartSec is this
+#: plus every other step's own bound, so systemd never kills a run between
+#: removing the old container and starting the new one.
+MAX_DEADLINE = 8 * 60 * 60.0
+BUILD_TIMEOUT = 1800.0
 INTERVAL = 20.0
 #: The second idle check, which must agree with the first.
 SETTLE = 5.0
@@ -96,6 +101,9 @@ HEALTH_WITHIN = 90.0
 TAKEN_WITHIN = 15.0
 #: How long the outcome's turn may run. A turn, not a request.
 TURN_TIMEOUT = 1800.0
+#: Everything a run does besides the wait, bounded: build, two probes, the
+#: recreate, the verification and the report turn, with room to spare.
+UNIT_TIMEOUT = MAX_DEADLINE + BUILD_TIMEOUT + TURN_TIMEOUT + 2 * 60 * 60.0
 
 PROBE_QUESTION = ("Recreate check by stash_recreate, run {run}: this question "
                   "is set and cleared within seconds. Ignore it.")
@@ -115,6 +123,18 @@ _CONVERSATION = re.compile(rf"--(?:session-id|resume)[ =]({_UUID})")
 
 class Refused(Exception):
     """A step that would have lost work, or could not prove it would not."""
+
+
+def checked_deadline(value: Any) -> float:
+    """A wait the unit can finish inside its own timeout, or Refused."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise Refused(f"deadline {value!r} is not a number of seconds") from None
+    if not (0 < seconds <= MAX_DEADLINE):  # also refuses nan
+        raise Refused(f"deadline {value!r} must be more than 0 and at most "
+                      f"{MAX_DEADLINE:.0f} seconds")
+    return seconds
 
 
 # ------------------------------------------------------------- the transport
@@ -181,8 +201,12 @@ class Run:
         self.data["updated_at"] = self.clock()
         _write_json(STATUS, self.data)
 
-    def state(self, state: str, **extra: Any) -> None:
-        self.data.update(state=state, **extra)
+    def state(self, state: str, *, quiet_for: float = 0.0,
+              **extra: Any) -> None:
+        """Move to `state`. `quiet_for` is how long the next step may run
+        without writing, so `arm` does not read a silent step as a dead run."""
+        self.data.update(state=state, active_until=self.clock() + quiet_for,
+                         **extra)
         self.save()
 
     def check(self, name: str, ok: bool | None, detail: Any = "") -> bool:
@@ -267,8 +291,10 @@ def busy_processes(ps_text: str, own_args: str) -> list[str]:
                            f"session {stream.group(1)}; killing it loses "
                            "that turn's reply")
             continue
-        reasons.append(f"process {pid} (parent {ppid}) is running: "
-                       f"{args[:160]}")
+        # The name only: a command line can carry a bearer token, and this
+        # reason is written to the read-write mount and the journal.
+        name = os.path.basename(args.split(None, 1)[0]) if args else "?"
+        reasons.append(f"process {pid} ({name}, parent {ppid}) is running")
     return reasons
 
 
@@ -468,17 +494,16 @@ def preflight(run: Run, build: bool) -> tuple[str, str]:
     """Everything that can be proven before the container is touched.
 
     Returns the hive_data mount's host source and the image. Raises Refused;
-    a refusal after the build puts the previous image's tag back, so the tag
+    the caller puts the previous image's tag back on any refusal, so the tag
     still names what the running container was made from.
     """
-    run.state("preflight")
     source = _compose_mount_source()
     run.check("fragment mounts host hive_data read-only", True, source)
     image = _image()
-    run.data["previous_image"] = _image_id(image)
     if build:
-        run.state("building")
-        built = _cmd(["docker", "compose", "build", SERVICE], timeout=1800)
+        run.state("building", quiet_for=BUILD_TIMEOUT)
+        built = _cmd(["docker", "compose", "build", SERVICE],
+                     timeout=BUILD_TIMEOUT)
         if not run.check("image rebuilt", built.returncode == 0,
                          "" if built.returncode == 0 else _tail(built)):
             raise Refused(f"the image did not build: {_tail(built)}")
@@ -550,13 +575,20 @@ def question_round_trip(run: Run) -> None:
         run.check("edit --question sets the question", held == marker,
                   {"task": task, "question": held})
     finally:
-        if _question(task) == marker:
+        now = _question(task)
+        if now == marker:
             _ledger("edit", task, "--answered")
             held = _question(task)
             run.check("edit --answered clears it", held is None,
                       {"task": task, "question": held})
             if held is not None:
                 run.data["marker_left_on"] = task
+        elif isinstance(now, tuple):
+            # Unreadable: the marker may be standing on a real task, and
+            # nothing here can say it is not.
+            run.check("edit --answered clears it", False,
+                      {"task": task, "unreadable": now[1]})
+            run.data["marker_left_on"] = task
         else:
             run.check("edit --answered clears it", None,
                       {"task": task, "skipped": "the question is no longer "
@@ -731,40 +763,65 @@ def _one_run():
 
 
 def recreate(record: Run, build: bool, deadline: float,
-             wait: Callable[..., None]) -> None:
-    source, image = preflight(record, build)
+             wait: Callable[..., None], *,
+             check: Callable[[], list[str]] | None = None,
+             clock: Callable[[], float] = time.monotonic) -> None:
+    check = check or check_idle
+    record.state("preflight")
+    image = _image()
+    record.data["previous_image"] = _image_id(image)
     try:
-        record.state("waiting for idle")
-        wait(record, deadline)
-        # Again at the last moment: the wait can be hours, and a peer can
-        # move the host's hive-data checkout in that time.
-        behind = probe_image(image, source)
-        if not record.check("hive_data still level at the recreate",
-                            not behind, behind or "nothing missing"):
-            raise Refused(f"hive_data at {source} fell behind the ledger "
-                          f"tool while waiting ({'; '.join(behind)})")
-    except Refused:
+        source, _ = preflight(record, build)
+        ends = clock() + deadline
+        while True:
+            record.state("waiting for idle")
+            wait(record, max(0.0, ends - clock()))
+            # Again after the wait: it can be hours, and a peer can move the
+            # host's hive-data checkout in that time.
+            behind = probe_image(image, source)
+            if not record.check("hive_data still level at the recreate",
+                                not behind, behind or "nothing missing"):
+                raise Refused(f"hive_data at {source} fell behind the "
+                              f"ledger tool while waiting "
+                              f"({'; '.join(behind)})")
+            # The last word is a check made after the probe, so nothing that
+            # started while it ran is killed unseen; a wake the watch sends
+            # from here on is named in the report.
+            window = time.time()
+            last = check()
+            if not last:
+                break
+            record.busy(last)
+            if clock() >= ends:
+                raise Refused(
+                    f"the chief was not idle within {deadline:.0f}s, so "
+                    "nothing was recreated; last seen: " + "; ".join(last))
+    except BaseException:
         restore_image(record, image)
         raise
     ps = _ps()
     held = conversations(ps.stdout) if ps.returncode == 0 else []
     before = _started_at()
-    record.state("recreating", window_from=time.time(), conversations=held)
-    up = _cmd(["docker", "compose", "up", "-d", "--no-deps",
-               "--force-recreate", SERVICE], timeout=600)
-    record.data["recreated"] = True
-    if not record.check("compose up --no-deps --force-recreate",
-                        up.returncode == 0,
-                        "" if up.returncode == 0 else _tail(up)):
-        record.state("failed", error=f"compose up failed: {_tail(up)}")
-        return
-    ok = verify(record, before, source, held)
-    with contextlib.suppress(Refused, KeyError, TypeError):
-        record.data["woken_in_window"] = _watch(
-            "watch-check", "--since", str(record.data["window_from"]))["woken"]
-    record.state("done" if ok else "failed",
-                 error=None if ok else "a check after the recreate failed; "
-                 "see checks")
+    record.state("recreating", quiet_for=900.0, window_from=window,
+                 conversations=held)
+    try:
+        up = _cmd(["docker", "compose", "up", "-d", "--no-deps",
+                   "--force-recreate", SERVICE], timeout=600)
+        after = _started_at()
+        record.data["recreated"] = after is not None and after != before
+        if not record.check("compose up --no-deps --force-recreate",
+                            up.returncode == 0,
+                            "" if up.returncode == 0 else _tail(up)):
+            record.state("failed", error=f"compose up failed: {_tail(up)}")
+            return
+        ok = verify(record, before, source, held)
+        record.state("done" if ok else "failed",
+                     error=None if ok else "a check after the recreate "
+                     "failed; see checks")
+    finally:
+        with contextlib.suppress(Exception):
+            record.data["woken_in_window"] = _watch(
+                "watch-check", "--since", str(window))["woken"]
 
 
 def run(reason: str, *, build: bool = True, deadline: float = DEADLINE,
@@ -778,13 +835,18 @@ def run(reason: str, *, build: bool = True, deadline: float = DEADLINE,
             record.state("refused", error=str(exc))
         except Exception as exc:  # a run always ends in a recorded state
             record.state("failed", error=f"{type(exc).__name__}: {exc}")
-        record.data["finished_at"] = time.time()
-        record.data["report"] = report = deliver(_report_text(record.data))
+        outcome = record.data["state"]
+        text = _report_text(record.data)
+        # Still a run while its report turn is open: a terminal state here
+        # would let `arm` request a second run that systemd cannot start.
+        record.state("reporting", quiet_for=TURN_TIMEOUT + 120, outcome=outcome)
+        record.data["report"] = report = deliver(text)
         if record.data["recreated"]:
             resumed(record, report)
-            if not record.passed() and record.data["state"] == "done":
-                record.data["state"] = "failed"
-        record.save()
+            if not record.passed() and outcome == "done":
+                outcome = "failed"
+        record.data["finished_at"] = time.time()
+        record.state(outcome)
         return record.data
 
 
@@ -807,21 +869,39 @@ def take_request() -> dict | None:
 # ---------------------------------------------------------------------- arm
 
 
+def run_active(now: float) -> bool:
+    """Whether status.json describes a run that is still going.
+
+    Read from the file alone, because inside the container that is all there
+    is: a run not in a terminal state that wrote within the heartbeat, or
+    whose current step said it would be quiet for longer.
+    """
+    status = read_status()
+    if not status or status.get("state") in TERMINAL:
+        return False
+    alive_until = max(float(status.get("updated_at") or 0) + HEARTBEAT,
+                      float(status.get("active_until") or 0))
+    return now < alive_until
+
+
 def arm(reason: str, *, deadline: float = DEADLINE,
         within: float = TAKEN_WITHIN,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep) -> dict:
     """Ask the host for a recreate, and say whether it took the request."""
-    status = read_status()
-    if status and status.get("state") not in TERMINAL \
-            and clock() - float(status.get("updated_at") or 0) < HEARTBEAT:
-        raise Refused(f"a recreate run is already {status['state']} "
+    deadline = checked_deadline(deadline)
+    if run_active(clock()):
+        status = read_status() or {}
+        raise Refused(f"a recreate run is already {status.get('state')} "
                       f"(requested for: {status.get('reason')}); see "
                       f"{STATUS.relative_to(REPO)}")
-    for waiting in (REQUEST, TAKEN):
-        if waiting.exists():
-            raise Refused(f"a recreate request is already waiting at "
-                          f"{waiting.relative_to(REPO)}")
+    if REQUEST.exists():
+        raise Refused(f"a recreate request is already waiting at "
+                      f"{REQUEST.relative_to(REPO)}")
+    # A request the unit moved aside for a run that is no longer active is
+    # one whose run died before reading it: it would only block every arm.
+    with contextlib.suppress(FileNotFoundError):
+        TAKEN.unlink()
     _write_json(REQUEST, {"reason": reason, "deadline": deadline,
                           "at": clock()})
     ends = clock() + within
@@ -852,7 +932,7 @@ UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 
 def units() -> dict[str, str]:
     tool = Path(__file__).resolve()
-    hours = int((DEADLINE + 2 * 60 * 60) // 3600)
+    hours = int(-(-UNIT_TIMEOUT // 3600))
     return {
         "stash-recreate.path": (
             "[Unit]\nDescription=Watch for a request to recreate the chief "
@@ -914,7 +994,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "arm":
             out = arm(args.reason, deadline=args.deadline)
         elif args.command == "run":
-            reason, deadline = args.reason, args.deadline
+            reason, deadline = args.reason, checked_deadline(args.deadline)
             if args.from_request:
                 taken = take_request()
                 if taken is None:
@@ -922,8 +1002,8 @@ def main(argv: list[str] | None = None) -> int:
                                       "why": "no request to take"}))
                     return 0
                 reason = str(taken.get("reason") or "")
-                with contextlib.suppress(TypeError, ValueError):
-                    deadline = float(taken.get("deadline") or deadline)
+                if taken.get("deadline") is not None:
+                    deadline = checked_deadline(taken["deadline"])
             out = run(reason, build=args.build, deadline=deadline)
         elif args.command == "check":
             reasons = check_idle()

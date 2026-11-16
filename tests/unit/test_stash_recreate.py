@@ -72,7 +72,13 @@ def test_a_detached_stream_reader_is_busy_and_names_its_session(sr):
     ps = IDLE_PS + (f"\n  10105       1 S    curl -sS -N -X POST "
                     f"http://hive-comms:8424/sessions/{OTHER_SESSION}/message")
     reasons = sr.busy_processes(ps, OWN_PS)
-    assert any(OTHER_SESSION in r for r in reasons)
+    assert any(OTHER_SESSION in r and "holds the stream" in r for r in reasons)
+
+
+def test_a_busy_reason_never_copies_a_command_line(sr):
+    ps = IDLE_PS + "\n  10400       0 S    curl -H Authorization: Bearer s3cr3t http://x/y"
+    (reason,) = sr.busy_processes(ps, OWN_PS)
+    assert "s3cr3t" not in reason
 
 
 def test_a_zombie_is_not_work(sr):
@@ -138,10 +144,13 @@ class Docker:
 
     def __init__(self, answers):
         self.calls: list[list[str]] = []
+        self.inputs: list[str] = []
         self.answers = answers
 
     def __call__(self, args, **kwargs):
         self.calls.append(list(args))
+        if kwargs.get("input"):
+            self.inputs.append(kwargs["input"])
         line = " ".join(args)
         for key, answer in self.answers.items():
             if key in line:
@@ -309,10 +318,12 @@ def test_the_run_consumes_the_request_the_unit_moved_aside(sr):
 class Ledger:
     """The recreated container's ledger tool, as its stdout."""
 
-    def __init__(self, tasks, *, sticks=True, replaced_with=None):
+    def __init__(self, tasks, *, sticks=True, clears=True, replaced_with=None):
         self.tasks = {t["id"]: dict(t) for t in tasks}
         self.sticks = sticks
+        self.clears = clears
         self.replaced_with = replaced_with
+        self.edited: list[str] = []
 
     def __call__(self, args):
         i = args.index("/usr/src/app/tools/stateless/staff_ledger/staff_ledger.py")
@@ -320,10 +331,12 @@ class Ledger:
         if command == "list":
             return 0, json.dumps({"tasks": list(self.tasks.values())}), ""
         task = self.tasks[rest[0]]
+        if command == "edit":
+            self.edited.append(rest[0])
         if command == "edit" and "--question" in rest and self.sticks:
             task["question"] = (self.replaced_with
                                 or rest[rest.index("--question") + 1])
-        if command == "edit" and "--answered" in rest and self.sticks:
+        if command == "edit" and "--answered" in rest and self.clears:
             task["question"] = None
         return 0, json.dumps({"task": task}), ""
 
@@ -343,11 +356,14 @@ GOOD_MOUNT = [{"Destination": "/opt/venv/lib/python3.12/site-packages/hive_data"
                "Source": "/host/hive-data/hive_data", "RW": False}]
 
 
-def _verify(sr, monkeypatch, ledger, mounts=GOOD_MOUNT):
-    monkeypatch.setattr(subprocess, "run", _verify_docker(ledger, mounts))
+def _verify(sr, monkeypatch, ledger, mounts=GOOD_MOUNT, over=None,
+            clock=lambda: 0.0):
+    docker = _verify_docker(ledger, mounts)
+    docker.answers.update(over or {})
+    monkeypatch.setattr(subprocess, "run", docker)
     record = sr.Run("test")
     ok = sr.verify(record, "before", "/host/hive-data/hive_data", [],
-                   clock=lambda: 0.0, sleep=lambda s: None)
+                   clock=clock, sleep=lambda s: None)
     return ok, {c["check"]: c["ok"] for c in record.data["checks"]}
 
 
@@ -391,3 +407,192 @@ def test_a_wake_marked_during_the_recreate_is_handed_back(sr):
              {"id": "b", "name": "B", "woken_at": 50.0},
              {"id": "c", "name": "C", "woken_at": None}]
     assert [t["id"] for t in sr.woken_since(tasks, 90.0)] == ["a"]
+    assert [t["id"] for t in sr.woken_since(tasks, 100.0)] == ["a"]
+
+
+FREE = [{"id": "t1", "status": "done", "question": None}]
+
+
+def test_verification_fails_on_a_writable_mount(sr, monkeypatch):
+    mount = [{**GOOD_MOUNT[0], "RW": True}]
+    ok, checks = _verify(sr, monkeypatch, Ledger(FREE), mounts=mount)
+    assert checks["hive_data mounted read-only from the host"] is False
+
+
+def test_verification_fails_on_a_mount_from_another_path(sr, monkeypatch):
+    mount = [{**GOOD_MOUNT[0], "Source": "/elsewhere/hive_data"}]
+    ok, checks = _verify(sr, monkeypatch, Ledger(FREE), mounts=mount)
+    assert checks["hive_data mounted read-only from the host"] is False
+
+
+def test_verification_fails_and_names_the_task_when_the_clear_does_not_hold(
+        sr, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", _verify_docker(
+        Ledger(FREE, clears=False), GOOD_MOUNT))
+    record = sr.Run("test")
+    ok = sr.verify(record, "before", "/host/hive-data/hive_data", [],
+                   clock=lambda: 0.0, sleep=lambda s: None)
+    assert ok is False
+    assert record.data["marker_left_on"] == "t1"
+
+
+def test_a_task_already_holding_a_question_is_never_probed(sr, monkeypatch):
+    ledger = Ledger([{"id": "t0", "status": "done", "question": "real one"},
+                     {"id": "t1", "status": "in progress", "question": None}])
+    _verify(sr, monkeypatch, ledger)
+    assert set(ledger.edited) == {"t1"}
+    assert ledger.tasks["t0"]["question"] == "real one"
+
+
+def test_verification_fails_when_the_mind_server_never_answers(sr, monkeypatch):
+    ticks = iter(range(0, 10_000, 10)).__next__
+    ok, checks = _verify(sr, monkeypatch, Ledger(FREE),
+                         over={"curl": (7, "", "connection refused")},
+                         clock=ticks)
+    assert ok is False
+    assert checks["mind server /health ok"] is False
+
+
+def test_verification_fails_when_the_recreated_container_has_an_old_library(
+        sr, monkeypatch):
+    ok, checks = _verify(sr, monkeypatch, Ledger(FREE), over={
+        "exec hive-mind-stash /opt/venv/bin/python3 -c":
+            (0, _probe(["start_agent"]), "")})
+    assert ok is False
+
+
+# ------------------------------------------------ the run, end to end, faked
+
+
+def _run_docker(sr, probes=None, woken=()):
+    state = {"up": False}
+    probes = iter(probes or [_probe(), _probe()])
+
+    def started(_):
+        return 0, ("2026-11-15T20:00:00Z" if state["up"] else
+                   "2026-11-15T15:46:20Z") + "\n", ""
+
+    def up(_):
+        state["up"] = True
+        return 0, "", ""
+
+    def ps(_):
+        text = IDLE_PS.replace(f"--session-id {CONV}", f"--resume {CONV}") \
+            if state["up"] else IDLE_PS
+        return 0, text, ""
+
+    def watch(args):
+        if "--since" in args:
+            return 0, json.dumps({"reasons": [], "woken": list(woken)}), ""
+        return 0, json.dumps({"reasons": []}), ""
+
+    ledger = Ledger(FREE)
+    docker = _verify_docker(ledger, GOOD_MOUNT)
+    docker.answers.update({
+        "compose up": up, "{{.State.StartedAt}}": started,
+        "exec hive-mind-stash ps": ps, "watch-check": watch,
+        "docker run": lambda a: (0, next(probes), ""),
+        "deliver": (0, json.dumps({"delivered": True, "session": CONV,
+                                   "turn_completed": True}), "")})
+    return docker, state
+
+
+def test_an_idle_chief_is_recreated_once_with_no_deps_and_reported(
+        sr, monkeypatch):
+    docker, _ = _run_docker(sr, woken=[{"id": "t9", "name": "lost wake"}])
+    monkeypatch.setattr(subprocess, "run", docker)
+    out = sr.run("bubbles", deadline=300, wait=lambda *a: None)
+    (up,) = docker.ran("compose up")
+    assert up[-4:] == ["-d", "--no-deps", "--force-recreate", "stash"][-4:]
+    assert "--no-deps" in up and up[-1] == "stash"
+    assert out["state"] == "done", out
+    assert out["recreated"] is True
+    (report,) = docker.inputs
+    assert "t9" in report and "recreated." in report
+
+
+def test_a_recreate_whose_harness_did_not_resume_is_not_done(sr, monkeypatch):
+    docker, _ = _run_docker(sr)
+    docker.answers["exec hive-mind-stash ps"] = (0, IDLE_PS, "")
+    monkeypatch.setattr(subprocess, "run", docker)
+    out = sr.run("bubbles", deadline=300, wait=lambda *a: None)
+    assert out["state"] == "failed"
+
+
+def test_a_hive_data_behind_at_preflight_never_waits(sr, monkeypatch):
+    waited = []
+    docker, _ = _run_docker(sr, probes=[_probe(["update_task(question=)"])])
+    monkeypatch.setattr(subprocess, "run", docker)
+    out = sr.run("test", deadline=300, wait=lambda *a: waited.append(a))
+    assert out["state"] == "refused"
+    assert waited == []
+
+
+def test_a_hive_data_that_falls_behind_during_the_wait_is_refused(
+        sr, monkeypatch):
+    ids = iter(["sha256:old\n", "sha256:new\n"])
+    docker, _ = _run_docker(sr, probes=[_probe(), _probe(["start_agent"])])
+    docker.answers["image inspect"] = (
+        lambda a: (0, next(ids, "sha256:new\n"), ""))
+    monkeypatch.setattr(subprocess, "run", docker)
+    out = sr.run("test", deadline=300, wait=lambda *a: None)
+    assert out["state"] == "refused"
+    assert "fell behind" in out["error"]
+    assert docker.ran("compose up") == []
+    assert docker.ran("tag sha256:old hive_mind-stash")
+
+
+def test_work_that_starts_during_the_last_probe_holds_the_recreate(
+        sr, monkeypatch):
+    docker, _ = _run_docker(sr, probes=[_probe()] * 3)
+    monkeypatch.setattr(subprocess, "run", docker)
+    answers = iter([["process 12 (curl, parent 1) is running"], []])
+    record = sr.Run("test")
+    sr.recreate(record, True, 300, lambda *a: None,
+                check=lambda: next(answers), clock=lambda: 0.0)
+    assert record.data["busy"] == ["process 12 (curl, parent 1) is running"]
+    assert len(docker.ran("compose up")) == 1
+
+
+def test_a_second_run_while_one_holds_the_lock_is_refused(sr, monkeypatch):
+    import fcntl
+    sr.STATE_DIR.mkdir(parents=True)
+    with open(sr.LOCK, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(sr.Refused, match="lock"):
+            sr.run("second", deadline=300, wait=lambda *a: None)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), 0, -5, 10 ** 9, "soon"])
+def test_arm_refuses_a_deadline_the_unit_cannot_honour(sr, bad):
+    with pytest.raises(sr.Refused, match="deadline"):
+        sr.arm("test", deadline=bad, within=1)
+    assert not sr.REQUEST.exists()
+
+
+def test_arm_hands_its_deadline_to_the_run(sr):
+    seen = {}
+
+    def host_takes(_):
+        if sr.REQUEST.exists():
+            seen.update(json.loads(sr.REQUEST.read_text()))
+            sr.REQUEST.unlink()
+    sr.arm("test", deadline=600, within=5, sleep=host_takes)
+    assert seen["deadline"] == 600
+
+
+def test_arm_refuses_while_a_run_is_in_a_long_quiet_step(sr):
+    record = sr.Run("building")
+    record.state("building", quiet_for=1800)
+    record.data["updated_at"] = record.clock() - 1000
+    sr._write_json(sr.STATUS, record.data)
+    with pytest.raises(sr.Refused, match="already"):
+        sr.arm("second", within=1)
+
+
+def test_a_taken_request_whose_run_died_does_not_block_arm(sr):
+    sr._write_json(sr.TAKEN, {"reason": "old"})
+
+    def host_takes(_):
+        sr.REQUEST.unlink(missing_ok=True)
+    assert sr.arm("again", within=5, sleep=host_takes)["armed"] is True
