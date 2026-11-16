@@ -38,3 +38,8 @@
 	url = https://github.com/danielstewart77/hive-surfaces.git
 	branch = main
 	ignore = all
+[submodule "modules/auth-service"]
+	path = modules/auth-service
+	url = https://github.com/danielstewart77/auth-service.git
+	branch = main
+	ignore = all
