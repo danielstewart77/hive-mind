@@ -334,3 +334,171 @@ def test_standing_rules_come_from_the_minds_own_memory_service(mind, service):
     assert "<standing-rules>\n- Never guess.\n</standing-rules>" in injection
     assert "Not mine." not in injection
     assert seen[0]["auth"] == "Bearer lucent-key"
+
+
+# --- a delegate's turn never rotates the mind ------------------------------
+
+
+def _log(path: Path, header: dict) -> str:
+    """A plain session log: the header the harness writes, then one turn."""
+    _transcript(path, [{"type": "session", "id": path.stem, **header},
+                       {"type": "turn_start"}])
+    return str(path)
+
+
+_DELEGATE = {"origin": "subagent", "parentSession": "conv-parent", "delegationDepth": 1}
+_OVER = {"tokens": 150, "kind": "usage", "model": "m", "window": 1000}
+
+
+@pytest.mark.parametrize("header", [
+    _DELEGATE, {"origin": "subagent"}, {"parentSession": "conv-parent"}],
+    ids=["both", "origin-only", "parent-only"])
+def test_a_delegates_turn_over_the_threshold_reports_and_arms_nothing(
+        mind, service, monkeypatch, tmp_path, header):
+    seen, replies = service
+    replies["/sessions/arm-rotation"] = {"ok": True}
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    rotation_check = importlib.import_module("rotation_check")
+
+    assessed = rotation_check.assess({
+        "session_id": "child-1", "context": _OVER,
+        "transcript_path": _log(tmp_path / "child-1.jsonl", header)})
+
+    assert assessed is None
+    assert seen == []
+
+
+def test_the_minds_own_turn_over_the_threshold_is_still_reported_and_armed(
+        mind, service, monkeypatch, tmp_path):
+    seen, replies = service
+    replies["/sessions/arm-rotation"] = {"ok": True}
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    rotation_check = importlib.import_module("rotation_check")
+
+    assessed = rotation_check.assess({
+        "session_id": "conv-1", "context": _OVER,
+        "transcript_path": _log(tmp_path / "conv-1.jsonl", {"delegationDepth": 0})})
+    rotation_check.arm(assessed)
+
+    assert [r["path"] for r in seen] == ["/sessions/context", "/sessions/arm-rotation"]
+
+
+@pytest.mark.parametrize("where", ["gone.jsonl", "", "nul\x00.jsonl"],
+                         ids=["missing", "no-path", "unusable-path"])
+def test_a_turn_whose_log_cannot_be_read_is_judged_as_the_minds(
+        mind, service, monkeypatch, tmp_path, where):
+    seen, _ = service
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    rotation_check = importlib.import_module("rotation_check")
+
+    assessed = rotation_check.assess({
+        "session_id": "conv-1", "context": _OVER,
+        "transcript_path": str(tmp_path / where) if where else ""})
+
+    assert assessed["rotate"] is True
+    assert [r["path"] for r in seen] == ["/sessions/context"]
+
+
+@pytest.mark.parametrize("header,answers", [(_DELEGATE, ""), ({}, '{"rotate": true}')])
+def test_a_goal_round_rotates_only_for_the_minds_own_turn(
+        mind, service, monkeypatch, tmp_path, capsys, header, answers):
+    import io
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    monkeypatch.setenv("HIVE_GOAL_RUN", "1")
+    rotation_check = importlib.import_module("rotation_check")
+    event = {"session_id": "s-1", "context": _OVER,
+             "transcript_path": _log(tmp_path / "s-1.jsonl", header)}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
+
+    rotation_check.main()
+
+    assert capsys.readouterr().out.strip() == answers
+
+
+def test_a_harvester_still_takes_an_unreadable_log_as_not_the_minds(mind, tmp_path):
+    dsh_transcript = importlib.import_module("dsh_transcript")
+
+    assert dsh_transcript.is_delegate_log(tmp_path / "gone.jsonl") is True
+    assert dsh_transcript.is_delegate_log(
+        Path(_log(tmp_path / "own.jsonl", {"delegationDepth": 0}))) is False
+
+
+# --- a delegate's turn is never harvested as the mind's ---------------------
+#
+# The installed training_capture and skill_telemetry wrappers hand the
+# consumers the log as dsh_transcript translates it. What keeps a delegate's
+# turns out of the mind's training data and skill counts is the translation
+# marking them sidechain and both consumers skipping sidechain entries.
+
+
+def _dsh_log(path: Path, header: dict) -> Path:
+    """A plain dsh log: the header, then one user turn and one reply."""
+    return _transcript(path, [
+        {"type": "session", "id": path.stem, **header},
+        {"type": "user/message", "time": 1_794_781_568_850,
+         "data": {"content": [{"type": "text", "text": "/backlog what is next"}]}},
+        {"type": "assistant/message", "time": 1_794_781_570_000,
+         "data": {"message": {"content": [{"type": "text", "text": "the board says"}],
+                              "source": {"model": "m"}},
+                  "usage": {}}},
+    ])
+
+
+@pytest.mark.parametrize("header,harvested", [
+    ({"delegationDepth": 0}, True),
+    (_DELEGATE, False),
+    ({"origin": "subagent"}, False),
+    ({"parentSession": "conv-parent"}, False),
+], ids=["mind", "delegate", "origin-only", "parent-only"])
+def test_only_the_minds_own_turn_becomes_a_training_row_and_a_skill_use(
+        mind, tmp_path, monkeypatch, header, harvested):
+    from core.skill_telemetry_detect import detect_claude_skills
+    from core.training_capture_claude import capture_session
+    dsh_transcript = importlib.import_module("dsh_transcript")
+    # The wrappers' own path: resolve() on the payload's zstd log. Only the
+    # decompression is stood in for, since it needs the harness's node reader.
+    log = _dsh_log(tmp_path / "session.jsonl.zstd", header)
+    monkeypatch.setattr(dsh_transcript, "read_log_lines",
+                        lambda path: Path(path).read_text().splitlines())
+    translated = dsh_transcript.resolve({"session_id": "s-1", "transcript_path": str(log)})
+
+    wrote = capture_session(translated, session_id="s-1", mind_id="m-1",
+                            db_path=tmp_path / "training.db")
+
+    assert wrote is harvested
+    assert detect_claude_skills(translated) == ({"backlog"} if harvested else set())
+
+
+def _dsh_skill_log(path: Path, arguments: str) -> Path:
+    """A dsh log whose one reply calls the skill tool as dsh writes it."""
+    return _transcript(path, [
+        {"type": "session", "id": path.stem, "delegationDepth": 0},
+        {"type": "user/message",
+         "data": {"content": [{"type": "text", "text": "what should I pick up"}]}},
+        {"type": "assistant/message",
+         "data": {"message": {"content": [
+             {"type": "tool-call", "id": "call_1", "name": "skill", "arguments": arguments}],
+             "source": {"model": "m"}}, "usage": {}}},
+    ])
+
+
+@pytest.mark.parametrize("arguments,counted", [
+    ('{"name": "take-a-task"}', {"take-a-task"}),
+    ('{"name": "hivemind:planka"}', set()),
+    ('{"name": "Take_A_Task"}', set()),
+    ('{"name": ', set()),
+    ('"take-a-task"', set()),
+    ('[' * 100_000, set()),
+    ('{"name": 5}', set()),
+], ids=["bare", "namespaced-refused", "pattern-refused", "not-json",
+        "not-an-object", "nested-too-deep", "name-not-text"])
+def test_a_dsh_skill_call_counts_as_a_use_of_that_skill(
+        mind, tmp_path, monkeypatch, arguments, counted):
+    from core.skill_telemetry_detect import detect_claude_skills
+    dsh_transcript = importlib.import_module("dsh_transcript")
+    log = _dsh_skill_log(tmp_path / "session.jsonl.zstd", arguments)
+    monkeypatch.setattr(dsh_transcript, "read_log_lines",
+                        lambda path: Path(path).read_text().splitlines())
+    translated = dsh_transcript.resolve({"session_id": "s-1", "transcript_path": str(log)})
+
+    assert detect_claude_skills(translated) == counted

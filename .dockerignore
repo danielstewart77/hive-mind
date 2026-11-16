@@ -51,3 +51,6 @@ minds/*/.dsh/
 
 # History
 .git
+
+# hive-mind's modules: each builds from its own folder, never from this image.
+modules/

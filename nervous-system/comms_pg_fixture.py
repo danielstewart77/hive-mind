@@ -44,14 +44,17 @@ from lucent_api.tests.conftest import scratch_dsn  # noqa: F401 - re-exported fi
 #: and a mind is registered by an idempotent upsert anyway.
 _SESSION_TABLES = (
     "core.session_turns", "core.active_sessions", "core.session_memory",
-    "core.context_overhead", "core.sessions",
+    "core.context_overhead", "core.sessions", "core.surface_accounts",
 )
 
 
 async def _wipe(dsn: str) -> None:
     connection = await asyncpg.connect(dsn)
     try:
-        await connection.execute(f"TRUNCATE {', '.join(_SESSION_TABLES)}")
+        # CASCADE because the console's design sessions hold a key into
+        # `core.sessions`; the scratch database is applied from every step,
+        # so that table is there even though no comms test writes it.
+        await connection.execute(f"TRUNCATE {', '.join(_SESSION_TABLES)} CASCADE")
     finally:
         await connection.close()
 
@@ -90,11 +93,15 @@ async def close_manager(mgr) -> None:
 async def register_mind(
     mind_id: str = "ada", *, name: str | None = None, model: str = "sonnet",
     harness: str = "claude_cli", gateway_url: str = "http://mind.invalid:8420",
-    session_token: str | None = None,
+    session_token: str | None = None, owner: str = "daniel",
 ) -> str:
-    """A mind registration, because `sessions.mind_id` is a real foreign key."""
+    """A mind registration, because `sessions.mind_id` is a real foreign key.
+
+    Owned, as every mind is (story 2.1.8): a Telegram or Discord sender
+    reaches only a mind whose owner they are linked to (story 2.1.15).
+    """
     now = time.time()
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"owner": owner}
     if session_token is not None:
         kwargs["session_token"] = session_token
     await core.upsert_mind(
@@ -118,6 +125,13 @@ async def seed_session(
     """
     if await core.get_mind(mind_id) is None:
         await register_mind(mind_id)
+    head = surface.split(":", 1)[0]
+    if head in ("telegram", "discord") and surface_id:
+        # A bot's conversation was opened by somebody it let in, which since
+        # story 2.1.15 means an account linked to the mind's owner.
+        owner = (await core.get_mind(mind_id) or {}).get("owner")
+        if owner:
+            await link_account(head, surface_id, owner)
     now = time.time()
     values: dict[str, Any] = {
         "created_at": now, "last_active": now, "conversation_id": "conv-1",
@@ -142,6 +156,15 @@ async def seed_session(
             "VALUES ($1, $2, $3)", bind[0], bind[1], session_id,
         )
     return session_id
+
+
+async def link_account(surface: str, account_ref: str, username: str) -> None:
+    """An account linked to a person, as setup; a second link is a no-op."""
+    await execute(
+        "INSERT INTO core.surface_accounts (surface, account_ref, username, "
+        "linked_at) VALUES ($1, $2, $3, 0) ON CONFLICT DO NOTHING",
+        surface, account_ref, username,
+    )
 
 
 async def add_turn(session_id: str, role: str, content: str,

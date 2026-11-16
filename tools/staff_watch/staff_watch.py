@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -65,7 +66,15 @@ import urllib.request
 from typing import Any, Iterable
 
 import hive_data
-from hive_data import staff
+
+try:
+    from hive_data import staff
+    _STAFF_UNIMPORTABLE = ""
+except ImportError as exc:  # a hive-data with no ledger module: named below
+    staff = None
+    # Kept, because the same ImportError is also a dependency the image
+    # never installed, and "pull hive-data" does not fix that one.
+    _STAFF_UNIMPORTABLE = f" (importing it raised {exc!r})"
 
 #: Statuses that are watched and recorded but never ping anybody. `on hold`
 #: is the overnight case the morning brief reads; `with Daniel` is work he
@@ -93,6 +102,30 @@ STALLED = 900.0
 #: model's turn rather than of a request, because the gateway runs the turn
 #: only while a reader is attached.
 TURN_TIMEOUT = 1800.0
+
+#: How long a sub-agent record that belongs to no conversation may stay open
+#: before the sweep writes its ending. Only those: a record with a
+#: conversation is decided by whether that conversation is still producing
+#: output, which is a real answer rather than a guess.
+#:
+#: Deliberately longer than any turn this hive allows a mind that has a
+#: bound - the longest configured is four hours - because the cost of the
+#: two errors is not symmetric. Retiring a child that is still running
+#: records work as abandoned that was not, and nothing afterwards can tell
+#: a reader it was wrong. Retiring a dead one late leaves a record open that
+#: every reader already draws as stale from its own clock. `STAFF_AGENT_GRACE`
+#: overrides it for a hive whose minds run longer still.
+GRACE = float(os.environ.get("STAFF_AGENT_GRACE") or 4 * 60 * 60)
+
+
+def generating_sessions(live: dict[str, Any]) -> set[str]:
+    """The conversations the feed says are producing output right now.
+
+    Only the generating half. A conversation the feed calls idle is one whose
+    turn has ended, and a child of that turn died with it.
+    """
+    return {str(entry.get("session_id") or "")
+            for entry in live.get("sessions") or []}
 
 
 class Refused(RuntimeError):
@@ -320,7 +353,14 @@ def _drain(answer: Any, session_id: str) -> None:
 
 
 async def tick(now: float | None = None) -> dict[str, Any]:
-    """One pass. Reports what it recorded and what it woke, as data."""
+    """One pass. Reports what it recorded and what it woke, as data.
+
+    Also retires the sub-agent records nothing has been heard from, which is
+    the one piece of work here that is not about tasks at all. It lives in
+    this process because this is the hive's only timer holding the ledger's
+    own database role, and it runs before the live feed is read so that a
+    comms outage cannot skip it.
+    """
     moment = time.time() if now is None else now
     mind_id = (os.environ.get("MIND_ID") or "").strip()
     if not mind_id:
@@ -334,6 +374,29 @@ async def tick(now: float | None = None) -> dict[str, Any]:
     for task in tasks:
         task["sessions"] = [row["session_id"] for row in
                             await staff.task_sessions(task["id"])]
+
+    # After the live read, and that ordering was wrong the first time. The
+    # earlier version swept before it, so that a comms outage could not skip
+    # the pass - but it had to pick a window with no way to tell a dead child
+    # from a slow one, and `TURN_TIMEOUT` here is this process's own stream
+    # limit rather than any mind's turn length. On a hive whose minds allow
+    # 900 seconds, 14400 seconds and no bound at all, that retired work that
+    # was still running and reported it as abandoned, which is the one thing
+    # a record of what ran must never say.
+    #
+    # So the sweep asks the live feed instead. A child dies with its turn's
+    # process, so a record whose conversation is no longer producing output
+    # is a record whose child is gone - whatever that mind's turn length. The
+    # grace window below is only for records that resolve to no conversation
+    # at all, where there is nothing to ask.
+    #
+    # The cost is that a pass refused by comms sweeps nothing. That is the
+    # right trade: the requirement is that a child nobody closed is retired
+    # *eventually*, and the first pass after comms returns does it. Retiring
+    # a live child early is a wrong record; retiring a dead one late is a
+    # record that arrives late.
+    retired = await staff.retire_stale_agents(
+        now=moment, timeout=GRACE, alive=generating_sessions(live))
 
     plan = decide(live, tasks, mind_id, moment)
 
@@ -354,7 +417,53 @@ async def tick(now: float | None = None) -> dict[str, Any]:
     return {"at": moment, "recorded_stopped": plan["stopped"],
             "recorded_running": plan["running"], "mid_turn": plan["mid_turn"],
             "pending": plan["pending"], "woken": woken,
-            "target": plan.get("target")}
+            "target": plan.get("target"),
+            # The count rather than the ids. The first pass after a
+            # deployment can close a backlog of every child left open since
+            # the last one, and a pass's report is one line in a log.
+            "retired_agents": len(retired)}
+
+
+#: What a pass calls on `hive_data.staff`, and the keywords it passes.
+#: The library reaches this process by a different route from this file, so
+#: the two can stand at different commits; checked at start, a library that
+#: is behind ends the watch with its name rather than failing one pass a
+#: minute in a log nobody reads. A call added to `tick` is added here with it.
+NEEDS: dict[str, tuple[str, ...]] = {
+    "tasks": (), "task_sessions": (), "wake_pending": (),
+    "retire_stale_agents": ("now", "timeout", "alive"),
+    "note_running": (), "note_stopped": ("now",), "note_woken": ("now",),
+}
+
+
+def missing() -> list[str]:
+    """What a pass calls that the loaded `hive_data.staff` lacks."""
+    if staff is None:
+        return ["hive_data.staff"]
+    absent: list[str] = []
+    for name, keywords in NEEDS.items():
+        function = getattr(staff, name, None)
+        if function is None:
+            absent.append(f"hive_data.staff.{name}")
+            continue
+        params = inspect.signature(function).parameters
+        if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            continue
+        absent += [f"{name}({keyword}=)" for keyword in keywords
+                   if keyword not in params]
+    return absent
+
+
+def _level() -> None:
+    absent = missing()
+    if absent:
+        where = getattr(hive_data, "__file__", None) or "an unknown path"
+        raise Refused(
+            f"hive_data at {where} is behind the staff watch: it has no "
+            f"{', '.join(absent)}{_STAFF_UNIMPORTABLE}. Bring hive-data level "
+            "with the hive_mind "
+            "checkout; a container that bakes its own copy needs the host's "
+            "mounted over it, or a rebuild.")
 
 
 async def _connect() -> None:
@@ -398,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
                      help=f"seconds between passes (default {EVERY:g})")
     args = parser.parse_args(argv)
     try:
+        _level()
         if args.command == "tick":
             return asyncio.run(_once())
         return asyncio.run(_forever(args.every))

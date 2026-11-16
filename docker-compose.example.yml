@@ -123,6 +123,23 @@ services:
       # Bind-mount comms/ so code edits don't require a rebuild —
       # restart the container to pick up changes.
       - ./nervous-system/comms:/app/comms
+      # And hive_data over the copy pip baked in, for the same reason and a
+      # sharper one: comms/ is mounted live, so a commit here that imports a
+      # new hive_data module reaches the container while the baked package
+      # does not. That mismatch is not a degraded feature — the gateway
+      # crash-loops on ImportError at module scope, so `hive-comms` is never
+      # on the network long enough for DNS to resolve, and every surface
+      # reports "Cannot connect to host hive-comms:8424" instead of a
+      # missing module. Baked, the fix is a rebuild mid-outage; mounted, the
+      # two move together.
+      #
+      # Read-only: the container must never write to the host's source tree.
+      # The pip install stays for the dependencies and the metadata; only the
+      # package directory is overlaid, schema/steps included, so a new
+      # migration is present to run rather than needing a rebuild first.
+      # Having the code and having the schema are still two steps —
+      # `python -m hive_data.migrate check` reports the gap.
+      - ${HIVE_DATA_DIR:-../hive-data}/hive_data:/usr/local/lib/python3.12/site-packages/hive_data:ro
 
   # ─────────────────────────────────────────────────────────────
   # Voice server — STT + TTS for any surface that wants voice.
