@@ -112,6 +112,57 @@ def _post(path: str, body: dict[str, Any]) -> Any | None:
         return None
 
 
+#: The blocks ``HIVE_PROMPT_BLOCKS_OFF`` can name.
+SWITCHABLE_BLOCKS = frozenset({"soul", "recent-memory", "session-memory"})
+
+
+def _blocks_off(mind_id: str, mind_name: str) -> frozenset[str]:
+    """The blocks ``HIVE_PROMPT_BLOCKS_OFF`` withholds from this mind.
+
+    The variable is a comma-separated list of ``mind=block+block`` entries,
+    the mind given by name or id, case-insensitively, or ``*`` for every
+    mind; ``all`` stands for every switchable block:
+
+        HIVE_PROMPT_BLOCKS_OFF=bob=all,bilby=recent-memory+session-memory
+
+    It exists so one mind can run without what the hive adds to its prompt,
+    beside a mind that has it, and the two be compared. Unset, empty or
+    unparseable it withholds nothing: a typo costs the experiment, never a
+    mind its soul. With the variable unset the same value is read from
+    ``/data/prompt_blocks_off`` (``HIVE_PROMPT_BLOCKS_OFF_FILE`` to move it),
+    one entry or several per line, ``#`` starting a comment — read on every
+    compose, so writing or removing that file flips the switch for the next
+    spawn with no restart of the gateway every conversation runs through.
+
+    An unanswered user turn is not a block and is never withheld — see
+    ``compose_prompt_blocks``.
+    """
+    raw = os.environ.get("HIVE_PROMPT_BLOCKS_OFF")
+    if raw is None:
+        # No restart to flip it: the same value, read from a file each time.
+        try:
+            with open(os.environ.get("HIVE_PROMPT_BLOCKS_OFF_FILE",
+                                     "/data/prompt_blocks_off")) as fh:
+                raw = ",".join(line.split("#")[0].strip() for line in fh)
+        except OSError:
+            raw = ""
+    mine = {(mind_id or "").lower(), (mind_name or "").lower(), "*"} - {""}
+    off: set[str] = set()
+    for entry in raw.split(","):
+        who, sep, what = entry.partition("=")
+        if not sep or who.strip().lower() not in mine:
+            continue
+        names = {n.strip().lower() for n in what.split("+")} - {""}
+        if "all" in names:
+            names = (names - {"all"}) | SWITCHABLE_BLOCKS
+        unknown = names - SWITCHABLE_BLOCKS
+        if unknown:
+            log.warning("HIVE_PROMPT_BLOCKS_OFF names no such block: %s",
+                        ", ".join(sorted(unknown)))
+        off |= names & SWITCHABLE_BLOCKS
+    return frozenset(off)
+
+
 def _fetch_soul(mind_id: str, mind_name: str) -> str:
     """Query the KG for the Mind node's soul_values; format as <soul> block."""
     entity_name = mind_name.capitalize()
@@ -248,12 +299,16 @@ async def compose_prompt_blocks(
         max_bytes = _UNBOUNDED
 
     blocks: list[str] = []
+    off = _blocks_off(mind_id, mind_name)
+    if off:
+        log.info("prompt blocks withheld from %s by HIVE_PROMPT_BLOCKS_OFF: %s",
+                 mind_name, ", ".join(sorted(off)))
 
-    soul = _fetch_soul(mind_id, mind_name)
+    soul = "" if "soul" in off else _fetch_soul(mind_id, mind_name)
     if soul:
         blocks.append(soul)
 
-    recent = _fetch_recent_memory(mind_id)
+    recent = "" if "recent-memory" in off else _fetch_recent_memory(mind_id)
     if recent:
         # Recent memory gives way only once session memory has nothing
         # left to give: it keeps its head, where the strongest rows are.
@@ -263,6 +318,10 @@ async def compose_prompt_blocks(
         blocks.append(recent)
 
     session_memory = await _fetch_session_memory(mind_id=mind_id, client_ref=client_ref)
+    if session_memory and "session-memory" in off:
+        # The carry-forward is history and is what the switch withholds. A
+        # turn the user sent and nobody answered is not: it still arrives.
+        session_memory = _split_continuation(session_memory)[1]
     if session_memory:
         fixed = len("\n\n".join(blocks + [""]).encode("utf-8"))
         session_memory = _trim_session_memory(session_memory, max_bytes - fixed)
