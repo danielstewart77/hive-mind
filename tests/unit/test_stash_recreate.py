@@ -596,3 +596,29 @@ def test_a_taken_request_whose_run_died_does_not_block_arm(sr):
     def host_takes(_):
         sr.REQUEST.unlink(missing_ok=True)
     assert sr.arm("again", within=5, sleep=host_takes)["armed"] is True
+
+
+def test_a_conversation_replaced_by_a_rotation_is_not_a_failed_resume(
+        sr, monkeypatch):
+    rotated = "bff50119-ab7d-4b76-9c71-a19bc595afcf"
+    docker, state = _run_docker(sr)
+    after = IDLE_PS.replace(CONV, rotated)
+
+    def ps(_):
+        return 0, (after if state["up"] else IDLE_PS), ""
+    docker.answers["exec hive-mind-stash ps"] = ps
+    monkeypatch.setattr(subprocess, "run", docker)
+    out = sr.run("bubbles", deadline=300, wait=lambda *a: None)
+    assert out["state"] == "done", out["checks"]
+
+
+def test_a_held_conversation_that_came_back_without_its_log_fails(
+        sr, monkeypatch):
+    docker, _ = _run_docker(sr)
+    docker.answers["exec hive-mind-stash ps"] = (0, IDLE_PS, "")
+    monkeypatch.setattr(subprocess, "run", docker)
+    out = sr.run("bubbles", deadline=300, wait=lambda *a: None)
+    assert out["state"] == "failed"
+    (check,) = [c for c in out["checks"]
+                if c["check"] == "a held conversation resumed from its log"]
+    assert check["ok"] is False
