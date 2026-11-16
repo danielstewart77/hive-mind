@@ -20,6 +20,7 @@ distinguishable, forever, from a line the Mind wrote about itself.
 
 from __future__ import annotations
 
+import json
 import os
 
 import httpx
@@ -64,10 +65,16 @@ def _unwrap(response: httpx.Response) -> dict:
             detail=f"lucent refused the soul request: {response.text[:400]}",
         )
     body = response.json()
-    if isinstance(body, dict) and body.get("ok") is False:
+    # Two refusal shapes, both answered 200. The schema-validating routes say
+    # `ok: false`; the older graph routes say `upserted: false` with a
+    # `reason` and no `ok` at all, and reading only the first means a refused
+    # write is returned here as a success.
+    if isinstance(body, dict) and (
+            body.get("ok") is False or body.get("upserted") is False):
         raise HTTPException(
             status_code=400,
-            detail=str(body.get("detail") or body.get("code") or "soul request failed"),
+            detail=str(body.get("detail") or body.get("reason")
+                       or body.get("code") or "soul request failed"),
         )
     return body if isinstance(body, dict) else {}
 
@@ -94,6 +101,56 @@ async def fetch_history(mind_name: str, limit: int = 25) -> list[dict]:
     body = _unwrap(response)
     changes = body.get("changes")
     return changes if isinstance(changes, list) else []
+
+
+async def seed_mind_node(
+    mind_name: str, mind_id: str, owner: str, credential: str,
+) -> dict:
+    """Create a brand-new Mind's node in the graph, as that Mind.
+
+    Written with the mind's own memory-store credential rather than the
+    console's soul bearer, because provenance in the graph is the credential
+    that wrote the row: seeded with the console's, every mind in the hive
+    would have been created by the console acting as itself, and a second
+    user's mind would carry a write made under Daniel's house credential.
+    The mind has had its own credential since it was minted, moments before
+    this call.
+
+    The node carries its name and nothing else. The Mind type's schema
+    allows exactly one property, `name`, so anything more is refused as an
+    unknown field — and the soul itself is authored in conversation
+    afterwards, not guessed at here.
+
+    It is created with its edge in the same call, because the graph refuses
+    a node with no edge: "cannot create a node without at least one edge".
+    A seed sent without one is not a node nobody linked, it is no node.
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        response = await client.post(
+            f"{_base_url()}/graph/upsert",
+            json={
+                "entity_type": "Mind",
+                "name": node_name(mind_name),
+                "data_class": f"{(mind_name or '').strip().lower()}-identity",
+                "mind_id": mind_id,
+                "owner": owner,
+                "properties": json.dumps({"name": node_name(mind_name)}),
+                # The graph refuses a node with no edge at all, and the
+                # registry allows a Mind exactly one relation: CREATED_BY a
+                # Person. Pointed at the owner rather than at Daniel, which
+                # is the whole point of a hive with more than one person in
+                # it — a mind made for Sloan hangs off Sloan.
+                "relation": "CREATED_BY",
+                "target_type": "Person",
+                "target_name": node_name(owner),
+                # The mind's own credential made this write, so the record
+                # says the mind did, which is what every later soul edit
+                # is compared against.
+                "source": "self",
+            },
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+    return _unwrap(response)
 
 
 async def push_soul(mind_name: str, soul_values: list[str], reason: str) -> dict:

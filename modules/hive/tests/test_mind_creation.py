@@ -31,6 +31,88 @@ _PAIRS = [
 ]
 
 
+class _Recorder:
+    """A stand-in for one service, on a real port.
+
+    A real server rather than a patched helper: what these tests assert is
+    the request that went out — its method, its query, its bearer — and a
+    stub of our own transport wrapper can only tell us it was called.
+    """
+
+    def __init__(self):
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
+
+        self.received: list[dict] = []
+        self.hitl: str | None = None
+        self.refuse = False
+        app = FastAPI()
+
+        @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+        async def anything(path: str, request: Request):
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = None
+            self.received.append({
+                "method": request.method,
+                "path": "/" + path,
+                "query": dict(request.query_params.multi_items() and
+                              {k: request.query_params.getlist(k)
+                               for k in request.query_params}),
+                "json": payload,
+                "bearer": (request.headers.get("authorization") or ""
+                           ).removeprefix("Bearer "),
+            })
+            if self.refuse:
+                return JSONResponse({"error": "refused"}, status_code=403)
+            if self.hitl:
+                return JSONResponse({"hitl_request_id": self.hitl})
+            return JSONResponse({"ok": True})
+
+        self.app = app
+
+
+@pytest.fixture()
+def own_credentials(tmp_path, monkeypatch):
+    """A `.env` for this hive's minds, so a minted value has somewhere to go.
+
+    Without one `provision_mind` has nowhere to write and the mind holds no
+    credential at all — which is a different state from holding one, and the
+    state these tests are about.
+    """
+    import credentials_data
+    import holder_credentials
+
+    env_file = tmp_path / "hive_mind.env"
+    env_file.write_text("")
+    files = {"hive_mind": env_file}
+    monkeypatch.setattr(credentials_data, "ENV_FILES", files)
+    monkeypatch.setattr(holder_credentials, "ENV_FILES", files)
+    return env_file
+
+
+@pytest.fixture()
+def hive_tools(monkeypatch):
+    from multiuser_support import ThreadedServer
+
+    recorder = _Recorder()
+    with ThreadedServer(recorder.app) as server:
+        monkeypatch.setenv("HIVE_TOOLS_URL", server.url)
+        monkeypatch.setenv("HIVE_TOOLS_TOKEN", "tools-token")
+        yield recorder
+
+
+@pytest.fixture()
+def lucent(monkeypatch):
+    from multiuser_support import ThreadedServer
+
+    recorder = _Recorder()
+    with ThreadedServer(recorder.app) as server:
+        monkeypatch.setenv("LUCENT_API_URL", server.url)
+        yield recorder
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
@@ -413,3 +495,266 @@ def test_a_create_that_fails_part_way_leaves_nothing_and_can_be_run_again(client
 
     monkeypatch.setattr(configuration_data.os, "chown", real_chown)
     assert _create(client).status_code == 200
+
+
+# ── wave B: the mind is reachable, started, and has a node ───────────────
+#
+# Before this, creating a mind wrote a compose fragment no `docker compose`
+# invocation could see and handed the operator a shell line to run, and the
+# mind had no node in the graph at all.
+
+
+def _stack(tmp_path, *names):
+    """A stack file shaped like the real one: an include list, then services."""
+    entries = "".join(
+        f"  - path: minds/{n}/container/compose.yaml\n" for n in names)
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "include:\n" + entries + "\nservices:\n  hive-postgres:\n"
+        "    image: postgres:17  # keep this comment\n")
+    return path
+
+
+def test_a_new_minds_fragment_is_added_to_the_stacks_include_list(tmp_path, monkeypatch):
+    """Without the entry the scaffold is a file nothing can start."""
+    path = _stack(tmp_path, "ada", "bob")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+
+    assert configuration_data.include_mind_in_stack("atlas") is True
+
+    lines = path.read_text().splitlines()
+    assert lines[1:4] == [
+        "  - path: minds/ada/container/compose.yaml",
+        "  - path: minds/bob/container/compose.yaml",
+        "  - path: minds/atlas/container/compose.yaml",
+    ]
+    # The rest of the running stack's definition is left exactly as it was.
+    assert "    image: postgres:17  # keep this comment" in path.read_text()
+
+
+def test_a_stack_file_that_would_stop_parsing_is_left_alone(tmp_path, monkeypatch):
+    """The whole file is what `docker compose` refuses, for every service in
+    it — and it is generated and gitignored, so there is no diff to notice
+    the breakage by and no checkout to recover with."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "include:\n  - path: minds/ada/container/compose.yaml\n"
+        "services:\n  hive-postgres:\n    image: postgres:17\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+    before = path.read_text()
+    # A list item at the mapping's own indentation is the shape that breaks.
+    monkeypatch.setattr(
+        configuration_data.yaml, "safe_load",
+        lambda _text: (_ for _ in ()).throw(configuration_data.yaml.YAMLError("bad")))
+
+    with pytest.raises(ValueError):
+        configuration_data.include_mind_in_stack("atlas")
+
+    assert path.read_text() == before
+    assert not list(tmp_path.glob("*.console-new"))
+
+
+def test_a_mind_already_in_the_include_list_is_not_added_twice(tmp_path, monkeypatch):
+    """A retried create must not leave the stack naming one mind twice."""
+    path = _stack(tmp_path, "ada", "atlas")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+    before = path.read_text()
+
+    assert configuration_data.include_mind_in_stack("atlas") is False
+    assert path.read_text() == before
+
+
+def test_the_new_entry_copies_the_indentation_of_the_list_it_joins(tmp_path, monkeypatch):
+    """A two-space line in a four-space list is a mixed-indent sequence, and
+    `docker compose` then refuses every subcommand for every service in the
+    file — one new mind taking the whole running stack down."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "include:\n"
+        "    - path: minds/ada/container/compose.yaml\n"
+        "\nservices:\n  hive-postgres:\n    image: postgres:17\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+
+    assert configuration_data.include_mind_in_stack("atlas") is True
+
+    assert yaml.safe_load(path.read_text())["include"] == [
+        {"path": "minds/ada/container/compose.yaml"},
+        {"path": "minds/atlas/container/compose.yaml"},
+    ]
+
+
+def test_an_entry_keeps_the_keys_that_belong_to_it(tmp_path, monkeypatch):
+    """Inserted one line too early, the previous mind's own keys are
+    reattached to the new one."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "include:\n"
+        "  - path: minds/bob/container/compose.yaml\n"
+        "    env_file: minds/bob/.env\n"
+        "\nservices:\n  hive-postgres:\n    image: postgres:17\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+
+    configuration_data.include_mind_in_stack("atlas")
+
+    assert yaml.safe_load(path.read_text())["include"] == [
+        {"path": "minds/bob/container/compose.yaml", "env_file": "minds/bob/.env"},
+        {"path": "minds/atlas/container/compose.yaml"},
+    ]
+
+
+def test_a_mind_listed_in_another_form_is_still_only_listed_once(tmp_path, monkeypatch):
+    """Already-present is the path, not the spelling: a quoted entry or one
+    with a trailing comment is the same mind."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "include:\n"
+        '  - path: "minds/atlas/container/compose.yaml"  # the new one\n'
+        "\nservices:\n  hive-postgres:\n    image: postgres:17\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+
+    assert configuration_data.include_mind_in_stack("atlas") is False
+
+
+def test_the_stack_file_keeps_its_owner_and_mode(tmp_path, monkeypatch):
+    """This console runs as root over the operator's own checkout. A new
+    inode owned by root is a stack file he can no longer edit."""
+    path = _stack(tmp_path, "ada")
+    path.chmod(0o640)
+    before = path.stat()
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+
+    configuration_data.include_mind_in_stack("atlas")
+
+    after = path.stat()
+    assert after.st_mode & 0o7777 == before.st_mode & 0o7777
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+def test_creating_a_mind_lists_it_in_the_stack_and_starts_it_through_hive_tools(
+    client, tmp_path, monkeypatch, hive_tools
+):
+    """Story 2.1.9: the container is started through Hive Tools, whose
+    approval is the admin's click, not a shell line pasted into a terminal."""
+    path = _stack(tmp_path, "ada")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+    monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", "/host/Dev/hive_mind")
+
+    body = _create(client).json()
+
+    assert "  - path: minds/atlas/container/compose.yaml" in path.read_text()
+    sent = [r for r in hive_tools.received if r["path"] == "/docker/up"]
+    assert len(sent) == 1
+    assert sent[0]["method"] == "POST"
+    assert sent[0]["query"]["service"] == ["atlas"]
+    assert sent[0]["query"]["path"] == ["/host/Dev/hive_mind"]
+    assert body["started"] is True
+    assert body["start_error"] is None
+
+
+def test_a_start_waiting_on_approval_is_reported_as_waiting_rather_than_started(
+    client, tmp_path, monkeypatch, hive_tools
+):
+    """A container nobody has approved yet is not running, and saying it is
+    sends the operator to a mind that is not there."""
+    path = _stack(tmp_path, "ada")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(path))
+    monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", "/host/Dev/hive_mind")
+    hive_tools.hitl = "op-77"
+
+    body = _create(client).json()
+
+    assert body["started"] is False
+    assert body["start_operation"] == "op-77"
+    assert "approval" in body["next_step"]
+
+
+def test_a_new_minds_node_is_written_with_its_own_memory_store_credential(
+    client, tmp_path, monkeypatch, hive_tools, lucent, own_credentials
+):
+    """Provenance in the graph is the credential that wrote the row. With the
+    console's, every mind in the hive reads as something the console made —
+    and a second user's mind as a write made under Daniel's house credential.
+
+    The mind's value is placed in the file the mint writes to rather than
+    minted here: minting needs the credential registry this console only has
+    inside its container, and what this guards is which credential the seed
+    presents, not how it came to be there.
+    """
+    # A sibling's value sits beside it, so a lookup that takes the first
+    # token it finds rather than this mind's own fails here.
+    sibling, mine = "some-other-minds-value", "the-minds-own-value"
+    own_credentials.write_text(
+        "\n".join([f"LUCENT_TOKEN_BOB={sibling}", f"LUCENT_TOKEN_ATLAS={mine}"]) + "\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
+
+    created = _create(client)
+    assert created.status_code == 200
+
+    upserts = [r for r in lucent.received if r["path"] == "/graph/upsert"]
+    assert len(upserts) == 1, [r["path"] for r in lucent.received]
+    assert upserts[0]["bearer"] == mine
+    assert upserts[0]["json"]["entity_type"] == "Mind"
+    assert upserts[0]["json"]["name"] == "Atlas"
+    # The node the mind will key every later memory write by.
+    assert upserts[0]["json"]["mind_id"] == created.json()["mind_id"]
+    # Provenance: the mind made this write, which is what every later soul
+    # edit is compared against.
+    assert upserts[0]["json"]["source"] == "self"
+    # The graph refuses a node with no edge, so a seed without one is not a
+    # node nobody linked — it is no node. The registry allows a Mind exactly
+    # one relation, and it points at the owner rather than at Daniel.
+    assert upserts[0]["json"]["relation"] == "CREATED_BY"
+    assert upserts[0]["json"]["target_type"] == "Person"
+    assert upserts[0]["json"]["target_name"] == "Daniel"
+
+
+def test_a_node_the_memory_store_refuses_is_reported_rather_than_raised(
+    client, tmp_path, monkeypatch, hive_tools, lucent, own_credentials
+):
+    """The scaffold stands and the mind is recoverable: a failure here is
+    reported, never raised, exactly as a failed mint is.
+
+    The mind holds a credential so the write is actually attempted — without
+    one the route refuses before it reaches the memory store, and a seed
+    that silently swallowed a refusal would still read as a success.
+    """
+    mine = "the-minds-own-value"
+    own_credentials.write_text(f"LUCENT_TOKEN_ATLAS={mine}\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
+    lucent.refuse = True
+
+    response = _create(client)
+
+    assert response.status_code == 200
+    assert [r["path"] for r in lucent.received] == ["/graph/upsert"]
+    assert response.json()["soul_seed_error"]
+
+
+def test_a_mind_with_no_credential_of_its_own_gets_no_node_and_says_so(
+    client, tmp_path, monkeypatch, hive_tools, lucent
+):
+    """Seeding it with the console's credential instead is the one thing
+    this must not do, so a mind holding none gets no node at all."""
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
+
+    response = _create(client)
+
+    assert response.status_code == 200
+    assert lucent.received == []
+    assert response.json()["soul_seed_error"]
+
+
+def test_a_start_that_hive_tools_refuses_is_not_reported_as_started(
+    client, tmp_path, monkeypatch, hive_tools
+):
+    """The same lie as calling an unapproved start started: the operator goes
+    looking for a mind that is not running."""
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
+    monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", "/host/Dev/hive_mind")
+    hive_tools.refuse = True
+
+    body = _create(client).json()
+
+    assert body["started"] is False
+    assert body["start_error"]
+    assert "not running yet" in body["next_step"]

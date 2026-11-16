@@ -100,7 +100,23 @@ window.addEventListener("DOMContentLoaded", function () {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
             created = data.registration;
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
-            document.getElementById("mind-commands").innerHTML = (data.commands || []).map(function (step, index) { const id = "mind-command-" + index; return '<div><p class="command-label">' + h.escapeHtml(step.name) + '</p><div class="code-wrap"><pre class="code-panel" id="' + id + '">' + h.escapeHtml(step.command) + '</pre><button class="icon-button" type="button" data-copy="#' + id + '" aria-label="Copy command"><i data-lucide="copy"></i></button></div></div>'; }).join("");
+            // The console starts the container itself now, so what used to
+            // be a command to paste is an account of what happened. Each
+            // step is reported on its own: one of them failing is a
+            // different state from all of them failing, and a success panel
+            // that hides a refusal sends the operator to talk to a mind
+            // that is not there.
+            const steps = [
+                ["Listed in the stack", data.include_error],
+                [data.start_operation ? "Start waiting on your approval in Hive Tools" : "Started", data.start_error],
+                ["Its node in the graph", data.soul_seed_error],
+                ["Registered with the gateway", data.registration_error]
+            ];
+            document.getElementById("mind-commands").innerHTML = steps.map(function (step) {
+                return step[1]
+                    ? '<div class="error-state">' + h.escapeHtml(step[0]) + ' failed: ' + h.escapeHtml(step[1]) + '</div>'
+                    : '<div><p class="command-label">' + h.escapeHtml(step[0]) + '</p></div>';
+            }).join("");
             // A mind whose credentials did not land boots authenticating to
             // nothing and fails from detached hooks, in silence. Saying it on
             // the success screen is the only place the operator will look.

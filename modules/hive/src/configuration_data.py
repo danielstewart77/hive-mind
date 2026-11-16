@@ -23,6 +23,14 @@ HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 HIVE_MIND_MINDS_CONFIG_DIR = Path("/minds_hive_mind_config")
 EDGE_MINDS_DIR = Path("/minds_edge")
 
+#: The stack file whose ``include:`` list is what makes a mind's own compose
+#: fragment reachable. Scaffolding one without this writes a fragment no
+#: `docker compose` invocation can see, which is why creating a mind used to
+#: hand the operator a shell line running the `/generate-compose` skill.
+#: Configurable, and otherwise under the host Dev root the console already
+#: mounts — never a person's home written in here (story 2.1.19).
+STACK_COMPOSE_FILENAME = "docker-compose.yml"
+
 _CONFIGURABLE_CAPABILITY_IDS = {"inference-proxy", "ollama", "pihole"}
 _MIND_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
@@ -432,6 +440,106 @@ def scaffold_internal_mind(
         shutil.rmtree(mind_dir, ignore_errors=True)
         raise
     return {"runtime": str(runtime_path), "compose": str(compose_path)}
+
+
+def stack_compose_path() -> Path:
+    """Where the stack file listing every mind's fragment is, from here."""
+    configured = os.getenv("HIVE_MIND_STACK_COMPOSE", "").strip()
+    if configured:
+        return Path(configured)
+    root = os.getenv("DEV_ROOTS_DIR", "/dev_roots").strip() or "/dev_roots"
+    return Path(root) / "hive_mind" / STACK_COMPOSE_FILENAME
+
+
+def include_mind_in_stack(name: str) -> bool:
+    """Add this mind's compose fragment to the stack's ``include:`` list.
+
+    Returns whether the line was added; an entry already naming this mind is
+    left alone, so a retried create is not a second include.
+
+    Edited as text rather than through a YAML round-trip: re-dumping the file
+    to add one line would rewrite every comment and quoting choice in the
+    eight hundred lines that define the services this host is currently
+    running. That means matching the file rather than assuming it —
+
+    * the new entry copies the indentation of the entries already there, so
+      a four-space list does not get a two-space line and stop parsing,
+      taking every other mind's `docker compose` invocation with it;
+    * it goes after the last entry *and any keys belonging to it*
+      (``env_file``, ``project_directory``), which are more deeply indented
+      continuations rather than entries of their own;
+    * already-present is judged on the path, so a quoted entry or one with a
+      trailing comment is recognised rather than added a second time;
+    * the file's mode and ownership are carried onto the replacement, because
+      this console runs as root and a stack file left root-owned is one the
+      operator's own editor can no longer write.
+    """
+    if not _MIND_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid Mind name")
+    fragment = f"minds/{name}/container/compose.yaml"
+    # Through a symlink rather than over it: replacing the link with a
+    # regular file leaves the real stack file holding the old content, and a
+    # compose run from the other location never sees the new mind.
+    path = stack_compose_path().resolve()
+    text = path.read_text()
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    entries = [i for i, line in enumerate(lines)
+               if line.lstrip().startswith("- path:")
+               and "minds/" in line]
+    if not entries:
+        raise ValueError(
+            f"{path} has no minds in its include list, so this console "
+            "cannot tell where a new one goes")
+    if any(fragment in lines[i] for i in entries):
+        return False
+    last = entries[-1]
+    indent = lines[last][:len(lines[last]) - len(lines[last].lstrip())]
+    deeper = len(indent) + 2
+    after = last + 1
+    while (after < len(lines) and lines[after].strip()
+           and not lines[after].lstrip().startswith("- ")
+           and len(lines[after]) - len(lines[after].lstrip()) >= deeper):
+        after += 1
+    lines.insert(after, f"{indent}- path: {fragment}")
+    # Written whole, through a neighbour and a rename, so a failure part way
+    # cannot leave the running stack's definition truncated.
+    rewritten = newline.join(lines) + newline
+    # The highest-consequence failure in this function is a file that no
+    # longer parses: `docker compose` then refuses every subcommand for
+    # every service in it, so one new mind would take the whole running
+    # stack down, and that file is generated and gitignored — there is no
+    # diff to notice it by and no checkout to recover with. So the result is
+    # parsed before it is installed, and a file that would not load is not
+    # installed at all.
+    try:
+        loaded = yaml.safe_load(rewritten)
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"adding {name} to {path} would leave it unparseable, so it was "
+            f"left alone: {exc}") from exc
+    if not isinstance(loaded, dict) or "include" not in loaded:
+        raise ValueError(
+            f"adding {name} to {path} would lose its include list, so it "
+            "was left alone")
+    scratch = path.with_name(path.name + ".console-new")
+    try:
+        scratch.write_text(rewritten)
+        stat = path.stat()
+        os.chmod(scratch, stat.st_mode & 0o7777)
+        try:
+            # This console runs as root and the stack file is in the
+            # operator's own checkout. A new inode owned by root is a file
+            # he can no longer edit, and neither can the skill that
+            # generates it.
+            os.chown(scratch, stat.st_uid, stat.st_gid)
+        except (OSError, AttributeError):
+            pass
+        os.replace(scratch, path)
+    except BaseException:
+        scratch.unlink(missing_ok=True)
+        raise
+    return True
 
 
 def _mind_uid() -> int:

@@ -1231,10 +1231,77 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         # Not fatal: the scaffold stands and the Register button retries.
         registration_error = str(getattr(exc, "detail", "") or exc)
 
+    # The fragment the scaffold just wrote is invisible to `docker compose`
+    # until the stack file lists it, so this is part of creating a mind
+    # rather than a step after it. Non-fatal and reported for the same
+    # reason minting is: the scaffold stands and the mind is recoverable.
+    include_error = None
+    try:
+        configuration_data_module.include_mind_in_stack(name)
+    except (OSError, ValueError) as exc:
+        include_error = str(exc)
+
+    # Started here, not handed back as a shell line. The approval for
+    # touching this host's containers is the admin's click in Hive Tools,
+    # which is a record of who started what; a command pasted into a
+    # terminal is neither (story 2.1.9, decided 2026-11-15).
+    start = {"started": False, "error": None, "operation_id": None}
+    if include_error is None:
+        try:
+            up = await _hive_tools_request(
+                "POST", "/docker/up",
+                params={"path": mind_mounts.hive_mind_project_path(), "service": name},
+                timeout=310.0,
+            )
+            operation = up.get("hitl_request_id")
+            if operation:
+                # Recorded before it is reported, so the pending approval has
+                # a requester. Any failure here is this step's failure, not
+                # the create's: the container request is already in flight.
+                try:
+                    await console_access.record_operation_from(up, user)
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    start["error"] = (
+                        f"started, waiting on approval, but recording who "
+                        f"asked failed: {exc}")
+                start["operation_id"] = str(operation)
+            elif up.get("error") or up.get("status") == "error":
+                # Hive Tools answers 2xx with the compose failure in the body
+                # — a broken fragment, a build that did not finish, an
+                # unknown service. Reading that as started sends the operator
+                # to talk to a container that does not exist.
+                start["error"] = str(
+                    up.get("error") or up.get("stderr") or "the start failed")
+            else:
+                start["started"] = True
+        except (HTTPException, OSError, ValueError) as exc:
+            start["error"] = str(getattr(exc, "detail", "") or exc)
+
+    # The Mind's own node, written as the Mind. A mind with no node is a
+    # mind whose first memory write has nothing to hang from, and seeding it
+    # with the console's credential would record every mind in the hive as
+    # something the console created.
+    soul_seed_error = None
+    try:
+        location = holder_credentials.locate(
+            holder_credentials.SERVICES["lucent"], name)
+        credential = (
+            holder_credentials._loaded_value(location) if location else None)
+        if not credential:
+            raise ValueError(
+                "this Mind holds no memory-store credential, so its node "
+                "cannot be written as itself")
+        await mind_soul.seed_mind_node(name, mind_id, owner, credential)
+    except Exception as exc:  # noqa: BLE001 - reported; setup-personality retries
+        soul_seed_error = str(getattr(exc, "detail", "") or exc)
+
     log_event(
         log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
         mind_id=mind_id, harness=harness, provider=provider,
         credentials=[m["service"] for m in minted], credential_error=credential_error,
+        include_error=include_error, started=start["started"],
+        start_operation=start["operation_id"], start_error=start["error"],
+        soul_seed_error=soul_seed_error,
     )
     return {
         "mind_id": mind_id,
@@ -1250,18 +1317,18 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             "provider": provider,
             "owner": owner,
         },
-        "commands": [
-            {
-                "name": "Build and start the Mind",
-                "command": (
-                    "cd $HIVE_MIND_DIR && /generate-compose && "
-                    f"docker compose up -d --build {shlex.quote(name)}"
-                ),
-            }
-        ],
+        "include_error": include_error,
+        "started": start["started"],
+        "start_operation": start["operation_id"],
+        "start_error": start["error"],
+        "soul_seed_error": soul_seed_error,
         # The soul is authored in conversation, not here — see setup-personality.
         "next_step": (
             f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
+            if start["started"] else
+            f"{name} is waiting on your approval in Hive Tools to start."
+            if start["operation_id"] else
+            f"{name} is scaffolded but not running yet."
         ),
     }
 
