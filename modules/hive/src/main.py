@@ -1019,7 +1019,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     default_model = str(
-        body.get("default_model") or _PROVIDER_DEFAULT_MODELS[provider]
+        body.get("default_model") or _INTERNAL_MIND_DEFAULT_MODELS[provider]
     ).strip()
     mind_id = str(body.get("mind_id") or uuid.uuid4())
     try:
@@ -1040,15 +1040,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             ),
         )
 
-    ollama_base_url = ""
-    if provider == "ollama":
-        ollama_base_url = str(
-            body.get("ollama_url")
-            or await get_capability_endpoint("ollama")
-            or os.getenv("OLLAMA_URL")
-            or DEFAULT_OLLAMA_BASE_URL
-        )
-        ollama_base_url = normalize_endpoint(ollama_base_url)
+    # Every mind created here talks to the inference proxy with its own key
+    # (story 2.1.9, DECIDED 2026-11-15 by Daniel), so an Ollama mind's base is
+    # the proxy, never a bare daemon: there its calls go unmetered and its
+    # proxy key is sent to a host that is not the proxy.
+    ollama_base_url = DEFAULT_OLLAMA_BASE_URL if provider == "ollama" else ""
 
     owner = await _new_mind_owner(body, user)
     try:
@@ -1061,7 +1057,6 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             owner=owner,
             description=str(body.get("description") or ""),
             ollama_base_url=ollama_base_url,
-            ollama_api_key=str(body.get("ollama_api_key") or ""),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1636,6 +1631,13 @@ _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-5.4",
     "ollama": "qwen3:8b",
 }
+# A container mind created here calls the inference proxy (story 2.1.9), so
+# it starts on a model the proxy serves; `gpt-5.4` and `qwen3:8b` are not.
+_INTERNAL_MIND_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-5",
+    "openai": "gpt-5.6-terra",
+    "ollama": "gpt-oss:20b-32k",
+}
 _EDGE_MIND_SURFACES = {"telegram", "discord"}
 
 
@@ -1655,7 +1657,13 @@ def _mind_install_options() -> dict:
             for harness, providers in sorted(_HARNESS_PROVIDERS.items())
         ],
         "providers": [
-            {"value": provider, "default_model": _PROVIDER_DEFAULT_MODELS[provider]}
+            {
+                "value": provider,
+                "default_model": _PROVIDER_DEFAULT_MODELS[provider],
+                # What the container-mind form starts on: a model the proxy
+                # serves, since that is what such a mind calls.
+                "internal_default_model": _INTERNAL_MIND_DEFAULT_MODELS[provider],
+            }
             for provider in sorted(_MIND_PROVIDERS)
         ],
         "roles": sorted(_EDGE_MIND_ROLES),

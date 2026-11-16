@@ -19,8 +19,6 @@
                 <div class="form-grid">
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
-                    <div class="field" id="mind-ollama-field"><label for="mind-ollama-url">Ollama URL</label><input id="mind-ollama-url" name="ollama_url" type="url" value="{{ default_ollama_url }}" placeholder="http://host.docker.internal:8899"><small>Defaults to the inference proxy, so the Mind is metered.</small></div>
-                    <div class="field" id="mind-ollama-key-field"><label for="mind-ollama-key">Proxy key</label><input id="mind-ollama-key" name="ollama_api_key" type="text" placeholder="hmp-…"><small>Only if the endpoint authenticates. Bare Ollama needs none.</small></div>
                 </div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
@@ -48,7 +46,7 @@ window.addEventListener("DOMContentLoaded", function () {
     let created = null;
     const options = {{ install_options | tojson }};
     const defaultModels = {};
-    options.providers.forEach(function (item) { defaultModels[item.value] = item.default_model; });
+    options.providers.forEach(function (item) { defaultModels[item.value] = item.internal_default_model || item.default_model; });
     const providersFor = {};
     options.harnesses.forEach(function (item) { providersFor[item.value] = item.providers; });
     const providerLabels = {anthropic: "Anthropic", openai: "OpenAI", ollama: "Ollama (local)"};
@@ -68,8 +66,6 @@ window.addEventListener("DOMContentLoaded", function () {
     function onProviderChange() {
         const provider = form.elements.provider.value, isOllama = provider === "ollama";
         form.elements.default_model.value = defaultModels[provider] || "";
-        document.getElementById("mind-ollama-field").hidden = !isOllama;
-        document.getElementById("mind-ollama-key-field").hidden = !isOllama;
     }
 
     form.addEventListener("change", function (event) {
@@ -98,9 +94,7 @@ window.addEventListener("DOMContentLoaded", function () {
             description: form.elements.description.value,
             harness: selectedHarness(),
             provider: form.elements.provider.value,
-            default_model: form.elements.default_model.value,
-            ollama_url: form.elements.ollama_url.value,
-            ollama_api_key: form.elements.ollama_api_key.value
+            default_model: form.elements.default_model.value
         };
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});

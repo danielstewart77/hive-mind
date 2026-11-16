@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,13 +102,24 @@ class Service:
     prefix: str
     own_files: dict[str, str]
     wants_mind_id: bool
+    #: A mounted env file the admin credential is read from, at each call,
+    #: when the process environment does not carry it - so issuing this
+    #: console that credential needs no restart of the console.
+    admin_file: str | None = None
 
     def url(self) -> str:
         base = (os.getenv(self.url_env) or self.url_default).rstrip("/")
         return base
 
     def admin_token(self) -> str:
-        return os.getenv(self.admin_env) or ""
+        value = os.getenv(self.admin_env) or ""
+        if value or not self.admin_file or self.admin_file not in ENV_FILES:
+            return value
+        try:
+            return credentials_data._read_env_value(
+                ENV_FILES[self.admin_file], self.admin_env) or ""
+        except Unreadable:
+            return ""
 
 
 SERVICES: dict[str, Service] = {
@@ -140,20 +152,22 @@ SERVICES: dict[str, Service] = {
         wants_mind_id=True,
     ),
     # One key per mind, so each mind's usage is its own (story 2.1.9,
-    # DECIDED 2026-11-15 by Daniel). The console's own proxy key is the
-    # admin credential: the proxy names which clients may mint for others in
-    # its `CREDENTIAL_ADMIN_CLIENTS`. No holder reads a plain file of its
-    # own here; a key in a mind's runtime.yaml is one this console cannot
+    # DECIDED 2026-11-15 by Daniel). The admin credential is the key of a
+    # proxy client that exists only to mint for others - named in the
+    # proxy's `CREDENTIAL_ADMIN_CLIENTS` - and not the console's own proxy
+    # key, which it sends on ordinary calls. No holder reads a plain file of
+    # its own here; a key in a mind's runtime.yaml is one this console cannot
     # write, and the page offers it revoke, not rotate.
     "proxy": Service(
         key="proxy",
         label="the inference proxy",
         url_env="INFERENCE_PROXY_URL",
         url_default="http://host.docker.internal:8899",
-        admin_env="INFERENCE_PROXY_KEY",
+        admin_env="PROXY_CREDENTIAL_ADMIN_KEY",
         prefix="PROXY",
         own_files={},
         wants_mind_id=False,
+        admin_file="hive_mind",
     ),
 }
 
@@ -317,7 +331,8 @@ async def _request(
     except httpx.HTTPError as exc:
         # Unguarded this escapes every caller and the route turns it into a
         # detail-less 500 — on a write, with no restore and no log line.
-        if method == "PUT":
+        # A connection never made sent nothing, so nothing can have landed.
+        if method == "PUT" and not isinstance(exc, httpx.ConnectError):
             raise MintUncertain(
                 f"{service.label} did not answer the mint for "
                 f"{path.rsplit('/', 1)[-1]!r} ({type(exc).__name__}), so "
@@ -511,6 +526,11 @@ async def rotate(service: Service, holder: str) -> dict[str, Any]:
         (r for r in holders if str(r.get("holder", "")).lower() == holder.strip().lower()),
         None,
     )
+    if row is None and service.key == "proxy" and _unlisted_proxy_holder(holder):
+        # A mind whose proxy mint failed at creation - the proxy was down -
+        # has its variable and no client. Its first key is issued here; the
+        # variable is written only by mind creation, so the holder is a mind.
+        return await mint(service, holder.strip().lower(), "", role="mind")
     if row is None:
         raise MintRefused(f"{service.label} has no holder called {holder!r}")
     role = str(row.get("role") or "")
@@ -528,11 +548,38 @@ async def rotate(service: Service, holder: str) -> dict[str, Any]:
     )
 
 
+def _proxy_variables() -> list[str]:
+    """Holders a `PROXY_TOKEN_<NAME>` in the shared mind file is for."""
+    path = ENV_FILES.get("hive_mind")
+    if path is None:
+        return []
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    found = re.findall(r"(?m)^PROXY_TOKEN_([A-Z0-9_]+)=", text)
+    # A mind name has hyphens where its variable has underscores.
+    return [stem.lower().replace("_", "-") for stem in found]
+
+
+def _unlisted_proxy_holder(holder: str) -> bool:
+    return holder.strip().lower() in _proxy_variables()
+
+
 async def holder_rows(service: Service) -> list[dict[str, Any]]:
     """One row per holder this service reports, with where it reads and
     whether this console can rotate it."""
     rows: list[dict[str, Any]] = []
-    for row in await list_holders(service):
+    listed = await list_holders(service)
+    if service.key == "proxy":
+        # A mind created while the proxy was down has a variable here and no
+        # client there: it needs a row, or its only remedy has no button.
+        known = {str(row.get("holder") or "").lower() for row in listed}
+        listed = listed + [
+            {"holder": name, "username": None, "role": "mind", "revoked_at": "never issued"}
+            for name in _proxy_variables() if name not in known
+        ]
+    for row in listed:
         holder = str(row.get("holder") or "")
         if not holder:
             continue
@@ -605,7 +652,14 @@ async def name_held_by_something_else(name: str) -> str | None:
         except MintRefused:
             # A service that cannot be asked is not a service that said no.
             continue
-        if any(str(row.get("holder", "")).lower() == name.strip().lower() for row in rows):
+        for row in rows:
+            if str(row.get("holder", "")).lower() != name.strip().lower():
+                continue
+            if service.key == "proxy" and row.get("live") is False:
+                # A proxy client keeps its row and usage after its key is
+                # revoked; nothing is using it, and the proxy itself refuses
+                # a mind taking over an app's or a privileged client.
+                continue
             return service.label
     return None
 
