@@ -592,7 +592,7 @@ _A_FILE = bytes(range(256)) + b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
 
 async def test_an_attached_file_comes_back_whole_after_the_pool_is_reopened(
-        connected, a_notice_time):
+        connected, inspector, a_notice_time):
     """Story 3.7.2: a file attached to an item is kept and comes back with
     that item - after a restart, which for this layer is a pool closed and
     opened again, so nothing in the process can be what answers."""
@@ -600,6 +600,14 @@ async def test_an_attached_file_comes_back_whole_after_the_pool_is_reopened(
     await board.create_work_item(item_id, "epic", "carries a file", 1)
     kept = (await board.add_attachment(
         item_id, "backlog.jpg", "image/jpeg", _A_FILE, a_notice_time))["row"]
+
+    # Kept in the database, read with a plain driver connection: a layer
+    # that held the file anywhere else would pass its own round trip.
+    stored = await inspector.fetchrow(
+        "SELECT item_id, content FROM board.work_item_attachments "
+        "WHERE id = $1", kept["id"])
+    assert stored is not None
+    assert (stored["item_id"], bytes(stored["content"])) == (item_id, _A_FILE)
 
     await hive_data.close(drain_timeout=5.0)
     await hive_data.connect()

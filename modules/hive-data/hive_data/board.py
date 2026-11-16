@@ -462,10 +462,11 @@ async def add_attachment(item_id: str, filename: str, content_type: str,
     that comes back is what the database holds rather than what the caller
     sent - the size is the database's own count of the bytes it stored.
 
-    Not taken under the board's lock: an attachment reorders nothing. An item
-    deleted while its file is on the way in is the foreign key's to refuse,
-    and it does, as `MissingReference` at this statement - the key is not
-    deferred - so the caller can report the file as not kept.
+    An item that is not there is the foreign key's to refuse, and it does,
+    as `MissingReference` at this statement - the key is not deferred - so
+    the caller can report the file as not kept. The console takes the
+    board's lock around this, so a delete counting what it takes cannot have
+    a file land between its count and its delete.
     """
     sql, args = _sql.insert(ATTACHMENTS, {
         "item_id": item_id, "filename": filename,
