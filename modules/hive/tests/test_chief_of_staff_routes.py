@@ -94,8 +94,8 @@ def test_the_barrel_window_is_seven_days_unless_the_page_asks_for_another(
         now = time.time()
         recent = await staff.create_task("Six days ago", "done",
                                          now=now - 6 * day)
-        old = await staff.create_task("Eight days ago", "done",
-                                      now=now - 8 * day)
+        old = await staff.create_task("Just over seven days ago", "done",
+                                      now=now - 7 * day - 60)
         return recent["id"], old["id"]
     recent, old = suite.run(rows())
 

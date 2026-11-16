@@ -26,9 +26,11 @@ async def _finished(name, days_ago):
 
 
 def _listed_once_loaded(page, expected):
+    # Well inside the page's own twenty-second refresh, so what is read is
+    # the answer the visit or the choice asked for, not the next poll's.
     page.wait_for_function(
         "(want) => document.querySelectorAll('#cos-barrel .cos-done').length"
-        " === want", arg=expected)
+        " === want", arg=expected, timeout=8000)
     return page.evaluate(_LISTED)
 
 
