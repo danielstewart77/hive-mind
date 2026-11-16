@@ -2080,8 +2080,22 @@ async def _mind_exists(mind_id: str) -> bool:
 
 @app.get("/broker/minds")
 async def broker_get_minds():
-    """Return all registered minds from the broker database."""
-    return await broker.get_registered_minds()
+    """Return all registered minds from the broker database.
+
+    Each row says whether the hive's admin credential may be sent to the
+    address it registered (`admin_credential_allowed`): only a mind owned by
+    `config.admin_credential_owner()`. The console reads it, so the gateway
+    and the console withhold that credential from the same minds.
+    """
+    from comms.config import admin_credential_owner
+
+    trusted = admin_credential_owner()
+    rows = await broker.get_registered_minds()
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict):
+            owner = str(row.get("owner") or "").strip().lower()
+            row["admin_credential_allowed"] = bool(trusted) and owner == trusted
+    return rows
 
 
 async def _refuse_foreign_registration(caller, body) -> None:
@@ -2152,6 +2166,17 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
                 401, "Registration needs an admin or a mind's own credential"
             )
         await _refuse_foreign_registration(caller, body)
+        # A mind's own credential registers a mind of its credential's
+        # person and nobody else's. Without this a kid's box could register a
+        # fresh row naming Daniel as owner, at a server of its own, and the
+        # gateway would send that address his admin credential.
+        mine = user_access.normalize_username(caller.username)
+        named = user_access.normalize_username(body.owner)
+        if named and named != mine:
+            raise HTTPException(
+                403, f"{caller.holder!r} may only register a mind of {mine!r}"
+            )
+        body.owner = mine or None
     try:
         await broker.register_mind(
             mind_id=body.mind_id,

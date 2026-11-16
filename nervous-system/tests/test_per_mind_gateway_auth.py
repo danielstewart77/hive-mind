@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from unittest.mock import patch
 
 import aiohttp
@@ -601,3 +602,128 @@ def test_a_broker_read_failure_is_this_gateway_s_fault_not_the_mind_s() -> None:
             await close_manager(mgr)
 
     assert _run(scenario()) is True
+
+
+# ---------------------------------------------------------------------------
+# The hive's admin credential goes to no mind but its owner's
+# (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+# credentials). A mind may re-register its own address, so whatever answers
+# there receives what the gateway sends on a model or harness switch.
+# ---------------------------------------------------------------------------
+_SWITCH_CALLS = {
+    "/models": lambda mgr, mind: mgr.mind_models(mind),
+    "/harnesses": lambda mgr, mind: mgr.mind_harnesses(mind),
+    "/skills/check": lambda mgr, mind: mgr._check_skills_on_mind(mind),
+    "/handover": lambda mgr, mind: mgr._render_handover_on_mind(
+        mind, harness="codex", conversation_id="conv-1", harness_sid="",
+        summary="s", budget_bytes=1000),
+}
+
+
+def _switch_calls(monkeypatch, *, owner: str, trusted: str | None, refusing: bool,
+                  token: str | None = "alpha-token", status: int = 401,
+                  ) -> dict[str, list[str]]:
+    """Every bearer the gateway presented on each switch call to alpha."""
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "hive-admin")
+    monkeypatch.delenv("MIND_ADMIN_TOKEN", raising=False)
+    if trusted is None:
+        monkeypatch.delenv("COMMS_ADMIN_CREDENTIAL_OWNER", raising=False)
+    else:
+        monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", trusted)
+
+    async def scenario():
+        mgr = await make_manager()
+        try:
+            # A mind of its own: the scratch registry outlives one scenario.
+            mind = str(uuid.uuid4())
+            await register_mind(
+                mind, name=f"alpha-{mind[:8]}", gateway_url="http://alpha:8420",
+                session_token=token, owner=owner,
+            )
+            seen = {}
+            for route, call in _SWITCH_CALLS.items():
+                recorder = _refusing(status) if refusing else _RecordingSession
+                recorder.calls = []
+                recorder.response = None
+                with patch("aiohttp.ClientSession", recorder):
+                    try:
+                        await call(mgr, mind)
+                    except (MindCallFailed, ValueError):
+                        pass
+                seen[route] = [_bearer(c) for c in recorder.calls]
+            return seen
+        finally:
+            await close_manager(mgr)
+
+    return _run(scenario())
+
+
+def test_a_switch_presents_the_minds_own_credential_not_the_admin_one(monkeypatch) -> None:
+    seen = _switch_calls(monkeypatch, owner="daniel", trusted="daniel", refusing=False)
+    assert seen == {route: ["alpha-token"] for route in _SWITCH_CALLS}
+
+
+def test_a_mind_owned_by_anyone_else_is_never_sent_the_admin_credential(monkeypatch) -> None:
+    """Refusing its own credential does not earn it the admin one."""
+    refused = _switch_calls(monkeypatch, owner="sloan", trusted="daniel", refusing=True)
+    assert refused == {route: ["alpha-token"] for route in _SWITCH_CALLS}
+
+
+def test_a_mind_of_anyone_elses_with_no_credential_registered_is_sent_none(monkeypatch) -> None:
+    """Arnold's and Zach's rows hold no session credential today."""
+    bare = _switch_calls(monkeypatch, owner="sloan", trusted="daniel", refusing=True,
+                         token=None)
+    assert bare == {route: [""] for route in _SWITCH_CALLS}
+
+
+def test_the_owners_older_mind_still_gets_the_admin_credential_after_refusing_its_own(
+    monkeypatch,
+) -> None:
+    """His minds still running code that accepts only the admin credential on
+    these routes keep switching until they are restarted."""
+    seen = _switch_calls(monkeypatch, owner="daniel", trusted="daniel", refusing=True)
+    assert seen == {route: ["alpha-token", "hive-admin"] for route in _SWITCH_CALLS}
+
+
+def test_with_no_owner_named_the_admin_credential_goes_to_no_mind(monkeypatch) -> None:
+    seen = _switch_calls(monkeypatch, owner="daniel", trusted="", refusing=True)
+    assert seen == {route: ["alpha-token"] for route in _SWITCH_CALLS}
+
+
+def test_the_owners_mind_with_no_credential_registered_gets_admin_only_after_a_refusal(
+    monkeypatch,
+) -> None:
+    seen = _switch_calls(monkeypatch, owner="daniel", trusted="daniel", refusing=True,
+                         token=None)
+    assert seen == {route: ["", "hive-admin"] for route in _SWITCH_CALLS}
+
+
+def test_the_owner_is_matched_whatever_its_case_and_on_a_503_too(monkeypatch) -> None:
+    """A mind that cannot read its own credential answers 503, not 401."""
+    seen = _switch_calls(monkeypatch, owner="Daniel", trusted=" DANIEL ", refusing=True,
+                         status=503)
+    assert seen == {route: ["alpha-token", "hive-admin"] for route in _SWITCH_CALLS}
+
+
+def test_the_owner_may_be_named_in_the_gateways_config_file(monkeypatch, tmp_path) -> None:
+    from comms import config as comms_config
+
+    named = tmp_path / "config.yaml"
+    named.write_text("admin_credential_owner: daniel\n")
+    monkeypatch.setattr(comms_config, "_CONFIG_YAML", named)
+    seen = _switch_calls(monkeypatch, owner="daniel", trusted=None, refusing=True)
+    assert seen == {route: ["alpha-token", "hive-admin"] for route in _SWITCH_CALLS}
+
+
+def test_a_refused_harness_listing_or_handover_is_a_refusal_not_an_answer(monkeypatch) -> None:
+    """Neither is read as "no harnesses" or "unreadable transcript"."""
+    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "")
+
+    async def body(mgr, sid):
+        with pytest.raises(MindRefusedCredential):
+            await mgr.mind_harnesses(MIND_A)
+        with pytest.raises(MindRefusedCredential):
+            await _SWITCH_CALLS["/handover"](mgr, MIND_A)
+        return True
+
+    assert _with_refusing_mind(body) is True
