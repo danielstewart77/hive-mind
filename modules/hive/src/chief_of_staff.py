@@ -59,12 +59,25 @@ from hive_data import core, staff
 #: rather than in the tree.
 DONE = "done"
 
-#: A board story in this status is finished. Only a story carries a status
-#: on this board - a feature's state is its stories' - so this is the one
-#: word that decides what leaves the tree. The board's own word for it
+#: A board item in this status is finished. The board's own word for it
 #: happens to match the ledger's; they are separate vocabularies and are
 #: named separately so that renaming one does not silently move the other.
+#: Every kind carries a status since board step 13, but a feature that
+#: finished before then still reads backlog, so a feature is also finished
+#: when every one of its stories is (`_feature_finished`).
 BOARD_DONE = "done"
+
+#: How far back the barrel reaches when nobody chose (feature 6.11,
+#: 2026-11-16): finished work older than this many days is left out of the
+#: answer, never deleted, and a wider window brings it back.
+DEFAULT_WINDOW_DAYS = 7
+
+#: The widest window the page may ask for, ten years: wide enough to mean
+#: "everything", and bounded so a typed URL cannot ask for an overflow.
+MAX_WINDOW_DAYS = 3650
+
+#: Seconds in a day, the unit the window is chosen in.
+DAY = 24 * 60 * 60
 
 #: How long a sub-agent may be open before it reads as orphaned rather than
 #: working. The mind's turn timeout: a child lives inside the turn's process,
@@ -264,11 +277,62 @@ def _board_label(item: dict[str, Any], numbers: dict[str, str]) -> str:
     return f"{numbers.get(item['id'], '')} {item['title']}".strip()
 
 
+def _barrel_item(item: dict[str, Any], kind: str, numbers: dict[str, str],
+                 kinds: dict[str, str],
+                 finished_at: float | None) -> dict[str, Any]:
+    """A finished board item as the barrel draws it, by its own board id,
+    with the moment it finished, which is what the window counts from."""
+    return _node(item["id"], _board_label(item, numbers), kind,
+                 status=DONE, work_kind=kinds.get(item["id"], kind),
+                 finished_at=finished_at)
+
+
 def _barrel_story(story: dict[str, Any], numbers: dict[str, str],
                   kinds: dict[str, str]) -> dict[str, Any]:
-    """A finished story as the barrel draws it, by its own board id."""
-    return _node(story["id"], _board_label(story, numbers), "story",
-                 status=DONE, work_kind=kinds.get(story["id"], "story"))
+    """A finished story, finished when the board stamped it done."""
+    return _barrel_item(story, "story", numbers, kinds, story.get("done_at"))
+
+
+def _barrel_task(task: dict[str, Any]) -> dict[str, Any]:
+    """A finished ledger task as itself: the work it was named no board item
+    the barrel can draw in its place, and it still finished."""
+    return _node(task["id"], task["name"], "task", status=DONE,
+                 work_kind=TASK_KIND, finished_at=task.get("done_at"))
+
+
+def _feature_finished(feature: dict[str, Any],
+                      stories: list[dict[str, Any]]) -> tuple[bool,
+                                                              float | None]:
+    """Whether a feature is finished, and when.
+
+    Finished when the board says so, at the moment it did; or, for a
+    feature whose status still reads what step 13 backfilled, when it has
+    stories and every one is done, at the moment the last of them finished.
+    """
+    if feature.get("status") == BOARD_DONE:
+        return True, feature.get("done_at")
+    mine = [s for s in stories if s.get("feature_id") == feature["id"]]
+    if mine and all(s.get("status") == BOARD_DONE for s in mine):
+        times = [s["done_at"] for s in mine if s.get("done_at") is not None]
+        return True, max(times) if times else None
+    return False, None
+
+
+def _in_window(rows: list[dict[str, Any]], *, now: float,
+               days: int) -> list[dict[str, Any]]:
+    """The finished rows that finished within the last `days` days, newest
+    first.
+
+    Time is the only thing that hides a row here (requirement 5 of
+    2026-11-16): a row whose finish was never recorded cannot be judged by
+    time, so it is kept, after every row that can be.
+    """
+    since = now - days * DAY
+    kept = [r for r in rows
+            if r.get("finished_at") is None or r["finished_at"] >= since]
+    return sorted(kept, key=lambda r: (r.get("finished_at") is None,
+                                       -(r.get("finished_at") or 0.0),
+                                       r["id"]))
 
 
 def _board_children(item_id: str, features: list[dict[str, Any]],
@@ -281,10 +345,9 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
 
     Returns nodes, edges and the finished rows for the barrel. A story that
     is done is in the barrel and not in the tree. A feature every one of
-    whose stories is done leaves the tree too - only a story carries a status
-    on this board, so a finished feature is one with nothing left under it -
-    but it goes nowhere: the barrel holds finished stories and nothing else
-    (requirement 8 of 2026-11-15), so its stories go in its stead.
+    whose stories is done leaves the tree too, and goes to the barrel with
+    its stories: the barrel holds finished stories, features and tasks
+    (feature 6.11, 2026-11-16).
 
     None of these children carries an assigned mind or a session name, and
     none spins of its own accord; a story spins only when a working child is
@@ -327,9 +390,11 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
         label = f"{numbers.get(feature['id'], '')} {feature['title']}".strip()
         mine = [s for s in stories if s.get("feature_id") == feature["id"]]
         if mine and all(s.get("status") == BOARD_DONE for s in mine):
-            # The feature leaves the tree and goes nowhere: the barrel holds
-            # finished stories and nothing else (2026-11-15). Its stories are
-            # finished stories, so they still go.
+            # The feature leaves the tree for the barrel, and its stories,
+            # which are finished stories, go with it.
+            _, finished_at = _feature_finished(feature, stories)
+            barrel.append(_barrel_item(feature, "feature", numbers, kinds,
+                                       finished_at))
             for story in mine:
                 barrel.append(_barrel_story(story, numbers, kinds))
             continue
@@ -338,6 +403,27 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
         edges.append({"source": item_id, "target": feature["id"]})
         _add_stories(feature["id"], feature["id"])
     return nodes, edges, barrel
+
+
+def _finished_item(item: dict[str, Any] | None, kind: str | None,
+                   stories: list[dict[str, Any]], numbers: dict[str, str],
+                   kinds: dict[str, str]) -> dict[str, Any] | None:
+    """The barrel row a finished ledger task's board item draws as, or None
+    when the item is not one the barrel draws or the board does not call it
+    finished - in which case the task stands for itself."""
+    if item is None:
+        return None
+    if kind in STORY_KINDS or kind == "task":
+        if item.get("status") != BOARD_DONE:
+            return None
+        return _barrel_item(item, "story" if kind in STORY_KINDS else "task",
+                            numbers, kinds, item.get("done_at"))
+    if kind == "feature":
+        done, finished_at = _feature_finished(item, stories)
+        if not done:
+            return None
+        return _barrel_item(item, "feature", numbers, kinds, finished_at)
+    return None
 
 
 def _unique(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -592,16 +678,21 @@ def _lend_activity(nodes: dict[str, dict[str, Any]],
             node["active"] = True
 
 
-async def get_tree(*, chief: str = "Stash",
-                   now: float | None = None) -> dict[str, Any]:
+async def get_tree(*, chief: str = "Stash", now: float | None = None,
+                   window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
     """Everything the page draws, in one answer.
 
     `nodes` and `edges` are the live tree, rooted at `CHIEF_ID`. `barrel` is
     what has finished, which is deliberately not in the tree: Daniel's
     instruction is that a finished child disappears from the work and goes to
-    the right. `questions` is every bubble, in the order the tasks holding
-    them last moved, and the root carries their count because that number is
-    what the page is read for.
+    the right. It holds finished stories, features and tasks that finished
+    within the last `window_days` days, newest first; older ones are only
+    left out of this answer. `finished_stories` counts every finished story
+    the barrel would hold at any window, which is what the progress bar
+    reads, so choosing a narrower window does not move the bar.
+    `questions` is every bubble, in the order the tasks holding them last
+    moved, and the root carries their count because that number is what the
+    page is read for.
     """
     moment = time.time() if now is None else now
     tasks = await staff.tasks()
@@ -637,7 +728,8 @@ async def get_tree(*, chief: str = "Stash",
     # The first live task covering each board item takes that item's place.
     claimed: dict[str, str] = {}
     extra: list[str] = []
-    finished_items: list[str] = []
+    finished: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    board_tasks = {row["id"]: row for row in board.get("tasks", [])}
     by_id = {row["id"]: row for row in (*epics, *features, *stories)}
     # Which task takes a board item's place is decided once, by which was
     # opened first, never by the order the ledger lists them in: that is
@@ -655,11 +747,24 @@ async def get_tree(*, chief: str = "Stash",
         board_item = task.get("board_item")
         work_kind = kinds.get(board_item or "", TASK_KIND)
         if task["status"] == DONE:
-            # A finished task leaves the tree and goes nowhere. When the
-            # work it was is a board story, the story is what finished, and
-            # the barrel holds finished stories (requirement 8).
-            if work_kind in STORY_KINDS:
-                finished_items.append(board_item)
+            # A finished task leaves the tree for the barrel. When the work
+            # it was is a board story, feature or task the board also calls
+            # finished, that item is what finished and is drawn in its
+            # place; otherwise the ledger task itself is (feature 6.11).
+            item = by_id.get(board_item or "")
+            kind = kinds.get(board_item or "")
+            if item is None and board_item in board_tasks:
+                # A board task is not one of `kinds`: a ledger task naming
+                # one draws as a plain task in the tree, with no children.
+                item, kind = board_tasks[board_item], "task"
+            finished.append((task, _finished_item(item, kind, stories,
+                                                   numbers, kinds)))
+            # The finished work beneath it finished too, and closing the
+            # task that watched it must not hide it: only time hides
+            # finished work (requirement 5).
+            if kind in ("feature", "epic"):
+                barrel.extend(_board_children(board_item, features, stories,
+                                              numbers, kinds)[2])
             continue
 
         sessions = [p["session_id"]
@@ -744,11 +849,16 @@ async def get_tree(*, chief: str = "Stash",
     # the ledger is the authority on whether a task is over.
     live_items = {node.get("board_item") for node in nodes.values()}
     live_items.update(nodes)
-    for item_id in finished_items:
-        story = by_id.get(item_id)
-        if story is not None and story.get("status") == BOARD_DONE:
-            barrel.append(_barrel_story(story, numbers, kinds))
+    # An item still being worked is not drawn as finished, so the ledger
+    # task that finished on it stands for itself instead.
+    for task, row in finished:
+        if row is None or row["id"] in live_items:
+            row = _barrel_task(task)
+        barrel.append(row)
     barrel = [row for row in _unique(barrel) if row["id"] not in live_items]
+    finished_stories = sum(1 for row in barrel
+                           if row.get("work_kind") in STORY_KINDS)
+    barrel = _in_window(barrel, now=moment, days=window_days)
 
     root = _node(CHIEF_ID, chief, "chief", questions=len(questions),
                  work_kind="chief", active=False)
@@ -759,4 +869,6 @@ async def get_tree(*, chief: str = "Stash",
             "edges": [{"source": source, "target": target}
                       for target, source in parent.items()],
             "barrel": barrel, "questions": questions,
+            "finished_stories": finished_stories,
+            "window_days": window_days,
             "generated_at": moment}

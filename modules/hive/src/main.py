@@ -28,6 +28,7 @@ from fastapi import (
     FastAPI,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     WebSocket,
@@ -2403,15 +2404,19 @@ async def chief_of_staff_page(request: Request):
 
 
 @app.get("/api/chief-of-staff")
-async def api_chief_of_staff(user: dict = Depends(require_auth)):
+async def api_chief_of_staff(
+        days: int = Query(chief_of_staff.DEFAULT_WINDOW_DAYS, ge=1,
+                          le=chief_of_staff.MAX_WINDOW_DAYS),
+        user: dict = Depends(require_auth)):
     """The live tree, the barrel and the bubbles, in one answer.
 
     One call rather than three, so the tree, what has finished and what is
     waiting on Daniel can never be drawn from different moments and disagree
-    about the same task.
+    about the same task. `days` is the barrel's window: what finished longer
+    ago than that is left out of the answer (feature 6.11).
     """
     del user
-    return await chief_of_staff.get_tree()
+    return await chief_of_staff.get_tree(window_days=days)
 
 
 @app.get("/graph/data")
