@@ -133,7 +133,11 @@ def test_a_module_left_on_another_branch_is_not_moved(hive):
     remotes, checkout = hive
     assert modules_sh(checkout).returncode == 0
     alpha = checkout / "modules" / "alpha"
+    remotes.push_new("alpha", "past-recorded")
+    assert modules_sh(checkout).returncode == 0
     git("checkout", "-q", "-b", "feature", cwd=alpha)
+    (alpha / "version").write_text("feature work")
+    git("commit", "-q", "-am", "feature work", cwd=alpha)
     before = git("rev-parse", "HEAD", cwd=alpha)
     remotes.push_new("alpha", "4")
 
@@ -146,14 +150,14 @@ def test_a_module_left_on_another_branch_is_not_moved(hive):
 
 def test_a_pinned_module_stays_at_its_pin(hive):
     remotes, checkout = hive
-    first = git("rev-parse", "HEAD", cwd=remotes.scratch / "alpha")
-    remotes.push_new("alpha", "5")
-    git("config", "-f", ".gitmodules", "submodule.modules/alpha.pin", first, cwd=checkout)
+    pinned = remotes.push_new("alpha", "5")
+    remotes.push_new("alpha", "after the pin")
+    git("config", "-f", ".gitmodules", "submodule.modules/alpha.pin", pinned, cwd=checkout)
 
     run = modules_sh(checkout)
 
     assert run.returncode == 0, run.stderr
-    assert git("rev-parse", "HEAD", cwd=checkout / "modules" / "alpha") == first
+    assert git("rev-parse", "HEAD", cwd=checkout / "modules" / "alpha") == pinned
 
 
 def test_a_module_whose_branch_diverged_is_named_and_the_run_fails(hive):
@@ -163,21 +167,67 @@ def test_a_module_whose_branch_diverged_is_named_and_the_run_fails(hive):
     (alpha / "version").write_text("local")
     git("commit", "-q", "-am", "local only", cwd=alpha)
     remotes.push_new("alpha", "6")
+    newest_beta = remotes.push_new("beta", "6")
 
     run = modules_sh(checkout)
 
     assert run.returncode != 0
     assert "modules/alpha" in run.stderr
-    assert git("branch", "--show-current", cwd=checkout / "modules" / "beta") == "master"
+    assert git("rev-parse", "HEAD", cwd=checkout / "modules" / "beta") == newest_beta
 
 
-def test_the_installer_clones_hive_mind_with_every_module_at_the_latest(tmp_path, monkeypatch):
+def test_a_module_whose_clone_was_cut_short_is_finished_on_the_next_run(hive):
+    remotes, checkout = hive
+    assert modules_sh(checkout).returncode == 0
+    alpha = checkout / "modules" / "alpha"
+    (alpha / "version").unlink()  # the .git is there, the files never were
+
+    run = modules_sh(checkout)
+
+    assert run.returncode == 0, run.stderr
+    assert (alpha / "version").read_text() == "1"
+
+
+def test_commits_made_on_a_detached_module_are_kept_and_named(hive):
+    remotes, checkout = hive
+    assert modules_sh(checkout).returncode == 0
+    alpha = checkout / "modules" / "alpha"
+    git("checkout", "-q", "--detach", cwd=alpha)
+    (alpha / "version").write_text("detached work")
+    git("commit", "-q", "-am", "detached work", cwd=alpha)
+    work = git("rev-parse", "HEAD", cwd=alpha)
+    remotes.push_new("alpha", "7")
+
+    run = modules_sh(checkout)
+
+    assert run.returncode != 0
+    assert "modules/alpha" in run.stderr
+    assert git("rev-parse", "HEAD", cwd=alpha) == work
+
+
+def _mirrored_hive(tmp_path, monkeypatch) -> Remotes:
+    """A hive-mind whose manifest names GitHub-style URLs that do not resolve
+    here, served from a local mirror the installer is pointed at."""
     remotes = Remotes(tmp_path)
     remotes.create("hive-tools", "master")
     remotes.create("hive-data", "main")
     remotes.superproject({"hive-tools": "master", "hive-data": "main"}, with_script=True)
+    work = remotes.scratch / "hive-mind"
+    for name in ("hive-tools", "hive-data"):
+        git("config", "-f", ".gitmodules", f"submodule.modules/{name}.url",
+            f"https://upstream.invalid/{name}.git", cwd=work)
+    git("commit", "-q", "-am", "manifest names upstream", cwd=work)
+    git("push", "-q", remotes.url("hive-mind"), "HEAD:master", cwd=work)
+    monkeypatch.setattr(steps, "REPO_BASE", str(remotes.base))
+    # A real install has no help allowing local transport.
+    for var in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        monkeypatch.delenv(var)
+    return remotes
+
+
+def test_the_installer_clones_hive_mind_with_every_module_at_the_latest(tmp_path, monkeypatch):
+    remotes = _mirrored_hive(tmp_path, monkeypatch)
     newest = remotes.push_new("hive-tools", "2")
-    monkeypatch.setattr(steps, "REPO_BASE", f"file://{remotes.base}")
     inst = installer_at(tmp_path / "install", answers())
 
     steps.clone_repos(steps.Ctx(inst, Shell(inst.home.log)))
@@ -187,3 +237,17 @@ def test_the_installer_clones_hive_mind_with_every_module_at_the_latest(tmp_path
     assert git("rev-parse", "HEAD", cwd=tools) == newest
     assert git("branch", "--show-current", cwd=tools) == "master"
     assert (inst.home.repo("hive-data") / "version").read_text() == "1"
+
+
+def test_the_install_stops_when_a_module_cannot_be_brought_up(tmp_path, monkeypatch):
+    remotes = _mirrored_hive(tmp_path, monkeypatch)
+    inst = installer_at(tmp_path / "install", answers())
+    ctx = steps.Ctx(inst, Shell(inst.home.log))
+    steps.clone_repos(ctx)
+    tools = inst.home.repo("hive-tools")
+    (tools / "version").write_text("local")
+    git("commit", "-q", "-am", "local only", cwd=tools)
+    remotes.push_new("hive-tools", "upstream")
+
+    with pytest.raises(steps.StepFailed, match="modules/hive-tools"):
+        steps.clone_repos(ctx)
