@@ -223,7 +223,7 @@ def assess(event: dict) -> dict | None:
         report = {
             "client_type": client_type, "client_ref": client_ref,
             "conversation_id": conversation_id, "kind": measured["kind"],
-            "tokens": int(measured["tokens"] or 0),
+            "tokens": measured["tokens"],
             "model": measured["model"] or None,
             "surface": os.environ.get("HIVE_SURFACE") or None,
         }

@@ -1170,13 +1170,13 @@ def test_a_report_that_measured_nothing_on_a_row_with_no_size_still_records_it_a
     async def scenario():
         mgr = await _manager()
         await _seed(mgr)
-        await mgr.report_context("sess-1", tokens=0, kind="none", conversation_id="conv-1")
+        await mgr.report_context("sess-1", tokens=None, kind="none", conversation_id="conv-1")
         row = await mgr._get_row("sess-1")
         await _close(mgr)
         return row
 
     row = _run(scenario())
-    assert (row["context_tokens"], row["context_kind"]) == (0, "none")
+    assert (row["context_tokens"], row["context_kind"]) == (None, "none")
     assert row["context_observed_at"] is not None
 
 

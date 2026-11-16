@@ -387,7 +387,7 @@ def check(event: dict, harness: str, runtime_path: Path) -> dict | None:
     client_type = os.environ.get("SURFACE", "")
     client_ref = os.environ.get("CLIENT_REF", "")
     report = {"conversation_id": conversation_id, "kind": measured["kind"],
-              "tokens": measured["tokens"] or 0, "model": measured["model"] or None,
+              "tokens": measured["tokens"], "model": measured["model"] or None,
               "client_type": client_type, "client_ref": client_ref,
               "surface": os.environ.get("HIVE_SURFACE") or None}
     if window is not None:
