@@ -86,12 +86,22 @@ def hooks_config(hooks_dir_in_container: str, *, python: str = "/opt/venv/bin/py
     return config
 
 
+def _is_python_launcher(argument: str) -> bool:
+    name = Path(argument).name.lower().removesuffix(".exe")
+    if name in {"py", "python", "python3"}:
+        return True
+    if not name.startswith("python3."):
+        return False
+    return all(part.isdigit() for part in name.removeprefix("python3.").split("."))
+
+
 def _managed_rotation(command: object, managed_scripts: set[str]) -> bool:
     try:
         arguments = shlex.split(str(command or ""))
     except ValueError:
         return False
-    return any(argument in managed_scripts for argument in arguments)
+    return (len(arguments) > 1 and _is_python_launcher(arguments[0])
+            and arguments[1] in managed_scripts)
 
 
 def _merge_rotation_hooks(existing: dict, generated: dict,
