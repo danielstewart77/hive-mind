@@ -12,7 +12,7 @@ PAGE = ORIGIN + "/kanban/backlog"
 # Every title the backlog tree draws, and the nesting level of its row.
 _DRAWN = """() => Object.fromEntries(
   [...document.querySelectorAll('#backlog-mount .kanban-item[data-level]')].map(row => [
-    row.querySelector('.kanban-item-title').textContent.replace(/^[0-9.]+ /, ''),
+    row.querySelector('.kanban-item-title').textContent,
     Number(row.dataset.level)]))"""
 
 
@@ -49,8 +49,9 @@ def _client_with_board(monkeypatch):
 
 _NUMBERS = """() => Object.fromEntries(
   [...document.querySelectorAll('#backlog-mount .kanban-item[data-level]')]
-    .map(row => row.querySelector('.kanban-item-title').textContent.match(/^([0-9.]+) (.*)$/))
-    .filter(Boolean).map(m => [m[2], m[1]]))"""
+    .map(row => [row.querySelector('.kanban-item-title').textContent,
+                 row.querySelector('.kanban-col-order').textContent])
+    .filter(([, number]) => /^[0-9.]+$/.test(number)))"""
 
 
 def _numbers(page):

@@ -32,10 +32,13 @@
 .kanban-trash { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; padding:.3rem; min-height:0; line-height:0; opacity:.75; }
 .kanban-trash:hover, .kanban-trash:focus { opacity:1; }
 .kanban-parent { display:block; opacity:.7; font-size:.85rem; margin-top:.4rem; }
-.kanban-tree { display:grid; gap:.8rem; }
-.kanban-item { padding:.4rem .6rem; min-height:28px; line-height:28px; font-size:13px; border-bottom:1px solid var(--console-line); }
-.kanban-item:nth-child(even) { background-color: var(--console-surface-2); }
-.kanban-children { margin: .8rem 0 0 1.2rem; display:grid; gap:.6rem; }
+/* The backlog tree is a table of slim rows, patterned on the Azure DevOps backlog: one line
+   per item under the columns Order, ID, Type, Name and Status. Every row is the same grid at
+   every depth, so the columns line up; nesting only indents the Name cell. */
+.kanban-tree { --c-order:5rem; --c-id:3.75rem; --c-type:2.5rem; --c-status:9.5rem; --c-gap:.5rem; --indent:1.25rem; display:block; font-size:13px; }
+.kanban-tree-actions { display:flex; flex-wrap:wrap; gap:.5rem; margin:0 0 .6rem; }
+.kanban-item { padding:0; }
+.kanban-children { margin:0; display:block; }
 .kanban-inline { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; max-width:100%; }
 .kanban-inline > * { min-width:0; max-width:100%; }
 .kanban-inline .button { flex:0 1 auto; max-width:100%; white-space:normal; overflow-wrap:anywhere; box-sizing:border-box; }
@@ -56,35 +59,37 @@
 .kanban-toggle[aria-expanded="false"] svg { transform:rotate(0deg); }
 .kanban-toggle[aria-expanded="true"] svg { transform:rotate(90deg); }
 .kanban-item-link { color:inherit; text-decoration:none; }
-.kanban-cols { display:flex; flex-direction:row; align-items:center; justify-content:flex-start; gap:.5rem; width:100%; min-width:0; text-align:left; }
-.kanban-col-num { font-variant-numeric:tabular-nums; font-weight:600; min-width:2.6rem; text-align:left; flex:0 0 auto; }
-
-
-.kanban-row { display:block; }
-.kanban-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.35rem; }
-.kanban-col-type { font-size:.8rem; opacity:.8; flex:0 0 auto; text-align:left; }
-
-.kanban-col-title { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; font-weight:600; display:block; text-align:left; margin:0; }
-.kanban-col-title .kanban-item-title { display:inline; margin:0; text-align:left; flex:0 1 auto; }
-.kanban-col-state { font-size:.8rem; opacity:.85; flex:0 0 auto; text-align:left; }
-.kanban-item select { max-width:100%; display:inline-block; min-height:28px; line-height:28px; font-size:13px; margin-left:.4rem; vertical-align:middle; }
-.kanban-dot { color:#3fb950; margin-right:.35rem; font-size:.7rem; }
-@media(max-width:520px){.kanban-cols{column-gap:.3rem}.kanban-col-type{display:none}}
+.kanban-cols { display:grid; grid-template-columns:var(--c-order) var(--c-id) var(--c-type) minmax(0,1fr) var(--c-status); column-gap:var(--c-gap); align-items:center; min-height:32px; padding:0 .6rem; border-bottom:1px solid var(--console-line); box-sizing:border-box; }
+.kanban-item > .kanban-cols:hover { background:var(--console-surface-2); }
+.kanban-head { position:sticky; top:0; z-index:2; min-height:30px; background:var(--console-bg, #111417); color:var(--console-muted); font-size:12px; font-weight:650; border-bottom-color:var(--console-line-strong); }
+.kanban-col-order, .kanban-col-id { font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.kanban-col-id { color:var(--console-muted); }
+.kanban-col-type { display:flex; align-items:center; }
+.kanban-type-icon { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; }
+.kanban-type-icon svg { width:16px; height:16px; }
+.kanban-type-icon[data-type="epic"] { color:#e8833a; }
+.kanban-type-icon[data-type="feature"] { color:#a77de8; }
+.kanban-type-icon[data-type="story"] { color:#4aa3df; }
+.kanban-type-icon[data-type="bug"] { color:#e05252; }
+.kanban-type-icon[data-type="task"] { color:#e5c04b; }
+/* Indented by depth, capped so a deep chain never squeezes the name out of its cell. */
+.kanban-col-title { display:flex; align-items:center; gap:.2rem; min-width:0; padding-left:min(calc((var(--level, 1) - 1) * var(--indent)), 12rem); }
+.kanban-col-title .kanban-item-title { flex:0 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:500; color:inherit; text-decoration:none; }
+.kanban-col-title .kanban-item-title:hover, .kanban-col-title .kanban-item-title:focus { text-decoration:underline; }
+.kanban-col-title .kanban-toggle { min-height:0; }
+.kanban-col-status select { width:100%; height:24px; min-height:0; padding:0 .3rem; font-size:12px; line-height:22px; margin:0; }
+.kanban-children > .kanban-empty { margin:0; padding:.2rem .6rem; padding-left:calc(.6rem + var(--c-order) + var(--c-id) + var(--c-type) + 3 * var(--c-gap) + min(calc(var(--level, 1) * var(--indent)), 12rem) + 1.7rem); font-size:12px; border-bottom:1px solid var(--console-line); }
+@media(max-width:520px){.kanban-tree{--c-order:3rem;--c-id:2.2rem;--c-type:1.9rem;--c-status:5.75rem;--c-gap:.3rem;--indent:.5rem}.kanban-cols{padding:0 .3rem}.kanban-col-title .kanban-toggle{flex-basis:1rem;width:1rem;min-width:1rem}}
 .kanban-filter { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; margin:.6rem 0; font-size:13px; }
 .kanban-filter label { display:inline-flex; gap:.3rem; align-items:center; cursor:pointer; }
 .kanban-filter-hint { opacity:.65; }
 .kanban-bug { border:2px solid #e05252 !important; }
-.kanban-bug-icon { margin-right:.3rem; }
 .kanban-menu { position:fixed; z-index:1000; display:grid; min-width:180px; padding:.3rem; background:var(--console-surface-2, #1d2226); border:1px solid var(--console-line-strong, #4a555e); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.45); }
 .kanban-menu-item { text-align:left; background:none; border:0; color:inherit; font:inherit; padding:.55rem .75rem; border-radius:6px; cursor:pointer; }
 .kanban-menu-item:hover, .kanban-menu-item:focus { background:rgba(255,255,255,.08); outline:none; }
 
-.kanban-num { font-variant-numeric:tabular-nums; opacity:.75; font-size:.9rem; flex:0 0 auto; }
-.kanban-item > .kanban-inline { flex-wrap:wrap; }
-.kanban-row .kanban-inline { min-width:0; }
-.kanban-row .kanban-item-title { overflow-wrap:anywhere; margin:0; text-align:left; }
 .kanban-tree, .kanban-children, .kanban-item { min-width:0; max-width:100%; box-sizing:border-box; }
-@media(max-width:520px){.kanban-children{margin-left:.25rem}.kanban-num{font-size:.8rem}.kanban-inline{gap:.3rem}.kanban-inline .button{padding:.3rem .45rem;font-size:.8rem;min-height:0}.kanban-page{padding-left:.4rem;padding-right:.4rem}.kanban-inline .button{flex:1 1 calc(50% - .3rem)}.kanban-item{padding:.6rem}.kanban-toolbar a{font-size:.9rem}}
+@media(max-width:520px){.kanban-inline{gap:.3rem}.kanban-inline .button{padding:.3rem .45rem;font-size:.8rem;min-height:0}.kanban-page{padding-left:.4rem;padding-right:.4rem}.kanban-inline .button{flex:1 1 calc(50% - .3rem)}.kanban-toolbar a{font-size:.9rem}}
 @media(max-width:800px){.kanban-board{grid-template-columns:1fr}.kanban-lane{min-height:0}.kanban-drop{min-height:110px}}
 .kanban-details { width:min(760px, calc(100vw - 2rem)); max-height:calc(100vh - 4rem); overflow:auto; padding:1rem 1.25rem; background:var(--console-surface, #171b1f); color:var(--console-text, #edf1f3); border:1px solid var(--console-line-strong, #3a444d); border-radius:10px; }
 .kanban-details::backdrop { background:rgba(0,0,0,.6); }
@@ -191,24 +196,36 @@
     for(const t of ['epic','feature','story','task'].filter(t=>t!==current)){if(kind==='epics'&&t==='epic')continue;list.push([`Change to ${t}`,()=>mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{type:t},`Changed to ${t}.`)]);}
     return list;
   }
-  function markBug(node,story){if(story.subtype!=='bug')return;node.classList.add('kanban-bug');const title=node.querySelector('.kanban-item-title');if(title&&!title.querySelector('.kanban-bug-icon')){const icon=el('span','kanban-bug-icon','🐞');icon.setAttribute('aria-label','Bug');title.prepend(icon);}}
   let openMenu=null;
   function closeMenu(){if(openMenu){openMenu.remove();openMenu=null;}}
   function showMenu(x,y,list){closeMenu();const menu=el('div','kanban-menu');menu.setAttribute('role','menu');for(const [label,action] of list){const item=el('button','kanban-menu-item',label);item.type='button';item.setAttribute('role','menuitem');item.addEventListener('click',async()=>{closeMenu();await action();});menu.append(item);}document.body.append(menu);const maxLeft=window.innerWidth-menu.offsetWidth-8;const maxTop=window.innerHeight-menu.offsetHeight-8;menu.style.left=`${Math.max(8,Math.min(x,maxLeft))}px`;menu.style.top=`${Math.max(8,Math.min(y,maxTop))}px`;openMenu=menu;}
   document.addEventListener('click',e=>{if(openMenu&&!openMenu.contains(e.target))closeMenu();});
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMenu();});
   window.addEventListener('scroll',closeMenu,true);
-  function actionRow(record,kind){
+  // An epic, feature or task row opens its actions on a right click.
+  function withMenu(row,record,kind){
     const list=actionList(record,kind);
-    const row=el('div','kanban-inline');
-    row.append(safeTitle(record));
-    for(const [label,action] of list)row.append(button(label,action));
     row.addEventListener('contextmenu',e=>{e.preventDefault();showMenu(e.clientX,e.clientY,list);});
     return row;
   }
   // Every type carries a status (story 3.7.1), so every row in the backlog has one to set.
   function statusSelect(r,kind){const select=el('select','');select.setAttribute('aria-label',`Status for ${r.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===r.status;select.append(option);}select.addEventListener('change',async()=>{const previous=r.status;try{await request(`/api/kanban/${kind}/${encodeURIComponent(r.id)}`,'PATCH',{status:select.value});await reload('Status updated.');}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});return select;}
-  function renderStory(s,number){const item=el('div','kanban-item surface');const cols=el('div','kanban-cols');cols.append(makeToggle(item,true));cols.append(el('span','kanban-col-type',s.subtype||'story'));const titleSpan=el('span','kanban-col-title');const title=safeTitle(s);if(number)title.textContent=`${number} ${s.title}`;titleSpan.append(title);cols.append(titleSpan);cols.append(statusSelect(s,'stories'));item.append(cols);return item;}
+  // The type is an icon, never a word; its name is the icon's accessible label and hover title.
+  // A bug is a story subtype and carries its own icon; any other subtype is drawn as a story.
+  const TYPE_ICONS={epic:['crown','Epic'],feature:['trophy','Feature'],story:['book-open','Story'],bug:['bug','Bug'],task:['clipboard-check','Task']};
+  const typeOf=r=>r._kind==='epics'?'epic':r._kind==='features'?'feature':r._kind==='tasks'?'task':(r.subtype==='bug'?'bug':'story');
+  function typeIcon(type){const [icon,label]=TYPE_ICONS[type];const span=el('span','kanban-type-icon');span.dataset.type=type;span.setAttribute('role','img');span.setAttribute('aria-label',label);span.title=label;const i=el('i','');i.setAttribute('data-lucide',icon);i.setAttribute('aria-hidden','true');span.append(i);return span;}
+  const COLUMNS=['Order','ID','Type','Name','Status'];
+  // One row of the backlog: Order, ID, Type, Name (with its expand chevron), Status.
+  function rowCells(node,r,number,hasChildren){
+    const cols=el('div','kanban-cols');
+    const order=el('span','kanban-col-order',number||'');order.title=number||'';
+    const type=el('span','kanban-col-type');type.append(typeIcon(typeOf(r)));
+    const name=el('span','kanban-col-title');const title=safeTitle(r);title.title=r.title;name.append(makeToggle(node,hasChildren),title);
+    const status=el('span','kanban-col-status');status.append(statusSelect(r,r._kind));
+    cols.append(order,el('span','kanban-col-id',String(r.item_number??'')),type,name,status);
+    return cols;
+  }
   // Two drop zones on every row. The top band of a row is a reorder: a vertical line shows
   // where the item will land, and the dropped item takes the row's parent. The rest of the
   // row is a nest: a border shows the row will become the dropped item's parent.
@@ -216,7 +233,7 @@
     const band=el('div','kanban-drop-band');band.setAttribute('aria-hidden','true');
     if(beforeId)target.prepend(band);
     const clearMarks=()=>{target.classList.remove('kanban-nest-over');band.classList.remove('kanban-band-over');};
-    const zoneOf=e=>{if(!beforeId)return 'nest';const r=target.getBoundingClientRect();return (e.clientY-r.top)<Math.min(14,r.height/3)?'reorder':'nest';};
+    const zoneOf=e=>{if(!beforeId)return 'nest';const own=target.querySelector(':scope > .kanban-cols')||target;const r=own.getBoundingClientRect();return (e.clientY-r.top)<Math.min(14,r.height/3)?'reorder':'nest';};
     target.addEventListener('dragover',e=>{
       e.preventDefault();
       const zone=zoneOf(e);
@@ -247,45 +264,17 @@
   let expandedIds=loadExpanded();
   function rememberState(node,id){if(!id)return;const on=node.dataset.collapsed!=='true';if(on)expandedIds.add(id);else expandedIds.delete(id);saveExpanded(expandedIds);}
   function makeToggle(node,hasChildren){const t=el('button','button kanban-toggle');t.type='button';t.disabled=!hasChildren;t.setAttribute('aria-label','Expand or collapse');t.setAttribute('aria-expanded',String(node.dataset.collapsed!=='true'));const icon=el('i','');icon.setAttribute('data-lucide','chevron-right');t.append(icon);t.addEventListener('click',e=>{e.stopPropagation();setCollapsed(node,node.dataset.collapsed!=='true');rememberState(node,node.dataset.itemId);});return t;}
-  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-inline .kanban-toggle, :scope > .kanban-cols .kanban-toggle');if(t&&!t.disabled)t.setAttribute('aria-expanded',String(!on));}
-  function labelRow(node,row,label,hasChildren,id,meta){
-    node.dataset.itemId=id||'';
-    if(id&&hasChildren){setCollapsed(node,!expandedIds.has(id));}else if(hasChildren){setCollapsed(node,true);}
-    const name=label;
-    const title=row.querySelector('.kanban-item-title');
-    const actions=Array.from(row.children).filter(c=>c!==title);
-    const cols=el('div','kanban-cols');
-    cols.append(makeToggle(node,hasChildren));
-    cols.append(el('span','kanban-col-type',meta.type));
-    const t=el('span','kanban-col-title');
-    if(meta.inProgress)t.append(el('span','kanban-dot','●'));
-    title.textContent=name;t.append(title);cols.append(t);
-    cols.append(el('span','kanban-col-state',meta.state||''));
-    row.replaceChildren(cols);
-    row.classList.add('kanban-row');
-    return row;
-  }
-  // Wrap labelRow to pull following select into the same row for inline display
-  const _origLabelRow=labelRow;
-  labelRow=function(node,row,label,hasChildren,id,meta){
-    const result=_origLabelRow(node,row,label,hasChildren,id,meta);
-    const next=row.nextSibling;
-    if(next&&next.tagName&&next.tagName.toUpperCase()==='SELECT'){
-      const cols=row.querySelector('.kanban-cols');
-      if(cols) cols.append(next);
-    }
-    return result;
-  };
+  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-cols .kanban-toggle');if(t&&!t.disabled)t.setAttribute('aria-expanded',String(!on));}
   function renderBacklog(){
     const mount=$('backlog-mount');mount.replaceChildren();
-    mount.append(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));
+    const adders=el('div','kanban-tree-actions');mount.append(adders);
+    adders.append(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));
     // A task needs no parent (story 3.7.4), so it is created from the top of the backlog.
-    mount.append(button('Add task',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/tasks','POST',{title},'Task created in Backlog.');}));
+    adders.append(button('Add task',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/tasks','POST',{title},'Task created in Backlog.');}));
     const all=[...state.epics.map(e=>({...e,_kind:'epics'})),...state.features.map(f=>({...f,_kind:'features'})),...state.stories.map(s=>({...s,_kind:'stories'})),...state.tasks.map(t=>({...t,_kind:'tasks'}))].sort(byOrder);
     const parentOf=r=>r.parent_id||r.feature_id||r.epic_id||r.task_id||null;
     const childrenOf=id=>all.filter(r=>parentOf(r)===id);
     const roots=all.filter(r=>!parentOf(r)||!all.some(p=>p.id===parentOf(r)));
-    const kindLabel=r=>r._kind==='epics'?'Epic':r._kind==='features'?'Feature':r._kind==='tasks'?'Task':(r.subtype==='bug'?'Bug':'Story');
     // The walk's own number, over the whole board before the filter hides anything, only for a
     // row the server's numbering has not reached; hiding a done item renumbers nothing shown.
     const walkedOf={};
@@ -299,30 +288,26 @@
       // The server's number, the one every other view shows.
       const number=state.numbers[r.id]||walkedOf[r.id];
       const kids=shownBelow(childrenOf(r.id));
-      const node=el('div','surface kanban-item');node.dataset.level=String(level);node.dataset.id=r.id;
-      const label=`${number} ${r.title}`;
       const sub=kids.length>0;
-      if(r._kind==='stories'){
-        const item=renderStory(r,number);item.dataset.level=String(level);item.dataset.id=r.id;
-        // story rows are fully built by renderStory; no labelRow needed
-        markBug(item,r);makeDraggable(item,'stories',r.id);enableDrop(item,'stories',parentOf(r),r.id);
-        // A feature dropped onto a story, or a task, hangs under it; drawn without a children
-        // list, it and everything under it vanished from the tree.
-        if(sub){item.dataset.itemId=r.id;setCollapsed(item,!expandedIds.has(r.id));const children=el('div','kanban-children');kids.forEach(k=>children.append(build(k,level+1)));item.append(children);}
-        return item;
-      }
-      const row=labelRow(node,actionRow(r,r._kind),label,sub,r.id,{type:kindLabel(r),number,state:'',inProgress:false});
-      row.querySelector('.kanban-cols').append(statusSelect(r,r._kind));
-      node.append(row);
+      const node=el('div','kanban-item');node.dataset.level=String(level);node.dataset.id=r.id;node.dataset.itemId=r.id;
+      node.style.setProperty('--level',String(level));
+      if(sub)setCollapsed(node,!expandedIds.has(r.id));
+      const row=rowCells(node,r,number,sub);
+      // A story row has no right-click menu; its actions are on its own page.
+      node.append(r._kind==='stories'?row:withMenu(row,r,r._kind));
       makeDraggable(node,r._kind,r.id);
       enableDrop(node,r._kind,parentOf(r),r.id);
       const children=el('div','kanban-children');
       kids.forEach(k=>children.append(build(k,level+1)));
-      if(!sub)children.append(el('p','kanban-empty',childrenOf(r.id).length?'Everything under this is hidden by the status filter.':'Nothing under this yet.'));
-      node.append(children);
+      // A feature dropped onto a story, or a task, hangs under it; drawn without a children
+      // list, it and everything under it vanished from the tree.
+      if(sub)node.append(children);
+      // A row with nothing under it shows no chevron; one whose children the filter hides says so.
+      else if(childrenOf(r.id).length){children.append(el('p','kanban-empty','Everything under this is hidden by the status filter.'));node.append(children);}
       return node;
     };
     const shownRoots=shownBelow(roots);
+    if(shownRoots.length){const head=el('div','kanban-cols kanban-head');for(const name of COLUMNS)head.append(el('span','',name));mount.append(head);}
     shownRoots.forEach(r=>mount.append(build(r,1)));
     if(!shownRoots.length)mount.append(el('p','kanban-empty surface',all.length?'Nothing on the board is shown by the status filter.':'No epics yet. Create one to get started.'));
     if(window.lucide)window.lucide.createIcons({attrs:{'stroke-width':1.8}});
