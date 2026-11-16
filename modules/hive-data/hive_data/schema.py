@@ -107,7 +107,10 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "board.work_items": (
         "id", "kind", "parent_id", "title", "status", "position",
         "description", "requirements", "acceptance_criteria", "qa_tests",
-        "subtype"),
+        "subtype",
+        #: The permanent whole-number ID (step 14), one count across every
+        #: kind. The text `id` stays the key everything references.
+        "item_number"),
     #: The files a work item carries (step 12), keyed by the item's id.
     "board.work_item_attachments": (
         "id", "item_id", "filename", "content_type", "size_bytes", "content",
@@ -253,6 +256,9 @@ GENERATED: dict[str, frozenset[str]] = {
     "tools.users": frozenset({"id"}),
     "board.design_notices": frozenset({"id"}),
     "board.work_item_attachments": frozenset({"id"}),
+    #: GENERATED ALWAYS (step 14): an item's ID is the database's to issue
+    #: and nobody's to set, on a create or afterwards.
+    "board.work_items": frozenset({"item_number"}),
     #: `content_search` is GENERATED ALWAYS, not BY DEFAULT: Postgres
     #: refuses a value for it outright. Named here so the refusal happens
     #: before the statement is built, with a sentence saying why, rather

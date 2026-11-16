@@ -323,6 +323,10 @@ async def create_work_item(item_id: str, kind: str, title: str,
     positions and both are decided by the page. Read it with
     `next_position` or `first_position` inside the same unit as this write,
     or two creations race and take the same slot.
+
+    The item's permanent whole-number ID, `item_number`, is not an argument:
+    the database issues it from the one count every kind shares (step 14),
+    and refuses a value from anyone else.
     """
     if kind not in KINDS:
         raise ValueRefused(
