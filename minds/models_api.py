@@ -36,8 +36,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
-from minds.runtime_api import authorize_admin, load_runtime
 from minds.rotation_policy import read_policy
+from minds.runtime_api import authorize_admin, load_runtime
 
 _TIMEOUT = aiohttp.ClientTimeout(total=6)
 

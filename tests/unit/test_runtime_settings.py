@@ -8,8 +8,8 @@ Both of those are behaviours, not conventions, so both are tested here.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import pytest

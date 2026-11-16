@@ -17,7 +17,6 @@ Both harness servers mount these routes; see `install_runtime_routes`.
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 import logging
 import os
 import re
@@ -25,6 +24,7 @@ import secrets
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 

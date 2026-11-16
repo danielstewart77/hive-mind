@@ -50,15 +50,15 @@ from minds import (
     files_api,
     github_token_api,
     models_api,
-    rotation_policy,
     rotation_marker_api,
+    rotation_policy,
     runtime_api,
     skills_api,
     surface_token_api,
     transcript,
 )
-from minds.proactive import make_proactive_router
 from minds.harness import dsh_hooks, rotation_hooks
+from minds.proactive import make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
