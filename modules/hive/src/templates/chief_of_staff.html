@@ -209,6 +209,47 @@
   </div>
 </div>
 
+<script>
+  // Where the done bucket starts, decided here — before the page first
+  // paints and before the graph library loads — so a remembered state is
+  // simply there, rather than sliding in or out on every visit.
+  //
+  // Open or docked is remembered per browser, once for phone-size screens
+  // and once for large ones (feature 3.6, 2026-11-15): docking it on a
+  // phone never makes the desktop start docked, nor the reverse. With
+  // nothing remembered a phone starts docked and a large screen open.
+  // Storage that is blocked or throws is treated as remembering nothing:
+  // the page and its buttons work exactly as they would without it.
+  window.cosBarrelMemory = (function () {
+    var PHONE = '(max-width: 820px)';  // the site's one mobile breakpoint
+    var KEYS = { phone: 'hive.cos.doneBucket.phone',
+                 large: 'hive.cos.doneBucket.large' };
+    function sizeClass() {
+      return window.matchMedia(PHONE).matches ? 'phone' : 'large';
+    }
+    function recall() {
+      try {
+        var v = window.localStorage.getItem(KEYS[sizeClass()]);
+        return v === 'open' ? true : v === 'docked' ? false : null;
+      } catch (e) { return null; }
+    }
+    return {
+      start: function () {
+        var r = recall();
+        return r === null ? sizeClass() === 'large' : r;
+      },
+      remember: function (open) {
+        try {
+          window.localStorage.setItem(KEYS[sizeClass()],
+                                      open ? 'open' : 'docked');
+        } catch (e) { /* not remembered; the bucket still moved */ }
+      }
+    };
+  })();
+  document.getElementById('cos-stage').classList
+    .toggle('barrel-open', window.cosBarrelMemory.start());
+</script>
+
 <div class="cos-asks-pane">
   <h2>Waiting on you (<span id="cos-asks-n">0</span>)</h2>
   <div id="cos-asks"><p class="cos-empty">Nothing.</p></div>
@@ -222,7 +263,10 @@
   <span id="cos-pct">0%</span>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
+<!-- async: the page, its buttons and the done bucket never wait on the
+     graph library. Blocking, a slow cdnjs left a remembered-open bucket on
+     screen with a close control nothing had wired up yet. -->
+<script id="cos-cytoscape" async src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
 <script>
 (function () {
   // Drawn from one payload, so the tree, the barrel and the counts can never
@@ -581,6 +625,15 @@
   }
 
   var cy = null;
+  // The latest payload, held until the graph library has arrived.
+  var pendingDraw = null;
+  document.getElementById('cos-cytoscape').addEventListener('load', function () {
+    if (pendingDraw !== null) {
+      var data = pendingDraw;
+      pendingDraw = null;
+      draw(data);
+    }
+  });
   var lastGoodAt = 0;
   var deco = document.getElementById('cos-deco');
   var shape = '';
@@ -894,7 +947,7 @@
     document.getElementById('cos-progress').style.width = pct + '%';
     document.getElementById('cos-pct').textContent = pct + '%';
 
-    draw(data);
+    if (window.cytoscape) { draw(data); } else { pendingDraw = data; }
   }
 
   // ── the barrel, and what opening it does to the graph ────────────────
@@ -927,13 +980,20 @@
   // so it goes back to the done button that opened it.
   function dock() {
     var hadFocus = pane.contains(document.activeElement);
-    setBarrel(false);
+    setBarrel(false, true);
     var t = hadFocus && visibleToggle();
     if (t) t.focus({ preventScroll: true });
   }
 
-  function setBarrel(open) {
+  var memory = window.cosBarrelMemory;
+
+  // `chosen` is every move Daniel makes — the done buttons, the close
+  // control, Escape, a swipe, and opening the nav, which docks it. Only the
+  // starting state applied on load or on crossing the breakpoint is not a
+  // choice, and is never written back.
+  function setBarrel(open, chosen) {
     stage.classList.toggle('barrel-open', open);
+    if (chosen) memory.remember(open);
     toggles.forEach(function (t) {
       t.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
@@ -950,7 +1010,7 @@
   toggles.forEach(function (t) {
     t.addEventListener('click', function () {
       var open = !isOpen();
-      setBarrel(open);
+      setBarrel(open, true);
       // Over the page on a phone-size screen: the keyboard goes with it.
       if (open && mobile.matches) {
         pane.querySelector('[data-barrel-close]').focus({ preventScroll: true });
@@ -992,23 +1052,33 @@
     var dx = t.clientX - swipe.x;
     var dy = t.clientY - swipe.y;
     swipe = null;
-    if (dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) dock();
+    // Phone-size only, where the barrel lies over the page: in a large
+    // screen's layout a sideways drag on the list is not a way out, and it
+    // would be remembered as a choice.
+    if (mobile.matches && dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) dock();
   }, { passive: true });
   pane.addEventListener('touchcancel', function () { swipe = null; },
                         { passive: true });
 
-  // Desktop opens with it; a phone does not. Re-decided when the viewport
-  // crosses the breakpoint, so a rotated phone does not keep a default it
-  // was never given.
-  function applyDefault() { setBarrel(!mobile.matches); }
-  listenMedia(mobile, applyDefault);
-  applyDefault();
+  // The starting state for this size of screen: its remembered choice, else
+  // docked on a phone and open on a large screen. Re-decided when the
+  // viewport crosses the breakpoint, so a rotated phone or a resized window
+  // takes the state remembered for the size it now is.
+  function applyStart() {
+    var hadFocus = pane.contains(document.activeElement);
+    var open = memory.start();
+    setBarrel(open, false);
+    var t = !open && hadFocus && visibleToggle();
+    if (t) t.focus({ preventScroll: true });
+  }
+  listenMedia(mobile, applyStart);
+  applyStart();
 
   // The nav docks the barrel when it opens, through the real setter rather
   // than by stripping the class, so aria-expanded cannot be left saying
   // "true" on a closed barrel.
   document.addEventListener('hive:close-push-panels', function () {
-    setBarrel(false);
+    setBarrel(false, true);
   });
 
   window.addEventListener('resize', function () {

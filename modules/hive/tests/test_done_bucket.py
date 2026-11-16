@@ -22,8 +22,12 @@ _BUCKET = """() => {
 
 
 def _settled(page):
-    # The bucket slides over .2s; read it once it has arrived.
-    page.wait_for_timeout(350)
+    # The bucket slides in and out by a CSS transition. Read it once the
+    # bucket's own transitions have finished — a fixed wait raced the slide
+    # on a loaded machine and read it half way across.
+    page.wait_for_function(
+        "() => document.getElementById('cos-barrel-pane').getAnimations()"
+        ".every(a => a.playState !== 'running')")
     return page.evaluate(_BUCKET)
 
 
@@ -75,3 +79,43 @@ def test_an_open_bucket_on_a_large_screen_stays_in_the_window_however_it_is_resi
         page.locator("[data-barrel-toggle]:visible").click()
         bucket = _settled(page)
         assert _open_on_screen(bucket), bucket
+
+
+def _load(page):
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    return _settled(page)
+
+
+def test_a_remembered_choice_comes_back_on_the_next_visit_kept_apart_per_screen_size(
+        monkeypatch):
+    client = signed_in_client(monkeypatch)
+    with browser(client) as context:
+        # One browser: one storage, shared by both sizes of window.
+        page = context(1400, 900).new_page()
+        page.goto(PAGE)
+        page.wait_for_load_state("networkidle")
+
+        page.locator("[data-barrel-close]").click()
+        assert _docked(_load(page))
+        page.locator("[data-barrel-toggle]:visible").click()
+        assert _open_on_screen(_load(page))
+        page.locator("[data-barrel-close]").click()
+        assert _docked(_load(page))
+
+        # Phone-size: its own default, then its own remembered choice.
+        page.set_viewport_size({"width": 390, "height": 800})
+        assert _docked(_load(page))
+        page.locator("[data-barrel-toggle]:visible").click()
+        assert _open_on_screen(_load(page))
+
+        # Open on the phone did not make the large screen open...
+        page.set_viewport_size({"width": 1400, "height": 900})
+        assert _docked(_load(page))
+        # ...and docked on the large screen did not dock the phone.
+        page.set_viewport_size({"width": 390, "height": 800})
+        assert _open_on_screen(_load(page))
+
+        # Opening the nav docks it on a phone, and that is remembered too.
+        page.locator("[data-sidebar-open]").click()
+        assert _docked(_load(page))
