@@ -519,7 +519,10 @@ class RotationMemoryRequest(BaseModel):
 
 class BrokerMessageRequest(BaseModel):
     message_id: str | None = None
-    conversation_id: str
+    # A plain id. It is printed into the receiving mind's prompt outside the
+    # hive's envelope, so a sender who could put a line break in it could
+    # write a paragraph the receiver reads as the hive's.
+    conversation_id: str = Field(pattern=r"^[A-Za-z0-9._:+-]{1,128}$")
     from_mind: str = Field(alias="from")
     to_mind: str = Field(alias="to")
     content: str
@@ -2163,6 +2166,13 @@ async def _refuse_foreign_registration(caller, body) -> None:
                 f"{caller.holder!r} may only register itself, not "
                 f"{name or mind_id!r}",
             )
+        # Its own row, under its own name. A mind that renamed itself would
+        # step out from under every credential and grant keyed on its name -
+        # hive-tools knows a mind's token by it - so only the admin renames.
+        if (str(mind_id or "") == asked_id
+                and user_access.normalize_username(name) != asked_name):
+            raise HTTPException(
+                403, f"{caller.holder!r} may not rename {name!r}; the admin does")
     if existing:
         return
     if caller.holder not in {asked_id.lower(), asked_name}:
@@ -2461,7 +2471,13 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
         )
 
     message_id = body.message_id or str(uuid.uuid4())
-    metadata = body.metadata
+    # Whose request this is: the person the posting credential belongs to, not
+    # whatever `from_mind` the body names - a service credential may name any
+    # mind. The admin credential is every holder at once, so it is the named
+    # mind's owner, or the person the admin credential belongs to.
+    metadata = dict(body.metadata or {})
+    metadata[broker.SENDER_OWNER_KEY] = await _sender_owner(
+        _caller(request), body.from_mind)
 
     result = await broker.insert_message(
         message_id=message_id,
@@ -2500,17 +2516,49 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
     )
 
 
-@app.get("/broker/messages")
-async def broker_get_messages(conversation_id: str):
-    """Get all messages for a conversation."""
+async def _sender_owner(caller, from_mind: str) -> str:
+    """The person a posted message's request belongs to, or "" for nobody."""
+    if caller.sees_everything():
+        row = await core.get_mind_by_id_or_name(from_mind)
+        owner = str((row or {}).get("owner") or "").strip().lower()
+        if owner:
+            return owner
+        from comms.config import admin_credential_owner
+
+        return admin_credential_owner()
+    return user_access.normalize_username(caller.username)
+
+
+async def _readable_conversation(request: Request, conversation_id: str) -> list[dict] | None:
+    """A conversation's messages, if the caller may read them.
+
+    A mind's own credential reads only conversations it is a party to; one
+    mind could otherwise read any other's by id, and an inbound text's id is
+    its sender's phone number. Admin and service holders are the machinery
+    and read every one, as before.
+    """
     messages = await broker.get_messages(conversation_id)
-    return messages
+    caller = _caller(request)
+    if caller.sees_everything() or caller.role != user_access.MIND:
+        return messages
+    for message in messages:
+        for party in (message.get("from_mind"), message.get("to_mind")):
+            if party and await _names_own_mind(caller, str(party)):
+                return messages
+    return None
+
+
+@app.get("/broker/messages")
+async def broker_get_messages(conversation_id: str, request: Request):
+    """Get all messages for a conversation."""
+    messages = await _readable_conversation(request, conversation_id)
+    return messages if messages is not None else []
 
 
 @app.get("/broker/conversations/{conversation_id}")
-async def broker_get_conversation(conversation_id: str):
+async def broker_get_conversation(conversation_id: str, request: Request):
     """Get conversation detail with all messages."""
-    messages = await broker.get_messages(conversation_id)
+    messages = await _readable_conversation(request, conversation_id)
     if not messages:
         return JSONResponse({"error": "Conversation not found"}, status_code=404)
     return {"conversation_id": conversation_id, "messages": messages}
