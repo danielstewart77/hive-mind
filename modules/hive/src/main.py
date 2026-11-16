@@ -768,6 +768,11 @@ async def bots_page(request: Request):
     return await _console_page(request, "bots.html")
 
 
+@app.get("/usage", response_class=HTMLResponse)
+async def usage_page(request: Request):
+    return await _console_page(request, "usage.html")
+
+
 # Registered before /minds/{mind_id}: FastAPI matches in declaration order,
 # so the parameterised route would otherwise swallow this literal one.
 @app.get("/minds/new", response_class=HTMLResponse)
@@ -3171,6 +3176,26 @@ async def _bot_row(mind: dict, surface: str) -> dict:
         str(mind.get("mind_id") or mind.get("id") or ""), surface
     )
     return row
+
+
+@app.get("/api/usage")
+async def api_usage(days: int = 30, user: dict = Depends(require_auth)):
+    """What the signed-in user's minds cost over the last `days` days; to an
+    admin, every person's and the hive's own services' (story 2.1.17)."""
+    import usage_data
+
+    days = max(1, min(int(days), 365))
+    try:
+        rows = await usage_data.proxy_usage(days)
+    except usage_data.UsageUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    minds = await route_access.registered_minds()
+    if minds is None:
+        raise HTTPException(
+            status_code=503,
+            detail="the hive's registry could not be read, so usage cannot be "
+                   "put under the people it belongs to")
+    return {"days": days, **usage_data.usage_by_person(rows, minds, user)}
 
 
 @app.get("/api/bots")

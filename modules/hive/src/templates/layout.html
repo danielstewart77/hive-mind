@@ -50,6 +50,7 @@
         <div class="console-nav" role="navigation" aria-label="Main navigation">
             <a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
             <a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>
+            <a href="/usage" class="console-nav-link {% if path.startswith('/usage') %}is-active{% endif %}"><i data-lucide="gauge"></i><span>Usage</span></a>
             {% if current_user.is_admin %}
             <a href="/roles" class="console-nav-link {% if path.startswith('/roles') %}is-active{% endif %}"><i data-lucide="badge-check"></i><span>Roles</span></a>
             <a href="/bots" class="console-nav-link {% if path.startswith('/bots') %}is-active{% endif %}"><i data-lucide="bot"></i><span>Bots</span></a>
