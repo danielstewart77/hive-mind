@@ -399,11 +399,12 @@ async def _deliver_text(
 ) -> int:
     """Deliver to the mind's own person; the operator only when there is none.
 
-    A reminder belongs to whoever asked for it. But the bot this process
-    holds may have no conversation with that person — their mind's bot is a
-    different bot — and a refusal there must not end as a reminder that
-    simply never arrives. So a refused delivery is logged and repeated to the
-    stack-wide chat, which is where every one of these went before.
+    A reminder belongs to whoever asked for it. A refused delivery to a chat
+    that is not the operator's is somebody else's claim, so it is logged and
+    not repeated anywhere (story 2.1.19). The operator chat is used only when
+    no claim was found at all - and this scheduler can only fire for minds its
+    own credential's user owns (comms refuses it a session on anyone else's),
+    so that chat is never another person's reminder's destination.
 
     Answers with the chat the words actually reached, or zero if none did, so
     anything following them lands in the same place rather than resolving the

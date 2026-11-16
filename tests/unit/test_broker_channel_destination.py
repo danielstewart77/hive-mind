@@ -91,8 +91,11 @@ def store(monkeypatch) -> Store:
         recorded.replies.append(content)
 
     async def mind_row(mind_id):
-        # Owned, as every mind is: the channel's reader is its owner.
-        return {"name": mind_id, "model": "model-for-tests", "owner": "sloan"}
+        # Owned, as every mind is: the channel's reader is its owner. The
+        # caller belongs to somebody else, so a prompt naming the caller's
+        # owner instead of the channel's is caught.
+        owner = "sloan" if mind_id == SKIPPY else "daniel"
+        return {"name": mind_id, "model": "model-for-tests", "owner": owner}
 
     async def claim(mind_id):
         return "839112201109110825"
