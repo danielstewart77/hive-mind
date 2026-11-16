@@ -424,11 +424,14 @@ def _dsh_skill_log(path: Path, arguments: str) -> Path:
 
 @pytest.mark.parametrize("arguments,counted", [
     ('{"name": "take-a-task"}', {"take-a-task"}),
-    ('{"name": "hivemind:planka"}', {"planka"}),
+    ('{"name": "hivemind:planka"}', set()),
+    ('{"name": "Take_A_Task"}', set()),
     ('{"name": ', set()),
     ('"take-a-task"', set()),
-    ('{"name": "hivemind:"}', set()),
-], ids=["bare", "namespaced", "not-json", "not-an-object", "namespace-only"])
+    ('[' * 100_000, set()),
+    ('{"name": 5}', set()),
+], ids=["bare", "namespaced-refused", "pattern-refused", "not-json",
+        "not-an-object", "nested-too-deep", "name-not-text"])
 def test_a_dsh_skill_call_counts_as_a_use_of_that_skill(
         mind, tmp_path, monkeypatch, arguments, counted):
     from core.skill_telemetry_detect import detect_claude_skills
