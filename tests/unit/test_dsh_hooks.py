@@ -407,3 +407,38 @@ def test_only_the_minds_own_turn_becomes_a_training_row_and_a_skill_use(
 
     assert wrote is harvested
     assert detect_claude_skills(translated) == ({"backlog"} if harvested else set())
+
+
+def _dsh_skill_log(path: Path, arguments: str) -> Path:
+    """A dsh log whose one reply calls the skill tool as dsh writes it."""
+    return _transcript(path, [
+        {"type": "session", "id": path.stem, "delegationDepth": 0},
+        {"type": "user/message",
+         "data": {"content": [{"type": "text", "text": "what should I pick up"}]}},
+        {"type": "assistant/message",
+         "data": {"message": {"content": [
+             {"type": "tool-call", "id": "call_1", "name": "skill", "arguments": arguments}],
+             "source": {"model": "m"}}, "usage": {}}},
+    ])
+
+
+@pytest.mark.parametrize("arguments,counted", [
+    ('{"name": "take-a-task"}', {"take-a-task"}),
+    ('{"name": "hivemind:planka"}', set()),
+    ('{"name": "Take_A_Task"}', set()),
+    ('{"name": ', set()),
+    ('"take-a-task"', set()),
+    ('[' * 100_000, set()),
+    ('{"name": 5}', set()),
+], ids=["bare", "namespaced-refused", "pattern-refused", "not-json",
+        "not-an-object", "nested-too-deep", "name-not-text"])
+def test_a_dsh_skill_call_counts_as_a_use_of_that_skill(
+        mind, tmp_path, monkeypatch, arguments, counted):
+    from core.skill_telemetry_detect import detect_claude_skills
+    dsh_transcript = importlib.import_module("dsh_transcript")
+    log = _dsh_skill_log(tmp_path / "session.jsonl.zstd", arguments)
+    monkeypatch.setattr(dsh_transcript, "read_log_lines",
+                        lambda path: Path(path).read_text().splitlines())
+    translated = dsh_transcript.resolve({"session_id": "s-1", "transcript_path": str(log)})
+
+    assert detect_claude_skills(translated) == counted
