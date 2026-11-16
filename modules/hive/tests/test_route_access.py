@@ -423,6 +423,9 @@ def test_the_board_bearer_is_attached_to_the_board_and_no_others():
         "POST /api/kanban/stories",
         "POST /api/kanban/tasks",
         "PATCH /api/kanban/{kind}/{record_id}",
+        "GET /api/kanban/items/{record_id}/attachments",
+        "POST /api/kanban/items/{record_id}/attachments",
+        "GET /api/kanban/items/{record_id}/attachments/{attachment_id}",
     }
 
 

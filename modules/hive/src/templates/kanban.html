@@ -145,17 +145,19 @@
       return 'failed';
     }
     const beneath=[counts.features&&noun(counts.features,'feature','features'),counts.stories&&noun(counts.stories,'story','stories'),counts.tasks&&noun(counts.tasks,'task','tasks')].filter(Boolean);
-    const warning=beneath.length
-      ? `Delete "${record.title}" and the ${beneath.join(' and ')} beneath it? This cannot be undone.`
-      : `Delete "${record.title}"? This cannot be undone.`;
+    // The files go with the rows they are attached to.
+    const files=counts.attachments?` ${noun(counts.attachments,"attachment","attachments")} will be deleted with it.`:"";
+    const warning=(beneath.length
+      ? `Delete "${record.title}" and the ${beneath.join(' and ')} beneath it?`
+      : `Delete "${record.title}"?`)+`${files} This cannot be undone.`;
     return window.confirm(warning) ? 'yes' : 'no';
   }
   async function removeItem(kind,id){
     try{
       const result=await request(`/api/kanban/${kind}/${encodeURIComponent(id)}`,'DELETE');
       const gone=result&&result.removed;
-      const tail=gone&&(gone.features||gone.stories||gone.tasks)
-        ? ` Also removed ${[gone.features&&noun(gone.features,'feature','features'),gone.stories&&noun(gone.stories,'story','stories'),gone.tasks&&noun(gone.tasks,'task','tasks')].filter(Boolean).join(' and ')}.`
+      const tail=gone&&(gone.features||gone.stories||gone.tasks||gone.attachments)
+        ? ` Also removed ${[gone.features&&noun(gone.features,'feature','features'),gone.stories&&noun(gone.stories,'story','stories'),gone.tasks&&noun(gone.tasks,'task','tasks'),gone.attachments&&noun(gone.attachments,'attachment','attachments')].filter(Boolean).join(' and ')}.`
         : '';
       await reload(`Deleted successfully.${tail}`);
     }catch(err){await reload(`Could not delete: ${err.message}`);}

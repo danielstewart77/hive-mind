@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import auth
 import console_access
@@ -60,6 +61,7 @@ import sentinel_review
 import sso
 import store
 from hive_data import core
+from hive_data.errors import HiveDataError
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
@@ -999,6 +1001,132 @@ async def api_kanban_delete(kind: str, record_id: str, user: dict = Depends(requ
         raise HTTPException(status_code=404, detail="Kanban resource not found")
     actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
     return await _kanban_call(getattr(kanban_data, f"delete_{_SINGULAR[actual]}"), record_id)
+
+
+# ── the files a work item carries ──────────────────────────────────────
+#
+# Keyed by the item's id alone, under `/items/` rather than the kind-named
+# collections above: the kind is never looked up, so a kind the board gains
+# later carries attachments with no change here. See `kanban_data`.
+
+
+def _attachment_disposition(disposition: str, filename: str) -> str:
+    """A Content-Disposition header for any file name.
+
+    Headers are Latin-1. A name in another script - or a macOS screenshot's,
+    which carries a narrow no-break space before "PM" - written into the
+    header as it stands fails every download of a file that was kept. So the
+    plain `filename` is an ASCII stand-in and the real name travels in the
+    RFC 5987 form every current browser reads first.
+    """
+    fallback = "".join(
+        c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in filename
+    ) or "attachment"
+    quoted = urllib.parse.quote(filename, safe="")
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"
+
+
+@app.get("/api/kanban/items/{record_id}/attachments")
+async def api_kanban_attachments(
+        record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """This item's attachments, oldest first, without their bytes."""
+    del user
+    return await _kanban_call(kanban_data.list_attachments, record_id)
+
+
+#: What a multipart body may carry beyond the file itself: the boundaries,
+#: the part headers and the file's name. Generous, because a refusal on this
+#: margin would be a file under the cap refused for its envelope.
+_ATTACHMENT_ENVELOPE_BYTES = 64 * 1024
+
+
+@app.post("/api/kanban/items/{record_id}/attachments")
+async def api_kanban_attachment_upload(
+        record_id: str, request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """Keep a file against this item, and answer with what was kept.
+
+    Anything but a 200 means the file was not kept, and says why: an empty
+    file, one over the cap, an item that is not there, or a store that
+    refused the write.
+
+    The form is parsed here rather than declared as an `UploadFile`
+    parameter, because a declared one is parsed - the whole body spooled to
+    disk - before this runs. A body whose declared length is already past
+    the cap is refused unread. One sent without a length (chunked) is still
+    spooled by the parser before the cap refuses it, as a mind's picture is;
+    a browser's upload always declares one.
+    """
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > (
+            kanban_data.MAX_ATTACHMENT_BYTES + _ATTACHMENT_ENVELOPE_BYTES):
+        raise HTTPException(
+            status_code=413,
+            detail=(f"That file is over the {kanban_data.MAX_ATTACHMENT_BYTES}-byte "
+                    "limit. It was not kept."),
+        )
+    try:
+        form = await request.form(max_files=1, max_fields=8)
+    except Exception as exc:  # starlette raises its own parse errors
+        raise HTTPException(
+            status_code=400, detail=f"The upload could not be read: {exc}"
+        ) from exc
+    try:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(
+                status_code=400, detail="No file was sent: the form field is `file`.")
+        data = await file.read(kanban_data.MAX_ATTACHMENT_BYTES + 1)
+        filename = file.filename
+    finally:
+        # The spooled part is a temporary file; closed here rather than left
+        # to whenever the request object is collected.
+        await form.close()
+    try:
+        kept = await _kanban_call(
+            kanban_data.add_attachment, record_id, filename, data)
+    except HiveDataError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The file was not kept: the board's store refused it ({exc})",
+        ) from exc
+    log_event(
+        log, "kanban.attachment.added", **_actor_fields(user),
+        item_id=record_id, attachment_id=kept["id"],
+        size_bytes=kept["size_bytes"], content_type=kept["content_type"],
+    )
+    return kept
+
+
+@app.get("/api/kanban/items/{record_id}/attachments/{attachment_id}")
+async def api_kanban_attachment(
+        record_id: str, attachment_id: int,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """One attachment's bytes, as the type its own bytes decided.
+
+    An image is shown in place; anything else is only ever a download, so a
+    kept HTML or SVG file never runs as a page on the console's origin.
+    Immutable for a year: an attachment is never altered once kept, and its
+    id is never reused.
+    """
+    del user
+    if not 1 <= attachment_id < 2**63:
+        # No row's id: the column is a bigint, and the driver refuses a
+        # larger one as an error rather than as nothing found.
+        raise HTTPException(status_code=404, detail=f"Attachment not found: {attachment_id}")
+    kept = await _kanban_call(kanban_data.get_attachment, record_id, attachment_id)
+    disposition = "inline" if kept["is_image"] else "attachment"
+    return Response(
+        content=kept["content"],
+        media_type=kept["content_type"],
+        headers={
+            "Content-Disposition": _attachment_disposition(disposition, kept["filename"]),
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
 
 
 @app.get("/api/minds/install-options")
