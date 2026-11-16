@@ -28,17 +28,20 @@ async def _number(inspector, item_id: str) -> int:
 
 async def test_each_new_item_of_any_kind_takes_the_next_number_of_one_count(
         connected, inspector):
-    epic, feature, story = _id("e"), _id("f"), _id("s")
+    epic, feature, story, task = _id("e"), _id("f"), _id("s"), _id("t")
     await board.create_work_item(epic, "epic", "an epic", 1)
     await board.create_work_item(feature, "feature", "a feature", 1,
                                  parent_id=epic)
     await board.create_work_item(story, "story", "a story", 1,
                                  parent_id=feature, status="backlog")
+    await board.create_work_item(task, "task", "a task on its own", 1)
 
     first = await _number(inspector, epic)
     assert isinstance(first, int)
     assert [await _number(inspector, feature),
-            await _number(inspector, story)] == [first + 1, first + 2]
+            await _number(inspector, story),
+            await _number(inspector, task)] == [first + 1, first + 2,
+                                                first + 3]
     # The layer's own read carries it, which is what the console shows.
     assert (await board.work_item(story))["item_number"] == first + 2
 
