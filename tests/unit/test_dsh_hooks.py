@@ -290,8 +290,11 @@ _DELEGATE = {"origin": "subagent", "parentSession": "conv-parent", "delegationDe
 _OVER = {"tokens": 150, "kind": "usage", "model": "m", "window": 1000}
 
 
+@pytest.mark.parametrize("header", [
+    _DELEGATE, {"origin": "subagent"}, {"parentSession": "conv-parent"}],
+    ids=["both", "origin-only", "parent-only"])
 def test_a_delegates_turn_over_the_threshold_reports_and_arms_nothing(
-        mind, service, monkeypatch, tmp_path):
+        mind, service, monkeypatch, tmp_path, header):
     seen, replies = service
     replies["/sessions/arm-rotation"] = {"ok": True}
     monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
@@ -299,7 +302,7 @@ def test_a_delegates_turn_over_the_threshold_reports_and_arms_nothing(
 
     assessed = rotation_check.assess({
         "session_id": "child-1", "context": _OVER,
-        "transcript_path": _log(tmp_path / "child-1.jsonl", _DELEGATE)})
+        "transcript_path": _log(tmp_path / "child-1.jsonl", header)})
 
     assert assessed is None
     assert seen == []
@@ -320,15 +323,17 @@ def test_the_minds_own_turn_over_the_threshold_is_still_reported_and_armed(
     assert [r["path"] for r in seen] == ["/sessions/context", "/sessions/arm-rotation"]
 
 
+@pytest.mark.parametrize("where", ["gone.jsonl", "", "nul\x00.jsonl"],
+                         ids=["missing", "no-path", "unusable-path"])
 def test_a_turn_whose_log_cannot_be_read_is_judged_as_the_minds(
-        mind, service, monkeypatch, tmp_path):
+        mind, service, monkeypatch, tmp_path, where):
     seen, _ = service
     monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
     rotation_check = importlib.import_module("rotation_check")
 
     assessed = rotation_check.assess({
         "session_id": "conv-1", "context": _OVER,
-        "transcript_path": str(tmp_path / "gone.jsonl")})
+        "transcript_path": str(tmp_path / where) if where else ""})
 
     assert assessed["rotate"] is True
     assert [r["path"] for r in seen] == ["/sessions/context"]
@@ -348,3 +353,11 @@ def test_a_goal_round_rotates_only_for_the_minds_own_turn(
     rotation_check.main()
 
     assert capsys.readouterr().out.strip() == answers
+
+
+def test_a_harvester_still_takes_an_unreadable_log_as_not_the_minds(mind, tmp_path):
+    dsh_transcript = importlib.import_module("dsh_transcript")
+
+    assert dsh_transcript.is_delegate_log(tmp_path / "gone.jsonl") is True
+    assert dsh_transcript.is_delegate_log(
+        Path(_log(tmp_path / "own.jsonl", {"delegationDepth": 0}))) is False

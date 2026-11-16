@@ -101,7 +101,9 @@ def log_origin(path: Path) -> str:
     """
     try:
         header = session_header(read_log_lines(path))
-    except UnreadableLog:
+    except (UnreadableLog, OSError, ValueError):
+        # ValueError: a path no filesystem call accepts, such as one holding
+        # a NUL. Still unreadable, never a crash inside a Stop hook.
         return "unknown"
     if header.get("origin") == "subagent" or header.get("parentSession"):
         return "delegate"
