@@ -31,9 +31,11 @@ def _page(client, path):
         yield page
 
 
-# Every row of the backlog tree, top to bottom: its id and the label it shows.
+# Every row of the backlog tree, top to bottom: its id, and its Order cell and
+# Name read together as one label.
 _TREE = """() => Array.from(document.querySelectorAll('#backlog-mount .kanban-item[data-id]'))
-  .map(row => [row.dataset.id, row.querySelector('.kanban-item-title').textContent])"""
+  .map(row => [row.dataset.id,
+    `${row.querySelector('.kanban-col-order').textContent} ${row.querySelector('.kanban-item-title').textContent}`])"""
 
 # The cards of one board lane, top to bottom.
 _LANE = """status => Array.from(
