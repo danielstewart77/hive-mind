@@ -6,6 +6,7 @@ whole point of the states — that a service which did not answer is never
 rendered as a credential that was refused.
 """
 
+from unittest.mock import AsyncMock
 import os
 import sys
 import time
@@ -305,7 +306,7 @@ class TestWhatALiveCheckFinds:
             _mind("gone", gateway="http://gone:8420"),
         ]
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["good:8420"] = (200, {"stored": True, "accepted": True, "login": "dan"})
         network["bad:8420"] = (200, {"stored": True, "accepted": False, "detail": "no"})
@@ -329,7 +330,7 @@ class TestWhatALiveCheckFinds:
     ) -> None:
         _patch_env_files(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["cypher:8420"] = (
             200,
@@ -354,7 +355,7 @@ class TestWhatALiveCheckFinds:
         """One remedy is a redeploy and the other is a trip to the machine."""
         _patch_env_files(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["old:8420"] = (404, {})
         network["down:8420"] = httpx.ConnectTimeout("timed out")
@@ -373,7 +374,7 @@ class TestWhatALiveCheckFinds:
         the operator off to revoke one that is fine."""
         _patch_env_files(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["cypher:8420"] = (401, {"error": "unauthorized"})
 
@@ -524,7 +525,7 @@ class TestWhatAHolderSaysAboutItself:
         none."""
         _patch_env_files(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["bob:8420"] = (
             200,
@@ -550,7 +551,7 @@ class TestWhatAHolderSaysAboutItself:
         one."""
         _patch_env_files(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["cypher:8420"] = (
             200,
@@ -657,7 +658,7 @@ class TestWhatACheckHandsBack:
         is a Value column that stays empty over a token that is stored."""
         _patch_env_files(monkeypatch, tmp_path)
         monkeypatch.setattr(
-            "mind_runtime.admin_headers", lambda *_a: {"Authorization": "Bearer a"}
+            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         network["cypher:8420"] = (
             200,

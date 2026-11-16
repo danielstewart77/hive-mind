@@ -76,6 +76,7 @@ from capability_install import (
     inference_proxy_status,
 )
 from config import BASE_DIR
+import configuration_data as configuration_data_module
 from configuration_data import (
     DEFAULT_OLLAMA_BASE_URL,
     OWNER_RE,
@@ -1030,6 +1031,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
 
     if await _mind_name_is_taken(name):
         raise HTTPException(status_code=409, detail="That Mind name is already taken")
+    if await asyncio.to_thread(configuration_data_module.name_is_a_host_already, name):
+        raise HTTPException(
+            status_code=409,
+            detail="That name is already an address on the hive's network",
+        )
     held_by = await holder_credentials.name_held_by_something_else(name)
     if held_by:
         raise HTTPException(
@@ -1353,7 +1359,7 @@ async def _probe_mind_host(mind: dict) -> dict:
     # unreachable because of one unset variable on this box, which is the
     # exact conflation `host_status_for` exists to prevent.
     try:
-        headers = mind_runtime.admin_headers(gateway)
+        headers = await mind_runtime.admin_headers(gateway)
     except HTTPException as exc:
         return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
                 "reading": None, "error": str(exc.detail)}

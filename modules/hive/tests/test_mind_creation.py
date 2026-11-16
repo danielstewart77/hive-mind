@@ -314,6 +314,7 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
         f"{host}/session_token:{own}/session_token:ro",
         f"{host}/{home}:{own}/{home}:rw",
         f"{host}/data:{own}/data:rw",
+        f"{host}/reference:{own}/reference:rw",
     ]
     # The published tree, at the branch it is published on, and the stage
     # whose code is root's.
@@ -339,20 +340,40 @@ def test_registering_a_new_mind_hands_the_gateway_the_credential_it_will_present
 
 def test_the_console_never_sends_its_admin_credential_to_a_locked_down_mind(client, monkeypatch):
     """However that mind's address is written: it can re-register itself with
-    the gateway at any address it listens on, so the guard is where the
-    address leads."""
+    the gateway at any address - a server of its own, or another mind's,
+    which the console would then act on for it. So the admin credential is
+    withheld from every address its registry row claims, and from wherever
+    its container answers."""
+    import asyncio
+    import route_access
     import mind_runtime
 
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
     assert _create(client).status_code == 200
-    where = {"atlas": {"10.9.0.7"}, "10.9.0.7": {"10.9.0.7"}, "bob": {"10.9.0.2"}}
+    mind_id = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())["mind_id"]
+    registry = [
+        {"id": mind_id, "name": "atlas", "gateway_url": "http://ada:8420"},
+        {"id": "ada-id", "name": "ada", "gateway_url": "http://ada:8420"},
+        {"id": "bob-id", "name": "bob", "gateway_url": "http://bob:8420"},
+    ]
+    monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
+    where = {"atlas": {"10.9.0.7"}, "10.9.0.7": {"10.9.0.7"}, "ada": {"10.9.0.3"},
+             "bob": {"10.9.0.2"}}
     monkeypatch.setattr(configuration_data, "_addresses", lambda host: where.get(host, set()))
 
-    for url in ("http://atlas:8420", "http://10.9.0.7:7777"):
+    for url in ("http://ada:8420", "http://atlas:8420", "http://10.9.0.7:7777"):
         with pytest.raises(main_mod.HTTPException) as refused:
-            mind_runtime.admin_headers(url)
-        assert refused.value.status_code == 503
-    assert mind_runtime.admin_headers("http://bob:8420") == {"Authorization": "Bearer admin-token"}
+            asyncio.run(mind_runtime.admin_headers(url))
+        assert refused.value.status_code == 503, url
+    assert asyncio.run(mind_runtime.admin_headers("http://bob:8420")) == {
+        "Authorization": "Bearer admin-token"}
+
+
+def test_a_mind_cannot_be_named_after_an_address_on_the_hives_network(client):
+    """Its name is its address there: a mind called hive-comms would answer
+    some of the calls meant for the gateway."""
+    assert _create(client, name="hive-comms").status_code == 409
+    assert not (client.minds_dir / "hive-comms").exists()
 
 
 def test_a_create_that_fails_part_way_leaves_nothing_and_can_be_run_again(client, monkeypatch):

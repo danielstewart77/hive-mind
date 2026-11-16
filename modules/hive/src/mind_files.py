@@ -77,7 +77,7 @@ async def _call(
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.request(
-                method, url, headers=admin_headers(url), json=json, params=params
+                method, url, headers=await admin_headers(url), json=json, params=params
             )
     except httpx.HTTPError as exc:
         raise HTTPException(

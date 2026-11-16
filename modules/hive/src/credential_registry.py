@@ -637,7 +637,7 @@ async def check_mind(credential: str, holder: str, gateway_url: str) -> _Checked
     try:
         from mind_runtime import admin_headers
 
-        headers = admin_headers(base)
+        headers = await admin_headers(base)
     except Exception as exc:  # noqa: BLE001
         # No admin token on this console. That is this console's problem, not
         # the holder's, and must not read as a mind that is down.

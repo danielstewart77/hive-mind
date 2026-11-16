@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import os
 import re
 import secrets
@@ -383,6 +385,8 @@ def scaffold_internal_mind(
                     f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
                     f"{host}/{shape['config_dir_name']}:{config_dir}:rw",
                     f"{host}/data:{own}/data:rw",
+                    # Its skills: synced here at start and installed into.
+                    f"{host}/reference:{own}/reference:rw",
                 ],
                 "restart": "unless-stopped",
                 "extra_hosts": ["host.docker.internal:host-gateway"],
@@ -414,7 +418,7 @@ def scaffold_internal_mind(
         runtime_path.write_text(yaml.safe_dump(runtime, sort_keys=False))
         compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
         # What the mind writes, and only that, is the mind's.
-        for writable in (shape["config_dir_name"], "data"):
+        for writable in (shape["config_dir_name"], "data", "reference"):
             (mind_dir / writable).mkdir()
             os.chown(mind_dir / writable, uid, uid)
         token_path = mind_dir / SESSION_TOKEN_FILENAME
@@ -462,31 +466,92 @@ def locked_down_minds() -> list[str]:
     return [name for name in names if is_locked_down(name)]
 
 
-def reaches_locked_down_mind(url: str) -> bool:
-    """Whether a request to `url` would land on a locked-down mind's container.
+def name_is_a_host_already(name: str) -> bool:
+    """A name another container on this network already answers to, or one
+    the hive's own services are named in. A mind's name is its address on
+    that network, so a mind named `hive-comms` would answer some of the calls
+    meant for the gateway - the admin credential among them."""
+    lowered = (name or "").strip().lower()
+    return lowered.startswith("hive") or bool(_addresses(lowered))
 
-    By where the address resolves, not by its name: such a mind can
-    re-register itself with the gateway under its own credential at any
-    address it listens on, and the console reads minds' addresses from the
-    gateway. No locked-down mind, no lookup. An address that cannot be
-    resolved while one exists is answered yes, so the caller withholds.
+
+def _locked_identities() -> tuple[set[str], set[str]]:
+    names = set(locked_down_minds())
+    ids = set()
+    for name in names:
+        try:
+            loaded = yaml.safe_load(
+                (HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml").read_text()) or {}
+            ids.add(str(loaded.get("mind_id") or ""))
+        except (OSError, yaml.YAMLError):
+            continue
+    ids.discard("")
+    return names, ids
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit((url or "").strip())
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
+
+
+async def withholds_admin_credential(url: str) -> bool:
+    """Whether the hive's admin credential must not be sent to `url`.
+
+    Yes when the address is one a locked-down mind's registry row claims,
+    whatever it is: such a mind can re-register itself with the gateway at
+    any address - a server of its own, or another mind's, which the console
+    would then act on for it. And yes when the address leads to such a
+    mind's container. No locked-down mind, no question. A registry that
+    cannot be read while one exists is answered yes.
     """
-    locked = locked_down_minds()
-    if not locked:
+    names, ids = _locked_identities()
+    if not names:
         return False
-    host = urllib.parse.urlsplit(url or "").hostname or ""
+    import route_access
+
+    rows = await route_access.registered_minds()
+    if rows is None:
+        return True
+    target = _origin(url)
+    for row in rows:
+        mine = str(row.get("name") or "").lower() in names or str(row.get("id") or "") in ids
+        if mine and _origin(str(row.get("gateway_url") or "")) == target:
+            return True
+    return await asyncio.to_thread(_leads_to_locked_container, target[1], names)
+
+
+def _leads_to_locked_container(host: str, names: set[str]) -> bool:
     target = _addresses(host)
     if not target:
         return True
-    for name in locked:
+    for name in names:
         if target & (_addresses(name) | _addresses(f"hive-mind-{name}")):
             return True
     return False
 
 
 def _addresses(host: str) -> set[str]:
+    """Where a host resolves, each address in one form (an IPv4 address
+    written as IPv6 is the IPv4 address)."""
     if not host:
         return set()
+    try:
+        found = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except OSError:
+        return set()
+    normal = set()
+    for raw in found:
+        try:
+            address = ipaddress.ip_address(raw.split("%", 1)[0])
+        except ValueError:
+            continue
+        mapped = getattr(address, "ipv4_mapped", None)
+        normal.add(str(mapped or address))
+    return normal
     try:
         return {info[4][0] for info in socket.getaddrinfo(host, None)}
     except OSError:
