@@ -16,8 +16,8 @@ import pty
 import shutil
 import struct
 import subprocess
-import tomllib
 import termios
+import tomllib
 from pathlib import Path
 from typing import Any
 
