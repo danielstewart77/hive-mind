@@ -176,7 +176,15 @@ def delegate_turn(event: dict) -> bool:
     judged as the mind's, so the mind's own rotation never stops on it.
     """
     raw = str(event.get("transcript_path") or "")
-    return bool(raw) and dsh_transcript.log_origin(Path(raw)) == "delegate"
+    if not raw:
+        return False
+    origin = dsh_transcript.log_origin(Path(raw))
+    if origin == "unknown":
+        # Judged as the mind's. Logged, because a delegate's log too large to
+        # read in time lands here too, and that case should be visible.
+        hive.log(NAME, f"unreadable log judged as the mind's "
+                       f"sid={event.get('session_id')} path={raw}")
+    return origin == "delegate"
 
 
 def assess(event: dict) -> dict | None:
