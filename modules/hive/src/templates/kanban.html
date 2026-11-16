@@ -156,8 +156,8 @@
     try{
       const result=await request(`/api/kanban/${kind}/${encodeURIComponent(id)}`,'DELETE');
       const gone=result&&result.removed;
-      const tail=gone&&(gone.features||gone.stories||gone.tasks)
-        ? ` Also removed ${[gone.features&&noun(gone.features,'feature','features'),gone.stories&&noun(gone.stories,'story','stories'),gone.tasks&&noun(gone.tasks,'task','tasks')].filter(Boolean).join(' and ')}.`
+      const tail=gone&&(gone.features||gone.stories||gone.tasks||gone.attachments)
+        ? ` Also removed ${[gone.features&&noun(gone.features,'feature','features'),gone.stories&&noun(gone.stories,'story','stories'),gone.tasks&&noun(gone.tasks,'task','tasks'),gone.attachments&&noun(gone.attachments,'attachment','attachments')].filter(Boolean).join(' and ')}.`
         : '';
       await reload(`Deleted successfully.${tail}`);
     }catch(err){await reload(`Could not delete: ${err.message}`);}

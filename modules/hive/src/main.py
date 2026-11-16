@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import auth
 import console_access
@@ -1034,21 +1035,57 @@ async def api_kanban_attachments(
     return await _kanban_call(kanban_data.list_attachments, record_id)
 
 
+#: What a multipart body may carry beyond the file itself: the boundaries,
+#: the part headers and the file's name. Generous, because a refusal on this
+#: margin would be a file under the cap refused for its envelope.
+_ATTACHMENT_ENVELOPE_BYTES = 64 * 1024
+
+
 @app.post("/api/kanban/items/{record_id}/attachments")
 async def api_kanban_attachment_upload(
-        record_id: str, file: UploadFile,
+        record_id: str, request: Request,
         user: dict = Depends(require_admin_or_route_bearer)):
     """Keep a file against this item, and answer with what was kept.
 
     Anything but a 200 means the file was not kept, and says why: an empty
     file, one over the cap, an item that is not there, or a store that
-    refused the write. Read to one byte past the cap and no further, so an
-    oversized file is refused without being held whole.
+    refused the write.
+
+    The form is parsed here rather than declared as an `UploadFile`
+    parameter, because a declared one is parsed - the whole body spooled to
+    disk - before this runs. A body whose declared length is already past
+    the cap is refused unread. One sent without a length (chunked) is still
+    spooled by the parser before the cap refuses it, as a mind's picture is;
+    a browser's upload always declares one.
     """
-    data = await file.read(kanban_data.MAX_ATTACHMENT_BYTES + 1)
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > (
+            kanban_data.MAX_ATTACHMENT_BYTES + _ATTACHMENT_ENVELOPE_BYTES):
+        raise HTTPException(
+            status_code=413,
+            detail=(f"That file is over the {kanban_data.MAX_ATTACHMENT_BYTES}-byte "
+                    "limit. It was not kept."),
+        )
+    try:
+        form = await request.form(max_files=1, max_fields=8)
+    except Exception as exc:  # starlette raises its own parse errors
+        raise HTTPException(
+            status_code=400, detail=f"The upload could not be read: {exc}"
+        ) from exc
+    try:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(
+                status_code=400, detail="No file was sent: the form field is `file`.")
+        data = await file.read(kanban_data.MAX_ATTACHMENT_BYTES + 1)
+        filename = file.filename
+    finally:
+        # The spooled part is a temporary file; closed here rather than left
+        # to whenever the request object is collected.
+        await form.close()
     try:
         kept = await _kanban_call(
-            kanban_data.add_attachment, record_id, file.filename, data)
+            kanban_data.add_attachment, record_id, filename, data)
     except HiveDataError as exc:
         raise HTTPException(
             status_code=503,
@@ -1074,6 +1111,10 @@ async def api_kanban_attachment(
     id is never reused.
     """
     del user
+    if not 1 <= attachment_id < 2**63:
+        # No row's id: the column is a bigint, and the driver refuses a
+        # larger one as an error rather than as nothing found.
+        raise HTTPException(status_code=404, detail=f"Attachment not found: {attachment_id}")
     kept = await _kanban_call(kanban_data.get_attachment, record_id, attachment_id)
     disposition = "inline" if kept["is_image"] else "attachment"
     return Response(

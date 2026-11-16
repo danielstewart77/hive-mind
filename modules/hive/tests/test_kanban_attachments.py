@@ -68,6 +68,17 @@ def test_an_attached_screenshot_comes_back_with_its_item_and_no_other(client):
         f"/api/kanban/items/{feature['id']}/attachments/{reopened[0]['id']}"
     ).status_code == 404
 
+    # A second item's own image comes back as its own, with its own type.
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+    assert _attach(client, epic["id"], "board.png", png).status_code == 200
+    on_epic = client.get(f"/api/kanban/items/{epic['id']}/attachments").json()
+    assert [a["filename"] for a in on_epic] == ["board.png"]
+    served = client.get(f"/api/kanban/items/{epic['id']}/attachments/{on_epic[0]['id']}")
+    assert (served.content, served.headers["content-type"]) == (png, "image/png")
+    assert [a["filename"] for a in client.get(
+        f"/api/kanban/items/{story['id']}/attachments").json()] == [
+        "kanban-pattern-azure-devops-backlog.jpg"]
+
 
 async def test_the_item_record_carries_every_file_attached_to_it_in_order():
     epic = await kanban_data.create_epic("Epic with two files")
@@ -75,6 +86,9 @@ async def test_the_item_record_carries_every_file_attached_to_it_in_order():
                                              b"\x89PNG\r\n\x1a\nfirst")
     second = await kanban_data.add_attachment(epic["id"], "notes.txt",
                                               b"second file")
+    elsewhere = await kanban_data.create_epic("Another epic")
+    await kanban_data.add_attachment(elsewhere["id"], "not-yours.png",
+                                     b"\x89PNG\r\n\x1a\nother")
 
     opened = await kanban_data.find_item(epic["id"])
     assert [(a["id"], a["filename"], a["is_image"])

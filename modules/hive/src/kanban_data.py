@@ -34,6 +34,7 @@ the only delete button.
 from __future__ import annotations
 
 import secrets
+import unicodedata
 from typing import Any
 
 import store
@@ -496,6 +497,11 @@ _IMAGE_MAGIC = (
 )
 DOWNLOAD_TYPE = "application/octet-stream"
 
+#: The characters that reorder the text around them.
+_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069")
+
 
 def attachment_type(data: bytes) -> str:
     """What a file is served as, from its own bytes and never its name."""
@@ -512,7 +518,11 @@ def _attachment_name(value: Any) -> str:
     name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
     if not name:
         return "attachment"
-    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+    if any(unicodedata.category(c) == "Cc" or c in _BIDI_CONTROLS
+           for c in name):
+        # A control character is not a name anyone can read, and a bidi
+        # override makes one read as another: "\u202egpj.exe" shows on the
+        # page as "exe.jpg".
         raise ValueError(
             "that file name contains a control character, which no name "
             "kept here will take. Rename the file and attach it again.")
@@ -550,15 +560,19 @@ async def add_attachment(record_id: str, filename: Any,
             f"that file is {len(data)} bytes; the limit is "
             f"{MAX_ATTACHMENT_BYTES}. It was not kept.")
     name = _attachment_name(filename)
-    if not await _exists(record_id):
-        raise KeyError(f"Item not found: {record_id}")
-    try:
-        row = await store.add_attachment(
-            record_id, name, attachment_type(data), data)
-    except store.UnknownReference as exc:
-        # Deleted between the check above and the write. The file was not
-        # kept, and the item it was meant for is gone.
-        raise KeyError(f"Item not found: {record_id}") from exc
+    # Under the board's lock, though it reorders nothing: a delete counts
+    # the files it is about to take and then takes them, and a file landing
+    # between the two is a file gone that the delete never reported.
+    async with store.board_transaction():
+        if not await _exists(record_id):
+            raise KeyError(f"Item not found: {record_id}")
+        try:
+            row = await store.add_attachment(
+                record_id, name, attachment_type(data), data)
+        except store.UnknownReference as exc:
+            # Removed behind the board's back between the check and the
+            # write. The file was not kept, and its item is gone.
+            raise KeyError(f"Item not found: {record_id}") from exc
     return _attachment_record(row)
 
 
