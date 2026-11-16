@@ -369,6 +369,31 @@ def test_the_console_never_sends_its_admin_credential_to_a_locked_down_mind(clie
         "Authorization": "Bearer admin-token"}
 
 
+def test_the_console_withholds_its_admin_credential_from_minds_the_gateway_withholds_it_from(
+    client, monkeypatch,
+):
+    """A kid's box elsewhere on the network, created nowhere near this
+    console, is not to be sent it either; the gateway marks which minds are."""
+    import asyncio
+    import route_access
+    import mind_runtime
+
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    registry = [
+        {"id": "arnold-id", "name": "arnold", "owner": "sloan",
+         "gateway_url": "http://192.168.5.64:8433", "admin_credential_allowed": False},
+        {"id": "bob-id", "name": "bob", "owner": "daniel",
+         "gateway_url": "http://bob:8420", "admin_credential_allowed": True},
+    ]
+    monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
+
+    with pytest.raises(main_mod.HTTPException) as refused:
+        asyncio.run(mind_runtime.admin_headers("http://192.168.5.64:8433"))
+    assert refused.value.status_code == 503
+    assert asyncio.run(mind_runtime.admin_headers("http://bob:8420")) == {
+        "Authorization": "Bearer admin-token"}
+
+
 def test_a_mind_cannot_be_named_after_an_address_on_the_hives_network(client):
     """Its name is its address there: a mind called hive-comms would answer
     some of the calls meant for the gateway."""
