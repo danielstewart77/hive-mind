@@ -75,3 +75,54 @@ def test_an_open_bucket_on_a_large_screen_stays_in_the_window_however_it_is_resi
         page.locator("[data-barrel-toggle]:visible").click()
         bucket = _settled(page)
         assert _open_on_screen(bucket), bucket
+
+
+def _load(page):
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    return _settled(page)
+
+
+def test_with_nothing_remembered_a_phone_starts_docked_and_a_large_screen_open(
+        monkeypatch):
+    client = signed_in_client(monkeypatch)
+    with browser(client) as context:
+        phone = context(390, 800, touch=True).new_page()
+        phone.goto(PAGE)
+        phone.wait_for_load_state("networkidle")
+        assert _docked(_settled(phone))
+
+        large = context(1400, 900).new_page()
+        large.goto(PAGE)
+        large.wait_for_load_state("networkidle")
+        assert _open_on_screen(_settled(large))
+
+
+def test_a_remembered_choice_comes_back_on_the_next_visit_kept_apart_per_screen_size(
+        monkeypatch):
+    client = signed_in_client(monkeypatch)
+    with browser(client) as context:
+        # One browser: one storage, shared by both sizes of window.
+        page = context(1400, 900).new_page()
+        page.goto(PAGE)
+        page.wait_for_load_state("networkidle")
+
+        page.locator("[data-barrel-close]").click()
+        assert _docked(_load(page))
+        page.locator("[data-barrel-toggle]:visible").click()
+        assert _open_on_screen(_load(page))
+        page.locator("[data-barrel-close]").click()
+        assert _docked(_load(page))
+
+        # Phone-size: its own default, then its own remembered choice.
+        page.set_viewport_size({"width": 390, "height": 800})
+        assert _docked(_load(page))
+        page.locator("[data-barrel-toggle]:visible").click()
+        assert _open_on_screen(_load(page))
+
+        # Open on the phone did not make the large screen open...
+        page.set_viewport_size({"width": 1400, "height": 900})
+        assert _docked(_load(page))
+        # ...and docked on the large screen did not dock the phone.
+        page.set_viewport_size({"width": 390, "height": 800})
+        assert _open_on_screen(_load(page))
