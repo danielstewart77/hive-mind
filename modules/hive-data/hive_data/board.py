@@ -58,6 +58,7 @@ NOTICES = "board.design_notices"
 CAPABILITIES = "board.capability_node_settings"
 EDGE_MINDS = "board.edge_mind_settings"
 REQUESTERS = "board.operation_requesters"
+ATTACHMENTS = "board.work_item_attachments"
 
 #: The three levels of the board, as `kind` spells them.
 KINDS = ("epic", "feature", "story")
@@ -448,6 +449,83 @@ async def delete_subtree(item_id: str, *,
         ") "
         f'DELETE FROM {qualified(ITEMS)} '
         'WHERE "id" IN (SELECT "id" FROM below)', item_id)
+
+
+# ---------------------------------------------------------------- attachments
+
+async def add_attachment(item_id: str, filename: str, content_type: str,
+                         content: bytes, created_at: float, *,
+                         unit: Unit | None = None) -> Row:
+    """Keep a file against a work item, and hand back what was kept.
+
+    One INSERT, so the file is either kept whole or not at all, and the row
+    that comes back is what the database holds rather than what the caller
+    sent - the size is the database's own count of the bytes it stored.
+
+    An item that is not there is the foreign key's to refuse, and it does,
+    as `MissingReference` at this statement - the key is not deferred - so
+    the caller can report the file as not kept. The console takes the
+    board's lock around this, so a delete counting what it takes cannot have
+    a file land between its count and its delete.
+    """
+    sql, args = _sql.insert(ATTACHMENTS, {
+        "item_id": item_id, "filename": filename,
+        "content_type": content_type, "size_bytes": len(content),
+        "content": content, "created_at": created_at,
+    }, returning=_ATTACHMENT_LISTED)
+    return await _execute_returning(unit, sql, *args)
+
+
+#: What a listing of attachments carries: everything but the bytes.
+_ATTACHMENT_LISTED = tuple(
+    c for c in COLUMNS[ATTACHMENTS] if c != "content")
+
+
+async def attachments(item_id: str, *,
+                      unit: Unit | None = None) -> list[Row]:
+    """An item's attachments, oldest first, without their bytes.
+
+    Ordered by id, which only an insert advances, so the list is the order
+    the files were attached in and is the same list after a restart.
+    """
+    return await _fetch(
+        unit, f"SELECT {select_list(ATTACHMENTS)} FROM {qualified(ATTACHMENTS)} "
+        'WHERE "item_id" = $1 ORDER BY "id"', item_id)
+
+
+async def attachment(item_id: str, attachment_id: int, *,
+                     unit: Unit | None = None) -> Row | None:
+    """One attachment with its bytes, or None.
+
+    Asked for through the item that owns it, and the item is in the WHERE
+    clause: an attachment id under another item's id is no attachment at
+    all, so a file attached to one item can never be read as another's.
+    """
+    return await _fetch_one(
+        unit, f"SELECT {select_list(ATTACHMENTS, COLUMNS[ATTACHMENTS])} "
+        f"FROM {qualified(ATTACHMENTS)} "
+        'WHERE "item_id" = $1 AND "id" = $2', item_id, attachment_id)
+
+
+async def subtree_attachment_count(item_id: str, *,
+                                   unit: Unit | None = None) -> int:
+    """How many files a delete of this row would take with it.
+
+    The row and everything beneath it, walked the way `delete_subtree`
+    walks it, so the number the page confirms is the number that goes.
+    """
+    row = await _fetch_one(
+        unit,
+        "WITH RECURSIVE below AS ("
+        f'  SELECT "id" FROM {qualified(ITEMS)} WHERE "id" = $1'
+        "  UNION"
+        f'  SELECT child."id" FROM {qualified(ITEMS)} AS child '
+        '    JOIN below ON below."id" = child."parent_id"'
+        ") "
+        f'SELECT count(*) AS "n" FROM {qualified(ATTACHMENTS)} '
+        'WHERE "item_id" IN (SELECT "id" FROM below)', item_id)
+    assert row is not None  # an aggregate always answers
+    return int(row["n"])
 
 
 # ---------------------------------------------------------- design sessions
