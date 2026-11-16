@@ -1076,6 +1076,12 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     minted, credential_error = await holder_credentials.provision_mind(
         name, mind_id, owner
     )
+    registration_error = None
+    try:
+        await _register_scaffolded_mind(name, {"owner": owner}, user)
+    except Exception as exc:  # noqa: BLE001 - reported; the button retries
+        # Not fatal: the scaffold stands and the Register button retries.
+        registration_error = str(getattr(exc, "detail", "") or exc)
 
     log_event(
         log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
@@ -1087,6 +1093,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         "written": written,
         "credentials": minted,
         "credential_error": credential_error,
+        "registration_error": registration_error,
         "registration": {
             "name": name,
             "mind_id": mind_id,
@@ -1152,17 +1159,14 @@ def _registered_mind(minds: list[dict], mind_id: str) -> dict | None:
     return next((m for m in minds if mind_id and str(m.get("id") or "") == mind_id), None)
 
 
-@app.post("/api/minds/{name}/register")
-async def api_register_mind(
-    name: str, request: Request, user: dict = Depends(require_auth)
-):
-    """Register a scaffolded Mind with the broker once its container is up."""
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Request body must be an object")
-    normalized = name.strip().lower()
-    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
-        raise HTTPException(status_code=400, detail="Invalid Mind name")
+async def _register_scaffolded_mind(normalized: str, body: dict, user: dict) -> dict:
+    """Register a mind scaffolded here with the gateway; returns comms' answer.
+
+    Done at creation as well as from the button: a mind created here holds
+    no gateway admin credential and cannot register itself, so a create
+    whose page was closed before the click would leave a mind the gateway
+    never learns the session credential of.
+    """
     try:
         configuration = local_runtime_configuration(normalized)
     except ValueError as exc:
@@ -1193,6 +1197,21 @@ async def api_register_mind(
         log, "mind.registered", **_actor_fields(user), mind_name=normalized,
         mind_id=str(configuration.get("mind_id") or ""),
     )
+    return broker_result
+
+
+@app.post("/api/minds/{name}/register")
+async def api_register_mind(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Register a scaffolded Mind with the broker once its container is up."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    normalized = name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    broker_result = await _register_scaffolded_mind(normalized, body, user)
     return {"registered": True, "broker": broker_result}
 
 
@@ -1334,7 +1353,7 @@ async def _probe_mind_host(mind: dict) -> dict:
     # unreachable because of one unset variable on this box, which is the
     # exact conflation `host_status_for` exists to prevent.
     try:
-        headers = mind_runtime.admin_headers()
+        headers = mind_runtime.admin_headers(gateway)
     except HTTPException as exc:
         return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
                 "reading": None, "error": str(exc.detail)}

@@ -237,7 +237,8 @@ def test_register_reaches_comms_with_the_admin_token_and_the_scaffolded_owner(cl
 
     assert client.post("/api/minds/atlas/register", json={}).status_code == 200
 
-    (sent,) = _broker_writes(comms)
+    # The button, after the registration creation already made.
+    sent = _broker_writes(comms)[-1]
     assert (sent["method"], sent["path"]) == ("POST", "/broker/minds")
     assert sent["authorization"] == "Bearer admin-token"
     assert json.loads(sent["body"])["owner"] == "sloan"
@@ -251,7 +252,8 @@ def test_register_leaves_out_the_owner_of_a_mind_comms_already_holds(client, com
     with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=held)):
         assert client.post("/api/minds/atlas/register", json={}).status_code == 200
 
-    (sent,) = _broker_writes(comms)
+    # The button, after the registration creation already made.
+    sent = _broker_writes(comms)[-1]
     assert "owner" not in json.loads(sent["body"])
 
 
@@ -305,11 +307,20 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
     service = yaml.safe_load(
         (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text()
     )["services"]["atlas"]
+    home = ".claude" if harness == "claude_cli" else ".codex"
+    host, own = "${HOST_PROJECT_DIR:-.}/minds/atlas", "/usr/src/app/minds/atlas"
     assert service["volumes"] == [
-        "${HOST_PROJECT_DIR:-.}/minds/atlas:/usr/src/app/minds/atlas:rw"]
-    assert service["build"]["context"] == configuration_data.DEFAULT_MIND_BUILD_CONTEXT
+        f"{host}/runtime.yaml:{own}/runtime.yaml:ro",
+        f"{host}/session_token:{own}/session_token:ro",
+        f"{host}/{home}:{own}/{home}:rw",
+        f"{host}/data:{own}/data:rw",
+    ]
+    # The published tree, at the branch it is published on, and the stage
+    # whose code is root's.
+    assert service["build"]["context"] == "https://github.com/danielstewart77/hive-mind.git#master"
+    assert service["build"]["target"] == "locked-mind"
     environment = dict(item.split("=", 1) for item in service["environment"])
-    assert environment["KEY_RING"].startswith("/usr/src/app/minds/atlas/")
+    assert environment["KEY_RING"] == f"{own}/data/keyring"
 
 
 def test_registering_a_new_mind_hands_the_gateway_the_credential_it_will_present(client, comms):
@@ -320,7 +331,39 @@ def test_registering_a_new_mind_hands_the_gateway_the_credential_it_will_present
     assert _create(client).status_code == 200
     on_disk = (client.minds_dir / "atlas" / "session_token").read_text().strip()
 
-    assert client.post("/api/minds/atlas/register", json={}).status_code == 200
-
+    # At creation, with no click: a page closed before Register would
+    # otherwise leave a mind the gateway cannot authenticate to.
     (sent,) = _broker_writes(comms)
     assert on_disk and json.loads(sent["body"])["session_token"] == on_disk
+
+
+def test_the_console_never_sends_its_admin_credential_to_a_locked_down_mind(client, monkeypatch):
+    """However that mind's address is written: it can re-register itself with
+    the gateway at any address it listens on, so the guard is where the
+    address leads."""
+    import mind_runtime
+
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    assert _create(client).status_code == 200
+    where = {"atlas": {"10.9.0.7"}, "10.9.0.7": {"10.9.0.7"}, "bob": {"10.9.0.2"}}
+    monkeypatch.setattr(configuration_data, "_addresses", lambda host: where.get(host, set()))
+
+    for url in ("http://atlas:8420", "http://10.9.0.7:7777"):
+        with pytest.raises(main_mod.HTTPException) as refused:
+            mind_runtime.admin_headers(url)
+        assert refused.value.status_code == 503
+    assert mind_runtime.admin_headers("http://bob:8420") == {"Authorization": "Bearer admin-token"}
+
+
+def test_a_create_that_fails_part_way_leaves_nothing_and_can_be_run_again(client, monkeypatch):
+    real_chown = os.chown
+
+    def failing(*args, **kwargs):
+        raise PermissionError("not this time")
+
+    monkeypatch.setattr(configuration_data.os, "chown", failing)
+    assert _create(client).status_code == 500
+    assert not (client.minds_dir / "atlas").exists()
+
+    monkeypatch.setattr(configuration_data.os, "chown", real_chown)
+    assert _create(client).status_code == 200

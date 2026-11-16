@@ -65,7 +65,7 @@ async def _call(method: str, url: str, *, collection: bool = False) -> dict:
     # the full text of every skill it runs.
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.request(method, url, headers=admin_headers())
+            response = await client.request(method, url, headers=admin_headers(url))
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
