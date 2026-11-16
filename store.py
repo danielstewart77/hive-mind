@@ -20,7 +20,7 @@ import os
 from typing import Any
 
 import hive_data
-from hive_data import tools
+from hive_data import core, tools
 
 #: The variable naming the database. Without it there is nothing to open.
 DSN_VAR = "HIVE_DATABASE_URL"
@@ -169,6 +169,27 @@ async def create_user(username: str, password_hash: str, is_admin: int,
     await tools.create_user(username, password_hash, is_admin, created_at,
                             unit=_live())
     return await user_by_username(username)
+
+
+async def admin_usernames() -> set[str]:
+    """Who signs in here as an admin: the person whose integrations - the
+    Google account, the LinkedIn token, the phone - this hive-tools holds."""
+    return {str(row["username"]).strip().lower()
+            for row in await tools.users(unit=_live())
+            if row["is_admin"] and not row.get("disabled_at")}
+
+
+async def mind_owner(name: str) -> str | None:
+    """The owner of the mind registered under `name`, "" for a mind with no
+    owner, or None when `name` is no mind's."""
+    # Matched as comms matches a mind's own credential to its row - case and
+    # surrounding space aside - so a mind registered as "Arnold" or " arnold"
+    # is still the mind its token was minted for.
+    wanted = name.strip().lower()
+    for row in await core.list_minds(unit=_live()):
+        if str(row["name"] or "").strip().lower() == wanted:
+            return str(row["owner"] or "").strip().lower()
+    return None
 
 
 # ------------------------------------------------------------------- tokens

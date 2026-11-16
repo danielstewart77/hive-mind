@@ -614,6 +614,18 @@ async def respond_to_hitl(
             from None
     now = int(time.time())
 
+    if new_status == "approved":
+        # Asked again at the decision, not only when the call was made: a
+        # request raised before a mind's owner changed, or before this check
+        # existed, must not replay one person's integrations for another's
+        # mind. Such a request is denied, never run.
+        from auth_api import owner_refusal
+
+        pending = await store.request(request_id)
+        if pending is not None and await owner_refusal(
+                str(pending.get("caller_mind") or "")):
+            new_status = "denied"
+
     async with store.transaction():
         row = await store.decide_request(request_id, new_status, now, now)
 

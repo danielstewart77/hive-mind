@@ -99,7 +99,53 @@ async def require_api_token(request: Request) -> str:
             detail="The approver credential decides approvals "
                    "(POST /hitl/{id}/respond) and does nothing else.")
 
+    await _refuse_a_mind_of_someone_else(name)
     return name
+
+
+#: What a mind owned by someone other than this hive-tools' admin is told.
+#: Refused outright, before any tool runs or any approval is raised: the
+#: approval would go to the person whose accounts these are, who is not the
+#: mind's owner.
+NOT_THE_OWNERS_TOOLS = (
+    "{holder} belongs to {owner}, and the accounts this hive-tools holds are "
+    "not {owner}'s, so the call is refused. {owner} has not connected "
+    "integrations of their own yet.")
+
+
+async def owner_refusal(holder: str) -> str | None:
+    """Why a call from `holder` may not use these integrations, or None.
+
+    Raises HTTPException(503) when whose mind it is cannot be read.
+    """
+    try:
+        owner = await store.mind_owner(holder)
+        if owner is None:
+            return None
+        admins = await store.admin_usernames()
+    except Exception as exc:  # noqa: BLE001 - fail closed, said why
+        raise HTTPException(
+            status_code=503,
+            detail="hive-tools could not read whose mind this is, so the call "
+                   "is refused") from exc
+    if owner in admins:
+        return None
+    return NOT_THE_OWNERS_TOOLS.format(holder=holder, owner=owner or "nobody")
+
+
+async def _refuse_a_mind_of_someone_else(holder: str) -> None:
+    """Refuse a mind whose owner is not the person whose integrations these are.
+
+    DECIDED 2026-11-15 (Daniel): Daniel's Google tools and every other
+    credential he set up are usable by his minds only; until a user can
+    connect their own (hive story 2.1.16), a call from a mind whose owner is
+    not the owner of the tool credentials is refused outright, never routed
+    to Daniel for approval. A holder that is no mind - one minted for a
+    service - is unchanged. A database that cannot answer refuses.
+    """
+    refused = await owner_refusal(holder)
+    if refused:
+        raise HTTPException(status_code=403, detail=refused)
 
 
 async def require_approver(request: Request) -> str:

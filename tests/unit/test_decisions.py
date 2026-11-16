@@ -167,3 +167,26 @@ async def test_an_action_that_is_neither_approve_nor_deny_is_refused(
     assert db_conn.execute(
         "SELECT status FROM hitl_requests WHERE id = 'typo'"
     ).fetchone()["status"] == "pending"
+
+
+async def test_approving_a_request_from_another_persons_mind_denies_it(
+        db_conn: RawSQL) -> None:
+    """DECIDED 2026-11-15 (Daniel): his integrations are his minds' only. A
+    request raised before that was enforced, or before the mind changed
+    hands, is denied at the decision and never replayed."""
+    from hive_data import core
+
+    now = time.time()
+    await core.upsert_mind(mind_id="arnold-id", name="arnold",
+                           gateway_url="http://arnold:8420", model="m",
+                           harness="claude_cli", registered_at=now,
+                           last_seen=now, owner="sloan")
+    _pending(db_conn, "from-arnold")
+    db_conn.execute("UPDATE hitl_requests SET caller_mind = 'arnold' "
+                    "WHERE id = 'from-arnold'")
+    db_conn.commit()
+
+    answer = await respond_to_hitl("from-arnold", "approve")
+
+    assert answer["status"] == "denied"
+    assert not answer.get("replay")
