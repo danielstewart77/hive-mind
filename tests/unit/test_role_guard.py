@@ -208,3 +208,54 @@ def test_a_spawn_the_gateway_cannot_answer_for_is_refused(tmp_path, monkeypatch)
 
     with pytest.raises(RuntimeError):
         role_guard.prepare(home, "", "mind-1", "http://gateway", "t")
+
+
+def test_with_spawn_grants_on_disk_a_role_change_is_still_obeyed_on_the_next_call(gateway, tmp_path):
+    grants_file = tmp_path / "role-grants.json"
+    role_guard.write_grants(grants_file, _managed(tools=["files"]))
+    env = _env(gateway, tmp_path, grants_file)
+
+    gateway.grants = _managed(tools=["files", "shell"])
+    assert _tool(env, "bash").returncode == 0
+    gateway.grants = _managed(tools=["files"])
+    assert _tool(env, "bash").returncode == role_guard.DENY
+
+
+def test_with_the_gateway_down_a_managed_minds_ungranted_hook_does_not_run(gateway, tmp_path):
+    grants_file = tmp_path / "role-grants.json"
+    role_guard.write_grants(grants_file, _managed(hooks=["time_inject"]))
+    gateway.status = 500
+    env = _env(gateway, tmp_path, grants_file)
+
+    _gate(env, "training_capture", tmp_path / "training")
+    _gate(env, "time_inject", tmp_path / "time")
+
+    assert not (tmp_path / "training").exists()
+    assert (tmp_path / "time").read_text() == "payload"
+
+
+def test_a_persistent_terminal_is_a_shell_to_the_roles(gateway, tmp_path):
+    gateway.grants = _managed(tools=["files"])
+    env = _env(gateway, tmp_path)
+
+    assert _tool(env, "terminal_open", {}).returncode == role_guard.DENY
+    gateway.grants = _managed(tools=["files", "shell"])
+    assert _tool(env, "terminal_open", {}).returncode == 0
+
+
+def _prompt(env, text):
+    event = {"hook_event_name": "UserPromptSubmit", "prompt": text}
+    return subprocess.run([sys.executable, str(GUARD), "prompt"], input=json.dumps(event),
+                          env=env, capture_output=True, text=True, timeout=30)
+
+
+def test_a_typed_skill_name_no_role_grants_is_refused(gateway, tmp_path):
+    (tmp_path / ".dsh" / "skills" / "send-sms").mkdir(parents=True)
+    (tmp_path / ".dsh" / "skills" / "remember").mkdir(parents=True)
+    gateway.grants = _managed(skills=["remember"])
+    env = _env(gateway, tmp_path)
+
+    refused = _prompt(env, "/send-sms tell Sloan dinner")
+    assert refused.returncode == role_guard.DENY and "send-sms" in refused.stderr
+    assert _prompt(env, "/remember this").returncode == 0
+    assert _prompt(env, "/model opus").returncode == 0

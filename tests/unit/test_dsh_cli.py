@@ -2071,3 +2071,30 @@ def test_the_terminals_pane_carries_the_same_session_id(dsh) -> None:
     the browser terminal is the one most likely to."""
     env = dsh._pane_env("qwen35-131k", "", "", "", None, "row-1")
     assert env["HIVE_SESSION_ID"] == "row-1"
+
+
+# ── role guard wiring (feature 10.18) ─────────────────────────────────────
+
+def test_the_terminals_pane_is_handed_the_role_guarded_hooks(dsh, monkeypatch) -> None:
+    """A pane's turns never reach the chat path, so the pane gets the guard too."""
+    from minds.harness import role_guard
+    monkeypatch.setattr(role_guard, "fetch", lambda *a, **k: {"managed": True, "tools": []})
+
+    env = dsh._pane_env("qwen35-131k", "", "", "", None, "row-1")
+
+    written = json.loads(Path(env["DSH_HOOKS_CONFIG"]).read_text())
+    assert written["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith(" guard")
+    assert json.loads(Path(env["HIVE_ROLE_GRANTS_FILE"]).read_text())["managed"] is True
+
+
+async def test_a_turn_the_gateway_cannot_say_the_roles_for_is_not_spawned(dsh, monkeypatch) -> None:
+    from minds.harness import role_guard
+    monkeypatch.setattr(role_guard, "fetch", lambda *a, **k: None)
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    events = await _drain(dsh)
+
+    assert spawn.calls == []
+    assert _result(events).get("is_error") is True

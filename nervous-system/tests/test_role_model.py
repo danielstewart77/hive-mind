@@ -122,3 +122,72 @@ def test_an_unmanaged_or_non_dsh_conversation_keeps_the_model_it_names(comms_db)
         await close_manager(mgr)
 
     _run(scenario())
+
+
+def test_a_turn_on_a_model_no_role_names_runs_on_the_role_model_and_the_row_says_so(comms_db):
+    async def scenario():
+        mgr = await make_manager()
+        mind = await _mind()
+        await roles.set_mind_roles(mind, [await _role("claude-opus-5-5")])
+        await seed_session("s7", mind_id=mind, harness="dsh", model="gpt-6.1-terra",
+                           surface_id="125")
+        with patch.object(mgr, "mind_model_row", new=AsyncMock(return_value=None)), \
+                patch.object(mgr, "_kill_process", new=AsyncMock()), \
+                patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
+                patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+            # The mind itself is not reachable from a test; the turn ends there,
+            # after the spawn this asserts on.
+            with pytest.raises(ValueError, match="No mind container URL"):
+                async for _event in mgr.send_message("s7", "hello"):
+                    pass
+        assert spawned.await_args.args[1] == "claude-opus-5-5"
+        assert (await mgr._get_row("s7"))["model"] == "claude-opus-5-5"
+        await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_a_turn_refused_for_want_of_a_model_says_why_in_the_stream(comms_db):
+    async def scenario():
+        mgr = await make_manager()
+        mind = await _mind()
+        await roles.set_mind_roles(mind, [await _role(None)])
+        await seed_session("s8", mind_id=mind, harness="dsh", model="claude-haiku-5-5",
+                           surface_id="126")
+        with patch.object(mgr, "_spawn", new=AsyncMock()) as spawned:
+            events = [e async for e in mgr.send_message("s8", "hello")]
+        assert spawned.await_count == 0
+        assert events[-1]["is_error"] is True
+        assert "names a model" in events[-1]["errors"][0]
+        await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_a_minds_own_credential_reads_its_own_grants_and_no_other_minds(comms_db, monkeypatch):
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    from comms import user_access
+
+    async def setup():
+        import hive_data
+        await hive_data.connect()
+        mine, other = await _mind(), await _mind()
+        await roles.set_mind_roles(mine, [await _role("claude-opus-5-5")])
+        await user_access.put_credential(mine, "daniel", "mind-secret", role="mind")
+        await hive_data.close(drain_timeout=5.0)
+        return mine, other
+
+    mine, other = _run(setup())
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    from comms import server as server_module
+    importlib.reload(server_module)
+    with TestClient(server_module.app, headers={"Authorization": "Bearer mind-secret"}) as client:
+        own = client.get(f"/minds/{mine}/grants")
+        foreign = client.get(f"/minds/{other}/grants")
+
+    assert own.status_code == 200
+    assert own.json()["managed"] is True and own.json()["models"] == ["claude-opus-5-5"]
+    assert foreign.status_code == 404
