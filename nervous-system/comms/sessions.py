@@ -21,7 +21,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import hive_data
-from hive_data import core, sessions_ops
+from hive_data import core, roles, sessions_ops
 from hive_data.errors import MissingReference
 from hive_data.rows import UNSET
 
@@ -716,6 +716,10 @@ class SessionManager:
         now = time.time()
 
         harness = normalise_harness(mind_row.get("harness"))
+        # Born on a model its mind's roles allow (story 10.18.5), so the row
+        # never names one the first turn would have to move off.
+        model = await self.role_model(
+            {"mind_id": mind_id, "harness": harness, "model": model})
 
         async def _write(unit) -> None:
             await core.create_session(
@@ -2155,6 +2159,31 @@ class SessionManager:
                 # status — has to be of the conversation that now exists.
                 session = await self._get_row(session_id) or session
 
+        # The model a DSH mind's roles allow (story 10.18.5), checked on
+        # every turn so a role changed between two turns is obeyed on the
+        # second. Moved in place, under this turn's own lock: the row takes
+        # the allowed model before the respawn below reads it, so the model
+        # shown for the conversation is the one that ran.
+        try:
+            allowed_model = await self.role_model(session)
+        except ValueError as exc:
+            # Said in the stream, as every other refused turn is: raised
+            # here it would only cut the stream off with no reason given.
+            log_event(log, "turn.refused_by_roles", session_id=session_id,
+                      mind_id=session["mind_id"], reason=str(exc))
+            yield {"type": "result", "is_error": True, "errors": [str(exc)]}
+            return
+        if allowed_model != session["model"]:
+            if self._pane_holds(session):
+                # A terminal is open on this conversation. Ending its process
+                # would close the pane under whoever is typing in it, so the
+                # move waits for the pane: the next attach applies it.
+                log_event(log, "session.role_model_deferred", session_id=session_id,
+                          mind_id=session["mind_id"], model=allowed_model)
+            else:
+                await self._move_to_role_model(session, allowed_model)
+                session = await self._get_row(session_id) or session
+
         mind_id = session["mind_id"]
         log.info("send_message: start session=%s mind=%s", session_id, mind_id)
         log_event(
@@ -2784,6 +2813,61 @@ class SessionManager:
             )
         return lock
 
+    async def role_model(self, session: dict, wanted: str | None = None) -> str:
+        """The model this conversation may run on, as its mind's roles say.
+
+        Only a DSH conversation of a mind under role management is decided
+        here (story 10.18.5; the Codex and Claude harnesses follow in their
+        own stories). Every other conversation runs on the model it names.
+        For a managed one the model must be one some held role names: the
+        one asked for when it is, else the mind's default when that is, else
+        the first a held role names, general first. None named by any role
+        is refused, because anything no role grants is denied.
+        """
+        model = wanted or session["model"]
+        if normalise_harness(await self.conversation_harness(session)) != "dsh":
+            return model
+        grants = await roles.grants_for(session["mind_id"])
+        if not grants["managed"]:
+            return model
+        allowed = list(grants["models"])
+        if not allowed:
+            raise ValueError(
+                "No role this mind holds names a model, so there is no model "
+                "it may run on. Give it a role that names one on the console's "
+                "Roles page.")
+        if model in allowed:
+            return model
+        if wanted:
+            raise ValueError(
+                f"Model {wanted!r} is not one this mind's roles allow: "
+                f"{', '.join(allowed)}.")
+        mind_row = await self._get_mind_row(session["mind_id"])
+        default = str((mind_row or {}).get("model") or "")
+        return default if default in allowed else allowed[0]
+
+    async def _move_to_role_model(self, session: dict, model: str) -> None:
+        """Put a conversation onto the model its roles allow, before a turn.
+
+        `switch_model` without its lock, which the caller already holds:
+        the process is ended so the respawn that follows starts on `model`,
+        and the row takes that model's window and threshold.
+        """
+        offered = await self.mind_model_row(
+            session["mind_id"], model, harness=await self.conversation_harness(session))
+        window = _positive_int((offered or {}).get("context_window"))
+        percent = self._rotation_percent(session, offered or {})
+        threshold = window * percent // 100 if window and percent else None
+        effort = session.get("effort")
+        if offered is not None and effort not in effort_levels_of(offered):
+            effort = None
+        await self._kill_process(session["id"])
+        await _update_session(session["id"], model=model, effort=effort,
+                              context_window=window, context_threshold=threshold)
+        log_event(log, "session.role_model", session_id=session["id"],
+                  mind_id=session["mind_id"], model=model,
+                  previous_model=session["model"])
+
     async def switch_model(self, session_id: str, model: str) -> dict:
         """Move this conversation onto another model on the same harness.
 
@@ -2808,6 +2892,8 @@ class SessionManager:
             # Read again under the lock: a switch that held it before this
             # call took it has replaced the conversation the first read saw.
             session = await self._get_row(session_id) or session
+            # A managed DSH mind moves only onto a model its roles allow.
+            await self.role_model(session, wanted=model)
             offered = await self.mind_model_row(
                 session["mind_id"], model,
                 harness=await self.conversation_harness(session),
@@ -3207,6 +3293,8 @@ class SessionManager:
                     f"{target} isn't available on this mind: "
                     f"{entry.get('reason') or 'no reason given'}."
                 )
+            # Onto dsh, a managed mind may only take a model its roles allow.
+            await self.role_model({**session, "harness": target}, wanted=model)
             offered = await self.mind_model_row(mind_id, model, harness=target)
             if offered is None:
                 raise ValueError(
