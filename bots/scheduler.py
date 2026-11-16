@@ -397,7 +397,7 @@ async def _send_text(bot_token: str, chat_id: int, text: str) -> bool:
 async def _deliver_text(
     mind_id: str, bot_token: str, text: str, *, chat_id: int | None = None
 ) -> int:
-    """Deliver to the mind's own person, falling back to the operator.
+    """Deliver to the mind's own person; the operator only when there is none.
 
     A reminder belongs to whoever asked for it. But the bot this process
     holds may have no conversation with that person — their mind's bot is a
@@ -415,6 +415,15 @@ async def _deliver_text(
         return chat_id
     fallback = config.telegram_owner_chat_id
     if not fallback or fallback == chat_id:
+        return 0
+    if chat_id:
+        # A chat that is not the operator's is somebody else's claim, so the
+        # reminder is theirs. Repeating it to the operator is a disclosure
+        # and still not a delivery (story 2.1.19); it is logged instead.
+        log_event(
+            log, "scheduled_skill.delivery_refused", level=logging.WARNING,
+            mind_id=mind_id, intended=str(chat_id),
+        )
         return 0
     log_event(
         log, "scheduled_skill.delivery_fell_back", level=logging.WARNING,

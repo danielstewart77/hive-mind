@@ -91,12 +91,12 @@ class TestWhereTheWordsAndTheAudioLand:
         assert landed == 5550001
         assert state["texts"] == ["5550001"]
 
-    async def test_a_refused_delivery_reports_the_chat_it_fell_back_to(
+    async def test_a_refused_reminder_for_another_person_is_never_sent_to_the_operator(
         self, monkeypatch
     ) -> None:
-        """Their mind's bot is a different bot, so a refusal here must not end
-        as a reminder that simply never arrives — and the audio has to follow
-        the words to the chat that actually took them."""
+        """A chat that is not the operator's is another person's claim, so
+        their reminder is theirs: repeating it to the operator is a
+        disclosure, not a delivery (stories 2.1.15 and 2.1.19)."""
         state: dict = {"refuses": ("5550001",)}
         server = await _bot_api(state)
         try:
@@ -112,8 +112,8 @@ class TestWhereTheWordsAndTheAudioLand:
         finally:
             await server.close()
 
-        assert landed == 9999999
-        assert state["texts"] == ["5550001", "9999999"]
+        assert landed == 0
+        assert state["texts"] == ["5550001"]
 
     async def test_a_delivery_that_reaches_nobody_reports_nobody(
         self, monkeypatch
