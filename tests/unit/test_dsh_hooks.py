@@ -361,3 +361,44 @@ def test_a_harvester_still_takes_an_unreadable_log_as_not_the_minds(mind, tmp_pa
     assert dsh_transcript.is_delegate_log(tmp_path / "gone.jsonl") is True
     assert dsh_transcript.is_delegate_log(
         Path(_log(tmp_path / "own.jsonl", {"delegationDepth": 0}))) is False
+
+
+# --- a delegate's turn is never harvested as the mind's ---------------------
+#
+# The installed training_capture and skill_telemetry wrappers hand the
+# consumers the log as dsh_transcript translates it. What keeps a delegate's
+# turns out of the mind's training data and skill counts is the translation
+# marking them sidechain and both consumers skipping sidechain entries.
+
+
+def _dsh_log(path: Path, header: dict) -> Path:
+    """A plain dsh log: the header, then one user turn and one reply."""
+    return _transcript(path, [
+        {"type": "session", "id": path.stem, **header},
+        {"type": "user/message", "time": 1_794_781_568_850,
+         "data": {"content": [{"type": "text", "text": "/backlog what is next"}]}},
+        {"type": "assistant/message", "time": 1_794_781_570_000,
+         "data": {"message": {"content": [{"type": "text", "text": "the board says"}],
+                              "source": {"model": "m"}},
+                  "usage": {}}},
+    ])
+
+
+@pytest.mark.parametrize("header,harvested", [
+    ({"delegationDepth": 0}, True),
+    (_DELEGATE, False),
+    ({"origin": "subagent"}, False),
+    ({"parentSession": "conv-parent"}, False),
+], ids=["mind", "delegate", "origin-only", "parent-only"])
+def test_only_the_minds_own_turn_becomes_a_training_row_and_a_skill_use(
+        mind, tmp_path, header, harvested):
+    from core.skill_telemetry_detect import detect_claude_skills
+    from core.training_capture_claude import capture_session
+    dsh_transcript = importlib.import_module("dsh_transcript")
+    translated = dsh_transcript.materialize(_dsh_log(tmp_path / "s-1.jsonl", header))
+
+    wrote = capture_session(translated, session_id="s-1", mind_id="m-1",
+                            db_path=tmp_path / "training.db")
+
+    assert wrote is harvested
+    assert detect_claude_skills(translated) == ({"backlog"} if harvested else set())
