@@ -274,3 +274,90 @@ def test_standing_rules_come_from_the_minds_own_memory_service(mind, service):
     assert "<standing-rules>\n- Never guess.\n</standing-rules>" in injection
     assert "Not mine." not in injection
     assert seen[0]["auth"] == "Bearer lucent-key"
+
+
+# --- a delegate's turn never rotates the mind ------------------------------
+
+
+def _log(path: Path, header: dict) -> str:
+    """A plain session log: the header the harness writes, then one turn."""
+    _transcript(path, [{"type": "session", "id": path.stem, **header},
+                       {"type": "turn_start"}])
+    return str(path)
+
+
+_DELEGATE = {"origin": "subagent", "parentSession": "conv-parent", "delegationDepth": 1}
+_OVER = {"tokens": 150, "kind": "usage", "model": "m", "window": 1000}
+
+
+@pytest.mark.parametrize("header", [
+    _DELEGATE, {"origin": "subagent"}, {"parentSession": "conv-parent"}],
+    ids=["both", "origin-only", "parent-only"])
+def test_a_delegates_turn_over_the_threshold_reports_and_arms_nothing(
+        mind, service, monkeypatch, tmp_path, header):
+    seen, replies = service
+    replies["/sessions/arm-rotation"] = {"ok": True}
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    rotation_check = importlib.import_module("rotation_check")
+
+    assessed = rotation_check.assess({
+        "session_id": "child-1", "context": _OVER,
+        "transcript_path": _log(tmp_path / "child-1.jsonl", header)})
+
+    assert assessed is None
+    assert seen == []
+
+
+def test_the_minds_own_turn_over_the_threshold_is_still_reported_and_armed(
+        mind, service, monkeypatch, tmp_path):
+    seen, replies = service
+    replies["/sessions/arm-rotation"] = {"ok": True}
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    rotation_check = importlib.import_module("rotation_check")
+
+    assessed = rotation_check.assess({
+        "session_id": "conv-1", "context": _OVER,
+        "transcript_path": _log(tmp_path / "conv-1.jsonl", {"delegationDepth": 0})})
+    rotation_check.arm(assessed)
+
+    assert [r["path"] for r in seen] == ["/sessions/context", "/sessions/arm-rotation"]
+
+
+@pytest.mark.parametrize("where", ["gone.jsonl", "", "nul\x00.jsonl"],
+                         ids=["missing", "no-path", "unusable-path"])
+def test_a_turn_whose_log_cannot_be_read_is_judged_as_the_minds(
+        mind, service, monkeypatch, tmp_path, where):
+    seen, _ = service
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    rotation_check = importlib.import_module("rotation_check")
+
+    assessed = rotation_check.assess({
+        "session_id": "conv-1", "context": _OVER,
+        "transcript_path": str(tmp_path / where) if where else ""})
+
+    assert assessed["rotate"] is True
+    assert [r["path"] for r in seen] == ["/sessions/context"]
+
+
+@pytest.mark.parametrize("header,answers", [(_DELEGATE, ""), ({}, '{"rotate": true}')])
+def test_a_goal_round_rotates_only_for_the_minds_own_turn(
+        mind, service, monkeypatch, tmp_path, capsys, header, answers):
+    import io
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    monkeypatch.setenv("HIVE_GOAL_RUN", "1")
+    rotation_check = importlib.import_module("rotation_check")
+    event = {"session_id": "s-1", "context": _OVER,
+             "transcript_path": _log(tmp_path / "s-1.jsonl", header)}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
+
+    rotation_check.main()
+
+    assert capsys.readouterr().out.strip() == answers
+
+
+def test_a_harvester_still_takes_an_unreadable_log_as_not_the_minds(mind, tmp_path):
+    dsh_transcript = importlib.import_module("dsh_transcript")
+
+    assert dsh_transcript.is_delegate_log(tmp_path / "gone.jsonl") is True
+    assert dsh_transcript.is_delegate_log(
+        Path(_log(tmp_path / "own.jsonl", {"delegationDepth": 0}))) is False
