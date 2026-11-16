@@ -128,6 +128,18 @@ RUN /opt/venv/bin/pip install --no-cache-dir "asyncpg>=0.29" /tmp/hive-data \
     && rm -rf /tmp/hive-data
 USER hivemind
 
+# A mind created from the console for a person (hive story 2.1.9). Its code
+# belongs to root, so the mind cannot rewrite the server that receives the
+# gateway's and the console's calls; only data/ and the folders its compose
+# file mounts are its own. Built from the published tree, never the host
+# checkout, so nothing untracked is in it.
+FROM mind AS locked-mind
+USER root
+RUN chown -R root:root /usr/src/app \
+    && chown hivemind:hivemind /usr/src/app/data
+USER hivemind
+
+
 # The default target, so every other mind's build is the mind image as it
 # always was.
 FROM mind
