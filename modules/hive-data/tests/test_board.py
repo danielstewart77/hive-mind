@@ -581,3 +581,51 @@ async def test_work_in_one_transaction_is_undone_together(
     assert await inspector.fetchval(
         'SELECT count(*) FROM board."capability_node_settings" '
         "WHERE node_id = $1", node_id) == 0
+
+
+# ---------------------------------------------------------------- attachments
+
+#: Every byte value, NUL included, followed by a JPEG's opening bytes. A file
+#: is not text, and a column or a codec that treated it as text would hand
+#: back something other than these bytes - a NUL is the first casualty.
+_A_FILE = bytes(range(256)) + b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+async def test_an_attached_file_comes_back_whole_after_the_pool_is_reopened(
+        connected, a_notice_time):
+    """Story 3.7.2: a file attached to an item is kept and comes back with
+    that item - after a restart, which for this layer is a pool closed and
+    opened again, so nothing in the process can be what answers."""
+    item_id = _id("s")
+    await board.create_work_item(item_id, "epic", "carries a file", 1)
+    kept = (await board.add_attachment(
+        item_id, "backlog.jpg", "image/jpeg", _A_FILE, a_notice_time))["row"]
+
+    await hive_data.close(drain_timeout=5.0)
+    await hive_data.connect()
+
+    listed = await board.attachments(item_id)
+    assert [(r["id"], r["filename"], r["content_type"], r["size_bytes"])
+            for r in listed] == [
+        (kept["id"], "backlog.jpg", "image/jpeg", len(_A_FILE))]
+    served = await board.attachment(item_id, kept["id"])
+    assert served is not None
+    assert bytes(served["content"]) == _A_FILE
+
+
+async def test_an_attachment_comes_back_only_with_the_item_it_was_attached_to(
+        connected, a_notice_time):
+    """Attaching to one item never shows up on another: not in the other's
+    listing, and not when the other item's id is used to ask for it."""
+    owner, other = _id("e"), _id("e")
+    await board.create_work_item(owner, "epic", "the owner", 1)
+    await board.create_work_item(other, "epic", "another item", 2)
+    first = (await board.add_attachment(
+        owner, "one.png", "image/png", b"one", a_notice_time))["row"]
+    second = (await board.add_attachment(
+        owner, "two.png", "image/png", b"two", a_notice_time))["row"]
+
+    assert [r["id"] for r in await board.attachments(owner)] == [
+        first["id"], second["id"]]
+    assert await board.attachments(other) == []
+    assert await board.attachment(other, first["id"]) is None

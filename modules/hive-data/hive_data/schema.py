@@ -108,6 +108,10 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "kind", "parent_id", "title", "status", "position",
         "description", "requirements", "acceptance_criteria", "qa_tests",
         "subtype"),
+    #: The files a work item carries (step 12), keyed by the item's id.
+    "board.work_item_attachments": (
+        "id", "item_id", "filename", "content_type", "size_bytes", "content",
+        "created_at"),
     #: The chief of staff's ledger (step 6). Dotted like every schema
     #: after `core`.
     "staff.statuses": ("name",),
@@ -225,6 +229,11 @@ PRIVATE: dict[str, frozenset[str]] = {
     #: lexeme positions nobody asked for. Declared so the drift check sees
     #: it; private so no read returns it.
     "memories": frozenset({"content_search", "embedding"}),
+    #: The file itself. Up to ten megabytes a row, and every listing of an
+    #: item's attachments is metadata: a listing that carried the bytes is
+    #: every image on an item sent again each time its page opens. The one
+    #: read that serves the file names it.
+    "board.work_item_attachments": frozenset({"content"}),
     "sessions": frozenset({
         "carry_forward", "carry_forward_sid", "carry_forward_at",
         "carry_forward_prompt_cap", "resend_content", "resend_images",
@@ -243,6 +252,7 @@ GENERATED: dict[str, frozenset[str]] = {
     "tools.sudo_grants": frozenset({"id"}),
     "tools.users": frozenset({"id"}),
     "board.design_notices": frozenset({"id"}),
+    "board.work_item_attachments": frozenset({"id"}),
     #: `content_search` is GENERATED ALWAYS, not BY DEFAULT: Postgres
     #: refuses a value for it outright. Named here so the refusal happens
     #: before the statement is built, with a sentence saying why, rather
@@ -256,7 +266,7 @@ GENERATED: dict[str, frozenset[str]] = {
 
 #: Columns whose *type* is checked at startup, not only their name.
 #:
-#: Names alone are not enough for these two. A `memory.memories.embedding`
+#: Names alone are not enough for these. A `memory.memories.embedding`
 #: left as `bytea` passes a name check, and then asyncpg — with the vector
 #: codec registered but the column not actually a vector — hands the row
 #: back as raw bytes, or, the other way round, hands an unregistered vector
@@ -269,6 +279,9 @@ GENERATED: dict[str, frozenset[str]] = {
 TYPED: dict[tuple[str, str], str] = {
     ("memories", "embedding"): "vector",
     ("memories", "content_search"): "tsvector",
+    #: A file kept as text would come back as a `str` asyncpg decoded, and
+    #: an image is not text: the bytes served would not be the bytes kept.
+    ("board.work_item_attachments", "content"): "bytea",
 }
 
 
