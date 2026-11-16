@@ -96,8 +96,8 @@ def test_a_deleted_subtree_is_counted_as_what_went() -> None:
 
     answered = run(sequence())
     predicted, removed, left = answered
-    assert predicted == {"features": 1, "stories": 2}
-    assert removed == {"features": 1, "stories": 2}
+    assert predicted == {"features": 1, "stories": 2, "tasks": 0}
+    assert removed == {"features": 1, "stories": 2, "tasks": 0}
     assert left == ["Elsewhere"]
 
 
