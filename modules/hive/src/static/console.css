@@ -16,6 +16,9 @@
     --console-red: #ef746f;
     --console-red-soft: #3b1d1e;
     --console-sidebar-width: 232px;
+    /* The phone top bar's height, in one place: the bar itself, the pinned
+       bands that sit under it and the scroll padding all read this. */
+    --console-topbar-height: 55px;
     --console-radius: 7px;
 }
 
@@ -376,8 +379,23 @@ a { color: inherit; }
     /* The push would otherwise give the document 232px of horizontal scroll:
        scroll right, close the nav, and the page is left looking blank until
        you scroll back. */
-    .console-app.sidebar-open { overflow-x: hidden; }
-    .console-mobile-header { height: 55px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--console-line); background: #101316; }
+    /* `clip`, not `hidden`, where the browser has it: `hidden` makes the app
+       a scroll container, and the top bar's sticky would then pin to a box
+       that never scrolls — the bar would ride away with the page whenever
+       the nav is open. */
+    .console-app.sidebar-open { overflow-x: hidden; overflow-x: clip; }
+    /* The top bar stays put while the page scrolls: the hamburger is how a
+       phone reaches the nav at all. Sticky rather than fixed, so it keeps
+       its place in the flow and covers nothing at the top of the page, and
+       so it still rides along when the nav pushes the page aside. Above the
+       page's own layers (a graph's decorations reach 10), under the nav's
+       overlay (110) and the rail (120). Three columns so the brand stays
+       centred whatever a page adds on the right. */
+    .console-mobile-header { position: sticky; top: 0; z-index: 100; height: var(--console-topbar-height); display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--console-line); background: #101316; }
+    .console-mobile-header > :first-child { justify-self: start; }
+    .console-mobile-actions { justify-self: end; display: flex; align-items: center; gap: 8px; }
+    /* An in-page jump lands below the bar rather than under it. */
+    html { scroll-padding-top: var(--console-topbar-height); }
     .mobile-brand { display: inline-flex; align-items: center; gap: 8px; color: var(--console-text); text-decoration: none; font-weight: 700; }
     .mobile-brand img { width: 23px; height: 23px; }
     .console-content { padding: 24px 18px 42px; }
