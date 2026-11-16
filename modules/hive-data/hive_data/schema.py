@@ -110,7 +110,10 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "subtype",
         #: The permanent whole-number ID (step 14), one count across every
         #: kind. The text `id` stays the key everything references.
-        "item_number"),
+        "item_number",
+        #: When its status moved into done (step 15), stamped by the
+        #: database and cleared when the item is reopened. Nobody sets it.
+        "done_at"),
     #: The files a work item carries (step 12), keyed by the item's id.
     "board.work_item_attachments": (
         "id", "item_id", "filename", "content_type", "size_bytes", "content",
@@ -120,7 +123,10 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "staff.statuses": ("name",),
     "staff.tasks": (
         "id", "name", "description", "status", "created_at", "updated_at",
-        "stopped_at", "woken_at", "board_item", "question"),
+        "stopped_at", "woken_at", "board_item", "question",
+        #: When its status moved into done (step 15), stamped by the
+        #: database from the row's own `updated_at`. Nobody sets it.
+        "done_at"),
     "staff.task_sessions": ("session_id", "task_id", "attached_at"),
     #: The sub-agents a mind has spawned. Step 9 made this for the chief's
     #: own delegates, which register themselves because nothing outside a
