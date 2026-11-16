@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import secrets
 import time
 import urllib.parse
 from pathlib import Path
@@ -149,6 +151,37 @@ _OLLAMA_ENV = {
 
 DEFAULT_OLLAMA_BASE_URL = "http://host.docker.internal:8899"
 
+#: What a mind created here is built from: the published hive-mind tree, and
+#: only that. Built from the host checkout instead, the image carries every
+#: file `.dockerignore` misses - every other mind's folder, inference proxy
+#: keys in their runtime.yaml among them - into a container its owner can
+#: read. Overridable for an install whose hive-mind lives elsewhere.
+DEFAULT_MIND_BUILD_CONTEXT = "https://github.com/danielstewart77/hive-mind.git#main"
+
+#: The user a mind's container runs as (the image's `hivemind`). Its folder
+#: is handed to it, because this console writes as root.
+DEFAULT_MIND_UID = 1000
+
+#: The credential the gateway presents on every call it makes to a mind,
+#: in the file the mind reads it from (hive-mind `minds/runtime_api.py`).
+SESSION_TOKEN_FILENAME = "session_token"
+
+
+def mind_session_token(name: str) -> str:
+    """The session credential a scaffolded mind will present, or "".
+
+    Minted with the scaffold so the console can register the mind with it:
+    a mind created here holds no gateway admin credential, so it cannot
+    register itself, and the gateway learns the credential from no one else.
+    """
+    if not _MIND_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid Mind name")
+    path = HIVE_MIND_MINDS_CONFIG_DIR / name / SESSION_TOKEN_FILENAME
+    try:
+        return path.read_text().strip()
+    except FileNotFoundError:
+        return ""
+
 
 def internal_mind_exists(name: str) -> bool:
     if not _MIND_NAME_RE.fullmatch(name):
@@ -246,10 +279,18 @@ def scaffold_internal_mind(
         base = (ollama_base_url or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
         runtime["env"] = _OLLAMA_ENV[harness](base, ollama_api_key)
 
+    own = f"/usr/src/app/minds/{name}"
     compose: dict[str, Any] = {
         "services": {
             name: {
-                "build": {"context": "../../..", "dockerfile": "Dockerfile"},
+                # The published tree, never the host checkout: see
+                # DEFAULT_MIND_BUILD_CONTEXT. The code is the image's, so a
+                # change reaches this mind when it is rebuilt.
+                "build": {
+                    "context": os.getenv("HIVE_MIND_BUILD_CONTEXT", "").strip()
+                    or DEFAULT_MIND_BUILD_CONTEXT,
+                    "dockerfile": "Dockerfile",
+                },
                 "container_name": f"hive-mind-{name}",
                 "working_dir": "/usr/src/app",
                 "environment": [
@@ -258,7 +299,9 @@ def scaffold_internal_mind(
                     f"{shape['config_dir_var']}={config_dir}",
                     "PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring",
                     "PYTHONNOUSERSITE=1",
-                    "KEY_RING=/usr/src/app/data/keyring",
+                    # Its own keyring, in its own folder: the hive's shared
+                    # one holds other minds' secrets.
+                    f"KEY_RING={own}/data/keyring",
                     "LUCENT_URL=http://hive-lucent:8424",
                     "LUCENT_URL_SELF=http://hive-lucent:8424",
                     # This mind's own value, not the hive's. Both services
@@ -278,9 +321,10 @@ def scaffold_internal_mind(
                     "HIVE_TOOLS_URL=http://hive-tools:9421",
                     "COMMS_URL=http://hive-comms:8424",
                     f"COMMS_BEARER_TOKEN=${{{_comms_variable(name)}}}",
-                    # A Mind re-registers from its own runtime.yaml on every
-                    # start, and POST /broker/minds is an admin route.
-                    "COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}",
+                    # No gateway admin credential: it opens every person's
+                    # conversations and mints anyone's credentials. The
+                    # console registers this mind, with the session
+                    # credential minted beside its runtime.yaml.
                     "HIVEMIND_BROKER_URL=http://hive-comms:8424",
                     # Every harness logs in to the inference proxy with this
                     # mind's own key, minted when it was created, so every
@@ -298,7 +342,11 @@ def scaffold_internal_mind(
                     "SPECS_DIR=/usr/src/app/specs/data-classes",
                     f"AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/{name}/data/auto-remember",
                 ],
-                "volumes": ["${HOST_PROJECT_DIR:-.}:/usr/src/app:rw"],
+                # Its own folder and nothing else of the host: not the
+                # hive_mind checkout, its .env, the shared keyring, or any
+                # other mind (DECIDED 2026-11-15, Daniel: a mind not owned by
+                # him never reaches his credentials).
+                "volumes": [f"${{HOST_PROJECT_DIR:-.}}/minds/{name}:{own}:rw"],
                 "restart": "unless-stopped",
                 "extra_hosts": ["host.docker.internal:host-gateway"],
                 "networks": ["hivemind"],
@@ -312,12 +360,9 @@ def scaffold_internal_mind(
             }
         }
     }
-    if harness == "codex_cli":
-        # Shared with every other codex container on this host: one
-        # `npm install -g @openai/codex` updates codex for all of them.
-        compose["services"][name]["volumes"].append(
-            "codex-global:/home/hivemind/.npm-global"
-        )
+    # No shared codex volume: every codex container on this host can write
+    # it, so a mind holding it could replace the codex binary Daniel's minds
+    # run. The image carries its own codex.
 
     container_dir = mind_dir / "container"
     container_dir.mkdir(parents=True, exist_ok=True)
@@ -325,4 +370,18 @@ def scaffold_internal_mind(
     compose_path = container_dir / "compose.yaml"
     runtime_path.write_text(yaml.safe_dump(runtime, sort_keys=False))
     compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
+    token_path = mind_dir / SESSION_TOKEN_FILENAME
+    handle = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(handle, "w") as stream:
+        stream.write(secrets.token_urlsafe(32) + "\n")
+    _hand_to_mind(mind_dir)
     return {"runtime": str(runtime_path), "compose": str(compose_path)}
+
+
+def _hand_to_mind(mind_dir: Path) -> None:
+    """Make the mind's folder its own: it writes its harness home, keyring
+    and session logs there, and this console writes as root."""
+    uid = int(os.getenv("HIVE_MIND_UID", "") or DEFAULT_MIND_UID)
+    for root, dirs, files in os.walk(mind_dir):
+        for entry in [root, *(os.path.join(root, n) for n in dirs + files)]:
+            os.chown(entry, uid, uid)

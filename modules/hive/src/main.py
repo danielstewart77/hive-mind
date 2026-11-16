@@ -84,6 +84,7 @@ from configuration_data import (
     get_edge_mind_metadata,
     internal_mind_exists,
     local_runtime_configuration,
+    mind_session_token,
     normalize_endpoint,
     scaffold_internal_mind,
     set_capability_endpoint,
@@ -1178,6 +1179,12 @@ async def api_register_mind(
     owner = _registration_owner(existing, body, user, configuration.get("owner"))
     if owner:
         registration["owner"] = owner
+    # A mind scaffolded here holds no gateway admin credential and cannot
+    # register itself, so the credential the gateway is to present to it
+    # travels with this registration or not at all.
+    session_token = mind_session_token(normalized)
+    if session_token:
+        registration["session_token"] = session_token
     # POST /broker/minds is an admin route on comms; the service token gets 401.
     broker_result = await _gateway_request(
         "POST", "/broker/minds", json_body=registration, admin=True

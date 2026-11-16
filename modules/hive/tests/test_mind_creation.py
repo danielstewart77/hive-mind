@@ -197,6 +197,8 @@ def test_register_sends_the_scaffolded_identity_to_the_broker(client):
         "harness": "codex_cli",
         # A new mind is the registering admin's unless another owner is named.
         "owner": "daniel",
+        # The credential the gateway presents to it, minted with the scaffold.
+        "session_token": (client.minds_dir / "atlas" / "session_token").read_text().strip(),
     }
 
 
@@ -288,3 +290,37 @@ def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
     runtime_env = yaml.safe_load(
         (client.minds_dir / "atlas" / "runtime.yaml").read_text()).get("env") or {}
     assert not {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"} & set(runtime_env)
+
+
+@pytest.mark.parametrize("harness,provider,model", _PAIRS)
+def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
+    client, harness, provider, model
+):
+    """DECIDED 2026-11-15 by Daniel: a mind not owned by him never reaches his
+    credentials. Its container is built from the published hive-mind tree
+    and mounts its own folder alone - not the checkout, its .env, the shared
+    keyring or another mind - and keeps its keyring in that folder."""
+    assert _create(client, harness=harness, provider=provider).status_code == 200
+
+    service = yaml.safe_load(
+        (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text()
+    )["services"]["atlas"]
+    assert service["volumes"] == [
+        "${HOST_PROJECT_DIR:-.}/minds/atlas:/usr/src/app/minds/atlas:rw"]
+    assert service["build"]["context"] == configuration_data.DEFAULT_MIND_BUILD_CONTEXT
+    environment = dict(item.split("=", 1) for item in service["environment"])
+    assert environment["KEY_RING"].startswith("/usr/src/app/minds/atlas/")
+
+
+def test_registering_a_new_mind_hands_the_gateway_the_credential_it_will_present(client, comms):
+    """It holds no admin credential to register itself with, so the console's
+    registration is the gateway's only source for the credential it must
+    present on every call to this mind - and the mind reads that same value
+    from its own folder."""
+    assert _create(client).status_code == 200
+    on_disk = (client.minds_dir / "atlas" / "session_token").read_text().strip()
+
+    assert client.post("/api/minds/atlas/register", json={}).status_code == 200
+
+    (sent,) = _broker_writes(comms)
+    assert on_disk and json.loads(sent["body"])["session_token"] == on_disk
