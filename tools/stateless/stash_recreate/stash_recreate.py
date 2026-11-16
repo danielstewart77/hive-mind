@@ -119,6 +119,7 @@ _MISSING_PROBE = (
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _STREAM = re.compile(rf"/sessions/({_UUID})/message")
 _CONVERSATION = re.compile(rf"--(?:session-id|resume)[ =]({_UUID})")
+_STARTED = re.compile(rf"--(session-id|resume)[ =]({_UUID})")
 
 
 class Refused(Exception):
@@ -732,20 +733,39 @@ def _report_text(data: dict) -> str:
     return "\n".join(lines)
 
 
-def resumed(run: Run, report: dict) -> None:
-    """The harness for the reported conversation came back on its own log."""
-    session = report.get("session")
-    if not report.get("delivered") or not session:
-        run.check("the conversation resumed from its log", None,
+def resumed(run: Run, report: dict, held: list[str]) -> None:
+    """The report turn completed, and no conversation the old container held
+    came back without its log.
+
+    Keyed by the harness's conversation id, which is not the gateway's
+    session id: a session whose conversation was replaced by a rotation
+    armed before the recreate comes back on a new conversation, started
+    fresh by design, and that is not a failed resume. On 2026-11-15 the
+    first run read exactly that as a failure.
+    """
+    if not report.get("delivered"):
+        run.check("the report turn completed after the recreate", None,
                   "no turn was delivered")
         return
+    run.check("the report turn completed after the recreate",
+              bool(report.get("turn_completed")),
+              {"session": report.get("session"),
+               "result": report.get("result")})
     ps = _ps()
-    args = [a for *_, a in _rows(ps.stdout) if session in a]
-    run.check("the conversation resumed from its log",
-              any(f"--resume {session}" in a or f"--resume={session}" in a
-                  for a in args) and bool(report.get("turn_completed")),
-              {"session": session, "turn_completed":
-               report.get("turn_completed"), "harness": args[:2]})
+    started = {match.group(2): match.group(1)
+               for *_, args in _rows(ps.stdout)
+               for match in [_STARTED.search(args)] if match}
+    back = {c: flag for c, flag in started.items() if c in held}
+    fresh = sorted(c for c in started if c not in held)
+    if not back:
+        run.check("a held conversation resumed from its log", None,
+                  {"held": held, "new_since": fresh,
+                   "skipped": "no conversation the old container held has "
+                              "been spoken to since"})
+        return
+    run.check("a held conversation resumed from its log",
+              all(flag == "resume" for flag in back.values()),
+              {"held": back, "new_since": fresh})
 
 
 # ---------------------------------------------------------------------- run
@@ -842,7 +862,7 @@ def run(reason: str, *, build: bool = True, deadline: float = DEADLINE,
         record.state("reporting", quiet_for=TURN_TIMEOUT + 120, outcome=outcome)
         record.data["report"] = report = deliver(text)
         if record.data["recreated"]:
-            resumed(record, report)
+            resumed(record, report, record.data.get("conversations") or [])
             if not record.passed() and outcome == "done":
                 outcome = "failed"
         record.data["finished_at"] = time.time()
