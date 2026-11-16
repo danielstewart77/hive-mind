@@ -39,6 +39,8 @@ however much room the whole command line has.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import concurrent.futures
 import json
 import os
@@ -1773,6 +1775,77 @@ async def _run_one_shot_turn(sid: str, state: dict, content: str,
         yield frame
 
 
+#: The image types dsh's read_image opens, by the extension it reads them by.
+_IMAGE_SUFFIXES = {"image/jpeg": ".jpg", "image/png": ".png",
+                   "image/webp": ".webp", "image/gif": ".gif"}
+
+
+def _save_attached_images(images: list[dict]) -> tuple[list[Path], list[str]]:
+    """Write each attached image to a file the dsh process can open.
+
+    Returns the saved paths and, for each image that could not be saved, the
+    reason in words. A failure is per image: one unreadable attachment does not
+    cost the others.
+    """
+    saved: list[Path] = []
+    failures: list[str] = []
+    directory = DSH_HOME / "attachments"
+    for index, image in enumerate(images, start=1):
+        if not isinstance(image, dict):
+            failures.append(f"image {index} arrived in a shape this mind cannot read")
+            continue
+        media_type = str(image.get("media_type") or "image/jpeg").lower()
+        suffix = _IMAGE_SUFFIXES.get(media_type)
+        if suffix is None:
+            failures.append(f"image {index} is {media_type}, which read_image cannot open")
+            continue
+        try:
+            data = base64.b64decode(image.get("data") or "", validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            failures.append(f"image {index} arrived as unreadable data")
+            continue
+        if not data:
+            failures.append(f"image {index} arrived empty")
+            continue
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            handle, raw_path = tempfile.mkstemp(prefix="image-", suffix=suffix, dir=directory)
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(data)
+        except OSError as exc:
+            failures.append(f"image {index} could not be written ({exc.strerror or exc})")
+            continue
+        saved.append(Path(raw_path))
+    return saved, failures
+
+
+async def _model_takes_images(model: str) -> bool | None:
+    """Whether the inference proxy says this model reads pictures.
+
+    True, False, or None when the proxy does not say or cannot be read. Only
+    False withholds an image: almost no model declares the flag, and treating
+    unknown as no would keep every attachment from minds that can see them.
+    """
+    try:
+        rows = await models_api.build_catalog(RUNTIME_PATH, harness="dsh")
+    except Exception:  # noqa: BLE001 — a listing that cannot be read says nothing
+        return None
+    for row in rows:
+        if row.get("name") == model:
+            flag = row.get("accepts_images")
+            return flag if isinstance(flag, bool) else None
+    return None
+
+
+def _with_attachment_paths(content: str, paths: list[Path]) -> str:
+    """The turn's text with every saved attachment named for read_image."""
+    if not paths:
+        return content
+    lines = [f"[Attached image saved at {path} — open it with read_image to see it.]"
+             for path in paths]
+    return "\n\n".join([content, *lines]) if content else "\n\n".join(lines)
+
+
 async def _run_dsh_turn(
     sid: str, content: str, images: list[dict] | None, goal_rounds: object = None,
 ) -> Any:
@@ -1788,17 +1861,33 @@ async def _run_dsh_turn(
     conversation_id = state["conversation_id"]
 
     if images:
-        # Said out loud rather than logged: a model answering the text as if
-        # nothing was attached looks like a model that ignored the picture.
-        log.warning("%s session %s: image input not supported, ignoring", NAME, sid)
-        yield {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{
-                "type": "text",
-                "text": f"({len(images)} attached image(s) were not sent —"
-                        " this harness has no image input yet.)",
-            }]},
-        }
+        # dsh takes no inline image, but its read_image tool opens a file. Each
+        # attachment is written where the dsh process can read it and the turn
+        # names the path, so the model sees the picture rather than the
+        # operator being told it never arrived.
+        if await _model_takes_images(state["model"]) is False:
+            saved, failures = [], [f"{state['model']} takes no image input, so"
+                                   f" {'it was' if len(images) == 1 else 'they were'}"
+                                   " not shown to it"]
+            unsent = len(images)
+        else:
+            saved, failures = _save_attached_images(images)
+            unsent = len(failures)
+        content = _with_attachment_paths(content, saved)
+        if failures:
+            # Said out loud rather than logged: a model answering the text as
+            # if nothing was attached looks like a model that ignored it.
+            log.warning("%s session %s: attachment(s) not saved: %s", NAME, sid,
+                        "; ".join(failures))
+            yield {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{
+                    "type": "text",
+                    "text": f"({unsent} attached image(s) did not reach the"
+                            " model: "
+                            + "; ".join(failures) + ".)",
+                }]},
+            }
 
     try:
         env = await _compose_turn_env(sid, state)

@@ -303,6 +303,8 @@ class _Listing:
 
     def __init__(self, windows: dict[str, int | None]) -> None:
         self.windows = windows
+        #: Further fields of a model's row, by model name.
+        self.extras: dict[str, dict] = {}
         self.urls: list[str] = []
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -318,7 +320,8 @@ class _Listing:
                 return False
 
             async def json(self) -> dict:
-                return {"data": [{"id": name, "context_window": window}
+                return {"data": [{"id": name, "context_window": window,
+                                  **listing.extras.get(name, {})}
                                  for name, window in listing.windows.items()]}
 
         class _Session:
@@ -991,15 +994,95 @@ async def test_a_turn_stopped_on_purpose_is_not_reported_as_a_crash(
     assert result["is_error"] is False
 
 
-async def test_an_attached_image_is_reported_as_not_sent(dsh, monkeypatch) -> None:
-    """A model answering the text as if nothing was attached looks like a model
-    that ignored the picture."""
+def _b64(raw: bytes) -> str:
+    import base64
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _named(turn: str, suffix: str) -> list[Path]:
+    return [Path(word) for word in turn.split() if word.endswith(suffix)]
+
+
+def _notices(events: list[dict]) -> list[str]:
+    return [t for t in _assistant_texts(events) if "did not reach the model" in t]
+
+
+async def test_an_attached_image_reaches_the_turn_as_a_file_read_image_can_open(
+    dsh, monkeypatch
+) -> None:
+    """dsh takes no inline image, but read_image opens a file. Every picture is
+    written into the mind's own dsh home and the turn names its path beside
+    the operator's words, so the model can see it — and the only thing the
+    operator reads is the model's answer, not a claim it never arrived."""
     _session(dsh)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([_report()]))
-    events = [e async for e in dsh._run_dsh_turn("row-1", "what is this?",
-                                                 [{"data": "x"}, {"data": "y"}])]
-    texts = [e["message"]["content"][0]["text"] for e in events if e["type"] == "assistant"]
-    assert any("2 attached image(s) were not sent" in t for t in texts)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    photos = [b"\xff\xd8\xff\xe0 one", b"\xff\xd8\xff\xe0 two"]
+    events = [e async for e in dsh._run_dsh_turn(
+        "row-1", "what is this?",
+        [{"media_type": "image/jpeg", "data": _b64(p)} for p in photos])]
+    turn = spawn.turns[-1]["turn"]
+    named = _named(turn, ".jpg")
+    assert [p.read_bytes() for p in named] == photos
+    assert all(p.parent == dsh.DSH_HOME / "attachments" for p in named)
+    assert "what is this?" in turn and "read_image" in turn
+    assert _assistant_texts(events) == ["the answer"]
+
+
+async def test_an_image_that_cannot_be_saved_is_reported_with_its_reason(
+    dsh, monkeypatch
+) -> None:
+    """When an attachment truly cannot reach the model, the operator is told
+    which one and why — and the one that could be saved still arrives."""
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = [e async for e in dsh._run_dsh_turn("row-1", "look", [
+        {"media_type": "image/tiff", "data": _b64(b"tiff")},
+        {"media_type": "image/png", "data": "not base64!"},
+        {"media_type": "image/png", "data": ""},
+        "not an image",
+        {"media_type": "image/png", "data": _b64(b"\x89PNG fine")},
+    ])]
+    [notice] = _notices(events)
+    assert notice.startswith("(4 attached image(s)")
+    assert "image 1 is image/tiff, which read_image cannot open" in notice
+    assert "image 2 arrived as unreadable data" in notice
+    assert "image 3 arrived empty" in notice
+    assert "image 4 arrived in a shape" in notice
+    assert [p.read_bytes() for p in _named(spawn.turns[-1]["turn"], ".png")] == [b"\x89PNG fine"]
+
+
+async def test_an_image_that_cannot_be_written_is_reported_and_the_turn_still_runs(
+    dsh, monkeypatch
+) -> None:
+    """A disk that refuses the file is the operator's to hear about, not a
+    turn that ends with nothing said."""
+    _session(dsh)
+    (dsh.DSH_HOME / "attachments").write_text("a file where the folder goes")
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = [e async for e in dsh._run_dsh_turn(
+        "row-1", "look", [{"media_type": "image/jpeg", "data": _b64(b"jpeg")}])]
+    [notice] = _notices(events)
+    assert "image 1 could not be written" in notice
+    assert _assistant_texts(events)[-1] == "the answer"
+
+
+async def test_a_model_that_takes_no_images_is_not_handed_one(dsh, monkeypatch) -> None:
+    """A picture put in front of a model that cannot read it breaks the route
+    for every later turn. When the proxy says so, the operator is told the
+    image did not reach the model and the turn carries no path."""
+    _session(dsh, model="gpt-oss:20b-32k")
+    proxy(monkeypatch, {"gpt-oss:20b-32k": 32_768}).extras = {
+        "gpt-oss:20b-32k": {"accepts_images": False}}
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = [e async for e in dsh._run_dsh_turn(
+        "row-1", "look", [{"media_type": "image/jpeg", "data": _b64(b"jpeg")}])]
+    [notice] = _notices(events)
+    assert "gpt-oss:20b-32k takes no image input" in notice
+    assert _named(spawn.turns[-1]["turn"], ".jpg") == []
 
 
 class _FakeTerminals:
@@ -1330,7 +1413,7 @@ async def test_a_quiet_turn_still_puts_a_byte_on_the_socket(dsh, monkeypatch) ->
     beats = [e for e in events if e.get("type") == "turn_heartbeat"]
     assert beats and all(e["_observer_only"] for e in beats)
     # And the turn still answers: a heartbeat is not a substitute for the report.
-    assert _assistant_text(events) == "the answer"
+    assert _assistant_texts(events) == ["the answer"]
 
 
 async def test_a_line_is_not_lost_to_a_heartbeat_tick(dsh, monkeypatch) -> None:
@@ -1583,7 +1666,7 @@ async def test_a_streamed_answer_still_reaches_the_turn_ledger(
         _report(text="the answer"),
     ]))
     events = await _drain(dsh)
-    assert _assistant_text(events) == "the answer"
+    assert _assistant_texts(events) == ["the answer"]
 
 
 async def test_a_turn_that_only_reasoned_still_says_what_it_did(
