@@ -145,9 +145,9 @@
      the graph gives it the room. Docked means gone — the barrel used to keep
      its 280 pixels whatever the class said, so on a workstation the handle
      toggled a class, flipped aria-expanded and changed nothing on screen. */
+  .cos-stage:not(.barrel-open) .cos-barrel { display:none; }
   @media (min-width: 821px) {
     .cos-topbar-done { display:none; }
-    .cos-stage:not(.barrel-open) .cos-barrel { display:none; }
   }
   /* Phone-size: the done button is the one in the top bar, and the barrel
      slides in over the page below that bar, so the bar stays reachable. It
@@ -163,7 +163,12 @@
       box-shadow:-18px 0 48px rgba(0,0,0,.45);
       transform:translateX(100%); visibility:hidden;
       transition:transform .2s ease, visibility 0s linear .2s;
+      /* A scroll over any part of it — the header too, not just the list —
+         stays in it and never moves the page underneath. */
+      overflow-y:auto; overscroll-behavior:contain;
     }
+    .cos-stage:not(.barrel-open) .cos-barrel { display:flex; }
+    .cos-barrel-head { touch-action:none; }
     .cos-stage.barrel-open .cos-barrel {
       transform:none; visibility:visible; transition:transform .2s ease;
     }
@@ -910,6 +915,23 @@
 
   function isOpen() { return stage.classList.contains('barrel-open'); }
 
+  // The done button on screen right now — the top bar's or the graph's.
+  function visibleToggle() {
+    for (var i = 0; i < toggles.length; i++) {
+      if (toggles[i].offsetParent !== null) return toggles[i];
+    }
+    return null;
+  }
+
+  // Docking hides the barrel; focus inside it would fall to the page body,
+  // so it goes back to the done button that opened it.
+  function dock() {
+    var hadFocus = pane.contains(document.activeElement);
+    setBarrel(false);
+    var t = hadFocus && visibleToggle();
+    if (t) t.focus({ preventScroll: true });
+  }
+
   function setBarrel(open) {
     stage.classList.toggle('barrel-open', open);
     toggles.forEach(function (t) {
@@ -929,6 +951,10 @@
     t.addEventListener('click', function () {
       var open = !isOpen();
       setBarrel(open);
+      // Over the page on a phone-size screen: the keyboard goes with it.
+      if (open && mobile.matches) {
+        pane.querySelector('[data-barrel-close]').focus({ preventScroll: true });
+      }
       // The nav and the barrel are never open together on a phone: the
       // nav yields to the barrel, as the barrel yields to the nav.
       if (open) document.querySelector('[data-console-app]')
@@ -943,13 +969,11 @@
     });
   });
 
-  pane.querySelector('[data-barrel-close]').addEventListener('click', function () {
-    setBarrel(false);
-  });
+  pane.querySelector('[data-barrel-close]').addEventListener('click', dock);
 
   // Escape docks an open barrel where it lies over the page.
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && mobile.matches && isOpen()) setBarrel(false);
+    if (e.key === 'Escape' && mobile.matches && isOpen()) dock();
   });
 
   // Swiping the open barrel away docks it: a rightward swipe, towards the
@@ -968,7 +992,7 @@
     var dx = t.clientX - swipe.x;
     var dy = t.clientY - swipe.y;
     swipe = null;
-    if (dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) setBarrel(false);
+    if (dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) dock();
   }, { passive: true });
   pane.addEventListener('touchcancel', function () { swipe = null; },
                         { passive: true });
