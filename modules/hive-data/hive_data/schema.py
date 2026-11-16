@@ -118,6 +118,16 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "board.work_item_attachments": (
         "id", "item_id", "filename", "content_type", "size_bytes", "content",
         "created_at"),
+    #: Role Management (step 15, feature 10.18).
+    "board.roles": (
+        "id", "slug", "name", "skills", "hooks", "model", "tools",
+        "kept_against", "created_at", "updated_at"),
+    "board.managed_minds": ("mind_id", "managed_at"),
+    "board.mind_roles": ("mind_id", "role_id", "assigned_at"),
+    "board.skill_submissions": (
+        "id", "skill", "submitted_by", "by_owner", "new_skill", "repository",
+        "branch", "pr_number", "pr_url", "merged_at", "closed_at",
+        "checked_at", "created_at"),
     #: The chief of staff's ledger (step 6). Dotted like every schema
     #: after `core`.
     "staff.statuses": ("name",),
@@ -262,6 +272,8 @@ GENERATED: dict[str, frozenset[str]] = {
     "tools.users": frozenset({"id"}),
     "board.design_notices": frozenset({"id"}),
     "board.work_item_attachments": frozenset({"id"}),
+    "board.roles": frozenset({"id"}),
+    "board.skill_submissions": frozenset({"id"}),
     #: GENERATED ALWAYS (step 14): an item's ID is the database's to issue
     #: and nobody's to set, on a create or afterwards.
     "board.work_items": frozenset({"item_number"}),

@@ -53,6 +53,7 @@ from .errors import (
 )
 from . import graph
 from . import memory
+from . import roles
 from . import staff
 from . import tools
 from .pool import close_pool, live_pool, open_pool, run, settings_in_use
