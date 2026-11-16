@@ -99,23 +99,20 @@ def _overlapping_route_writer(
     process_runtime_api.install_runtime_routes(
         app, path=runtime_path, mind_id="mind-1", log=logging.getLogger("test")
     )
-    try:
-        with TestClient(app, raise_server_exceptions=False) as client:
-            if action == "model":
-                response = client.patch(
-                    "/runtime",
-                    json={"default_model": "model-b", "provider": "proxy"},
-                    headers={"Authorization": "Bearer separate-process-token"},
-                )
-            else:
-                response = client.patch(
-                    "/runtime/settings",
-                    json={"settings": {"rotation_threshold_percent": 40}},
-                    headers={"Authorization": "Bearer separate-process-token"},
-                )
-        outcomes.put((position, action, response.status_code, response.text))
-    except Exception as exc:  # communicate actual child failure to the parent assertion
-        outcomes.put((position, action, None, f"{type(exc).__name__}: {exc}"))
+    with TestClient(app, raise_server_exceptions=False) as client:
+        if action == "model":
+            response = client.patch(
+                "/runtime",
+                json={"default_model": "model-b", "provider": "proxy"},
+                headers={"Authorization": "Bearer separate-process-token"},
+            )
+        else:
+            response = client.patch(
+                "/runtime/settings",
+                json={"settings": {"rotation_threshold_percent": 40}},
+                headers={"Authorization": "Bearer separate-process-token"},
+            )
+    outcomes.put((position, action, response.status_code, response.text))
 
 
 def _await_phase(phases, expected: tuple[str, str]) -> None:
