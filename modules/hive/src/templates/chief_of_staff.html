@@ -263,7 +263,10 @@
   <span id="cos-pct">0%</span>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
+<!-- async: the page, its buttons and the done bucket never wait on the
+     graph library. Blocking, a slow cdnjs left a remembered-open bucket on
+     screen with a close control nothing had wired up yet. -->
+<script id="cos-cytoscape" async src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
 <script>
 (function () {
   // Drawn from one payload, so the tree, the barrel and the counts can never
@@ -622,6 +625,15 @@
   }
 
   var cy = null;
+  // The latest payload, held until the graph library has arrived.
+  var pendingDraw = null;
+  document.getElementById('cos-cytoscape').addEventListener('load', function () {
+    if (pendingDraw !== null) {
+      var data = pendingDraw;
+      pendingDraw = null;
+      draw(data);
+    }
+  });
   var lastGoodAt = 0;
   var deco = document.getElementById('cos-deco');
   var shape = '';
@@ -935,7 +947,7 @@
     document.getElementById('cos-progress').style.width = pct + '%';
     document.getElementById('cos-pct').textContent = pct + '%';
 
-    draw(data);
+    if (window.cytoscape) { draw(data); } else { pendingDraw = data; }
   }
 
   // ── the barrel, and what opening it does to the graph ────────────────
@@ -1040,7 +1052,10 @@
     var dx = t.clientX - swipe.x;
     var dy = t.clientY - swipe.y;
     swipe = null;
-    if (dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) dock();
+    // Phone-size only, where the barrel lies over the page: in a large
+    // screen's layout a sideways drag on the list is not a way out, and it
+    // would be remembered as a choice.
+    if (mobile.matches && dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) dock();
   }, { passive: true });
   pane.addEventListener('touchcancel', function () { swipe = null; },
                         { passive: true });
@@ -1049,7 +1064,13 @@
   // docked on a phone and open on a large screen. Re-decided when the
   // viewport crosses the breakpoint, so a rotated phone or a resized window
   // takes the state remembered for the size it now is.
-  function applyStart() { setBarrel(memory.start(), false); }
+  function applyStart() {
+    var hadFocus = pane.contains(document.activeElement);
+    var open = memory.start();
+    setBarrel(open, false);
+    var t = !open && hadFocus && visibleToggle();
+    if (t) t.focus({ preventScroll: true });
+  }
   listenMedia(mobile, applyStart);
   applyStart();
 

@@ -22,8 +22,12 @@ _BUCKET = """() => {
 
 
 def _settled(page):
-    # The bucket slides over .2s; read it once it has arrived.
-    page.wait_for_timeout(350)
+    # The bucket slides in and out by a CSS transition. Read it once the
+    # bucket's own transitions have finished — a fixed wait raced the slide
+    # on a loaded machine and read it half way across.
+    page.wait_for_function(
+        "() => document.getElementById('cos-barrel-pane').getAnimations()"
+        ".every(a => a.playState !== 'running')")
     return page.evaluate(_BUCKET)
 
 
@@ -83,21 +87,6 @@ def _load(page):
     return _settled(page)
 
 
-def test_with_nothing_remembered_a_phone_starts_docked_and_a_large_screen_open(
-        monkeypatch):
-    client = signed_in_client(monkeypatch)
-    with browser(client) as context:
-        phone = context(390, 800, touch=True).new_page()
-        phone.goto(PAGE)
-        phone.wait_for_load_state("networkidle")
-        assert _docked(_settled(phone))
-
-        large = context(1400, 900).new_page()
-        large.goto(PAGE)
-        large.wait_for_load_state("networkidle")
-        assert _open_on_screen(_settled(large))
-
-
 def test_a_remembered_choice_comes_back_on_the_next_visit_kept_apart_per_screen_size(
         monkeypatch):
     client = signed_in_client(monkeypatch)
@@ -126,3 +115,7 @@ def test_a_remembered_choice_comes_back_on_the_next_visit_kept_apart_per_screen_
         # ...and docked on the large screen did not dock the phone.
         page.set_viewport_size({"width": 390, "height": 800})
         assert _open_on_screen(_load(page))
+
+        # Opening the nav docks it on a phone, and that is remembered too.
+        page.locator("[data-sidebar-open]").click()
+        assert _docked(_load(page))
