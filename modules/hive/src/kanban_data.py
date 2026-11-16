@@ -105,6 +105,10 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     """
     record: dict[str, Any] = {
         "id": row["id"],
+        # The permanent whole-number ID, one count across every kind, issued
+        # by the store on create and never changed after (story 3.7.7). The
+        # text id above stays the key every URL and reference names.
+        "item_number": row["item_number"],
         "title": row["title"],
         "description": row["description"],
         "requirements": row["requirements"],
