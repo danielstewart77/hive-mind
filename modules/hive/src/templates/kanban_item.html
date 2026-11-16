@@ -22,6 +22,9 @@
 .item-back-nav { position:static; background:none; padding:0; min-height:0; z-index:auto; }
 .item-back-nav a { color:var(--console-cyan, #4cc9d9); text-decoration:none; font-size:.9rem; }
 .item-back-nav a:hover { text-decoration:underline; }
+.item-description-head { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+.item-description-toggle { padding:.2rem .6rem; font-size:.8rem; min-height:0; }
+.item-description-view { padding:.6rem .75rem; border:1px solid var(--console-line, #333); border-radius:var(--console-radius, 7px); min-height:2.5rem; }
 </style>
 <main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}" data-item-number="{{ item.backlog_number }}">
   <nav class="item-back-nav"><a href="/kanban/backlog">Back to backlog</a></nav>
@@ -31,7 +34,11 @@
   <form id="item-form" class="surface item-field">
     <div class="item-actions item-form-header"><select id="status-choice" aria-label="Status" hidden></select><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
     <label class="item-field">Title<input class="item-title-input" type="text" name="title" value="{{ item.title }}" required></label>
-    <label class="item-field">Description<textarea name="description">{{ item.description }}</textarea></label>
+    <div class="item-field" id="description-field">
+      <div class="item-description-head"><span id="description-label">Description</span><button class="button item-description-toggle" type="button" id="description-toggle">Edit</button></div>
+      <div class="item-description-view" id="description-view"></div>
+      <textarea name="description" id="description-input" aria-labelledby="description-label" hidden></textarea>
+    </div>
     <label class="item-field">Requirements<textarea name="requirements">{{ item.requirements }}</textarea></label>
     <label class="item-field">Acceptance criteria<textarea name="acceptance_criteria">{{ item.acceptance_criteria }}</textarea></label>
     <label class="item-field">QA tests<textarea name="qa_tests">{{ item.qa_tests }}</textarea></label>
@@ -50,6 +57,8 @@
   </aside>
   </div>
 </main>
+<script type="application/json" id="description-source">{{ item.description | tojson }}</script>
+<script src="{{ request.url_for('static', path='markdown.js') }}?v={{ asset_versions['markdown.js'] }}"></script>
 <script>
 (() => {
   'use strict';
@@ -66,6 +75,27 @@
   const kindName = {epic: 'Epic', feature: 'Feature', story: 'Story'};
   function autoGrow(el){el.style.height='auto';el.style.height=`${el.scrollHeight}px`;}
   const growers = form.querySelectorAll('textarea');
+  // The description is handed over as JSON rather than as the textarea's
+  // text, which the HTML parser would strip a leading newline from.
+  const descriptionInput = document.getElementById('description-input');
+  const descriptionView = document.getElementById('description-view');
+  const descriptionToggle = document.getElementById('description-toggle');
+  descriptionInput.value = JSON.parse(document.getElementById('description-source').textContent) ?? '';
+  // What the store holds, as the textarea reports it. Save leaves the
+  // description out unless it differs, so displaying an item never rewrites
+  // it and a save of another field cannot overwrite a newer description.
+  let savedDescription = descriptionInput.value;
+  function showDescription(editing){
+    descriptionInput.hidden = !editing;
+    descriptionView.hidden = editing;
+    descriptionToggle.textContent = editing ? 'Preview' : 'Edit';
+    descriptionToggle.setAttribute('aria-label', editing ? 'Preview description' : 'Edit description');
+    if (editing) autoGrow(descriptionInput);
+    else if (window.hiveMarkdown) window.hiveMarkdown.render(descriptionView, descriptionInput.value);
+    else { descriptionView.className = 'item-description-view md-source'; descriptionView.textContent = descriptionInput.value; }
+  }
+  descriptionToggle.addEventListener('click', () => showDescription(descriptionInput.hidden));
+  showDescription(!savedDescription.trim());
   for (const t of growers) { autoGrow(t); t.addEventListener('input', () => autoGrow(t)); }
   window.addEventListener('resize', () => { for (const t of growers) autoGrow(t); });
   async function loadRelations(){
@@ -147,6 +177,7 @@
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form).entries());
+    if (body.description === savedDescription) delete body.description;
     const type = document.getElementById('type-choice').value;
     if (type !== currentType()) body.type = type;
     const parent = document.getElementById('parent-choice').value;
@@ -163,6 +194,14 @@
       if (!response.ok) throw new Error((await response.json()).detail || `Request failed (${response.status})`);
       const updated = await response.json();
       if ('status' in updated) page.dataset.itemStatus = updated.status;
+      if ('description' in updated) {
+        // The store's copy becomes the page's, unless the description was
+        // typed into while the save was in flight: that text stays put.
+        const untouched = descriptionInput.value === ('description' in body ? body.description : savedDescription);
+        const stored = (updated.description ?? '').replace(/\r\n?/g, '\n');
+        savedDescription = stored;
+        if (untouched) { descriptionInput.value = stored; showDescription(!stored.trim()); }
+      }
       feedback.textContent = 'Saved.';
     } catch (err) {
       feedback.textContent = `Not saved: ${err.message}`;
