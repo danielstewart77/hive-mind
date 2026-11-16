@@ -2633,7 +2633,13 @@ async def canvas_render_svg(request: Request, slide: int | None = None):
 
 @app.post("/canvas/submit")
 async def canvas_submit(request: Request):
-    """Daniel's 'I'm done drawing' poke. Fires a Skippy turn via the broker."""
+    """The signed-in person's "I'm done drawing" poke, to a mind of theirs.
+
+    Story 2.1.19: the drawer is whoever is signed in and the turn goes to
+    their own mind, never a fixed one. The body may name the mind; otherwise
+    it is this console's default mind when the drawer owns it, or their only
+    mind. An admin may name any mind, as everywhere else.
+    """
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -2641,11 +2647,34 @@ async def canvas_submit(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    note = (body or {}).get("note", "") if isinstance(body, dict) else ""
+    body = body if isinstance(body, dict) else {}
+    note = str(body.get("note", "") or "")
+    asked = str(body.get("mind", "") or "").strip()
     element_count = len(_canvas_elements)
     snapshot = str(request.base_url).rstrip("/") + "/canvas/render.svg"
+    who = design_delivery.person_label(user.get("username", ""))
+
+    minds = await route_access.registered_minds()
+    if minds is None:
+        raise HTTPException(status_code=502, detail="could not read the mind registry")
+    own = [m for m in minds if route_access.owner_of(m) == user.get("username")]
+    if asked:
+        target = route_access.find_mind(minds, asked)
+        if target is None or not (user.get("is_admin") or target in own):
+            raise HTTPException(status_code=404, detail=f"no mind of yours named {asked!r}")
+    else:
+        default = route_access.find_mind(own, os.getenv("MIND_NAME", "skippy"))
+        target = default or (own[0] if len(own) == 1 else None)
+        if target is None:
+            raise HTTPException(
+                status_code=400,
+                detail="say which of your minds should look" if own
+                else "you have no mind to send the drawing to")
+    target_name = str(target.get("name") or "")
+    mind_id = str(target.get("id") or "")
+
     content = (
-        "Daniel finished a drawing pass on the hive whiteboard and wants you "
+        f"{who} finished a drawing pass on the hive whiteboard and wants you "
         f"to look. The board currently has {element_count} element(s). Fetch "
         f"the snapshot with `curl -H \"Authorization: Bearer $CANVAS_PUSH_TOKEN\" "
         f"{snapshot}` — the bearer you draw with (CANVAS_PUSH_TOKEN, or "
@@ -2653,27 +2682,12 @@ async def canvas_submit(request: Request):
         "refuses. Rasterize it and respond on Telegram with what you see."
     )
     if note:
-        content += f" Daniel's note: {note}"
+        content += f" {who}'s note: {note}"
 
-    target_name = os.getenv("MIND_NAME", "skippy")
     headers = _gateway_headers()
     headers["Content-Type"] = "application/json"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # The broker keys minds on their UUID (mind_id), not the display
-            # name, so resolve the id from the registry before dispatching.
-            minds_resp = await client.get(
-                f"{_gateway_base_url()}/broker/minds", headers=headers
-            )
-            minds_resp.raise_for_status()
-            minds = minds_resp.json()
-            mind_id = next(
-                (m.get("id") for m in minds if m.get("name") == target_name), None
-            )
-            if not mind_id:
-                raise HTTPException(
-                    status_code=502, detail=f"mind '{target_name}' not registered in broker"
-                )
             payload = {
                 "conversation_id": str(uuid.uuid4()),
                 "from_mind": "canvas",
@@ -2686,7 +2700,8 @@ async def canvas_submit(request: Request):
             )
             resp.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"could not reach Skippy: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"could not reach {target_name}: {exc}") from exc
     log_event(
         log, "canvas.review.dispatched", **_actor_fields(user),
         mind_name=target_name, element_count=element_count, note_chars=len(note),
@@ -4070,9 +4085,7 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
         "POST",
         "/docker/restart",
         params={
-            "path": os.getenv(
-                "HIVE_MIND_PROJECT_PATH", "/home/daniel/Storage/Dev/hive_mind"
-            ),
+            "path": mind_mounts.hive_mind_project_path(),
             "service": name,
         },
     )

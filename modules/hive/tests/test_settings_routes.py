@@ -205,6 +205,10 @@ def test_mind_configuration_reports_a_mind_that_is_down(tmp_path, monkeypatch):
 def test_mind_restart_submits_hive_tools_approval(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("HIVE_TOOLS_TOKEN", "tools-token")
+    # Where the console's own deployment says the Dev tree is; the checkout
+    # is derived from it, never from anybody's home (story 2.1.19).
+    monkeypatch.delenv("HIVE_MIND_PROJECT_PATH", raising=False)
+    monkeypatch.setenv("HOST_DEV_DIR", "/srv/dev")
     with (
         patch.object(main_mod, "local_runtime_configuration", return_value={"name": "bob"}),
         patch.object(
@@ -219,6 +223,7 @@ def test_mind_restart_submits_hive_tools_approval(tmp_path, monkeypatch):
     assert response.json()["status"] == "pending"
     assert request.await_args.args == ("POST", "/docker/restart")
     assert request.await_args.kwargs["params"]["service"] == "bob"
+    assert request.await_args.kwargs["params"]["path"] == "/srv/dev/hive_mind"
 
 
 def test_operation_status_proxies_hive_tools(tmp_path, monkeypatch):

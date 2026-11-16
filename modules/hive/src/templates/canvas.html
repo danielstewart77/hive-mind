@@ -217,7 +217,7 @@
     </div>
     {% endif %}
     <button class="draw-btn-fit" id="draw-fit" title="Fit this slide to the screen">&#9635; fit</button>
-    <button class="draw-tool draw-tool-send" id="draw-submit" title="Send the board to Skippy for review">&#9993; send to Skippy</button>
+    <button class="draw-tool draw-tool-send" id="draw-submit" title="Send the board to your mind for review">&#9993; send for review</button>
     <button class="draw-btn-clear" id="draw-clear">clear</button>
     <span class="draw-conn-dot" id="draw-conn" title="disconnected"></span>
   </div>
@@ -977,7 +977,10 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({})
         });
-        submitBtn.textContent = r.ok ? 'sent to Skippy ✓' : 'send failed';
+        const answer = await r.json().catch(() => ({}));
+        submitBtn.textContent = r.ok
+          ? `sent to ${answer.dispatched_to || 'your mind'} ✓`
+          : (answer.detail || 'send failed');
       } catch (e) {
         submitBtn.textContent = 'send failed';
       }

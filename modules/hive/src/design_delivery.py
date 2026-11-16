@@ -32,6 +32,7 @@ import urllib.request
 from typing import Any
 
 import design_data
+import route_access
 
 log = logging.getLogger("hive.design")
 
@@ -50,7 +51,19 @@ def _service_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
+def person_label(username: str) -> str:
+    """How a prompt names a person: their username, capitalised as a name.
+
+    Usernames are the only label the identity store holds. One that cannot
+    be resolved is "The owner" rather than anybody in particular.
+    """
+    name = str(username or "").strip()
+    return name[:1].upper() + name[1:] if name else "The owner"
+
+
+def compose_message(
+    record: dict[str, Any], page: str, kind: str, person: str = ""
+) -> str:
     """The turn the Mind receives, built from the page as it now stands.
 
     The whole page travels, not a "go and look" ping. A notice would make
@@ -62,6 +75,9 @@ def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
     what Daniel flagged, so a page of forty requirements with two questions
     on it should arrive as two questions.
     """
+    # The person on the other side of the page: the owner of the mind this
+    # session is attached to (story 2.1.19), never a name written in here.
+    who = person_label(person)
     lines = [
         f"<design-session id=\"{record['id']}\" page=\"{page}\" action=\"{kind}\">",
         f"Design session: {record['title']}",
@@ -72,7 +88,7 @@ def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
         # go signal arriving with no requirements, no tests and no call graph
         # asks a mind to build from memory.
         lines.append(
-            "Daniel pressed Build. The three pages are agreed — write the code."
+            f"{who} pressed Build. The three pages are agreed — write the code."
         )
         for whole_page in design_data.PAGES:
             lines.append("")
@@ -106,7 +122,7 @@ def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
         # and asked nothing — true, and useless: what the Mind needs is the
         # agreed wording it must now write the next page against.
         lines.append(
-            f"Daniel accepted the {page} page as it stands. Write the next page."
+            f"{who} accepted the {page} page as it stands. Write the next page."
         )
         lines.append("")
         lines.append(f"## {page} (agreed)")
@@ -118,7 +134,7 @@ def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
         lines.append("</design-session>")
         return "\n".join(lines)
 
-    lines.append("Daniel submitted feedback on the design page.")
+    lines.append(f"{who} submitted feedback on the design page.")
     lines.append("")
 
     for position, item in enumerate(design_data.ordered_items(record, page), start=1):
@@ -129,13 +145,13 @@ def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
         label = item.get("text") or item.get("sentence") or item.get("name") or ""
         lines.append(f"{position}. {label}")
         if edited:
-            lines.append("   (Daniel edited this wording.)")
+            lines.append(f"   ({who} edited this wording.)")
         if question:
-            lines.append(f"   He asks: {question}")
+            lines.append(f"   {who} asks: {question}")
         lines.append("")
 
     if len(lines) == 4:
-        lines.append("He changed nothing and asked nothing on this page.")
+        lines.append(f"{who} changed nothing and asked nothing on this page.")
     lines.append("</design-session>")
     return "\n".join(lines)
 
@@ -206,7 +222,8 @@ async def deliver_notice(notice_id: int) -> bool:
         if not conversation_id:
             await design_data.release_notice(notice_id)
             return False
-        content = compose_message(record, notice["page"], notice["kind"])
+        person = await route_access.owner_of_mind(str(record.get("mind_id") or "")) or ""
+        content = compose_message(record, notice["page"], notice["kind"], person)
         await adopt_conversation(record["id"], conversation_id)
         await send_turn(conversation_id, content)
     except Exception:  # noqa: BLE001 — a failed send is never a lost submission
