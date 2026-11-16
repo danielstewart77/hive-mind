@@ -344,7 +344,7 @@ def _terminal_context_file(context: str) -> Path | None:
     return path
 
 
-def _role_hooks_env(env: dict[str, str]) -> dict[str, str]:
+def _role_hooks_env(env: dict[str, str], timeout: float = 10.0) -> dict[str, str]:
     """The hooks file and grants file a dsh process is started with.
 
     Feature 10.18: the mind's own hooks, each gated by its roles, plus the
@@ -355,7 +355,7 @@ def _role_hooks_env(env: dict[str, str]) -> dict[str, str]:
     """
     return role_guard.prepare(
         DSH_HOME, hooks_config(), env.get("MIND_ID") or NAME,
-        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""))
+        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout)
 
 
 def _patch_args() -> list[str]:
@@ -417,7 +417,8 @@ def _pane_env(
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     env["HIVE_SURFACE"] = "terminal"
-    env.update(_role_hooks_env({**os.environ, **env}))
+    # Short: a pane opens inside the attach handler, on the event loop.
+    env.update(_role_hooks_env({**os.environ, **env}, timeout=3.0))
     # The pane prints its own prompt and banner, and the interactive surface
     # ships to every dsh mind — so it reads the name from here rather than
     # carrying one mind's name in code every other install would be lying with.

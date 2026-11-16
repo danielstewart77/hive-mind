@@ -43,6 +43,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -52,7 +54,13 @@ TOOLS = ("shell", "files", "sub-minds", "web")
 
 #: dsh's tool names, by the family a role allows them under.
 FAMILIES = {
-    "shell": {"bash", "pwsh"},
+    # A persistent terminal, a background job and a workflow run are each a
+    # shell by another name: a role that leaves shell unticked must leave
+    # them unusable too.
+    "shell": {"bash", "pwsh", "terminal_open", "terminal_send", "terminal_read",
+              "terminal_signal", "terminal_close", "terminal_list",
+              "job_kill", "job_list", "job_output",
+              "cordis_run", "cordis_define", "cordis_stop", "cordis_undefine"},
     "files": {"read", "write", "edit", "glob", "grep", "read_image",
               "str_replace", "str_replace_editor"},
     "web": {"web_fetch", "web_search"},
@@ -115,9 +123,22 @@ def fetch(mind: str, url: str, token: str, timeout: float = FETCH_TIMEOUT) -> di
 
     A 404 is an answer, not a failure: a gateway without the route predates
     roles, and so does a mind it has never registered — neither is managed.
+
+    The deadline is the whole call's, name lookup included. urllib's own
+    timeout does not cover resolving the host, and a guard still waiting
+    when dsh's hook timeout runs out is a guard dsh ignores — the tool runs.
     """
     if not (mind and url):
         return None
+    answer: list = []
+    worker = threading.Thread(
+        target=lambda: answer.append(_fetch(mind, url, token, timeout)), daemon=True)
+    worker.start()
+    worker.join(timeout + 0.5)
+    return answer[0] if answer else None
+
+
+def _fetch(mind: str, url: str, token: str, timeout: float) -> dict | None:
     request = urllib.request.Request(
         f"{url.rstrip('/')}/minds/{urllib.request.quote(mind, safe='')}/grants",
         headers={"Authorization": f"Bearer {token}"} if token else {})
@@ -227,8 +248,14 @@ def tool_refusal(grants: dict, tool: str, arguments: dict | None) -> str | None:
     return None
 
 
+def essential(name: str) -> bool:
+    """Whether a hook keeps the mind alive, judged as the mind server judges
+    its required hooks: by the name appearing in the command's name."""
+    return any(token in name for token in ESSENTIAL_HOOKS)
+
+
 def hook_allowed(grants: dict, name: str) -> bool:
-    if not grants.get("managed") or name in ESSENTIAL_HOOKS:
+    if not grants.get("managed") or essential(name):
         return True
     return name in (grants.get("hooks") or [])
 
@@ -255,12 +282,17 @@ def effective_hooks(source: dict | None, python: str = "python3") -> dict:
                 if not isinstance(command, str) or not command.strip():
                     continue
                 name = hook_name(command)
-                if name in ESSENTIAL_HOOKS:
+                if essential(name):
                     continue
                 hook["command"] = (f"{python} {shlex.quote(str(GUARD))} gate "
                                    f"{shlex.quote(name)} -- sh -c {shlex.quote(command)}")
     events.setdefault("PreToolUse", []).insert(0, {"hooks": [{
         "type": "command", "command": f"{python} {shlex.quote(str(GUARD))} guard",
+        "timeout": 10}]})
+    # A typed `/name` loads a skill without any tool call, so the skill grant
+    # is checked on the prompt as well.
+    events.setdefault("UserPromptSubmit", []).insert(0, {"hooks": [{
+        "type": "command", "command": f"{python} {shlex.quote(str(GUARD))} prompt",
         "timeout": 10}]})
     return config
 
@@ -286,7 +318,8 @@ def delegate_names(patch_file: Path) -> list[str]:
 
 
 def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
-            python: str = "python3") -> dict[str, str]:
+            python: str = sys.executable or "python3",
+            timeout: float = 10.0) -> dict[str, str]:
     """Write what a dsh spawn needs and return the environment naming it.
 
     The grants are fetched now and written beside the hooks; a gateway that
@@ -295,9 +328,20 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
     before dsh is handed it, since a file dsh cannot parse registers no
     hooks at all — guard, memory and rotation together.
     """
-    grants = fetch(mind, url, token, timeout=10.0)
+    grants = fetch(mind, url, token, timeout=timeout)
     if grants is None:
         raise RuntimeError("the gateway did not say what this mind's roles allow, so it is not started")
+    try:
+        return _write_spawn_files(dsh_home, source_hooks, grants, python)
+    except (OSError, ValueError) as exc:
+        # One kind of failure for every caller: a hooks file that will not
+        # parse or a home that cannot be written is a mind that is not run,
+        # said out loud, not a turn that ends in silence.
+        raise RuntimeError(f"the role guard's files could not be written: {exc}") from exc
+
+
+def _write_spawn_files(dsh_home: Path, source_hooks: str, grants: dict,
+                       python: str) -> dict[str, str]:
     grants["delegates"] = delegate_names(dsh_home / "agents.patch.yml")
     grants_file = dsh_home / "role-grants.json"
     write_grants(grants_file, grants)
@@ -343,9 +387,55 @@ def _gate(argv: list[str]) -> int:
         saved = read_grants(Path(os.environ["HIVE_ROLE_GRANTS_FILE"])) if os.environ.get("HIVE_ROLE_GRANTS_FILE") else None
         allowed = bool(saved) and not saved.get("managed")
     if not allowed:
+        _note(f"hook {name} withheld: no role this mind holds grants it")
         return 0
     done = subprocess.run(command, input=stdin)
     return done.returncode
+
+
+def _note(message: str) -> None:
+    """One line in the mind's hook log, so a withheld hook is never silent."""
+    home = _mind_env(dict(os.environ)).get("DSH_HOME", "")
+    if not home:
+        return
+    try:
+        folder = Path(home).parent / "data" / "auto-remember"
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / "hooks.log", "a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%dT%H:%M:%S')}] role_guard: {message}\n")
+    except OSError:
+        pass
+
+
+def prompt_refusal(grants: dict, prompt: str, skills_dir: Path | None) -> str | None:
+    """Why a typed `/name` is refused: it names an installed skill no role grants."""
+    if not grants.get("managed"):
+        return None
+    text = prompt.lstrip()
+    if not text.startswith("/"):
+        return None
+    name = text[1:].split(None, 1)[0] if len(text) > 1 else ""
+    if not name or skills_dir is None or not (skills_dir / name).is_dir():
+        return None
+    if name in (grants.get("skills") or []):
+        return None
+    return (f"The skill {name} is not granted by this mind's roles "
+            f"({', '.join(grants.get('roles') or []) or 'none'}).")
+
+
+def _prompt() -> int:
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+        home = _mind_env(dict(os.environ)).get("DSH_HOME", "")
+        reason = prompt_refusal(current(), str(event.get("prompt") or ""),
+                                Path(home) / "skills" if home else None)
+    except Exception as exc:  # noqa: BLE001 - every failure is a refusal
+        print(f"The role guard could not decide, so the prompt is refused: {exc}", file=sys.stderr)
+        return DENY
+    if reason:
+        print(reason, file=sys.stderr)
+        return DENY
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -353,6 +443,8 @@ def main(argv: list[str]) -> int:
         return _guard()
     if argv[:1] == ["gate"]:
         return _gate(argv[1:])
+    if argv[:1] == ["prompt"]:
+        return _prompt()
     print("usage: role_guard.py guard | gate NAME -- COMMAND...", file=sys.stderr)
     return 1
 
