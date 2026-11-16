@@ -34,7 +34,7 @@ from pathlib import Path
 
 from installer import plan
 from installer.adapters import dsh, mind_image, proxy as proxy_adapter, site, tools
-from installer.paths import Home
+from installer.paths import MODULES, Home
 from installer.host import Host
 
 PROJECT = "hive"
@@ -77,6 +77,13 @@ EMBEDDING_MODEL_VAR = "LUCENT_EMBEDDING_MODEL"
 CLASSIFIER_MODEL_VAR = "HIVE_CLASSIFIER_MODEL"
 
 APP = "/usr/src/app"
+#: hive-mind's modules, hidden from every container that mounts the whole
+#: hive-mind tree: a mind reaches Hive Tools over its API, never its code, and
+#: the other modules are not its to read either. Only an operator, on the host,
+#: works in them.
+NO_MODULES = f"{APP}/{MODULES}:ro"
+#: Their history too: every module's objects live in hive-mind's own .git.
+NO_MODULE_HISTORY = f"{APP}/.git/{MODULES}:ro"
 
 #: Secrets the installer always makes.
 BASE_SECRETS = (
@@ -414,11 +421,15 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
             env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
+        # The Hive Tools card reports what is really there: the module, read
+        # only, where the console looks for a checkout.
+        env["HIVE_TOOLS_DIR"] = str(repo("hive-tools"))
         svc = base(CONSOLE, image=CONSOLE_IMAGE, waits_on_db=True, needs=(COMMS,), build={
             "context": str(repo("hive")), "additional_contexts": {"hive_data": hive_data}}, env=env)
         svc["ports"] = [f"0.0.0.0:{CONSOLE_PORT}:{CONSOLE_PORT}"]
         svc["volumes"] = [bind(home.data / "console", "/data"),
                           bind(home.minds, "/minds_hive_mind", "ro"),
+                          bind(repo("hive-tools"), "/hive_tools_repo", "ro"),
                           bind(home.env_file, site.ENV_FILE_MOUNT, kind=files)]
 
     if "terminal" in pieces:
@@ -445,7 +456,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         svc["volumes"] = [bind(repo("hive-mind"), APP, "ro"),
                           {"type": "volume", "source": "hive_voice_cache",
                            "target": "/home/hivemind/.cache"}]
-        svc["tmpfs"] = ["/tmp"]
+        svc["tmpfs"] = ["/tmp", NO_MODULES, NO_MODULE_HISTORY]
         svc["command"] = ["/opt/venv/bin/python3", "-m", "voice.voice_server"]
 
     if "tools" in pieces:
@@ -497,7 +508,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     svc["volumes"] = [bind(repo("hive-mind"), APP, "ro"),
                       bind(mind_dir, app_mind),
                       bind(home.dsh, dsh.MOUNT, "ro")]
-    svc["tmpfs"] = ["/tmp:exec,mode=1777"]
+    svc["tmpfs"] = ["/tmp:exec,mode=1777", NO_MODULES, NO_MODULE_HISTORY]
     svc["security_opt"] = ["no-new-privileges:true"]
     svc["command"] = ["/opt/venv/bin/python3", "-m", "minds.mind_server"]
 
@@ -519,7 +530,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         svc["working_dir"] = APP
         svc["volumes"] = [bind(repo("hive-mind"), APP, "ro"),
                           bind(mind_dir, app_mind, "ro")]
-        svc["tmpfs"] = ["/tmp"]
+        svc["tmpfs"] = ["/tmp", NO_MODULES, NO_MODULE_HISTORY]
         svc["security_opt"] = ["no-new-privileges:true"]
         svc["command"] = ["/opt/venv/bin/python3", "-m", module]
 

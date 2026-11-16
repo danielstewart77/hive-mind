@@ -203,3 +203,23 @@ def test_mind_lucent_hooks_and_console_carry_the_one_proxy_key_and_the_proxy_add
         assert hive_mind_env.proxy() == (proxy, key)
     finally:
         sys.modules.pop("hive_mind_env", None)
+
+
+def test_services_build_from_hive_minds_modules_and_minds_cannot_read_them(tmp_path):
+    inst = installer_at(tmp_path, answers(pieces=all_pieces(), modes={"voice": "here"},
+                                          telegram_token="t", discord_token="d"))
+    services = render(inst)["services"]
+    modules = inst.home.root / "repos" / "hive-mind" / "modules"
+
+    builds = {name: svc["build"]["context"] for name, svc in services.items() if "build" in svc}
+    assert builds["hive-tools"] == str(modules / "hive-tools")
+    assert builds[compose.CONSOLE] == str(modules / "hive")
+    assert builds[compose.TERMINAL] == str(modules / "terminal")
+    assert builds["inference-proxy"] == str(modules / "inference-proxy")
+    console_mounts = {v["target"]: v for v in services[compose.CONSOLE]["volumes"]}
+    assert console_mounts["/hive_tools_repo"]["source"] == str(modules / "hive-tools")
+    assert console_mounts["/hive_tools_repo"]["read_only"] is True
+    assert services[compose.CONSOLE]["environment"]["HIVE_TOOLS_DIR"] == str(modules / "hive-tools")
+    for name in ("wren", compose.VOICE, compose.TELEGRAM, compose.DISCORD):
+        hidden = {entry.split(":", 1)[0] for entry in services[name]["tmpfs"]}
+        assert {"/usr/src/app/modules", "/usr/src/app/.git/modules"} <= hidden, name
