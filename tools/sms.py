@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
+from auth_api import require_api_token
 from hitl import hitl_gate
 from schemas import SmsInboundEnabledRequest, SmsSendRequest
 
@@ -105,7 +106,7 @@ def _comms_config() -> tuple[str, dict[str, str]]:
 
 
 @router.get("/inbound/enabled")
-async def get_inbound_enabled() -> Any:
+async def get_inbound_enabled(_caller: str = Depends(require_api_token)) -> Any:
     """Proxy: read the current inbound-listener flag from hive-comms."""
     base_url, headers = _comms_config()
     try:
@@ -120,7 +121,8 @@ async def get_inbound_enabled() -> Any:
 
 
 @router.put("/inbound/enabled")
-async def set_inbound_enabled(body: SmsInboundEnabledRequest) -> Any:
+async def set_inbound_enabled(body: SmsInboundEnabledRequest,
+                              _caller: str = Depends(require_api_token)) -> Any:
     """Proxy: flip the inbound-listener flag in hive-comms."""
     base_url, headers = _comms_config()
     try:
