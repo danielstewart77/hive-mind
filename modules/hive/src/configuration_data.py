@@ -269,8 +269,13 @@ def scaffold_internal_mind(
                     # resolves by and does not change; only where the value
                     # comes from does.
                     f"LUCENT_BEARER_TOKEN=${{{_lucent_variable(name)}}}",
+                    # No Hive Tools token. The shared one is Skippy's, and a
+                    # mind holding it reaches Daniel's Google tools as him.
+                    # A mind whose owner is not the owner of the tool
+                    # credentials must never reach them (DECIDED 2026-11-15,
+                    # Daniel); it gets its own when every service accepts the
+                    # mind's one credential.
                     "HIVE_TOOLS_URL=http://hive-tools:9421",
-                    "HIVE_TOOLS_TOKEN=${HIVE_TOOLS_TOKEN}",
                     "COMMS_URL=http://hive-comms:8424",
                     f"COMMS_BEARER_TOKEN=${{{_comms_variable(name)}}}",
                     # A Mind re-registers from its own runtime.yaml on every
