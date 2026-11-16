@@ -51,8 +51,9 @@ All services run on a shared Docker network (`hivemind`). The gateway (`hive-com
 
 Every repository hive-mind depends on is a module in its manifest,
 [`.gitmodules`](.gitmodules): hive-tools, hive-data, hive (the console),
-terminal, inference-proxy, hive-harness-dsh and hive-surfaces, each under
-`modules/<name>`. Clone hive-mind and bring them all in at the latest:
+terminal, inference-proxy, hive-harness-dsh, hive-surfaces and auth-service
+(where people sign in to the hive, with local accounts or third-party
+sign-in; every hive runs it), each under `modules/<name>`. Clone hive-mind and bring them all in at the latest:
 
 ```bash
 git clone https://github.com/danielstewart77/hive-mind.git && cd hive-mind
