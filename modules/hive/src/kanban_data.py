@@ -1,9 +1,14 @@
-"""The kanban board: one shape, three levels, and the rules over the store.
+"""The kanban board: one shape, four kinds, and the rules over the store.
 
-An epic, a feature and a story differ by `kind` and by what they hang off,
-not by shape, so three tables would be three copies of the same CRUD and the
-same cascade. `parent_id` points at the row above: NULL for an epic, an epic
-for a feature, and either for a story.
+An epic, a feature, a story and a task differ by `kind` and by what they hang
+off, not by shape, so four tables would be four copies of the same CRUD and
+the same cascade. `parent_id` points at the row above: NULL for an epic, an
+epic for a feature, either for a story, and anything or nothing for a task -
+the one kind made to stand alone (story 3.7.4).
+
+Every kind carries a status, one of `STATUSES` (story 3.7.1): an epic or a
+feature can be done, not only a story. The store holds it NOT NULL and
+defaults it to backlog (hive-data step 13).
 
 No SQL lives here. Every read and write goes through `store`, which answers
 from the hive's Postgres, so the rules below are decided once, here.
@@ -35,13 +40,15 @@ import store
 
 STATUSES = ("backlog", "committed", "in_progress", "done")
 
-KINDS = ("epic", "feature", "story")
-_LABEL = {"epic": "Epic", "feature": "Feature", "story": "Story"}
-_PREFIX = {"epic": "e", "feature": "f", "story": "s"}
-#: The three collections the board payload has always been shaped as. Named
+KINDS = ("epic", "feature", "story", "task")
+_LABEL = {"epic": "Epic", "feature": "Feature", "story": "Story",
+          "task": "Task"}
+_PREFIX = {"epic": "e", "feature": "f", "story": "s", "task": "t"}
+#: The collections the board payload is shaped as, one per kind. Named
 #: rather than pluralised from the kind: "story" pluralises to "stories" and
 #: a trailing "s" makes it "storys", which is a key no page reads.
-_COLLECTION = {"epic": "epics", "feature": "features", "story": "stories"}
+_COLLECTION = {"epic": "epics", "feature": "features", "story": "stories",
+               "task": "tasks"}
 
 _ID_BYTES = 8
 
@@ -102,6 +109,7 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "requirements": row["requirements"],
         "acceptance_criteria": row["acceptance_criteria"],
         "qa_tests": row["qa_tests"],
+        "status": row["status"],
     }
 
     if row["kind"] == "feature":
@@ -110,8 +118,12 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     elif row["kind"] == "story":
         if row["parent_kind"]:
             record[f"{row['parent_kind']}_id"] = row["parent_id"]
-        record["status"] = row["status"]
         record["subtype"] = row["subtype"] or "story"
+    elif row["kind"] == "task":
+        # Under `parent_id` whatever it hangs off, and absent when it stands
+        # alone: a task's parent may be any kind, so no kind-named key fits.
+        if row["parent_id"]:
+            record["parent_id"] = row["parent_id"]
     return record
 
 
@@ -241,10 +253,12 @@ def _numbering_parent(record: dict[str, Any]) -> str | None:
     whatever `parent_id` holds — `change_type` can give one a parent, and the
     record an epic renders carries no parent key at all. A **story under a
     story** numbers as a root too: its record carries the parent under
-    `story_id`, which this reads nothing from.
+    `story_id`, which this reads nothing from. A story under a **task**
+    numbers beneath the task (`task_id`): no such row predates tasks, so
+    reading it renames nothing, and the backlog draws it there.
     """
     return (record.get("parent_id") or record.get("feature_id")
-            or record.get("epic_id"))
+            or record.get("epic_id") or record.get("task_id"))
 
 
 def _numbers_for(rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -279,7 +293,11 @@ async def backlog_numbers() -> dict[str, str]:
 
 
 async def get_data() -> dict[str, list[dict[str, Any]]]:
-    """The whole board with the three established record collections.
+    """The whole board, every status included, one collection per kind.
+
+    Done items are here: the status filter that hides them is the backlog
+    page's, and the Chief of Staff's done barrel, a mind holding the board
+    bearer and the one-database check all read this.
 
     One read of every row rather than three of one kind each. Three reads are
     three points in time, and a write landing between them returns a story
@@ -289,7 +307,7 @@ async def get_data() -> dict[str, list[dict[str, Any]]]:
     """
     rows = await store.work_items()
     out: dict[str, list[dict[str, Any]]] = {
-        "epics": [], "features": [], "stories": []}
+        name: [] for name in _COLLECTION.values()}
     for row in rows:
         out[_COLLECTION[row["kind"]]].append(_row_to_record(row))
     return out
@@ -304,7 +322,7 @@ async def get_board() -> dict[str, Any]:
     one board with another board's numbers.
     """
     rows = await store.work_items()
-    out: dict[str, Any] = {"epics": [], "features": [], "stories": []}
+    out: dict[str, Any] = {name: [] for name in _COLLECTION.values()}
     for row in rows:
         out[_COLLECTION[row["kind"]]].append(_row_to_record(row))
     out["numbers"] = _numbers_for(rows)
@@ -372,6 +390,11 @@ async def item_relations(record_id: str) -> dict[str, Any]:
         addable = [_row_to_record(r) for r in rows
                    if r["parent_id"] is None and r["kind"] == "story"
                    and r["id"] != record_id]
+    elif row["kind"] == "task":
+        choices = [_row_to_record(r) for r in rows
+                   if r["kind"] in ("epic", "feature", "story")
+                   and r["id"] != record_id]
+        addable = []
     else:
         choices = [_row_to_record(r) for r in rows
                    if r["kind"] in ("feature", "epic")
@@ -406,9 +429,21 @@ async def list_stories() -> list[dict[str, Any]]:
     return await _list("story")
 
 
+async def list_tasks() -> list[dict[str, Any]]:
+    return await _list("task")
+
+
+def _tally(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "features": sum(1 for r in rows if r["kind"] == "feature"),
+        "stories": sum(1 for r in rows if r["kind"] == "story"),
+        "tasks": sum(1 for r in rows if r["kind"] == "task"),
+    }
+
+
 async def count_descendants(record_id: str,
                             kind: str | None = None) -> dict[str, int]:
-    """How many features and stories a delete of this row would take with it.
+    """How many features, stories and tasks a delete of this row would take.
 
     The browser asks right before it puts the number in front of the
     operator. Its own copy of the board is whatever it loaded, which may be
@@ -418,11 +453,7 @@ async def count_descendants(record_id: str,
     if row is None or (kind is not None and row["kind"] != kind):
         label = _LABEL.get(kind or "", "Item")
         raise KeyError(f"{label} not found: {record_id}")
-    below = await store.descendants(record_id)
-    return {
-        "features": sum(1 for r in below if r["kind"] == "feature"),
-        "stories": sum(1 for r in below if r["kind"] == "story"),
-    }
+    return _tally(await store.descendants(record_id))
 
 
 async def kind_of(record_id: str) -> str:
@@ -448,7 +479,7 @@ async def current_type(record_id: str) -> str:
 
 
 async def _insert(kind: str, title: str, parent_id: str | None,
-                  status: str | None, position: int, *,
+                  status: str, position: int, *,
                   subtype: str = "", description: str = "",
                   requirements: str = "", acceptance_criteria: str = "",
                   qa_tests: str = "") -> dict[str, Any]:
@@ -475,7 +506,7 @@ async def create_epic(title: str, description: str = "",
     checked = _title(title)
     async with store.board_transaction():
         return await _insert(
-            "epic", checked, None, None, await store.first_position(),
+            "epic", checked, None, "backlog", await store.first_position(),
             description=description, requirements=requirements,
             acceptance_criteria=acceptance_criteria, qa_tests=qa_tests)
 
@@ -488,7 +519,8 @@ async def create_feature(epic_id: str, title: str, description: str = "",
     async with store.board_transaction():
         await _fetch(epic_id, "epic")
         return await _insert(
-            "feature", checked, epic_id, None, await store.next_position(),
+            "feature", checked, epic_id, "backlog",
+            await store.next_position(),
             description=description, requirements=requirements,
             acceptance_criteria=acceptance_criteria, qa_tests=qa_tests)
 
@@ -513,6 +545,27 @@ async def create_story(title: str, feature_id: str | None = None,
             acceptance_criteria=acceptance_criteria, qa_tests=qa_tests)
 
 
+async def create_task(title: str, parent_id: str | None = None,
+                      status: str = "backlog", description: str = "",
+                      requirements: str = "", acceptance_criteria: str = "",
+                      qa_tests: str = "") -> dict[str, Any]:
+    """A new task, standing alone or under any item named.
+
+    The one kind that may have no parent at all (story 3.7.4). It lands after
+    everything on the board, so a standalone task is the last root.
+    """
+    checked = _title(title)
+    checked_status = _check_status(status)
+    async with store.board_transaction():
+        if parent_id is not None and not await _exists(parent_id):
+            raise KeyError(f"Item not found: {parent_id}")
+        return await _insert(
+            "task", checked, parent_id, checked_status,
+            await store.next_position(), description=description,
+            requirements=requirements,
+            acceptance_criteria=acceptance_criteria, qa_tests=qa_tests)
+
+
 def _one_parent(feature_id: str | None,
                 epic_id: str | None) -> tuple[str, str]:
     if (feature_id is None) == (epic_id is None):
@@ -523,13 +576,16 @@ def _one_parent(feature_id: str | None,
 
 
 _ALLOWED_UPDATES = {
-    "epic": {"title", "before_id", "description", "requirements",
+    "epic": {"title", "status", "before_id", "description", "requirements",
              "acceptance_criteria", "qa_tests"},
-    "feature": {"title", "epic_id", "before_id", "parent", "description",
-                "requirements", "acceptance_criteria", "qa_tests"},
+    "feature": {"title", "status", "epic_id", "before_id", "parent",
+                "description", "requirements", "acceptance_criteria",
+                "qa_tests"},
     "story": {"title", "status", "feature_id", "epic_id", "before_id",
               "parent", "description", "requirements", "acceptance_criteria",
               "qa_tests"},
+    "task": {"title", "status", "parent", "description", "requirements",
+             "acceptance_criteria", "qa_tests"},
 }
 
 #: The prose fields, which are taken as given. A page is a document and the
@@ -555,7 +611,8 @@ async def _update(kind: str, record_id: str,
             if field in changes:
                 assignments[field] = _no_nul(field, str(changes[field]))
 
-        if kind in ("feature", "story") and changes.get("parent") == "none":
+        if (kind in ("feature", "story", "task")
+                and changes.get("parent") == "none"):
             await store.place(record_id, None, await store.next_position())
             changes = {k: v for k, v in changes.items() if k != "parent"}
 
@@ -598,6 +655,10 @@ async def update_story(record_id: str, **changes: Any) -> dict[str, Any]:
     return await _update("story", record_id, changes)
 
 
+async def update_task(record_id: str, **changes: Any) -> dict[str, Any]:
+    return await _update("task", record_id, changes)
+
+
 async def change_type(record_id: str, new_kind: str,
                       parent_id: str | None = None,
                       clear_parent: bool = False) -> dict[str, Any]:
@@ -608,6 +669,9 @@ async def change_type(record_id: str, new_kind: str,
     an item is not made its own parent. A bug is a story with the bug
     subtype. An epic with a parent keeps that parent in the row; the page is
     what offers the choice, and the store keeps what it is given.
+
+    The status comes along: every kind carries one (story 3.7.1), so an epic
+    marked done that becomes a feature is a done feature, not a fresh one.
     """
     if new_kind not in KINDS + ("bug",):
         raise ValueError(f"unsupported type: {new_kind}")
@@ -628,8 +692,7 @@ async def change_type(record_id: str, new_kind: str,
             new_parent = None
         else:
             new_parent = row["parent_id"]
-        status = (None if target_kind in ("epic", "feature")
-                  else (row["status"] or "backlog"))
+        status = row["status"] or "backlog"
         before = await store.work_items()
         kinds = {r["id"]: r["kind"] for r in before}
         # A change that leaves the item in the list it numbers in (a story to
@@ -730,10 +793,7 @@ async def _delete(kind: str, record_id: str) -> dict[str, Any]:
         below = await store.descendants(record_id)
         await store.delete_subtree(record_id)
     # What went, not what the caller's page thought would go.
-    record["removed"] = {
-        "features": sum(1 for r in below if r["kind"] == "feature"),
-        "stories": sum(1 for r in below if r["kind"] == "story"),
-    }
+    record["removed"] = _tally(below)
     return record
 
 
@@ -747,3 +807,7 @@ async def delete_feature(record_id: str) -> dict[str, Any]:
 
 async def delete_story(record_id: str) -> dict[str, Any]:
     return await _delete("story", record_id)
+
+
+async def delete_task(record_id: str) -> dict[str, Any]:
+    return await _delete("task", record_id)

@@ -850,12 +850,16 @@ _KANBAN_CREATE_FIELDS = {
     "epics": {"title"},
     "features": {"epic_id", "title"},
     "stories": {"title", "feature_id", "epic_id", "status"},
+    # A task may name no parent at all (story 3.7.4), so only its title is
+    # required.
+    "tasks": {"title", "parent_id", "status"},
 }
 _KANBAN_METADATA_FIELDS = {"description", "requirements", "acceptance_criteria", "qa_tests"}
 _KANBAN_UPDATE_FIELDS = {
-    "epics": {"title", "before_id", "type", "parent_id"} | _KANBAN_METADATA_FIELDS,
-    "features": {"epic_id", "title", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "epics": {"title", "status", "before_id", "type", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "features": {"epic_id", "title", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
     "stories": {"title", "feature_id", "epic_id", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "tasks": {"title", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
 }
 
 
@@ -915,9 +919,9 @@ async def api_kanban_numbers(
     return await _kanban_call(kanban_data.backlog_numbers)
 
 
-_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story"}
-_PLURAL = {"epic": "epics", "feature": "features", "story": "stories"}
-_SINGULAR = {"epics": "epic", "features": "feature", "stories": "story"}
+_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story", "tasks": "task"}
+_PLURAL = {"epic": "epics", "feature": "features", "story": "stories", "task": "tasks"}
+_SINGULAR = {"epics": "epic", "features": "feature", "stories": "story", "tasks": "task"}
 
 
 @app.get("/api/kanban/{kind}/{record_id}/descendants")
@@ -939,18 +943,20 @@ async def api_kanban_descendants(
 @app.post("/api/kanban/epics")
 @app.post("/api/kanban/features")
 @app.post("/api/kanban/stories")
+@app.post("/api/kanban/tasks")
 async def api_kanban_create(
         request: Request,
         user: dict = Depends(require_admin_or_route_bearer)):
     del user
     kind = request.url.path.rsplit("/", 1)[-1]
     fields = _KANBAN_CREATE_FIELDS[kind]
-    required = {"title"} if kind == "stories" else fields
+    required = {"title"} if kind in ("stories", "tasks") else fields
     body = await _kanban_body(request, fields, required)
     if kind == "stories" and ((body.get("feature_id") is None) == (body.get("epic_id") is None)):
         raise HTTPException(status_code=400, detail="story requires exactly one of feature_id or epic_id")
-    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return await _kanban_call(getattr(kanban_data, f"create_{entity}"), **body)
+    if kind == "tasks" and body.get("parent_id") == "":
+        body["parent_id"] = None
+    return await _kanban_call(getattr(kanban_data, f"create_{_SINGULAR[kind]}"), **body)
 
 
 @app.patch("/api/kanban/{kind}/{record_id}")

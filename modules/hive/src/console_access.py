@@ -293,6 +293,7 @@ TABLE.add(
     "POST /api/kanban/epics",
     "POST /api/kanban/features",
     "POST /api/kanban/stories",
+    "POST /api/kanban/tasks",
     "PATCH /api/kanban/{kind}/{record_id}",
 )
 

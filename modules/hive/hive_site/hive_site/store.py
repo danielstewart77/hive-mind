@@ -268,7 +268,7 @@ async def first_position() -> int:
 
 async def create_work_item(item_id: str, kind: str, title: str, position: int,
                            *, parent_id: str | None = None,
-                           status: str | None = None, subtype: str = "",
+                           status: str = "backlog", subtype: str = "",
                            description: str = "", requirements: str = "",
                            acceptance_criteria: str = "",
                            qa_tests: str = "") -> int:
@@ -288,18 +288,18 @@ async def update_work_item(item_id: str, fields: dict[str, Any]) -> int:
     return int(written["rows"])
 
 
-async def retype(item_id: str, kind: str, *, status: str | None = None,
+async def retype(item_id: str, kind: str, *, status: str = "backlog",
                  subtype: str = "", parent_id: str | None = None,
                  position: int) -> int:
     """Change what an item *is*, in one statement.
 
     A retype is one fact made of five columns and every one follows from the
-    new kind: an epic has no status and a story has one, a bug is a story
-    carrying the bug subtype, a row becoming an epic loses its parent, and a
+    new kind: a bug is a story carrying the bug subtype, a row becoming an epic loses its parent, and a
     row that moves parents needs a position because the number it held was
     only unique under the parent it left. Written one column at a time the
-    board is briefly a feature with a story's status, or a row at a duplicate
-    number, and the console reads it in between.
+    board is briefly a story with an epic's subtype, or a row at a duplicate
+    number, and the console reads it in between. Every kind carries a status
+    (hive-data step 13), so it rides along.
     """
     written = await board.retype(
         item_id, kind, status=status, subtype=subtype,

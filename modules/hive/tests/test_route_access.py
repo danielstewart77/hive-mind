@@ -421,6 +421,7 @@ def test_the_board_bearer_is_attached_to_the_board_and_no_others():
         "POST /api/kanban/epics",
         "POST /api/kanban/features",
         "POST /api/kanban/stories",
+        "POST /api/kanban/tasks",
         "PATCH /api/kanban/{kind}/{record_id}",
     }
 
