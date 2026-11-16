@@ -379,7 +379,7 @@ async def graph_upsert_backup(
     from lucent_api.kg_guards import (
         check_disambiguation,
         check_orphan_guard,
-        send_disambiguation_message,
+        notify_disambiguation,
     )
     from lucent_api.lucent_graph import _call, graph_upsert_direct
 
@@ -408,8 +408,9 @@ async def graph_upsert_backup(
             caller.owner_for_write(body.owner),
         )
         if disambig.action == "disambiguate":
-            await _call(
-                send_disambiguation_message, body.name, disambig.existing_nodes)
+            await notify_disambiguation(
+                body.name, disambig.existing_nodes,
+                caller.owner_for_write(body.owner))
             return {
                 "upserted": False,
                 "reason": "disambiguation_required",
@@ -465,7 +466,7 @@ async def graph_upsert(
     from lucent_api.kg_guards import (
         check_disambiguation,
         check_orphan_guard,
-        send_disambiguation_message,
+        notify_disambiguation,
     )
     from lucent_api.lucent_graph import _call, graph_upsert_direct
     from lucent_api.schema_registry import (
@@ -546,8 +547,9 @@ async def graph_upsert(
             caller.owner_for_write(body.owner),
         )
         if disambig.action == "disambiguate":
-            await _call(
-                send_disambiguation_message, body.name, disambig.existing_nodes)
+            await notify_disambiguation(
+                body.name, disambig.existing_nodes,
+                caller.owner_for_write(body.owner))
             return {
                 "ok": False,
                 "code": "disambiguation_required",

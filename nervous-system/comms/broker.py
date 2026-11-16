@@ -232,6 +232,7 @@ def build_wakeup_prompt(
     rolling_summary: str,
     message_number: int,
     discord_channel: str | None = None,
+    owner_name: str = "",
 ) -> str:
     """Construct the wakeup prompt sent to the callee's new session.
 
@@ -253,12 +254,15 @@ def build_wakeup_prompt(
     parts.extend(["New message:", content, ""])
 
     if discord_channel:
+        # The person is the owner of the mind whose channel it is (story
+        # 2.1.19), named by the caller; "your owner" when it could not say.
+        reader = owner_name or "your owner"
         parts.extend([
-            "Complete the requested work. Your response is posted into Daniel's",
+            f"Complete the requested work. Your response is posted into {reader}'s",
             f"Discord channel {discord_channel} as well as returned to {from_mind},",
-            "and that channel is where he will read it and reply to you. So write it",
-            "to Daniel: what happened, what you did about it, and what is left for",
-            f"him to decide. Not a report addressed to {from_mind}.",
+            "and that channel is where they will read it and reply to you. So write",
+            f"it to {reader}: what happened, what you did about it, and what is left",
+            f"for them to decide. Not a report addressed to {from_mind}.",
         ])
     else:
         parts.extend([
@@ -425,9 +429,11 @@ async def wakeup_and_collect(
         # 3. Send wakeup and collect response
         from_row = await get_mind_by_id(from_mind)
         from_display = (from_row.get("name") if from_row else None) or from_mind
+        owner = str((row or {}).get("owner") or "").strip()
         prompt = build_wakeup_prompt(
             from_display, to_mind, conversation_id, content, rolling_summary,
             message_number, discord_channel=channel_id,
+            owner_name=owner[:1].upper() + owner[1:],
         )
         response_text = await asyncio.wait_for(
             _collect_response(session_mgr.send_message(session_id, prompt)),

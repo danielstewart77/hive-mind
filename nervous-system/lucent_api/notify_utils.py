@@ -17,7 +17,7 @@ except ImportError:
     httpx = None  # type: ignore[assignment]
 
 
-def telegram_direct(message: str) -> tuple[bool, str]:
+def telegram_direct(message: str, chat_id: str | None = None) -> tuple[bool, str]:
     """Send via Telegram Bot API directly (bypasses gateway).
 
     Args:
@@ -30,7 +30,9 @@ def telegram_direct(message: str) -> tuple[bool, str]:
         return False, "httpx not installed"
 
     token = get_credential("TELEGRAM_BOT_TOKEN")
-    chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
+    # A named recipient is the person the message belongs to (story 2.1.19);
+    # the configured chat only when the caller names nobody.
+    chat_id = chat_id or get_credential("TELEGRAM_OWNER_CHAT_ID")
 
     if not token or not chat_id:
         return False, "TELEGRAM_BOT_TOKEN or TELEGRAM_OWNER_CHAT_ID not set"
