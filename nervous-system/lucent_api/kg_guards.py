@@ -62,11 +62,55 @@ _SIMILAR_ANYWHERE = (
 )
 
 
-def _telegram_direct(message: str) -> tuple[bool, str]:
+def _telegram_direct(message: str, chat_id: str | None = None) -> tuple[bool, str]:
     """Delegate to shared Telegram utility in core/."""
     from lucent_api.notify_utils import telegram_direct
 
-    return telegram_direct(message)
+    return telegram_direct(message, chat_id)
+
+
+async def owner_telegram_chat(owner: object) -> str | None:
+    """The Telegram account linked to this owner, "" for none, None for "any".
+
+    None means the write was a service's or an admin's, which names no owner
+    and keeps the configured chat. An owner with no linked Telegram account is
+    "", which is nobody: their graph question must not land in somebody
+    else's chat (story 2.1.19).
+    """
+    name = str(owner or "").strip().lower()
+    if not name:
+        return None
+    # Read through `core._fetch` rather than `broker_ops`: the package baked
+    # into this service's image can predate the account operations, and a
+    # lookup that raised would cost the write its disambiguation answer.
+    # Unreadable is nobody - never the configured chat, which is somebody.
+    try:
+        from hive_data.core import _fetch
+
+        rows = await _fetch(
+            None,
+            'SELECT "account_ref" FROM core."surface_accounts" '
+            'WHERE "username" = $1 AND "surface" = \'telegram\' '
+            'ORDER BY "account_ref" LIMIT 1',
+            name)
+    except Exception:  # noqa: BLE001 - a question is never worth a failed write
+        logger.warning("could not read %s's linked Telegram account", name, exc_info=True)
+        return ""
+    return str(rows[0]["account_ref"]) if rows else ""
+
+
+async def notify_disambiguation(
+    proposed_name: str, existing_nodes: list[dict], owner: object = None
+) -> bool:
+    """Ask the owner of the write whether a near-match is the same entity."""
+    import asyncio
+
+    chat = await owner_telegram_chat(owner)
+    if chat == "":
+        logger.info("disambiguation for %s: its owner has no linked Telegram", proposed_name)
+        return False
+    return await asyncio.to_thread(
+        send_disambiguation_message, proposed_name, existing_nodes, chat)
 
 
 async def check_disambiguation(
@@ -172,7 +216,7 @@ def check_orphan_guard(
 
 
 def send_disambiguation_message(
-    proposed_name: str, existing_nodes: list[dict]
+    proposed_name: str, existing_nodes: list[dict], chat_id: str | None = None
 ) -> bool:
     """Send a disambiguation message via Telegram (non-blocking, not HITL).
 
@@ -194,7 +238,7 @@ def send_disambiguation_message(
     )
 
     try:
-        success, _detail = _telegram_direct(message)
+        success, _detail = _telegram_direct(message, chat_id)
         return success
     except Exception:
         logger.exception(

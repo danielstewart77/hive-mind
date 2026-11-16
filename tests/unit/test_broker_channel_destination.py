@@ -91,7 +91,11 @@ def store(monkeypatch) -> Store:
         recorded.replies.append(content)
 
     async def mind_row(mind_id):
-        return {"name": mind_id, "model": "model-for-tests"}
+        # Owned, as every mind is: the channel's reader is its owner. The
+        # caller belongs to somebody else, so a prompt naming the caller's
+        # owner instead of the channel's is caught.
+        owner = "sloan" if mind_id == SKIPPY else "daniel"
+        return {"name": mind_id, "model": "model-for-tests", "owner": owner}
 
     async def claim(mind_id):
         return "839112201109110825"
@@ -242,29 +246,31 @@ def test_a_refused_post_still_leaves_the_caller_its_answer(store, monkeypatch):
 # ---------------------------------------------------------------- the prompt
 
 
-def test_the_wake_actually_sent_into_the_channel_is_addressed_to_daniel(
+def test_the_wake_actually_sent_into_the_channel_is_addressed_to_its_owner(
         store, posted):
     """The broker has to hand the destination to the prompt, not merely know
-    it. Woken with the plain prompt, the mind answers Hex — and Daniel is
-    handed a report written to a machine, in his own channel."""
+    it. Woken with the plain prompt, the mind answers Hex — and the person is
+    handed a report written to a machine, in their own channel. The person is
+    the owner of the mind whose channel it is (story 2.1.19)."""
     mgr = FakeSessionManager()
 
     _wake(mgr, metadata={"discord_channel": SECURITY})
 
     prompt = mgr.sent[0][1]
     assert SECURITY in prompt
-    assert "Daniel" in prompt
+    assert "Sloan" in prompt
+    assert "Daniel" not in prompt
 
 
-def test_the_prompt_for_a_channel_dispatch_addresses_daniel():
+def test_the_prompt_for_a_channel_dispatch_addresses_the_owner_it_is_given():
     """A mind not told who is reading writes a report to another machine."""
     prompt = broker.build_wakeup_prompt(
         "hex", SKIPPY, "conversation-one", "a beacon", "", 1,
-        discord_channel=SECURITY,
+        discord_channel=SECURITY, owner_name="Aiden",
     )
 
     assert SECURITY in prompt
-    assert "Daniel" in prompt
+    assert "Aiden's" in prompt and "to Aiden:" in prompt
 
 
 def test_the_prompt_for_a_plain_dispatch_still_addresses_the_caller():
