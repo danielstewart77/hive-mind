@@ -14,12 +14,16 @@ from pathlib import Path
 
 DEFAULT_HOME = "~/hive"
 
-#: The repositories an install may clone, by the name each is cloned under.
-#: All public, so no token is needed.
+#: The repositories an install uses, by name. hive-mind is cloned; every
+#: other one is a module in its manifest (.gitmodules), cloned with it under
+#: `modules/<name>` and brought to the latest of its branch by
+#: scripts/modules.sh. All public, so no token is needed.
 REPOS = (
     "hive-mind", "hive-data", "hive", "terminal", "inference-proxy",
-    "hive-tools", "hive-harness-dsh",
+    "hive-tools", "hive-harness-dsh", "hive-surfaces",
 )
+#: Where hive-mind keeps its modules, relative to its own checkout.
+MODULES = "modules"
 REPO_BASE = os.environ.get("HIVE_REPO_BASE", "https://github.com/danielstewart77")
 
 
@@ -37,7 +41,8 @@ class Home:
         return self.root / "repos"
 
     def repo(self, name: str) -> Path:
-        return self.repos / name
+        hive_mind = self.repos / "hive-mind"
+        return hive_mind if name == "hive-mind" else hive_mind / MODULES / name
 
     @property
     def state(self) -> Path:
