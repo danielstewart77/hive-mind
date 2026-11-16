@@ -138,7 +138,9 @@ async def lifespan(app: FastAPI):
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
     try:
-        seeded = await roles_data.seed()
+        # A task of its own: the store refuses a unit of work opened inside
+        # this lifespan's generator, and the seed is one.
+        seeded = await asyncio.create_task(roles_data.seed())
         log_event(log, "roles.seed", component="hive-control-plane", **seeded)
     except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
         log_event(log, "roles.seed_failed", level=logging.ERROR,

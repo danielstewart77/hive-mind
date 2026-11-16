@@ -516,3 +516,13 @@ def test_an_owner_gives_their_mind_roles_and_its_grants_are_their_union(repo, mo
     assert grants["managed"] is True
     assert {"remember", "code"} <= set(grants["skills"])
     assert set(grants["tools"]) >= {"files", "shell"}
+
+
+def test_a_fresh_hive_has_its_ready_made_roles_once_the_console_has_started(monkeypatch):
+    monkeypatch.setenv("HIVE_ROLES_DIR", str(roles_data.REPO_DIR))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+
+    with TestClient(main_mod.app):
+        slugs = {r["slug"] for r in testing.run(store.roles_list())}
+
+    assert slugs == {"general", "chief-of-staff", "operator", "developer", "planner", "optimizer"}
