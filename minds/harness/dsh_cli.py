@@ -55,7 +55,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from minds.harness import chat_surface
+from minds.harness import chat_surface, role_guard
 from minds import (
     context_overflow,
     failed_turn,
@@ -344,6 +344,20 @@ def _terminal_context_file(context: str) -> Path | None:
     return path
 
 
+def _role_hooks_env(env: dict[str, str], timeout: float = 10.0) -> dict[str, str]:
+    """The hooks file and grants file a dsh process is started with.
+
+    Feature 10.18: the mind's own hooks, each gated by its roles, plus the
+    role guard on every tool — written for every spawn, managed or not, so a
+    mind given roles mid-conversation is already guarded. Raised when the
+    gateway cannot say what the mind may use: the guard would have nothing
+    to judge by, and a mind that cannot be held to its roles is not run.
+    """
+    return role_guard.prepare(
+        DSH_HOME, hooks_config(), env.get("MIND_ID") or NAME,
+        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout)
+
+
 def _patch_args() -> list[str]:
     """The mind's rendered agents overlay, when the skills render wrote one.
 
@@ -403,8 +417,8 @@ def _pane_env(
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     env["HIVE_SURFACE"] = "terminal"
-    if hooks_config():
-        env["DSH_HOOKS_CONFIG"] = hooks_config()
+    # Short: a pane opens inside the attach handler, on the event loop.
+    env.update(_role_hooks_env({**os.environ, **env}, timeout=3.0))
     # The pane prints its own prompt and banner, and the interactive surface
     # ships to every dsh mind — so it reads the name from here rather than
     # carrying one mind's name in code every other install would be lying with.
@@ -1031,8 +1045,7 @@ async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
     env["HIVE_SESSION_ID"] = sid
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
-    if hooks_config():
-        env["DSH_HOOKS_CONFIG"] = hooks_config()
+    env.update(await asyncio.to_thread(_role_hooks_env, env))
     # HIVE_SURFACE is set, or cleared: never one inherited from the
     # container's own env.
     env.pop("HIVE_SURFACE", None)

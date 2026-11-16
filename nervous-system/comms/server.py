@@ -1659,6 +1659,17 @@ async def ws_attach(ws: WebSocket, session_id: str):
         log.error("session %s has no model — refusing attach", session_id)
         await ws.close(code=4409, reason="session has no model")
         return
+    # A pane's turns never pass through `send_message`, so the model a DSH
+    # mind's roles allow (story 10.18.5) is applied here, before the pane is
+    # opened on it, as well as on every chat turn.
+    try:
+        allowed_model = await session_mgr.role_model(session)
+    except ValueError as exc:
+        await ws.close(code=4409, reason=str(exc)[:120])
+        return
+    if allowed_model != session_model:
+        await session_mgr._move_to_role_model(session, allowed_model)
+        session_model = allowed_model
 
     # The tile takes the conversation. Nothing else binds a pane-hosted
     # conversation to a surface, so without this the pane carries no
@@ -2076,6 +2087,28 @@ async def _handle_command(
 async def _mind_exists(mind_id: str) -> bool:
     """Check if a mind is registered in the broker."""
     return await broker.get_mind_by_id(mind_id) is not None
+
+
+@app.get("/minds/{mind_id}/grants")
+async def mind_grants(mind_id: str, request: Request):
+    """What this mind's roles let it use, read now (feature 10.18).
+
+    `managed` False means roles decide nothing about the mind. For a managed
+    mind every list is the union of the roles it holds at this moment, so a
+    role changed on the console is a changed answer on the next call. The
+    path takes the mind's id or its name; a mind's own credential reaches
+    only its own row, and a mind that does not exist is a 404 rather than
+    an unmanaged answer somebody might act on.
+    """
+    from hive_data import roles
+
+    mind = await core.get_mind_by_id_or_name(mind_id)
+    if not mind:
+        raise HTTPException(404, "No such mind")
+    keys = await user_access.holder_keys(_caller(request))
+    if not user_access.mind_is_named_in(keys, mind["mind_id"]):
+        raise HTTPException(404, "No such mind")
+    return await roles.grants_for(mind["mind_id"])
 
 
 @app.get("/broker/minds")
