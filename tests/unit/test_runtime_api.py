@@ -11,6 +11,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -57,9 +58,36 @@ class _ProcessProxy(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
 
 
+def _prepare_spawn_from_current_test_source() -> tuple[object, object, list[str]]:
+    """Keep collection-time path pollution out of a fresh route-worker child."""
+    source_root = Path(__file__).resolve().parents[2]
+    polluted_comms = (source_root / "nervous-system" / "comms").resolve()
+    previous_path = sys.path[:]
+    sys.path[:] = [
+        str(source_root),
+        *(entry for entry in previous_path
+          if Path(entry or ".").resolve() not in {source_root, polluted_comms}),
+    ]
+    main_module = sys.modules["__main__"]
+    previous_main_file = getattr(main_module, "__file__", None)
+    main_module.__file__ = str(Path(__file__).resolve())
+    return main_module, previous_main_file, previous_path
+
+
+def _restore_spawn_source(
+    main_module: object, previous_main_file: object, previous_path: list[str],
+) -> None:
+    sys.path[:] = previous_path
+    if previous_main_file is None:
+        delattr(main_module, "__file__")
+    else:
+        main_module.__file__ = previous_main_file
+
+
 def _overlapping_route_writer(
     runtime_name: str,
     proxy_url: str,
+    source_root_name: str,
     position: str,
     action: str,
     first_release,
@@ -68,9 +96,21 @@ def _overlapping_route_writer(
     outcomes,
 ) -> None:
     """Run one real route request in its own interpreter/process."""
+    import secrets as standard_secrets
+
     from minds import runtime_api as process_runtime_api
 
     runtime_path = Path(runtime_name).resolve()
+    source_root = Path(source_root_name).resolve()
+    expected_test = source_root / "tests" / "unit" / "test_runtime_api.py"
+    if Path(__file__).resolve() != expected_test:
+        raise RuntimeError(f"spawned worker loaded {__file__}, not {expected_test}")
+    if not Path(process_runtime_api.__file__).resolve().is_relative_to(source_root):
+        raise RuntimeError(f"spawned worker loaded runtime API outside {source_root}")
+    if not Path(standard_secrets.__file__).resolve().is_relative_to(
+        Path(os.__file__).resolve().parent
+    ):
+        raise RuntimeError(f"spawned worker loaded non-stdlib secrets: {standard_secrets.__file__}")
     os.environ["MIND_ADMIN_TOKEN"] = "separate-process-token"
     os.environ["INFERENCE_PROXY_URL"] = proxy_url
     os.environ["MIND_PROXY_KEY"] = "separate-process-proxy-key"
@@ -404,18 +444,20 @@ def test_overlapping_runtime_routes_preserve_both_successful_updates_across_proc
     second_release = context.Event()
     second_action = "settings" if first_action == "model" else "model"
     proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+    source_root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("INFERENCE_PROXY_URL", proxy_url)
     monkeypatch.setenv("MIND_PROXY_KEY", "separate-process-proxy-key")
     first = context.Process(
         target=_overlapping_route_writer,
-        args=(str(runtime_file), proxy_url, "first", first_action, first_release,
+        args=(str(runtime_file), proxy_url, str(source_root), "first", first_action, first_release,
               second_release, phases, outcomes),
     )
     second = context.Process(
         target=_overlapping_route_writer,
-        args=(str(runtime_file), proxy_url, "second", second_action, first_release,
+        args=(str(runtime_file), proxy_url, str(source_root), "second", second_action, first_release,
               second_release, phases, outcomes),
     )
+    main_module, previous_main_file, previous_path = _prepare_spawn_from_current_test_source()
     try:
         first.start()
         _await_phase(phases, ("replace", "first"))
@@ -454,6 +496,7 @@ def test_overlapping_runtime_routes_preserve_both_successful_updates_across_proc
         proxy.shutdown()
         proxy_thread.join()
         proxy.server_close()
+        _restore_spawn_source(main_module, previous_main_file, previous_path)
 
     assert first.exitcode == 0
     assert second.exitcode == 0
