@@ -89,7 +89,7 @@ window.addEventListener("DOMContentLoaded", function () {
         const roles = ((await h.requestJson("/api/roles")).roles || []).filter(function (r) { return r.id !== null; });
         const box = document.getElementById("mind-roles");
         box.innerHTML = roles.map(function (r) {
-            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-model="' + h.escapeHtml(r.model || "") + '"' + (r.general ? " disabled" : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind)" : "") + '</label>';
+            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-model="' + h.escapeHtml(r.model || "") + '"' + (r.general ? ' data-general="true"' : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind; tick it alone to manage this Mind by general only)" : "") + '</label>';
         }).join("");
         box.addEventListener("change", function (event) {
             const model = event.target.dataset && event.target.dataset.model;
@@ -108,7 +108,8 @@ window.addEventListener("DOMContentLoaded", function () {
             harness: selectedHarness(),
             provider: form.elements.provider.value,
             default_model: form.elements.default_model.value,
-            role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([disabled])")).map(function (i) { return Number(i.value); })
+            role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
+            roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
         };
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});

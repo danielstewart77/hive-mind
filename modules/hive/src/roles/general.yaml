@@ -12,8 +12,11 @@ skills:
   - save-session
   - self-reflect
 hooks:
+  - bg_snapshot
   - prose_reminder
+  - skill_render_check
   - skill_telemetry
+  - soul_proposal_inject
   - surface_inject
   - time_inject
   - training_capture

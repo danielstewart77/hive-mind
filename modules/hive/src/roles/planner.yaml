@@ -1,5 +1,5 @@
 name: Planner
-model: claude-fable-5-2
+model: claude-opus-5-5
 tools:
   - files
   - sub-minds

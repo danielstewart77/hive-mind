@@ -208,9 +208,13 @@ async def seed() -> dict[str, Any]:
         if await store.roles_seeded():
             await _ensure_general()
             return {"seeded": False, "added": added}
-        existing = {r["slug"] for r in await store.roles_list()}
+        held = await store.roles_list()
+        existing = {r["slug"] for r in held}
+        names = {r["name"].strip().lower() for r in held}
         for slug, copy in repo_roles().items():
-            if "error" in copy or slug in existing:
+            # A local role already called this, under another slug, keeps
+            # its name; the repo copy stays offered as "in the repo only".
+            if "error" in copy or slug in existing or copy["name"].lower() in names:
                 continue
             await store.create_role(copy["name"], slug=slug, skills=copy["skills"],
                                     hooks=copy["hooks"], model=copy["model"],

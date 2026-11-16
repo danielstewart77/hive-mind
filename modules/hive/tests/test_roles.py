@@ -330,14 +330,21 @@ def mind_listing(monkeypatch):
             yield mind
 
 
-def _submitted(skill, *, by_owner=False, new_skill=True, pr=7, closed=False):
+def _submitted(skill, *, by_owner=False, new_skill=True, pr=7, state="merged"):
+    """A submission as GitHub last described it: merged, open, closed, or
+    never answered about (`unknown`)."""
     sid = testing.run(store.add_skill_submission(
         skill=skill, submitted_by="daniel" if by_owner else "sloan", by_owner=by_owner,
         new_skill=new_skill, repository=skill_submissions.REPOSITORY, branch=f"b-{skill}-{pr}"))
     fields = {"pr_number": pr}
-    if closed:
+    if state != "unknown":
+        fields["checked_at"] = 9e12
+    if state == "merged":
+        fields["merged_at"] = 1.0
+    if state == "closed":
         fields["closed_at"] = 1.0
     testing.run(store.update_skill_submission(sid, **fields))
+    return sid
 
 
 def test_community_submissions_are_left_out_of_a_minds_skill_list_by_default(repo, monkeypatch, mind_listing):
@@ -365,9 +372,147 @@ def test_asking_for_community_submissions_lists_them_labelled(repo, monkeypatch,
 
 
 def test_a_community_submission_closed_without_merging_is_not_hidden(repo, monkeypatch, mind_listing):
-    _submitted("weather", closed=True)
+    _submitted("weather", state="closed")
     client = _client(monkeypatch)
 
     body = client.get("/api/minds/stash/skills").json()
 
     assert "weather" in [s["name"] for s in body["skills"]]
+
+
+def test_a_community_submission_github_has_not_answered_about_is_hidden(repo, monkeypatch, mind_listing):
+    _submitted("weather", state="unknown")
+    client = _client(monkeypatch)
+
+    body = client.get("/api/minds/stash/skills").json()
+
+    assert "weather" not in [s["name"] for s in body["skills"]]
+
+
+def test_a_submission_still_open_does_not_hide_a_skill_of_the_same_name(repo, monkeypatch, mind_listing):
+    _submitted("weather", state="open")
+    client = _client(monkeypatch)
+
+    body = client.get("/api/minds/stash/skills").json()
+
+    assert "weather" in [s["name"] for s in body["skills"]]
+
+
+def test_reading_the_lists_learns_from_github_that_a_pull_request_merged(repo, monkeypatch, github):
+    sid = _submitted("weather", state="unknown")
+    testing.run(store.update_skill_submission(sid, checked_at=1.0))
+    real = github.__call__
+
+    def merged(request):
+        if request.method == "GET" and request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json={"number": 7, "state": "closed", "merged_at": "2026-11-16T00:00:00Z"})
+        return real(request)
+
+    monkeypatch.setattr(skill_submissions, "_transport", httpx.MockTransport(merged))
+
+    testing.run(skill_submissions.refresh())
+
+    row = testing.run(store.skill_submission(sid))
+    assert row["merged_at"] is not None and row["closed_at"] is None
+
+
+@pytest.mark.parametrize("method,url", [
+    ("post", "/api/roles"), ("delete", "/api/roles/{id}"), ("post", "/api/roles/{id}/keep"),
+    ("post", "/api/roles/{id}/promote"), ("post", "/api/roles/repo/developer/take")])
+def test_only_an_admin_defines_or_settles_a_role(repo, monkeypatch, method, url):
+    _write(repo, "developer", name="Developer", model=None, tools=[], skills=["x"], hooks=[])
+    role_id = testing.run(store.create_role("Developer", slug="developer", skills=["code"]))
+    client = _client(monkeypatch, admin=False, username="sloan")
+
+    response = getattr(client, method)(url.format(id=role_id), **({"json": {"name": "New"}} if method == "post" else {}))
+
+    assert response.status_code == 403
+    assert testing.run(store.role(role_id))["skills"] == ["code"]
+    assert not (repo / "new.yaml").exists()
+
+
+@pytest.mark.parametrize("path", ["../weather/SKILL.md", "/etc/weather/SKILL.md", "weather/../../x/SKILL.md"])
+def test_a_path_outside_the_skill_folder_is_refused_before_github_is_asked(repo, monkeypatch, github, path):
+    client = _client(monkeypatch, admin=False, username="sloan")
+    folder = {"files": [("SKILL.md", b"x", "text/markdown")], "paths": [path]}
+
+    assert _post(client, folder).status_code == 400
+    assert github.requests == []
+
+
+def test_a_folder_larger_than_a_skill_is_refused_before_github_is_asked(repo, monkeypatch, github):
+    client = _client(monkeypatch, admin=False, username="sloan")
+    big = b"x" * (skill_submissions.MAX_BYTES + 1)
+
+    assert _post(client, _folder(extra=[("weather/data.bin", big)])).status_code == 400
+    assert github.requests == []
+
+
+def test_a_submission_that_has_its_pull_request_is_not_retried_onto_it(repo, monkeypatch, github):
+    client = _client(monkeypatch, admin=False, username="sloan")
+    assert _post(client, _folder()).status_code == 200
+    submission = testing.run(store.skill_submissions())[0]
+    head = dict(github.refs)
+
+    response = _post(client, _folder(), url=f"/api/skill-submissions/{submission['id']}/retry")
+
+    assert response.status_code == 409
+    assert github.refs == head and len(github.pulls) == 1
+
+
+def test_a_script_in_a_submitted_skill_lands_executable(repo, monkeypatch, github):
+    client = _client(monkeypatch, admin=False, username="sloan")
+
+    _post(client, _folder(extra=[("weather/sky.sh", b"#!/bin/sh\necho sun\n"), ("weather/notes.md", b"plain")]))
+
+    tree = [json.loads(r.content) for r in github.requests if r.url.path.endswith("/git/trees")][0]["tree"]
+    modes = {e["path"].rsplit("/", 1)[-1]: e["mode"] for e in tree}
+    assert modes == {"SKILL.md": "100644", "sky.sh": "100755", "notes.md": "100644"}
+
+
+def test_another_user_cannot_write_a_skill_back_into_the_hives_own_checkout(repo, monkeypatch, tmp_path):
+    import configuration_data
+    minds = tmp_path / "hive-minds"
+    (minds / "stash").mkdir(parents=True)
+    monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_DIR", minds)
+    reached = []
+
+    async def write_back(url, skill):
+        reached.append(skill)
+        return {"saved": True}
+
+    async def gateway(name):
+        return GATEWAY
+
+    monkeypatch.setattr(main_mod.mind_skills, "write_back", write_back)
+    monkeypatch.setattr(main_mod, "_mind_gateway_url", gateway)
+    # Sloan owns this Mind, as the gateway's registry would say.
+    monkeypatch.setattr(main_mod.route_access, "registered_minds", AsyncMock(
+        return_value=[{"name": "stash", "mind_id": "mind-stash", "owner": "sloan"}]))
+    client = _client(monkeypatch, admin=False, username="sloan")
+
+    response = client.post("/api/minds/stash/skills/weather/write-back")
+
+    assert response.status_code == 403
+    assert "pull request" in response.json()["detail"]
+    assert reached == []
+
+
+def test_an_owner_gives_their_mind_roles_and_its_grants_are_their_union(repo, monkeypatch):
+    testing.run(roles_data.seed())
+    writer = testing.run(store.create_role("Writer", slug="writer", skills=["remember"], tools=["files"]))
+    builder = testing.run(store.create_role("Builder", slug="builder", skills=["code"], tools=["shell"]))
+
+    async def mind_row(name):
+        return {"name": name, "mind_id": "mind-stash", "owner": "daniel"}
+
+    monkeypatch.setattr(main_mod, "_mind_row", mind_row)
+    client = _client(monkeypatch)
+
+    response = client.put("/api/minds/stash/roles", json={"role_ids": [writer, builder]})
+
+    assert response.status_code == 200, response.text
+    grants = client.get("/api/minds/stash/roles").json()["grants"]
+    assert grants["managed"] is True
+    assert {"remember", "code"} <= set(grants["skills"])
+    assert set(grants["tools"]) >= {"files", "shell"}

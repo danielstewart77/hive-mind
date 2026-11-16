@@ -20,7 +20,7 @@ and the same pull request rather than as a second one.
 
 **Community submissions** (10.18.9) are skills a person other than the owner
 submitted as a *new* skill — a name the repo did not already have. Once such
-a pull request exists, that name is a community skill: left out of the
+a pull request is merged, that name is a community skill: left out of the
 console's skill lists unless asked for, and labelled when shown. The state
 is refreshed from GitHub when the lists are read; when GitHub cannot say, a
 submission is still counted as community, because showing a community skill
@@ -58,6 +58,12 @@ MAX_BYTES = 2 * 1024 * 1024
 
 #: How long a pull request's merge state is trusted before it is asked again.
 CHECK_EVERY = 5 * 60
+
+#: The most pull requests one read of the skill lists asks GitHub about, and
+#: how long each may take. A list read waits on these, so they are bounded;
+#: what is not asked this time is asked on the next read.
+REFRESH_BATCH = 10
+REFRESH_TIMEOUT = 5.0
 
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
@@ -138,11 +144,13 @@ async def submit(user: dict, files: list[tuple[str, bytes]]) -> dict[str, Any]:
     username = str(user.get("username") or "").strip().lower()
     if not username:
         raise HTTPException(status_code=401, detail="Sign in to submit a skill")
-    async with _client() as client:
-        new_skill = not await _exists(client, f"{SKILLS_PATH}/{name}")
+    # Recorded before GitHub is asked anything, as a new skill until GitHub
+    # says otherwise: a submission whose kind is not known yet is counted as
+    # a community one, which hides it a moment longer rather than showing it
+    # unlabelled.
     submission_id = await store.add_skill_submission(
         skill=name, submitted_by=username, by_owner=bool(user.get("is_admin")),
-        new_skill=new_skill, repository=REPOSITORY,
+        new_skill=True, repository=REPOSITORY,
         branch=f"pending-{time.time_ns()}")
     return await _open(submission_id, name, cleaned)
 
@@ -154,6 +162,11 @@ async def retry(submission_id: int, user: dict, files: list[tuple[str, bytes]]) 
         raise HTTPException(status_code=404, detail="No such submission")
     if row["submitted_by"] != str(user.get("username") or "").lower() and not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="That submission is not yours")
+    if row["pr_number"]:
+        # Its pull request exists. Moving the branch now would rewrite what a
+        # reviewer is reading, or commit onto a branch already merged.
+        raise HTTPException(status_code=409,
+                            detail="This submission already has its pull request; submit again for a new one")
     name, cleaned = checked_files(files)
     if name != row["skill"]:
         raise HTTPException(status_code=400, detail=f"This submission is the skill {row['skill']}")
@@ -171,13 +184,21 @@ async def _open(submission_id: int, name: str, files: list[tuple[str, bytes]]) -
         await store.update_skill_submission(submission_id, branch=branch)
     try:
         async with _client() as client:
+            if row["new_skill"]:
+                exists = await _exists(client, f"{SKILLS_PATH}/{name}")
+                if exists:
+                    await store.update_skill_submission(submission_id, new_skill=False)
+                    row = {**row, "new_skill": False}
             base_sha = (await _github(client, "GET", f"/repos/{REPOSITORY}/git/ref/heads/{BASE_BRANCH}"))["object"]["sha"]
             base_tree = (await _github(client, "GET", f"/repos/{REPOSITORY}/git/commits/{base_sha}"))["tree"]["sha"]
             entries = []
             for inner, data in files:
                 blob = await _github(client, "POST", f"/repos/{REPOSITORY}/git/blobs",
                                      json={"content": base64.b64encode(data).decode(), "encoding": "base64"})
-                entries.append({"path": f"{SKILLS_PATH}/{name}/{inner}", "mode": "100644",
+                # A browser upload carries no file mode; a script is known by
+                # its first line, and lands executable as it was on disk.
+                mode = "100755" if data.startswith(b"#!") else "100644"
+                entries.append({"path": f"{SKILLS_PATH}/{name}/{inner}", "mode": mode,
                                 "type": "blob", "sha": blob["sha"]})
             tree = await _github(client, "POST", f"/repos/{REPOSITORY}/git/trees",
                                  json={"base_tree": base_tree, "tree": entries})
@@ -186,6 +207,8 @@ async def _open(submission_id: int, name: str, files: list[tuple[str, bytes]]) -
                 "tree": tree["sha"], "parents": [base_sha]})
             await _point_branch(client, branch, commit["sha"])
             pull = await _pull_for(client, branch)
+            if pull is not None and pull.get("state") != "open":
+                pull = None
             if pull is None:
                 pull = await _github(client, "POST", f"/repos/{REPOSITORY}/pulls", json={
                     "title": f"Skill submission: {name}",
@@ -266,8 +289,9 @@ async def refresh() -> None:
         client = _client()
     except HTTPException:
         return
+    client.timeout = httpx.Timeout(REFRESH_TIMEOUT)
     async with client:
-        for row in due:
+        for row in due[:REFRESH_BATCH]:
             try:
                 pull = await _github(client, "GET", f"/repos/{row['repository']}/pulls/{row['pr_number']}")
             except HTTPException:
@@ -281,14 +305,21 @@ async def refresh() -> None:
 
 
 def community_from(rows: list[dict]) -> set[str]:
-    """The skill names that are community submissions, given the records."""
+    """The skill names that are community submissions, given the records.
+
+    A new skill from somebody other than the owner, once its pull request is
+    merged. One whose state GitHub has never told us is counted too, so a
+    community skill is never shown unlabelled for want of an answer; one
+    known to be open, or closed unmerged, has not reached the hive and is
+    not counted, so it cannot hide a skill of the same name somebody else
+    already has.
+    """
     names = set()
     for row in rows:
         if row["by_owner"] or not row["new_skill"] or not row["pr_number"]:
             continue
-        if row["closed_at"] is not None and row["merged_at"] is None:
-            continue
-        names.add(row["skill"])
+        if row["merged_at"] is not None or row["checked_at"] is None:
+            names.add(row["skill"])
     return names
 
 

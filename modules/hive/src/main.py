@@ -1223,6 +1223,9 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     if not isinstance(role_ids, list) or not all(
             isinstance(i, int) and not isinstance(i, bool) for i in role_ids):
         raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    # General alone is a choice too: managed, holding only what every
+    # managed Mind holds.
+    managed = bool(role_ids) or body.get("roles_managed") is True
     if role_ids:
         known = {r["id"] for r in await store.roles_list()}
         unknown = [i for i in role_ids if i not in known]
@@ -1230,6 +1233,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             raise HTTPException(status_code=400, detail=f"No such role: {unknown[0]}")
 
     owner = await _new_mind_owner(body, user)
+    # Held before the scaffold is written, so a Mind never exists unmanaged
+    # behind a failed assignment; a scaffold that then fails leaves only a
+    # management record for an id nothing uses.
+    if managed:
+        await store.set_mind_roles(mind_id, role_ids)
     try:
         written = scaffold_internal_mind(
             name,
@@ -1247,8 +1255,6 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(
             status_code=500, detail=f"Could not write the Mind scaffold: {exc}"
         ) from exc
-    if role_ids:
-        await store.set_mind_roles(mind_id, role_ids)
 
     # Minted here rather than left for a shell. The generated compose file
     # reads this mind's own variables, so without this the container comes up
@@ -4035,6 +4041,15 @@ async def api_mind_skill_write_back(
     name: str, skill: str, user: dict = Depends(require_auth)
 ):
     """Copy this Mind's version into its repo checkout. Nothing is committed."""
+    # A Mind in this hive's own stack writes back into the hive's own
+    # checkout, which is the hive's skills. Anybody but the owner hands the
+    # hive a skill only as a pull request (story 10.18.8).
+    if not user.get("is_admin") and await asyncio.to_thread(
+            (configuration_data_module.HIVE_MIND_MINDS_DIR / route_access.normalize_mind_name(name)).is_dir):
+        raise HTTPException(
+            status_code=403,
+            detail="This Mind's repo is the hive's own. Submit the skill as a "
+                   "pull request from the Submit a skill page instead.")
     result = await mind_skills.write_back(await _mind_gateway_url(name), skill)
     log_event(
         log, "mind.skill.written_back", **_actor_fields(user), mind_name=name, skill=skill
