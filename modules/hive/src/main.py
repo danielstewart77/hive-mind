@@ -900,6 +900,14 @@ async def api_kanban_data(
     return await _kanban_call(kanban_data.get_data)
 
 
+@app.get("/api/kanban/board")
+async def api_kanban_board(user: dict = Depends(require_auth)):
+    """The board and every row's order number, from one read, for the page
+    that draws one in the order of the other."""
+    del user
+    return await _kanban_call(kanban_data.get_board)
+
+
 @app.get("/api/kanban/numbers")
 async def api_kanban_numbers(
         user: dict = Depends(require_admin_or_route_bearer)):

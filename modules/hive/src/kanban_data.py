@@ -126,45 +126,106 @@ async def _exists(record_id: str) -> bool:
     return await store.work_item(record_id) is not None
 
 
-async def _ordered_children(parent_id: str, kind: str) -> list[str]:
-    return [row["id"] for row in await store.children(parent_id, kind)]
+def _numbered_list(rows: list[dict[str, Any]],
+                   parent_id: str | None) -> list[str]:
+    """The ids numbered under parent_id, in board order, whatever their kind.
+
+    This is the list an order number counts along, so it is the list an
+    order write renumbers. Not the rows of one kind: an epic's features and
+    its stories are one list (1.1 a feature, 1.2 a story), and renumbering
+    only the features hands them 1..n beside stories already holding 1..m,
+    so two rows share a position and the tie is settled by a random id —
+    every number in that list shifts and nobody moved anything. Not the rows
+    of one stored parent either: an epic numbers as a root whatever its
+    `parent_id` holds, and so does a story under a story.
+    """
+    return [row["id"] for row in rows
+            if _numbering_parent(_row_to_record(row)) == parent_id]
+
+
+def _refuse_cycle(rows: list[dict[str, Any]], record_id: str,
+                  parent_id: str | None) -> None:
+    """Refuse a parent that sits beneath the item being moved.
+
+    The numbering, the tree and the cascade all walk down from the roots. An
+    item made the child of its own child is a loop nothing reaches: the item
+    and everything under it lose their numbers and drop out of the tree that
+    holds their only delete button, while the drop reports success.
+    """
+    by_id = {row["id"]: row for row in rows}
+    seen: set[str] = set()
+    current = parent_id
+    while current is not None and current not in seen:
+        if current == record_id:
+            raise ValueError(
+                "An item cannot be moved under an item that is beneath it: "
+                "the two would hang off each other and drop out of the board")
+        seen.add(current)
+        row = by_id.get(current)
+        current = row["parent_id"] if row else None
+
+
+async def _settle(before: list[dict[str, Any]], placed: str) -> None:
+    """Send every row whose numbered list a write changed to the end of it.
+
+    A retype or a parent change moves more than the item it names: a feature
+    retyped to a story takes its stories into the top-level list (a story
+    under a story numbers as a root), still holding positions from the list
+    they left. Left there they land among the epics wherever those stale
+    numbers fall, and epics nobody touched change number. They go last
+    instead, in the order they had, after the item the write placed.
+    """
+    was = {row["id"]: _numbering_parent(_row_to_record(row)) for row in before}
+    rows = await store.work_items()
+    shifted = [row["id"] for row in rows
+               if row["id"] != placed and row["id"] in was
+               and was[row["id"]] != _numbering_parent(_row_to_record(row))]
+    if shifted:
+        await store.renumber(shifted, start=await store.next_position())
+
+
+async def _place_in_list(item_id: str, parent_id: str | None,
+                         before_id: str | None) -> None:
+    """Give item_id the stored parent parent_id, and put it directly before
+    before_id in the list it now numbers in — or last when before_id is None
+    or is not in that list.
+
+    The whole numbered list is written back, so every position in it is
+    distinct and the order is exactly the one decided here.
+    """
+    rows = await store.work_items()
+    _refuse_cycle(rows, item_id, parent_id)
+    await store.place(item_id, parent_id, store.MIN_POSITION)
+    rows = await store.work_items()
+    moved = next(row for row in rows if row["id"] == item_id)
+    siblings = [i for i in _numbered_list(
+        rows, _numbering_parent(_row_to_record(moved))) if i != item_id]
+    if before_id in siblings:
+        siblings.insert(siblings.index(before_id), item_id)
+    else:
+        siblings.append(item_id)
+    await store.renumber(siblings)
 
 
 async def _move_epic(item_id: str, before_id: str | None) -> None:
-    """Place a top-level epic before another epic, or at the end when none."""
-    await _fetch(item_id, "epic")
-    siblings = [row["id"] for row in await store.work_items("epic")]
-    siblings.remove(item_id)
-    if before_id is None:
-        siblings.append(item_id)
-    else:
-        if before_id not in siblings:
-            raise ValueError("drop target is not an epic")
-        siblings.insert(siblings.index(before_id), item_id)
-    await store.renumber(siblings)
+    """Place an epic before another top-level item, or at the end when none."""
+    row = await _fetch(item_id, "epic")
+    if before_id is not None and before_id not in _numbered_list(
+            await store.work_items(), None):
+        raise ValueError("drop target is not a top-level item")
+    await _place_in_list(item_id, row["parent_id"], before_id)
 
 
 async def _move_child(item_id: str, kind: str, parent_id: str,
                       before_id: str | None) -> dict[str, Any]:
-    row = await _fetch(item_id, kind)
-    old_parent = row["parent_id"]
-    siblings = await _ordered_children(parent_id, kind)
-    if old_parent == parent_id:
-        siblings.remove(item_id)
-    if before_id is None:
-        index = len(siblings)
-    else:
-        if before_id not in siblings:
-            raise ValueError("drop target is not a child of the destination")
-        index = siblings.index(before_id)
-    siblings.insert(index, item_id)
+    await _fetch(item_id, kind)
+    if before_id is not None and before_id not in _numbered_list(
+            await store.work_items(), parent_id):
+        raise ValueError("drop target is not a child of the destination")
     # The parent moves with a position rather than on its own: a row whose
     # parent changed and whose position did not is holding a number that was
     # only unique under the parent it left.
-    await store.place(item_id, parent_id, store.MIN_POSITION + index)
-    await store.renumber(siblings)
-    if old_parent is not None and old_parent != parent_id:
-        await store.renumber(await _ordered_children(old_parent, kind))
+    await _place_in_list(item_id, parent_id, before_id)
     return _row_to_record(await _fetch(item_id, kind))
 
 
@@ -231,6 +292,22 @@ async def get_data() -> dict[str, list[dict[str, Any]]]:
         "epics": [], "features": [], "stories": []}
     for row in rows:
         out[_COLLECTION[row["kind"]]].append(_row_to_record(row))
+    return out
+
+
+async def get_board() -> dict[str, Any]:
+    """The board as `get_data` shapes it, with every row's order number
+    under "numbers", from one read.
+
+    One read, so the order the page draws in and the numbers it labels with
+    are the same moment: fetched as two, a drag landing between them draws
+    one board with another board's numbers.
+    """
+    rows = await store.work_items()
+    out: dict[str, Any] = {"epics": [], "features": [], "stories": []}
+    for row in rows:
+        out[_COLLECTION[row["kind"]]].append(_row_to_record(row))
+    out["numbers"] = _numbers_for(rows)
     return out
 
 
@@ -545,6 +622,7 @@ async def change_type(record_id: str, new_kind: str,
                 raise ValueError("An item cannot be its own parent")
             if not await _exists(parent_id):
                 raise KeyError(f"Item not found: {parent_id}")
+            _refuse_cycle(await store.work_items(), record_id, parent_id)
             new_parent = parent_id
         elif clear_parent or target_kind == "epic":
             new_parent = None
@@ -552,9 +630,19 @@ async def change_type(record_id: str, new_kind: str,
             new_parent = row["parent_id"]
         status = (None if target_kind in ("epic", "feature")
                   else (row["status"] or "backlog"))
+        before = await store.work_items()
+        kinds = {r["id"]: r["kind"] for r in before}
+        # A change that leaves the item in the list it numbers in (a story to
+        # a bug, a feature to a story under the same epic) keeps its place;
+        # sent to the end, every sibling after it would change number.
+        stays = _numbering_parent(_row_to_record(row)) == _numbering_parent(
+            _row_to_record(row | {"kind": target_kind, "parent_id": new_parent,
+                                  "parent_kind": kinds.get(new_parent)}))
         await store.retype(record_id, target_kind, status=status,
                            subtype=subtype, parent_id=new_parent,
-                           position=await store.next_position())
+                           position=(row["position"] if stays
+                                     else await store.next_position()))
+        await _settle(before, record_id)
         moved = await store.work_item(record_id)
         assert moved is not None  # it was read above, inside this unit
         return _row_to_record(moved)
@@ -565,6 +653,10 @@ async def place_before(record_id: str, before_id: str) -> dict[str, Any]:
 
     A reorder drop: the moved item takes the same parent as the item it lands
     in front of, and nothing else changes. Its own children are not touched.
+    Every order number in the list it lands in is renumbered from where
+    things now sit, and no id changes. "Parent" is the list before_id is
+    numbered and drawn in; an item that would number somewhere else under
+    it (an epic before a feature) is refused and nothing is written.
     """
     if before_id == record_id:
         raise ValueError("An item cannot be placed before itself")
@@ -572,15 +664,38 @@ async def place_before(record_id: str, before_id: str) -> dict[str, Any]:
         target = await store.work_item(before_id)
         if target is None:
             raise KeyError(f"Item not found: {before_id}")
-        if not await _exists(record_id):
+        rows = await store.work_items()
+        by_id = {row["id"]: row for row in rows}
+        moved_row = by_id.get(record_id)
+        if moved_row is None:
             raise KeyError(f"Item not found: {record_id}")
-        siblings = [row["id"] for row in
-                    await store.children(target["parent_id"])
-                    if row["id"] != record_id]
-        siblings.insert(siblings.index(before_id), record_id)
-        await store.place(record_id, target["parent_id"],
-                          store.MIN_POSITION + siblings.index(record_id))
-        await store.renumber(siblings)
+        # The list the target is numbered in, which is where it is drawn: a
+        # story under a story, or an epic given a parent, is drawn and
+        # numbered at the top level whatever parent it stores.
+        landing = _numbering_parent(_row_to_record(target))
+
+        def numbers_in_landing(parent_id: str | None) -> bool:
+            parent_row = by_id.get(parent_id) if parent_id is not None else None
+            under = _row_to_record(moved_row | {
+                "parent_id": parent_id,
+                "parent_kind": parent_row["kind"] if parent_row else None})
+            return _numbering_parent(under) == landing
+
+        # The parent it stores: its own when it already numbers in that list
+        # (a pure reorder keeps a story-under-a-story's link to its story),
+        # else the target's, else the list's own parent.
+        fitting = [p for p in (moved_row["parent_id"], target["parent_id"],
+                               landing) if numbers_in_landing(p)]
+        if not fitting:
+            # An epic numbers at the top level whatever its parent, and a
+            # story under a story does too. Stored under the target's parent
+            # it would be drawn somewhere other than where it was dropped,
+            # and a delete of that parent would cascade it away unseen.
+            raise ValueError(
+                "This item cannot sit in that list: dropped there it would be "
+                "numbered and drawn somewhere else. Drop it before an item of "
+                "the list it belongs in, or onto the item it should go under.")
+        await _place_in_list(record_id, fitting[0], before_id)
         moved = await store.work_item(record_id)
         assert moved is not None
         return _row_to_record(moved)
@@ -600,7 +715,10 @@ async def set_parent(record_id: str,
             raise KeyError(f"Item not found: {record_id}")
         if parent_id is not None and not await _exists(parent_id):
             raise KeyError(f"Item not found: {parent_id}")
+        before = await store.work_items()
+        _refuse_cycle(before, record_id, parent_id)
         await store.place(record_id, parent_id, await store.next_position())
+        await _settle(before, record_id)
         moved = await store.work_item(record_id)
         assert moved is not None
         return _row_to_record(moved)

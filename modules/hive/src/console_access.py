@@ -347,6 +347,9 @@ TABLE.add(
     "GET /kanban/board",
     "GET /kanban/backlog",
     "GET /kanban/item/{record_id}",
+    # The page's own read of the board and its numbers together. A mind has
+    # /api/kanban/data and /api/kanban/numbers; this needs no bearer.
+    "GET /api/kanban/board",
     "DELETE /api/kanban/{kind}/{record_id}",
     # design pages
     "GET /design",
