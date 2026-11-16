@@ -72,11 +72,32 @@ def _owner_chat_id(client=None) -> str:
     return str(body.get("claimed_ref") or "")
 
 
+def _bot_token() -> str:
+    """This mind's own Telegram bot token, by the rule the surfaces read.
+
+    The claim names a person on this mind's own bot, and Telegram refuses a
+    bot writing to someone who never started it, so the message has to go
+    out through that bot: `TELEGRAM_BOT_TOKEN_KEYRING_KEY` in a container,
+    `TELEGRAM_BOT_TOKEN` elsewhere.
+    """
+    try:
+        from hive_surfaces import token_store
+
+        token = token_store.resolve_token("telegram")
+        if token:
+            return token
+    except Exception:  # noqa: BLE001 - a host without the surfaces package
+        pass
+    from core.secrets import get_credential
+
+    return get_credential("TELEGRAM_BOT_TOKEN") or ""
+
+
 def _telegram_direct(message: str) -> tuple[bool, str]:
     """Send via Telegram Bot API directly, to this mind's own person."""
     from core.secrets import get_credential
 
-    token = get_credential("TELEGRAM_BOT_TOKEN")
+    token = _bot_token()
     chat_id = _owner_chat_id()
 
     if not token or not chat_id:
@@ -220,7 +241,7 @@ def cmd_voice(args: argparse.Namespace) -> int:
     from core.secrets import get_credential
     import httpx
 
-    token = get_credential("TELEGRAM_BOT_TOKEN")
+    token = _bot_token()
     chat_id = _owner_chat_id()
     voice_url = _voice_server_url(os.getenv("MIND_ID", "default"))
 

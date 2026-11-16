@@ -80,12 +80,23 @@ async def owner_telegram_chat(owner: object) -> str | None:
     name = str(owner or "").strip().lower()
     if not name:
         return None
-    from hive_data import broker_ops
+    # Read through `core._fetch` rather than `broker_ops`: the package baked
+    # into this service's image can predate the account operations, and a
+    # lookup that raised would cost the write its disambiguation answer.
+    # Unreadable is nobody - never the configured chat, which is somebody.
+    try:
+        from hive_data.core import _fetch
 
-    for row in await broker_ops.surface_accounts_of(name):
-        if row["surface"] == "telegram":
-            return str(row["account_ref"])
-    return ""
+        rows = await _fetch(
+            None,
+            'SELECT "account_ref" FROM core."surface_accounts" '
+            'WHERE "username" = $1 AND "surface" = \'telegram\' '
+            'ORDER BY "account_ref" LIMIT 1',
+            name)
+    except Exception:  # noqa: BLE001 - a question is never worth a failed write
+        logger.warning("could not read %s's linked Telegram account", name, exc_info=True)
+        return ""
+    return str(rows[0]["account_ref"]) if rows else ""
 
 
 async def notify_disambiguation(

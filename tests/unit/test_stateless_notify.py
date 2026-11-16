@@ -146,3 +146,13 @@ def test_an_unclaimed_container_minds_notification_goes_to_nobody(monkeypatch):
         lambda request: httpx.Response(200, json={"claimed": False, "claimed_ref": ""})))
 
     assert notify._owner_chat_id(client) == ""
+
+
+def test_a_refused_claim_read_sends_a_container_minds_notification_to_nobody(monkeypatch):
+    import httpx
+    _env(monkeypatch)
+    notify = _notify_module(monkeypatch)
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(404, json={"detail": "No such claim"})))
+
+    assert notify._owner_chat_id(client) == ""
