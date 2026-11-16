@@ -97,6 +97,15 @@ def _transcript(tmp_path: Path, harness: str, tokens: int = 60_000) -> Path:
     return path
 
 
+def _unmeasured_transcript(tmp_path: Path, harness: str) -> Path:
+    path = tmp_path / ("unmeasured.jsonl" if harness == "claude" else "unmeasured-rollout.jsonl")
+    entries = [] if harness == "claude" else [
+        {"type": "turn_context", "payload": {"model": "model-a"}},
+    ]
+    path.write_text("".join(json.dumps(item) + "\n" for item in entries))
+    return path
+
+
 def _write_config(harness: str, mind_dir: Path, runtime_path: Path, app_root: Path) -> Path:
     if harness == "dsh":
         result = dsh_hooks.write_hooks(
@@ -316,6 +325,42 @@ def test_generated_safe_check_reloads_saved_percentage_for_each_harness(
         assert not marker.exists()
         assert [body for method, path, body in requests
                 if path.endswith("/sessions/fire-rotation")][-1]["prompt"] == "continue"
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_generated_safe_check_relays_an_unavailable_measurement_as_unknown(
+    harness, tmp_path, service,
+):
+    """The generated native command must not turn absent usage into zero."""
+    service_url, requests = service
+    mind_dir = tmp_path / "minds" / "probe"
+    runtime_path = mind_dir / "runtime.yaml"
+    _runtime(runtime_path, 40)
+    app_root = Path(__file__).resolve().parents[2]
+    config_path = _write_config(harness, mind_dir, runtime_path, app_root)
+    stop_command = next(command for command in _commands(harness, config_path)["Stop"]
+                        if "rotation_check" in command or "rotation_hooks.py" in command)
+    event = _event(harness, _unmeasured_transcript(tmp_path, harness))
+    if harness == "dsh":
+        event["context"] = {"model": "model-a", "window": 100_000}
+    env = os.environ.copy()
+    env.update({
+        "HIVE_MIND_APP_ROOT": str(app_root), "HIVE_RUNTIME_PATH": str(runtime_path),
+        "HIVE_HARNESS": harness, "HIVE_MODEL": "model-a",
+        "HIVE_MODEL_CONTEXT_WINDOW": "100000", "CLIENT_REF": "client-1",
+        "SURFACE": "terminal", "HIVE_SURFACE": "terminal",
+        "COMMS_URL": service_url, "COMMS_BEARER_TOKEN": "test-comms",
+        "INFERENCE_PROXY_URL": service_url, "MIND_PROXY_KEY": "test-proxy",
+        "HIVE_GOAL_RUN": "1" if harness == "dsh" else "0",
+        "AUTO_REMEMBER_LOG_DIR": str(mind_dir / "data" / "auto-remember"),
+    })
+
+    completed = _run(stop_command, event, env, app_root)
+
+    assert completed.returncode == 0, completed.stderr
+    report = [body for method, path, body in requests if path.endswith("/sessions/context")][-1]
+    assert (report["kind"], report["tokens"]) == ("none", None)
+    assert not [request for request in requests if request[1].endswith("/arm-rotation")]
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])

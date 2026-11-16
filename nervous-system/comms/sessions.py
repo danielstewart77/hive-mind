@@ -1090,7 +1090,7 @@ class SessionManager:
             # and a fresh timestamp would make a stale figure look current.
             # Only a row holding no size at all takes the report as before.
             result = await sessions_ops.record_unmeasured_context(
-                session_id, observed_at=moment, tokens=int(tokens or 0),
+                session_id, observed_at=moment, tokens=tokens,
                 threshold=threshold, window=window,
             )
             if not result["rows"]:
