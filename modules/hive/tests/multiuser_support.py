@@ -97,6 +97,17 @@ def fake_comms_app() -> FastAPI:
     async def minds():
         return [dict(m, gateway_url=base["url"]) for m in MINDS]
 
+    # The inference proxy's meter, per holder, as it answers the console.
+    usage: list[dict] = [
+        {"holder": "skippy", "role": "mind", "requests": 40, "total_tokens": 9000, "cost": 1.5},
+        {"holder": "arnold", "role": "mind", "requests": 3, "total_tokens": 700, "cost": 0.25},
+        {"holder": "hive-tools", "role": "service", "requests": 2, "total_tokens": 50, "cost": 0.01},
+    ]
+
+    @app.get("/credentials/usage")
+    async def credentials_usage(days: int = 30):
+        return usage
+
     @app.get("/sessions")
     async def sessions():
         return SESSIONS
@@ -195,6 +206,7 @@ def fake_comms_app() -> FastAPI:
     app.state.absent = absent
     app.state.tokens = tokens
     app.state.unreachable = unreachable
+    app.state.usage = usage
     return app
 
 

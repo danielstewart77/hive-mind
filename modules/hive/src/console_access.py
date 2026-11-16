@@ -201,6 +201,9 @@ TABLE.add(
     "GET /api/skill-submissions",
     "POST /api/skill-submissions",
     "POST /api/skill-submissions/{submission_id}/retry",
+    # Filtered by the handler to the user's own minds (story 2.1.17).
+    "GET /usage",
+    "GET /api/usage",
 )
 # The settings page is one route; only its sessions section is a user's.
 TABLE.add(
