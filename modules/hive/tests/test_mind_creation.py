@@ -70,7 +70,7 @@ def test_every_pair_scaffolds_a_runnable_mind(client, harness, provider, model):
     )
     service = compose["services"]["atlas"]
     assert service["container_name"] == "hive-mind-atlas"
-    assert service["command"][-1] == f"minds.harness.{harness}"
+    assert service["command"][-2:] == ["-m", "minds.mind_server"]
     assert "hivemind" in service["networks"]
 
 
@@ -265,3 +265,27 @@ def test_the_form_offers_only_pairs_the_api_accepts(client):
     assert 'value="codex_cli"' in page
     # Identity is deliberately not scaffolded here.
     assert "soul" in page.lower()
+
+
+@pytest.mark.parametrize("harness,provider,model", _PAIRS)
+def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
+    client, harness, provider, model
+):
+    """Story 2.1.9: the key the mind is given at creation is how it talks to
+    the proxy, whatever its harness - read from the variable the mint writes,
+    and not stamped over by its runtime env at spawn."""
+    import holder_credentials
+
+    assert _create(client, harness=harness, provider=provider).status_code == 200
+
+    own = holder_credentials.variable_name(holder_credentials.SERVICES["proxy"], "atlas")
+    compose = yaml.safe_load(
+        (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text())
+    environment = dict(
+        item.split("=", 1) for item in compose["services"]["atlas"]["environment"])
+    for login in ("ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"):
+        assert environment[login] == "${" + own + "}"
+    assert environment["ANTHROPIC_BASE_URL"] == configuration_data.DEFAULT_OLLAMA_BASE_URL
+    runtime_env = yaml.safe_load(
+        (client.minds_dir / "atlas" / "runtime.yaml").read_text()).get("env") or {}
+    assert not {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"} & set(runtime_env)

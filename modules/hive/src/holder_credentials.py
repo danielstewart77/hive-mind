@@ -73,6 +73,7 @@ _ROTATION_LOCK = asyncio.Lock()
 PROBE_PATHS: dict[str, str] = {
     "comms": "/broker/minds",
     "lucent": "/graph/schema",
+    "proxy": "/v1/models",
 }
 PROBE_ACCEPTED = frozenset({200, 404})
 
@@ -137,6 +138,22 @@ SERVICES: dict[str, Service] = {
             "hive-comms": "nervous_system",
         },
         wants_mind_id=True,
+    ),
+    # One key per mind, so each mind's usage is its own (story 2.1.9,
+    # DECIDED 2026-11-15 by Daniel). The console's own proxy key is the
+    # admin credential: the proxy names which clients may mint for others in
+    # its `CREDENTIAL_ADMIN_CLIENTS`. No holder reads a plain file of its
+    # own here; a key in a mind's runtime.yaml is one this console cannot
+    # write, and the page offers it revoke, not rotate.
+    "proxy": Service(
+        key="proxy",
+        label="the inference proxy",
+        url_env="INFERENCE_PROXY_URL",
+        url_default="http://host.docker.internal:8899",
+        admin_env="INFERENCE_PROXY_KEY",
+        prefix="PROXY",
+        own_files={},
+        wants_mind_id=False,
     ),
 }
 
@@ -596,7 +613,7 @@ async def name_held_by_something_else(name: str) -> str | None:
 async def provision_mind(
     name: str, mind_id: str, owner: str
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Give a brand-new containerised mind its own two credentials.
+    """Give a brand-new containerised mind its own credentials, one per service.
 
     Role and provenance are stated, never inferred. A mind is minted before it
     has a broker row — it gets one by registering itself on first boot — and
@@ -606,8 +623,10 @@ async def provision_mind(
     uuid, because every hook sends `$MIND_ID`; minted under its name instead,
     the mind authenticates and is then refused its own memory.
 
-    Both values land in the shared `hive_mind/.env` under this mind's own
-    variables, which is where its generated compose file reads them from.
+    Every value lands in the shared `hive_mind/.env` under this mind's own
+    variables, which is where its generated compose file reads them from:
+    its gateway and memory-store credentials, and its inference-proxy key,
+    which is what meters every call it makes to it and nobody else.
     """
     minted: list[dict[str, Any]] = []
     failures: list[str] = []
