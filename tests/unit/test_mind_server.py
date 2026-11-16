@@ -1290,8 +1290,12 @@ def test_a_dsh_turn_points_the_hook_bridge_at_the_minds_hooks(homes, proxy, monk
     (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
     client.post("/sessions/h6/message", headers=SESSION, json={"content": "two"})
 
-    assert "DSH_HOOKS_CONFIG" not in spawner.calls[0]["env"]
-    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(homes["dsh"] / "hooks.json")
+    effective = homes["dsh"] / "hooks.effective.json"
+    assert spawner.calls[0]["env"]["DSH_HOOKS_CONFIG"] == str(effective)
+    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(effective)
+    written = json.dumps(json.loads(effective.read_text()))
+    for event in _all_hooks()["hooks"]:
+        assert event in json.loads(written)["hooks"]
 
 
 async def _none():

@@ -2078,6 +2078,28 @@ async def _mind_exists(mind_id: str) -> bool:
     return await broker.get_mind_by_id(mind_id) is not None
 
 
+@app.get("/minds/{mind_id}/grants")
+async def mind_grants(mind_id: str, request: Request):
+    """What this mind's roles let it use, read now (feature 10.18).
+
+    `managed` False means roles decide nothing about the mind. For a managed
+    mind every list is the union of the roles it holds at this moment, so a
+    role changed on the console is a changed answer on the next call. The
+    path takes the mind's id or its name; a mind's own credential reaches
+    only its own row, and a mind that does not exist is a 404 rather than
+    an unmanaged answer somebody might act on.
+    """
+    from hive_data import roles
+
+    mind = await core.get_mind_by_id_or_name(mind_id)
+    if not mind:
+        raise HTTPException(404, "No such mind")
+    keys = await user_access.holder_keys(_caller(request))
+    if not user_access.mind_is_named_in(keys, mind["mind_id"]):
+        raise HTTPException(404, "No such mind")
+    return await roles.grants_for(mind["mind_id"])
+
+
 @app.get("/broker/minds")
 async def broker_get_minds():
     """Return all registered minds from the broker database.
