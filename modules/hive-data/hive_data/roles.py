@@ -59,7 +59,7 @@ GENERAL = "general"
 _ROLE_SETTABLE = frozenset({"name", "skills", "hooks", "model", "tools",
                             "kept_against", "updated_at"})
 
-_SUBMISSION_SETTABLE = frozenset({"branch", "pr_number", "pr_url", "merged_at",
+_SUBMISSION_SETTABLE = frozenset({"branch", "new_skill", "pr_number", "pr_url", "merged_at",
                                   "closed_at", "checked_at"})
 
 _SLUG_RUN = re.compile(r"[^a-z0-9]+")

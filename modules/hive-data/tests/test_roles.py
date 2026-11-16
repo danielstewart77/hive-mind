@@ -156,3 +156,15 @@ async def test_renaming_a_role_keeps_its_slug(connected):
     after = await roles.get_role(role_id)
     assert after["name"] == "Atlas's job"
     assert after["slug"] == before
+
+
+async def test_a_role_cannot_be_renamed_to_another_roles_name(connected):
+    import hive_data
+    import pytest
+
+    taken = f"Developer {_tag()}"
+    await roles.create_role(taken)
+    other = (await roles.create_role(f"Other {_tag()}"))["row"]["id"]
+
+    with pytest.raises(hive_data.Conflict):
+        await roles.update_role(other, name=f"  {taken.lower()} ")
