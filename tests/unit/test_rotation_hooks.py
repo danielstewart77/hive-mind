@@ -397,4 +397,3 @@ def test_generated_safe_check_recovers_when_runtime_file_is_missing(harness, tmp
     assert restored.returncode == 0, restored.stderr
     reports = [body for method, path, body in requests if path.endswith("/sessions/context")]
     assert reports[-1]["threshold"] == 40_000
-

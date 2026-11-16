@@ -561,4 +561,3 @@ def test_repeated_overflow_at_full_percentage_reports_failure_without_second_rot
         assert row["conversation_id"] != "conv-1"
         assert '"is_error": true' in response.text
         assert "ran out of room again" in response.text
-
