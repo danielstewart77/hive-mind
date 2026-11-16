@@ -67,7 +67,7 @@ def _unwrap(response: httpx.Response) -> dict:
 async def _call(url: str, params: dict | None = None) -> dict:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(url, headers=admin_headers(), params=params)
+            response = await client.get(url, headers=await admin_headers(url), params=params)
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
