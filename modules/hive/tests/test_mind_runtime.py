@@ -53,6 +53,18 @@ class _Client:
         return await self._respond("POST", url, **kwargs)
 
 
+@pytest.fixture(autouse=True)
+def _an_empty_registry(monkeypatch):
+    """The registry the admin credential is judged against, read before each
+    call to a mind: nothing in it, so these calls are judged on what they
+    send and nothing else."""
+    from unittest.mock import AsyncMock
+
+    import route_access
+
+    monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=[]))
+
+
 def _response(status: int, json_body=None, text: str = "") -> httpx.Response:
     return httpx.Response(
         status_code=status,

@@ -501,26 +501,39 @@ def _origin(url: str) -> tuple[str, str, int | None]:
 async def withholds_admin_credential(url: str) -> bool:
     """Whether the hive's admin credential must not be sent to `url`.
 
-    Yes when the address is one a locked-down mind's registry row claims,
-    whatever it is: such a mind can re-register itself with the gateway at
-    any address - a server of its own, or another mind's, which the console
-    would then act on for it. And yes when the address leads to such a
-    mind's container. No locked-down mind, no question. A registry that
-    cannot be read while one exists is answered yes.
+    Yes when a registry row claiming that address is one the gateway marks
+    as not to be sent it (`admin_credential_allowed` false: a mind not owned
+    by the person the gateway trusts with it, such as a kid's box elsewhere
+    on the network) - the console and the gateway withhold it from the same
+    minds (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches
+    his credentials). A gateway too old to mark its rows marks none.
+
+    Yes, too, when the address is one a locked-down mind's registry row
+    claims, whatever it is: such a mind can re-register itself with the
+    gateway at any address - a server of its own, or another mind's, which
+    the console would then act on for it. And yes when the address leads to
+    such a mind's container. A registry that cannot be read while one exists
+    is answered yes.
     """
-    names, ids = _locked_identities()
-    if not names:
-        return False
     import route_access
 
-    rows = await route_access.registered_minds()
+    names, ids = _locked_identities()
+    try:
+        rows = await route_access.registered_minds()
+    except Exception:  # noqa: BLE001 - unreadable, judged below
+        rows = None
+    target = _origin(url)
+    for row in rows or []:
+        if _origin(str(row.get("gateway_url") or "")) != target:
+            continue
+        if row.get("admin_credential_allowed") is False:
+            return True
+        if str(row.get("name") or "").lower() in names or str(row.get("id") or "") in ids:
+            return True
+    if not names:
+        return False
     if rows is None:
         return True
-    target = _origin(url)
-    for row in rows:
-        mine = str(row.get("name") or "").lower() in names or str(row.get("id") or "") in ids
-        if mine and _origin(str(row.get("gateway_url") or "")) == target:
-            return True
     return await asyncio.to_thread(_leads_to_locked_container, target[1], names)
 
 
