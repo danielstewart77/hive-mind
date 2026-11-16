@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 import hive_data
-from hive_data import broker_ops, core
+from hive_data import broker_ops, core, staff
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -74,6 +74,14 @@ async def lifespan(app: FastAPI):
     # every request with a missing column.
     await hive_data.connect()
     try:
+        # Claims an older gateway made after step 11's backfill ran and
+        # before this restart carry no link, and since story 2.1.15 an
+        # unlinked sender is refused everywhere. The backfill is repeatable,
+        # so it runs here on every start and those bots keep answering.
+        linked = await broker_ops.link_claimed_accounts(linked_at=time.time())
+        if linked.get("rows"):
+            log.info("surface accounts: linked %s claimed accounts at startup",
+                     linked["rows"])
         await session_mgr.start()
 
         pending = await broker.recover_stranded_messages()
@@ -181,6 +189,36 @@ async def _refuse_foreign_session(request: Request, session_id: str) -> None:
     mind_id = await _session_mind(session_id)
     if not user_access.mind_is_named_in(keys, mind_id):
         raise HTTPException(404, "Session not found")
+
+
+async def _reachable(surface: object, sender: object, session: dict | None) -> dict | None:
+    """The conversation a bot's chat is bound to, if this sender may reach it.
+
+    A bound conversation is reused with no sender on the turn that follows,
+    so whoever reuses it has to be checked against the mind it runs on — not
+    the bot's own mind, which a `/switch` may have moved it away from
+    (story 2.1.15). None reads exactly as "no active session".
+    """
+    if not session:
+        return session
+    mind = session.get("mind_id") or await _session_mind(str(session.get("id") or ""))
+    if await surface_claims.sender_reaches(surface, sender, mind):
+        return session
+    return None
+
+
+async def _active_for(body) -> dict | None:
+    """The command's bound conversation, as `_reachable` lets this sender see it."""
+    active = await session_mgr.get_active_session(body.surface, body.client_ref)
+    return await _reachable(body.surface, body.surface_id, active)
+
+
+def _bot_surface(*values: object) -> str | None:
+    """The first of these naming a bot surface, kept whole for the check."""
+    for value in values:
+        if surface_claims.surface_of(value):
+            return str(value)
+    return None
 
 
 async def _require_own_session_mind(request: Request, session_id: str) -> None:
@@ -381,6 +419,11 @@ class CreateSessionRequest(BaseModel):
     surface_prompt: str | None = None
     allowed_directories: list[str] | None = None
     mind_id: str
+    # A label for the conversation, set as it is created rather than by a
+    # second call that can be skipped or lost. Both are guarded by the rename
+    # credential — see the route.
+    name: str | None = None
+    color: str | None = None
 
 
 class ImageAttachment(BaseModel):
@@ -419,6 +462,47 @@ class RemoteControlResponse(BaseModel):
     rc_pid: int
 
 
+class SubagentEventRequest(BaseModel):
+    """One report about one sub-agent, from whichever harness spawned it.
+
+    Sent by a harness's own start and stop hooks. All three harnesses can
+    report that a child began and that it is over; only one can observe that
+    a child is still producing work, so `working` is a state a reporter sends
+    when it genuinely knows and never on a timer.
+
+    `conversation` is whatever id the reporting harness actually holds, and
+    the three hold three different kinds: claude's hook carries the
+    conversation id every spawn is handed, codex's carries the thread id
+    codex minted for itself, and a codex or dsh spawn is additionally given
+    this gateway's own session id. Which kind it is is resolved here rather
+    than asked of three hooks, because this is the only place that can read
+    the session table at all.
+
+    `kind` and `label` are optional because dsh's start event carries a
+    parent session and a child session and nothing else. An absent label is
+    stored absent; a placeholder would be an invented record.
+
+    `conversation` is required on every event, including the ones whose
+    harness payload does not repeat it, because it is part of the child's
+    identity: a harness agent id is unique inside the conversation that
+    spawned it and nowhere else. A reporter always knows which conversation
+    it is in - that is its own environment rather than anything it reads out
+    of an event - so there is nothing it cannot send. It may name a
+    conversation this hive does not know; what it may not do is leave the
+    field out, which would key one mind's reused id onto another of its own
+    children.
+    """
+
+    agent_id: str
+    state: str
+    mind_id: str
+    conversation: str
+    kind: str = ""
+    label: str = ""
+    parent_agent_id: str | None = None
+    outcome: str | None = None
+
+
 class RotationMemoryRequest(BaseModel):
     """Written by the per-mind rotation_check hook on Stop events.
 
@@ -435,7 +519,10 @@ class RotationMemoryRequest(BaseModel):
 
 class BrokerMessageRequest(BaseModel):
     message_id: str | None = None
-    conversation_id: str
+    # A plain id. It is printed into the receiving mind's prompt outside the
+    # hive's envelope, so a sender who could put a line break in it could
+    # write a paragraph the receiver reads as the hive's.
+    conversation_id: str = Field(pattern=r"^[A-Za-z0-9._:+-]{1,128}$")
     from_mind: str = Field(alias="from")
     to_mind: str = Field(alias="to")
     content: str
@@ -589,6 +676,44 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
+    # The bot's credential says which box is calling, not who is talking.
+    # On a Telegram or Discord surface the person is the sender's account,
+    # and they reach only a mind they own (story 2.1.15). Refused in the same
+    # words as a mind that is not theirs, which is what it is.
+    if not await surface_claims.sender_reaches(
+        body.surface, body.surface_id, body.mind_id
+    ):
+        return JSONResponse(
+            {"error": "Mind not found"}, status_code=404
+        )
+    # Naming is its own small capability and stays that way on the way in.
+    # `require_rename_bearer` guards `PUT .../name` precisely so that
+    # `COMMS_BEARER_TOKEN` — held by every surface bot and every mind
+    # container on this hive, the ones on the kids' machines included —
+    # cannot put a label on a conversation. Owning the mind has never been
+    # enough for that, and it is not enough here either: `core.bind_surface`
+    # replaces whatever binding a `client_ref` already had, so a create may
+    # repoint an existing chat at a conversation of the caller's own — and a
+    # name and colour on that row are exactly the disguise the token exists
+    # to deny. Checked only when a label was actually sent, so the creates
+    # that have never carried one are guarded exactly as they were. The admin
+    # token is accepted the ordinary way, so an operator and the chief of
+    # staff need no second secret.
+    if body.name is not None or body.color is not None:
+        require_rename_bearer(
+            x_rename_token=request.headers.get("x-rename-token", ""),
+            authorization=request.headers.get("authorization", ""),
+        )
+    # The colour is checked here, where this route can answer 400 for that
+    # case alone. A blanket `except ValueError` below would also turn the
+    # refusals already raised in `create_session` — no model, a harness that
+    # is not available, a mind deregistered mid-create — into 400s, which is
+    # a different route answering differently for everything but the value
+    # the caller actually got wrong.
+    try:
+        sessions.validated_color(body.color)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     try:
         session = await session_mgr.create_session(
             surface=body.surface,
@@ -598,6 +723,8 @@ async def create_session(body: CreateSessionRequest, request: Request):
             surface_prompt=body.surface_prompt,
             allowed_directories=body.allowed_directories,
             mind_id=body.mind_id,
+            name=body.name,
+            color=body.color,
         )
         return session
     except ConnectionError:
@@ -622,7 +749,27 @@ async def list_sessions(
         client_ref=client_ref,
     )
     caller, keys, known = await _owned_mind_keys(request)
-    return user_access.filter_sessions(rows, caller, keys, known)
+    rows = user_access.filter_sessions(rows, caller, keys, known)
+    if client_ref is not None and surface_claims.surface_of(client_type):
+        # This is how a bot finds the conversation a chat is already bound to
+        # before it sends a turn, and a turn carries no sender. So a binding
+        # made by somebody who may no longer reach that mind - an account
+        # linked to another person, or a binding from before accounts were
+        # linked at all - answers as no conversation, and the bot falls
+        # through to opening one, which checks the sender (story 2.1.15).
+        #
+        # Only the row marked active is checked: it is the only one a bot
+        # reuses, and a chat's whole history checked row by row is two reads
+        # per conversation it ever had, on every message it sends.
+        kept = []
+        for row in rows:
+            if row.get("is_active") and not await _reachable(
+                row.get("surface") or client_type, row.get("surface_id"), row
+            ):
+                continue
+            kept.append(row)
+        rows = kept
+    return rows
 
 
 @app.get("/sessions/names")
@@ -1046,6 +1193,13 @@ async def suspend_session(session_id: str):
 
 @app.post("/sessions/{session_id}/resume")
 async def resume_session(session_id: str, body: ActivateRequest):
+    # Resuming rebinds the client pair, so a bot's chat reaching a suspended
+    # conversation is checked exactly as an activation is (story 2.1.15).
+    bot = _bot_surface(body.surface, body.client_type)
+    if bot is not None and not await surface_claims.sender_reaches(
+        bot, body.surface_id, await _session_mind(session_id),
+    ):
+        return JSONResponse({"error": "Session not found"}, status_code=404)
     try:
         return await session_mgr.resume_session(
             session_id, body.client_type, body.client_ref
@@ -1110,6 +1264,14 @@ async def activate_session(session_id: str, body: ActivateRequest):
     conversation and did not, which is a refusal about a machine, not a
     statement about this row.
     """
+    bot = _bot_surface(body.surface, body.client_type)
+    if bot is not None and not await surface_claims.sender_reaches(
+        bot, body.surface_id, await _session_mind(session_id),
+    ):
+        # Moving a conversation onto a bot is reaching its mind from that
+        # bot's sender, so the sender is checked against the owner of the
+        # conversation being moved, never the bot's own mind (story 2.1.15).
+        return JSONResponse({"error": "Session not found"}, status_code=404)
     try:
         return await session_mgr.activate_session(
             session_id, body.client_type, body.client_ref,
@@ -1171,6 +1333,133 @@ async def write_rotation_memory(
         created_at=float(int(time.time())),
     )
     return {"ok": True, "id": written["row"]["id"]}
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent telemetry
+# ---------------------------------------------------------------------------
+async def _resolve_reported_conversation(reported: str) -> dict | None:
+    """The conversation row for whatever id a harness reported.
+
+    Three harnesses hold three kinds of id and none of them can tell which
+    kind it has, so all three send what they have and this decides. Tried in
+    order of how directly each names a session: the gateway's own id, which a
+    codex or dsh spawn is given outright; the conversation id every spawn is
+    handed; and the harness's own thread id, which is all a codex hook knows.
+    The order is not cosmetic - `harness_sid` carries no unique constraint,
+    so it is the weakest claim on a conversation and is asked last.
+
+    None when it resolves to no conversation at all. That is an ordinary
+    answer rather than a refusal: a harness spawning children outside any
+    hive conversation - an operator's own session at a terminal, which shares
+    this host's hooks and this mind's environment - is still a child that ran,
+    and the record of it is worth keeping even though no page will draw it.
+
+    Returns the row rather than the id, because the caller has to check whose
+    conversation it is before it stores it.
+    """
+    if not reported:
+        return None
+    row = await core.get_session(reported)
+    if row is None:
+        row = await core.get_session_by_conversation(reported)
+    if row is None:
+        row = await core.get_session_by_harness_sid(reported)
+    return row
+
+
+def _printable(text: str) -> str:
+    """A label or a kind with the characters a surface cannot draw removed.
+
+    Nothing reads this route's answer, so refusing a record over a stray
+    control character in a label - which a harness can put there by quoting
+    a file name badly - would drop the whole child silently. The text is
+    worth less than the record.
+    """
+    return "".join(c for c in (text or "") if c.isprintable()).strip()
+
+
+def _reportable_outcome(outcome: str | None) -> str | None:
+    """The outcome as a reporter is allowed to state it.
+
+    The reserved word the sweep writes for an ending nobody reported is the
+    one ending a later report may replace, so a reporter must not be able to
+    send it. Rewritten to the ordinary undescribed ending rather than
+    refused: the harness did say its child was over, and that is the part
+    worth keeping.
+    """
+    if outcome is None:
+        return None
+    cleaned = _printable(outcome)
+    if not cleaned or cleaned in staff.RESERVED_OUTCOMES:
+        return staff.OUTCOME_UNKNOWN
+    return cleaned
+
+
+@app.post("/staff/agents/events")
+async def record_subagent_event(body: SubagentEventRequest, request: Request):
+    """Record one report about one sub-agent.
+
+    Held to the mind in the body exactly as the rotation write is, and for the
+    same reason: this is addressed by a mind and a harness's own agent id
+    rather than by a conversation the caller could own, so there is nothing
+    here for an owner check to scope. The class admits every mind's own
+    credential and every surface bot's service value, so an unchecked
+    `mind_id` is one any holder could file a child under any mind.
+
+    Answers 200 with the record as stored. A reporter does not read the
+    answer and must not wait on it - a hook that blocks a spawn until this
+    returns has made a recording problem into a conversation problem - so
+    this is deliberately cheap: one resolve and one statement.
+
+    And because nothing reads the answer, a refusal here is a record that
+    vanishes with nothing anywhere saying so. So this normalises what can be
+    normalised rather than refusing it: a reserved outcome becomes the
+    ordinary undescribed one, and control characters come out of the label.
+    Dropping a whole ending because its outcome used a word the machinery
+    reserves loses far more than rewriting that one word does. What is still
+    refused is what cannot be stored at all - no identity, no conversation,
+    or a state nobody defined - because there is nothing to normalise it to.
+    """
+    await _refuse_foreign_mind_in_body(request, body.mind_id)
+    if not body.mind_id.strip():
+        return JSONResponse({"error": "mind_id required"}, status_code=400)
+    if not body.agent_id.strip():
+        return JSONResponse({"error": "agent_id required"}, status_code=400)
+    reported = body.conversation.strip()
+    if not reported:
+        return JSONResponse(
+            {"error": "conversation required: it is part of the child's "
+                      "identity, since a harness agent id is unique only "
+                      "inside the conversation that spawned it"},
+            status_code=400)
+    found = await _resolve_reported_conversation(reported)
+    # Two things travel in this body and both have to be held to the caller:
+    # the mind it files the child under, and the conversation it files it
+    # into. Checking only the first left the second open - a mind could name
+    # itself honestly and still drop its child into somebody else's
+    # conversation, which is the key the page narrows on, so the child would
+    # be drawn under another mind's work. Resolving to a conversation that is
+    # not the caller's is treated as resolving to none: the child still ran
+    # and the record still says so, it is simply not attached to a
+    # conversation this caller may claim.
+    session_id = None
+    if found is not None and await _names_own_mind(
+            _caller(request), found.get("mind_id") or ""):
+        session_id = found["id"]
+    try:
+        row = await staff.record_agent_event(
+            body.agent_id.strip(), body.state,
+            mind_id=body.mind_id.strip(),
+            agent_type=_printable(body.kind), label=_printable(body.label),
+            conversation_ref=reported,
+            session_id=session_id,
+            parent_agent_id=(body.parent_agent_id or "").strip() or None,
+            outcome=_reportable_outcome(body.outcome),
+        )
+    except hive_data.errors.ValueRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"ok": True, "agent": row}
 
 
 # ---------------------------------------------------------------------------
@@ -1373,6 +1662,17 @@ async def ws_attach(ws: WebSocket, session_id: str):
         log.error("session %s has no model — refusing attach", session_id)
         await ws.close(code=4409, reason="session has no model")
         return
+    # A pane's turns never pass through `send_message`, so the model a DSH
+    # mind's roles allow (story 10.18.5) is applied here, before the pane is
+    # opened on it, as well as on every chat turn.
+    try:
+        allowed_model = await session_mgr.role_model(session)
+    except ValueError as exc:
+        await ws.close(code=4409, reason=str(exc)[:120])
+        return
+    if allowed_model != session_model:
+        await session_mgr._move_to_role_model(session, allowed_model)
+        session_model = allowed_model
 
     # The tile takes the conversation. Nothing else binds a pane-hosted
     # conversation to a surface, so without this the pane carries no
@@ -1564,7 +1864,10 @@ async def _selectable(
     )
     keys = await user_access.visible_minds(caller)
     known = await user_access.all_mind_keys()
-    return user_access.filter_sessions(rows, caller, keys, known)
+    rows = user_access.filter_sessions(rows, caller, keys, known)
+    # A position addresses only a conversation this sender may reach, so a
+    # bot's list is cut to the minds its sender owns (story 2.1.15).
+    return await surface_claims.reachable_rows(body.surface, body.surface_id, rows)
 
 
 async def _resolve_target(
@@ -1609,6 +1912,14 @@ async def _handle_command(
     cmd: str, parts: list[str], body: CommandRequest,
     caller: user_access.Caller,
 ):
+    if not await surface_claims.sender_reaches(
+        body.surface, body.surface_id, body.mind_id
+    ):
+        # Every command a bot relays is the sender acting on this mind, the
+        # read-only ones included: `/sessions` lists its conversations. The
+        # admin credential is not exempt, because no bot holds it and the
+        # sender is the person either way (story 2.1.15).
+        return {"error": "Session not found"}
     if cmd in _MIND_BOUND_COMMANDS and not caller.sees_everything():
         if not await user_access.owns_mind(
             caller, body.mind_id
@@ -1616,9 +1927,7 @@ async def _handle_command(
             return {"error": "Session not found"}
         if not await _names_own_mind(caller, body.mind_id):
             return {"error": "Session not found"}
-        active = await session_mgr.get_active_session(
-            body.surface, body.client_ref
-        )
+        active = await _active_for(body)
         # A surface reference bound to a conversation on someone else's mind
         # is refused in the same words an absent one gets, so the command
         # cannot be used to find out which references are live.
@@ -1645,7 +1954,7 @@ async def _handle_command(
     if cmd in ("/new", "/clear"):
         # Kill active session (if any), run memory pipeline on it, then create a new one.
         # _run_memory_for_owner blocks inside create_session until the pipeline finishes.
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if active:
             await session_mgr.kill_session(active["id"])
         allowed_directories = parts[1:] if len(parts) > 1 else None
@@ -1658,7 +1967,7 @@ async def _handle_command(
         )
 
     if cmd == "/model":
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if len(parts) < 2:
             if not active:
                 return {"error": "No active session. Use /new first."}
@@ -1685,7 +1994,7 @@ async def _handle_command(
             return {"error": str(exc)}
 
     if cmd == "/effort":
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if not active:
             return {"error": "No active session. Use /new first."}
         try:
@@ -1700,7 +2009,7 @@ async def _handle_command(
         # Bare: what the mind offers, unavailable ones with their reason, and
         # where this conversation is. With a harness: that harness's models,
         # since the switch lands only once one is picked. With both: switch.
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         if not active:
             return {"error": "No active session. Use /new first."}
         if len(parts) < 2:
@@ -1725,6 +2034,10 @@ async def _handle_command(
         target, error = await _resolve_target(parts[1], body, caller)
         if error:
             return error
+        if not await surface_claims.sender_reaches(
+            body.surface, body.surface_id, await _session_mind(target)
+        ):
+            return {"error": "Session not found"}
         return await session_mgr.activate_session(
             target, body.surface, body.client_ref,
             surface=body.surface, surface_id=body.surface_id,
@@ -1736,10 +2049,14 @@ async def _handle_command(
         target, error = await _resolve_target(parts[1], body, caller)
         if error:
             return error
+        if not await surface_claims.sender_reaches(
+            body.surface, body.surface_id, await _session_mind(target)
+        ):
+            return {"error": "Session not found"}
         return await session_mgr.kill_session(target)
 
     if cmd == "/prune":
-        active = await session_mgr.get_active_session(body.surface, body.client_ref)
+        active = await _active_for(body)
         active_id = active["id"] if active else None
         rows = await session_mgr.list_sessions(surface_id=body.surface_id)
         keys = await user_access.visible_minds(caller)
@@ -1775,10 +2092,46 @@ async def _mind_exists(mind_id: str) -> bool:
     return await broker.get_mind_by_id(mind_id) is not None
 
 
+@app.get("/minds/{mind_id}/grants")
+async def mind_grants(mind_id: str, request: Request):
+    """What this mind's roles let it use, read now (feature 10.18).
+
+    `managed` False means roles decide nothing about the mind. For a managed
+    mind every list is the union of the roles it holds at this moment, so a
+    role changed on the console is a changed answer on the next call. The
+    path takes the mind's id or its name; a mind's own credential reaches
+    only its own row, and a mind that does not exist is a 404 rather than
+    an unmanaged answer somebody might act on.
+    """
+    from hive_data import roles
+
+    mind = await core.get_mind_by_id_or_name(mind_id)
+    if not mind:
+        raise HTTPException(404, "No such mind")
+    keys = await user_access.holder_keys(_caller(request))
+    if not user_access.mind_is_named_in(keys, mind["mind_id"]):
+        raise HTTPException(404, "No such mind")
+    return await roles.grants_for(mind["mind_id"])
+
+
 @app.get("/broker/minds")
 async def broker_get_minds():
-    """Return all registered minds from the broker database."""
-    return await broker.get_registered_minds()
+    """Return all registered minds from the broker database.
+
+    Each row says whether the hive's admin credential may be sent to the
+    address it registered (`admin_credential_allowed`): only a mind owned by
+    `config.admin_credential_owner()`. The console reads it, so the gateway
+    and the console withhold that credential from the same minds.
+    """
+    from comms.config import admin_credential_owner
+
+    trusted = admin_credential_owner()
+    rows = await broker.get_registered_minds()
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict):
+            owner = str(row.get("owner") or "").strip().lower()
+            row["admin_credential_allowed"] = bool(trusted) and owner == trusted
+    return rows
 
 
 async def _refuse_foreign_registration(caller, body) -> None:
@@ -1813,6 +2166,13 @@ async def _refuse_foreign_registration(caller, body) -> None:
                 f"{caller.holder!r} may only register itself, not "
                 f"{name or mind_id!r}",
             )
+        # Its own row, under its own name. A mind that renamed itself would
+        # step out from under every credential and grant keyed on its name -
+        # hive-tools knows a mind's token by it - so only the admin renames.
+        if (str(mind_id or "") == asked_id
+                and user_access.normalize_username(name) != asked_name):
+            raise HTTPException(
+                403, f"{caller.holder!r} may not rename {name!r}; the admin does")
     if existing:
         return
     if caller.holder not in {asked_id.lower(), asked_name}:
@@ -1849,6 +2209,17 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
                 401, "Registration needs an admin or a mind's own credential"
             )
         await _refuse_foreign_registration(caller, body)
+        # A mind's own credential registers a mind of its credential's
+        # person and nobody else's. Without this a kid's box could register a
+        # fresh row naming Daniel as owner, at a server of its own, and the
+        # gateway would send that address his admin credential.
+        mine = user_access.normalize_username(caller.username)
+        named = user_access.normalize_username(body.owner)
+        if named and named != mine:
+            raise HTTPException(
+                403, f"{caller.holder!r} may only register a mind of {mine!r}"
+            )
+        body.owner = mine or None
     try:
         await broker.register_mind(
             mind_id=body.mind_id,
@@ -2047,6 +2418,12 @@ async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
         return JSONResponse({"error": str(exc)}, status_code=422)
     if result is None:
         return JSONResponse({"error": f"Mind '{mind_id}' not found"}, status_code=404)
+    # A bot claimed by the old owner's account would go on answering them
+    # while every conversation it opened was refused, and the scheduler and
+    # the broker would keep delivering the mind's messages to them. So the
+    # claims whose account is not the new owner's are released with the move
+    # (story 2.1.15); the new owner claims the bot with a fresh phrase.
+    await surface_claims.release_claims_not_owned(str(result.get("mind_id") or mind_id))
     return result
 
 
@@ -2094,7 +2471,13 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
         )
 
     message_id = body.message_id or str(uuid.uuid4())
-    metadata = body.metadata
+    # Whose request this is: the person the posting credential belongs to, not
+    # whatever `from_mind` the body names - a service credential may name any
+    # mind. The admin credential is every holder at once, so it is the named
+    # mind's owner, or the person the admin credential belongs to.
+    metadata = dict(body.metadata or {})
+    metadata[broker.SENDER_OWNER_KEY] = await _sender_owner(
+        _caller(request), body.from_mind)
 
     result = await broker.insert_message(
         message_id=message_id,
@@ -2133,17 +2516,49 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
     )
 
 
-@app.get("/broker/messages")
-async def broker_get_messages(conversation_id: str):
-    """Get all messages for a conversation."""
+async def _sender_owner(caller, from_mind: str) -> str:
+    """The person a posted message's request belongs to, or "" for nobody."""
+    if caller.sees_everything():
+        row = await core.get_mind_by_id_or_name(from_mind)
+        owner = str((row or {}).get("owner") or "").strip().lower()
+        if owner:
+            return owner
+        from comms.config import admin_credential_owner
+
+        return admin_credential_owner()
+    return user_access.normalize_username(caller.username)
+
+
+async def _readable_conversation(request: Request, conversation_id: str) -> list[dict] | None:
+    """A conversation's messages, if the caller may read them.
+
+    A mind's own credential reads only conversations it is a party to; one
+    mind could otherwise read any other's by id, and an inbound text's id is
+    its sender's phone number. Admin and service holders are the machinery
+    and read every one, as before.
+    """
     messages = await broker.get_messages(conversation_id)
-    return messages
+    caller = _caller(request)
+    if caller.sees_everything() or caller.role != user_access.MIND:
+        return messages
+    for message in messages:
+        for party in (message.get("from_mind"), message.get("to_mind")):
+            if party and await _names_own_mind(caller, str(party)):
+                return messages
+    return None
+
+
+@app.get("/broker/messages")
+async def broker_get_messages(conversation_id: str, request: Request):
+    """Get all messages for a conversation."""
+    messages = await _readable_conversation(request, conversation_id)
+    return messages if messages is not None else []
 
 
 @app.get("/broker/conversations/{conversation_id}")
-async def broker_get_conversation(conversation_id: str):
+async def broker_get_conversation(conversation_id: str, request: Request):
     """Get conversation detail with all messages."""
-    messages = await broker.get_messages(conversation_id)
+    messages = await _readable_conversation(request, conversation_id)
     if not messages:
         return JSONResponse({"error": "Conversation not found"}, status_code=404)
     return {"conversation_id": conversation_id, "messages": messages}

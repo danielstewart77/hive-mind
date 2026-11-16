@@ -113,12 +113,32 @@ CMD ["/opt/venv/bin/python3", "server.py"]
 # From a build context rather than git because the repository is private;
 # asyncpg is its one dependency. Built with `target: mind-ledger` and
 # `additional_contexts: hive_data:` in that mind's compose fragment.
+#
+# The baked copy is for the dependencies and the metadata, not the code the
+# container runs: the fragment mounts the host's hive-data/hive_data
+# read-only over /opt/venv/lib/python3.12/site-packages/hive_data, as comms
+# does. The ledger tool is bind-mounted live from this checkout, so a baked
+# library stands still while the tool moves; on 2026-11-15 that left Stash
+# unable to record a question, link a board item or register a sub-agent.
+# Both tools refuse by name when the library they loaded is behind them.
 FROM mind AS mind-ledger
 USER root
 COPY --from=hive_data . /tmp/hive-data
 RUN /opt/venv/bin/pip install --no-cache-dir "asyncpg>=0.29" /tmp/hive-data \
     && rm -rf /tmp/hive-data
 USER hivemind
+
+# A mind created from the console for a person (hive story 2.1.9). Its code
+# belongs to root, so the mind cannot rewrite the server that receives the
+# gateway's and the console's calls; only data/ and the folders its compose
+# file mounts are its own. Built from the published tree, never the host
+# checkout, so nothing untracked is in it.
+FROM mind AS locked-mind
+USER root
+RUN chown -R root:root /usr/src/app \
+    && chown hivemind:hivemind /usr/src/app/data
+USER hivemind
+
 
 # The default target, so every other mind's build is the mind image as it
 # always was.

@@ -29,7 +29,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from minds.proactive import idle_drain
+from minds.proactive import BUFFER as proactive_buffer, idle_drain
 from minds.pty_attach import (
     TmuxTerminals,
     claude_conversation_flags,
@@ -52,6 +52,46 @@ MIND_DIR = MINDS_ROOT / MIND_NAME
 PROJECT_DIR = Path("/usr/src/app")
 
 log = configure_logging(f"hive-mind.minds.{MIND_NAME}")
+
+# Linux caps a *single* ``execve`` argument at ``MAX_ARG_STRLEN`` — 32 pages —
+# independently of ``ARG_MAX``, which bounds the argument list as a whole.
+# This adapter passes the composed system prompt as one
+# ``--append-system-prompt``, so the per-argument ceiling is what decides
+# whether a containerised mind can be spawned at all.
+MAX_ARG_STRLEN = 32 * os.sysconf("SC_PAGESIZE")
+
+
+class SpawnArgTooLarge(ValueError):
+    """One spawn argument is past the kernel's per-argument ceiling.
+
+    Raised rather than letting ``execve`` answer. The kernel's error —
+    ``OSError: [Errno 7] Argument list too long`` — names no argument, no
+    size and no limit, and points at the argument *list*, sending every
+    reader to ``ARG_MAX``, which is not the limit being hit.
+    """
+
+    def __init__(self, flag: str, size: int, limit: int) -> None:
+        self.flag = flag
+        self.size = size
+        self.limit = limit
+        super().__init__(
+            f"{flag} is {size:,} bytes — past the {limit:,}-byte kernel ceiling "
+            f"on a single exec argument (MAX_ARG_STRLEN, 32 pages). This is not "
+            f"ARG_MAX and not a context-window limit."
+        )
+
+
+def _refuse_oversized_args(cmd: list[str]) -> None:
+    """Refuse a command carrying an argument ``execve`` cannot take.
+
+    The ceiling applies to the NUL-terminated string, so the largest argument
+    that survives is one byte under ``MAX_ARG_STRLEN``.
+    """
+    for i, arg in enumerate(cmd):
+        size = len(arg.encode("utf-8"))
+        if size >= MAX_ARG_STRLEN:
+            flag = cmd[i - 1] if i and cmd[i - 1].startswith("--") else f"argv[{i}]"
+            raise SpawnArgTooLarge(flag, size, MAX_ARG_STRLEN)
 
 RUNTIME_PATH = MIND_DIR / "runtime.yaml"
 RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
@@ -87,7 +127,7 @@ SESSIONS: dict[str, dict] = {}
 # Proactive (unsolicited) delivery. The idle drain appends {"chat_id", "text"}
 # items here while no request is in flight; mind_server serves it on
 # GET /proactive for this mind's Telegram bot. See minds/proactive.py.
-PROACTIVE_BUFFER: list[dict] = []
+PROACTIVE_BUFFER: list[dict] = proactive_buffer
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +275,14 @@ async def _spawn_proc(
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
+    # The gateway's own row id for this conversation. A mind's `/end-session`
+    # skill deletes that row, and until this was set no harness exported
+    # anything it could resolve: claude and codex each export their own
+    # conversation id and the skill matched it against the live list, and dsh
+    # exports neither, so ending a session was simply impossible on a dsh
+    # mind. The id is handed to this mind on every spawn — there is nothing to
+    # look up and nothing to guess.
+    env["HIVE_SESSION_ID"] = session_id
     if surface == "scheduler":
         env["HIVEMIND_SCHEDULED_TASK"] = "1"
     # Per-spawn metadata for the rotation_check Stop hook. Empty values
@@ -251,6 +299,8 @@ async def _spawn_proc(
     if surface_label:
         env["HIVE_SURFACE"] = surface_label
     env.update(extra_env or {})
+
+    _refuse_oversized_args(cmd)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -335,7 +385,8 @@ def _rotation_argv(model: str, new_conversation_id: str, effort: str | None = No
 
 
 def _pane_env(
-    client_ref: str | None, surface: str | None, surface_id: str | None
+    client_ref: str | None, surface: str | None, surface_id: str | None,
+    session_id: str = "",
 ) -> dict[str, str]:
     """Environment the pane needs that the tmux server can't have inherited.
 
@@ -350,6 +401,8 @@ def _pane_env(
     # a second, conflicting session picker inside it, re-hosting the
     # conversation in a nested pty at a geometry nobody asked for.
     env["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
+    if session_id:
+        env["HIVE_SESSION_ID"] = session_id
     # A pty spawn is the web terminal by definition — no gateway derivation
     # needed. Per-turn hooks read this to tell the model which surface a turn
     # arrived on.
@@ -385,7 +438,7 @@ def _spawn_pty(
     """
     del harness_sid  # claude adopts the gateway's id; nothing else to track
     ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
-    pane_env = {**_pane_env(client_ref, surface, surface_id), **(extra_env or {})}
+    pane_env = {**_pane_env(client_ref, surface, surface_id, session_id), **(extra_env or {})}
     # ``system_prompt`` is a carry-forward comms is still holding: a switch's
     # handover or a rotation's seed, with no turn landed on it yet, so it has
     # to be applied again or the context composed for it is gone. It opens the
@@ -458,7 +511,7 @@ def _rotate_pty(
     )
     TERMINALS.respawn(
         session_id, argv,
-        env_overrides=_pane_env(client_ref, surface, surface_id),
+        env_overrides=_pane_env(client_ref, surface, surface_id, session_id),
     )
     log.info("Rotated the conversation in terminal %s onto %s (seed=%d chars)",
              TERMINALS.session_name(session_id), new_conversation_id, len(seed))

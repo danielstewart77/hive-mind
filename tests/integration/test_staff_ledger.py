@@ -74,3 +74,37 @@ async def test_opening_a_task_creates_the_row_with_its_session_and_prints_its_id
             "description": "What time is the potluck on Sunday?",
             "status": "in progress"}
         assert [p["session_id"] for p in pairs] == [session_id]
+
+
+async def test_a_question_recorded_through_the_tool_is_the_row_s_and_answering_clears_it(
+        monkeypatch, capsys):
+    # The page draws a bubble from this column (hive src/chief_of_staff.py),
+    # so this is the ledger half of "the question recorded is the question
+    # the page shows; clearing it leaves none".
+    async with claimed_database(ADMIN_DSN, "staff_ledger_test_") as dsn:
+        await migrate.apply(dsn)
+        monkeypatch.setenv("HIVE_DATABASE_URL", dsn)
+        tool = _tool()
+        await asyncio.to_thread(tool.main, [
+            "open", "--name", "Judging", "--session", str(uuid.uuid4())])
+        task_id = json.loads(capsys.readouterr().out)["id"]
+
+        async def question():
+            connection = await asyncpg.connect(dsn)
+            try:
+                return await connection.fetchval(
+                    "SELECT question FROM staff.tasks WHERE id = $1", task_id)
+            finally:
+                await connection.close()
+
+        asked = await asyncio.to_thread(tool.main, [
+            "edit", task_id, "--question", "Which model judges?"])
+        capsys.readouterr()
+        assert asked == 0
+        assert await question() == "Which model judges?"
+
+        answered = await asyncio.to_thread(tool.main, [
+            "edit", task_id, "--answered"])
+        capsys.readouterr()
+        assert answered == 0
+        assert await question() is None

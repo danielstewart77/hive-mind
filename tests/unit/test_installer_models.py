@@ -311,3 +311,16 @@ def test_a_classifier_whose_call_fails_is_forgotten_and_asked_again_from_the_cha
     assert asked.value.choices == ["gpt-oss:20b-32k", "claude-sonnet-5"]
     assert "classifier_model" not in ctx.answers
     assert ctx.env()[compose.CLASSIFIER_MODEL_VAR] == ""
+
+
+def test_the_tools_service_is_recreated_once_the_key_and_classifier_are_known(
+        tmp_path, monkeypatch):
+    hive = _Hive()
+    ctx = _existing(tmp_path, monkeypatch, hive, pieces=["tools"],
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+
+    steps.resolve_models(ctx)
+
+    ups = [c for c in hive.commands if "up" in c and "-d" in c]
+    assert ups and "hive-tools" in ups[-1][ups[-1].index("-d") + 1:]
+    assert ctx.env()[compose.CLASSIFIER_MODEL_VAR] == "gpt-oss:20b-32k"

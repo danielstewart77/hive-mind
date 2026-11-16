@@ -17,3 +17,21 @@ os.environ["MIND_NAME"] = "example"
 # into the tracked minds/example directory, and gives the tests that drive
 # those routes a value to present.
 os.environ["MIND_SESSION_TOKEN"] = "test-mind-session-token"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _gateway_says_unmanaged(monkeypatch):
+    """The gateway's answer to "what may this mind use", for every test.
+
+    A dsh spawn asks the gateway for the mind's role grants (feature 10.18)
+    and refuses to start without an answer. No test here runs a gateway, so
+    the network call — and only that — answers as a gateway would for a
+    mind nobody has put under role management. A test about roles replaces
+    it with the answer it needs.
+    """
+    from minds.harness import role_guard
+
+    monkeypatch.setattr(role_guard, "fetch", lambda *a, **k: {"managed": False})

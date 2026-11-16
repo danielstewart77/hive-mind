@@ -127,6 +127,10 @@ TABLE.add(
     "GET /sessions/{session_id}/carry-forward",
     "GET /models",
     "GET /broker/minds",
+    # What a mind's roles let it use (feature 10.18), read by its own role
+    # guard on every tool call and hook event. A mind's credential reaches
+    # only its own: `mind_grants` holds it to the mind in the path.
+    "GET /minds/{mind_id}/grants",
     # A bot asking who it answers, offering a message for judgement, and
     # carrying its install's existing allow-list entry across on first boot.
     # The service token, because every surface bot holds one and none of
@@ -145,6 +149,11 @@ TABLE.add(
     "PUT /sms/inbound/enabled",
     "GET /linkedin/auth",
     "GET /linkedin/callback",
+    # A harness reporting its own sub-agents. Addressed by the mind and the
+    # harness's own agent id rather than by a conversation, so there is
+    # nothing here for an owner check to scope; the handler holds the write
+    # to the caller's own mind the way the rotation write does.
+    "POST /staff/agents/events",
 )
 
 # --- Admin only ------------------------------------------------------------

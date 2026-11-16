@@ -130,6 +130,7 @@ PY
     git -C "$repo" pull --ff-only --quiet \
       || fail "could not update $repo" "git -C $repo status — commit or discard local changes, then run again"
   else
+    rm -rf "$repo.partial"   # left by a clone the network cut short
     git clone --quiet "$HIVE_REPO_BASE/hive-mind.git" "$repo.partial" \
       || fail "could not clone hive-mind from $HIVE_REPO_BASE" "check the network (and any web proxy), then run again"
     mv "$repo.partial" "$repo"

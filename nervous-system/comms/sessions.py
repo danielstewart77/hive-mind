@@ -21,7 +21,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import hive_data
-from hive_data import core, sessions_ops
+from hive_data import core, roles, sessions_ops
 from hive_data.errors import MissingReference
 from hive_data.rows import UNSET
 
@@ -286,6 +286,57 @@ HANDOVER_MAX_BYTES = 120_000
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 
 
+def normalised_name(name: str | None) -> str | None:
+    """A conversation's name as the row stores it, or ``None`` for no name.
+
+    One function for both writes that can set one — creating a conversation
+    and renaming it. The trim, the cap and the empty-means-none rule were an
+    inline expression in `set_session_name` while a rename was the only way a
+    name could arrive; a second caller copying that expression is how the two
+    drift until a name set at creation is stored at a length a rename would
+    have cut, and no test fails.
+
+    The text is laundered here rather than left to the insert, because a name
+    is a label and losing one must never cost the conversation it labels —
+    the same rule the broker states where it names a standing wake. Two
+    characters would otherwise cost it: a NUL, which a `text` column refuses,
+    and an unpaired surrogate, which no UTF-8 encoder will take. The rename
+    path survives both because `_update_session` launders through `_storable`
+    and the write is its own; a name given at creation rides the same unit of
+    work as the session row and its surface binding, so either one would roll
+    back the whole create and answer as though the mind were unreachable.
+    """
+    if name is None:
+        return None
+    # `errors="replace"` rather than a wider `_storable`: that helper carries
+    # every text column in this module, turn content included, and a lone
+    # surrogate there is a different question from one in a forty-character
+    # label.
+    trimmed = name.strip()[:MAX_SESSION_NAME_CHARS]
+    storable = _storable(trimmed).encode("utf-8", errors="replace").decode("utf-8")
+    return storable or None
+
+
+def validated_color(color: str | None) -> str | None:
+    """A tile colour as the row stores it, or ``ValueError``.
+
+    Exactly the rule the rename write has always applied, in one place now
+    that creation applies it too: a value that is sent and not empty is
+    matched as sent, so `" #fff"` is refused rather than quietly trimmed into
+    a colour. Not quite every form of it — a regex `$` matches before a
+    trailing newline as well, so `"#fff\n"` is accepted and stored stripped.
+    Left as it is deliberately: it is what every colour on this hive was
+    stored by, and tightening it here would refuse a value some tile already
+    holds. An empty string is not a colour, it is the absence of one — which
+    is how a colour is cleared.
+    """
+    if color is None:
+        return None
+    if color and not _COLOR_RE.match(color):
+        raise ValueError("color must be a hex value")
+    return color.strip() or None
+
+
 def effort_levels_of(model_row: dict | None) -> list[str]:
     """The effort levels a mind's model row declares; empty means none."""
     levels = (model_row or {}).get("effort_levels")
@@ -302,6 +353,19 @@ def normalise_harness(value: str | None) -> str:
     conversation, a spawn and a command all name the harness itself.
     """
     return str(value or "").strip().lower().split("_", 1)[0]
+
+
+#: Harnesses that hand the system prompt to ``execve`` as one argument, and so
+#: are bound by the kernel's per-argument ceiling rather than by the model's
+#: context window alone. Claude takes ``--append-system-prompt`` on argv; codex
+#: passes the prompt on stdin and in a seed file, dsh holds it in a state dict,
+#: and neither can hit that limit.
+ARGV_BOUND_HARNESSES = frozenset({"claude"})
+
+
+def harness_is_argv_bound(harness: str | None) -> bool:
+    """Whether this harness's prompt has to survive ``execve`` as one argument."""
+    return normalise_harness(harness) in ARGV_BOUND_HARNESSES
 
 
 # The error code every adapter reports for a turn that hit its model's
@@ -605,14 +669,30 @@ class SessionManager:
         allowed_directories: list[str] | None = None,
         *,
         mind_id: str,
+        name: str | None = None,
+        color: str | None = None,
     ) -> dict:
         """Create a new session, spawn process, return session info.
 
         Always a conversation that has no past. A rotation and a harness
         switch both replace the harness conversation under a row that
         already exists (see ``_replace_conversation``), so nothing reaches
-        here carrying a handover, an inherited name or a predecessor's id.
+        here carrying a handover, an *inherited* name or a predecessor's id.
+
+        A name the caller chose is another matter, and it is stamped on the
+        row in the same insert. A mind that opens a conversation for a job —
+        the chief of staff opens one per task — could otherwise only label it
+        with a second call, and a second call is a thing that gets skipped,
+        refused, or lost with the turn that was going to make it: the row
+        stays unnamed and every picker draws it as the mind's own name. One
+        call cannot half-happen.
         """
+        # Both checked before anything is written. The row and its surface
+        # binding go in one unit of work and the harness is spawned after it,
+        # so a value refused any later would have to be refused by undoing a
+        # conversation that already exists.
+        session_name = normalised_name(name)
+        session_color = validated_color(color)
         # The mind's preferred model lives in its registration (set from each
         # mind's own config). The caller can override per-session, but absent
         # that, the mind picks. No comms-wide silent fallback.
@@ -647,13 +727,18 @@ class SessionManager:
         now = time.time()
 
         harness = normalise_harness(mind_row.get("harness"))
+        # Born on a model its mind's roles allow (story 10.18.5), so the row
+        # never names one the first turn would have to move off.
+        model = await self.role_model(
+            {"mind_id": mind_id, "harness": harness, "model": model})
 
         async def _write(unit) -> None:
             await core.create_session(
                 id=session_id, surface=surface, surface_id=surface_id,
                 mind_id=mind_id, created_at=now, last_active=now,
                 status="running", conversation_id=conversation_id, model=model,
-                harness=harness or None, conversation_started_at=now, unit=unit,
+                harness=harness or None, conversation_started_at=now,
+                name=session_name, color=session_color, unit=unit,
             )
             await core.bind_surface(
                 client_type=surface, client_ref=client_ref,
@@ -673,6 +758,7 @@ class SessionManager:
             mind_id=mind_id,
             mind_name=mind_name,
             client_ref=client_ref,
+            argv_bound=harness_is_argv_bound(harness),
         )
 
         await self._spawn(
@@ -847,9 +933,9 @@ class SessionManager:
         """
         if name is None and color is None:
             raise ValueError("nothing to set: give a name, a colour, or both")
-        if color:
-            if not _COLOR_RE.match(color):
-                raise ValueError("color must be a hex value")
+        # Refused before the row is read, as it always was: a colour this
+        # module will not store is not a reason to go looking for a session.
+        checked_color = validated_color(color)
         row = await self._get_row(session_id)
         if not row:
             raise LookupError(f"Session not found: {session_id}")
@@ -871,9 +957,9 @@ class SessionManager:
 
         fields: dict[str, Any] = {}
         if name is not None:
-            fields["name"] = name.strip()[:MAX_SESSION_NAME_CHARS] or None
+            fields["name"] = normalised_name(name)
         if color is not None:
-            fields["color"] = color.strip() or None
+            fields["color"] = checked_color
         await _update_session(session_id, **fields)
         return await self._session_dict(session_id)
 
@@ -2084,6 +2170,31 @@ class SessionManager:
                 # status — has to be of the conversation that now exists.
                 session = await self._get_row(session_id) or session
 
+        # The model a DSH mind's roles allow (story 10.18.5), checked on
+        # every turn so a role changed between two turns is obeyed on the
+        # second. Moved in place, under this turn's own lock: the row takes
+        # the allowed model before the respawn below reads it, so the model
+        # shown for the conversation is the one that ran.
+        try:
+            allowed_model = await self.role_model(session)
+        except ValueError as exc:
+            # Said in the stream, as every other refused turn is: raised
+            # here it would only cut the stream off with no reason given.
+            log_event(log, "turn.refused_by_roles", session_id=session_id,
+                      mind_id=session["mind_id"], reason=str(exc))
+            yield {"type": "result", "is_error": True, "errors": [str(exc)]}
+            return
+        if allowed_model != session["model"]:
+            if self._pane_holds(session):
+                # A terminal is open on this conversation. Ending its process
+                # would close the pane under whoever is typing in it, so the
+                # move waits for the pane: the next attach applies it.
+                log_event(log, "session.role_model_deferred", session_id=session_id,
+                          mind_id=session["mind_id"], model=allowed_model)
+            else:
+                await self._move_to_role_model(session, allowed_model)
+                session = await self._get_row(session_id) or session
+
         mind_id = session["mind_id"]
         log.info("send_message: start session=%s mind=%s", session_id, mind_id)
         log_event(
@@ -2714,6 +2825,61 @@ class SessionManager:
             )
         return lock
 
+    async def role_model(self, session: dict, wanted: str | None = None) -> str:
+        """The model this conversation may run on, as its mind's roles say.
+
+        Only a DSH conversation of a mind under role management is decided
+        here (story 10.18.5; the Codex and Claude harnesses follow in their
+        own stories). Every other conversation runs on the model it names.
+        For a managed one the model must be one some held role names: the
+        one asked for when it is, else the mind's default when that is, else
+        the first a held role names, general first. None named by any role
+        is refused, because anything no role grants is denied.
+        """
+        model = wanted or session["model"]
+        if normalise_harness(await self.conversation_harness(session)) != "dsh":
+            return model
+        grants = await roles.grants_for(session["mind_id"])
+        if not grants["managed"]:
+            return model
+        allowed = list(grants["models"])
+        if not allowed:
+            raise ValueError(
+                "No role this mind holds names a model, so there is no model "
+                "it may run on. Give it a role that names one on the console's "
+                "Roles page.")
+        if model in allowed:
+            return model
+        if wanted:
+            raise ValueError(
+                f"Model {wanted!r} is not one this mind's roles allow: "
+                f"{', '.join(allowed)}.")
+        mind_row = await self._get_mind_row(session["mind_id"])
+        default = str((mind_row or {}).get("model") or "")
+        return default if default in allowed else allowed[0]
+
+    async def _move_to_role_model(self, session: dict, model: str) -> None:
+        """Put a conversation onto the model its roles allow, before a turn.
+
+        `switch_model` without its lock, which the caller already holds:
+        the process is ended so the respawn that follows starts on `model`,
+        and the row takes that model's window and threshold.
+        """
+        offered = await self.mind_model_row(
+            session["mind_id"], model, harness=await self.conversation_harness(session))
+        window = _positive_int((offered or {}).get("context_window"))
+        percent = self._rotation_percent(session, offered or {})
+        threshold = window * percent // 100 if window and percent else None
+        effort = session.get("effort")
+        if offered is not None and effort not in effort_levels_of(offered):
+            effort = None
+        await self._kill_process(session["id"])
+        await _update_session(session["id"], model=model, effort=effort,
+                              context_window=window, context_threshold=threshold)
+        log_event(log, "session.role_model", session_id=session["id"],
+                  mind_id=session["mind_id"], model=model,
+                  previous_model=session["model"])
+
     async def switch_model(self, session_id: str, model: str) -> dict:
         """Move this conversation onto another model on the same harness.
 
@@ -2738,6 +2904,8 @@ class SessionManager:
             # Read again under the lock: a switch that held it before this
             # call took it has replaced the conversation the first read saw.
             session = await self._get_row(session_id) or session
+            # A managed DSH mind moves only onto a model its roles allow.
+            await self.role_model(session, wanted=model)
             offered = await self.mind_model_row(
                 session["mind_id"], model,
                 harness=await self.conversation_harness(session),
@@ -2899,6 +3067,7 @@ class SessionManager:
         prompt = await self._compose_soul(
             mind_id, client_ref,
             max_bytes=None if available is None else max(0, available // 2),
+            harness=harness,
         )
         carried = len(prompt.encode("utf-8"))
         if available is None:
@@ -3133,6 +3302,8 @@ class SessionManager:
                     f"{target} isn't available on this mind: "
                     f"{entry.get('reason') or 'no reason given'}."
                 )
+            # Onto dsh, a managed mind may only take a model its roles allow.
+            await self.role_model({**session, "harness": target}, wanted=model)
             offered = await self.mind_model_row(mind_id, model, harness=target)
             if offered is None:
                 raise ValueError(
@@ -3255,7 +3426,8 @@ class SessionManager:
                         # The prompt the switch composed was trimmed for the
                         # new model; the old one takes its own.
                         system_prompt_blocks=await self._compose_soul(
-                            mind_id, routing["client_ref"]
+                            mind_id, routing["client_ref"],
+                            harness=await self.conversation_harness(session),
                         ),
                         mind_id=mind_id,
                         **routing,
@@ -3387,9 +3559,15 @@ class SessionManager:
 
     async def _compose_soul(
         self, mind_id: str, client_ref: str | None, max_bytes: int | None = None,
+        *, harness: str | None = None,
     ) -> str:
         """The system-prompt blocks a new harness process opens on, trimmed
-        to ``max_bytes`` the way a rotation's successor prompt is."""
+        to ``max_bytes`` the way a rotation's successor prompt is.
+
+        ``harness`` decides whether the kernel's per-argument ceiling applies
+        on top of that budget; only claude carries the prompt on argv. A
+        caller that does not name one is held to the ceiling, which is the
+        safe side of the choice."""
         from comms import bootstrap_loader  # noqa: PLC0415
         try:
             mind_row = await self._get_mind_row(mind_id)
@@ -3400,6 +3578,8 @@ class SessionManager:
             mind_name=(mind_row or {}).get("name") or mind_id,
             client_ref=client_ref,
             max_bytes=max_bytes,
+            argv_bound=(True if harness is None
+                        else harness_is_argv_bound(harness)),
         )
 
     async def _had_turns(self, session_id: str) -> bool:
@@ -3842,6 +4022,7 @@ class SessionManager:
             )
             system_prompt_blocks = await self._compose_soul(
                 mind_id, client_ref, max_bytes=cap,
+                harness=(session_row or {}).get("harness"),
             )
         mind_url = row["gateway_url"]
         mind_name = row["name"]
@@ -4012,12 +4193,60 @@ class SessionManager:
             )
         return data["rotated"]
 
-    def _mind_admin_headers(self) -> dict[str, str]:
-        """The admin credential for a mind's operator routes."""
+    async def _mind_operator_credentials(
+        self, mind_id: str, mind_row: dict | None
+    ) -> list[dict[str, str]]:
+        """What the gateway presents on a mind's `/models`, `/harnesses`,
+        `/handover` and `/skills/check`, in the order it tries them.
+
+        That mind's own session credential first. The hive's admin credential
+        follows only for a mind owned by `config.admin_credential_owner()`:
+        it opens every person's conversations, and anything at the address a
+        mind registered - which a mind may change with its own credential -
+        receives what is sent there (DECIDED 2026-11-15, Daniel: a mind not
+        owned by him never reaches his credentials). It is the fallback for
+        his minds still running code that accepts only the admin credential
+        on these routes. A mind with neither is called with no credential
+        and refuses.
+        """
+        from comms.config import admin_credential_owner
+
+        # Its own credential, or none when it registered none: either way
+        # the admin credential is only ever a second try after a refusal.
+        tried = [await self.mind_auth_headers(mind_id)]
+        owner = str((mind_row or {}).get("owner") or "").strip().lower()
+        trusted = admin_credential_owner()
         admin = os.environ.get("MIND_ADMIN_TOKEN") or os.environ.get(
             "COMMS_ADMIN_BEARER_TOKEN", ""
         )
-        return {"Authorization": f"Bearer {admin}"} if admin else {}
+        if admin and trusted and owner == trusted:
+            tried.append({"Authorization": f"Bearer {admin}"})
+        return tried
+
+    async def _mind_operator_call(
+        self, mind_id: str, mind_row: dict | None, method: str, url: str, **kwargs
+    ) -> tuple[int, str]:
+        """One call to a mind's operator route; its status and body text.
+
+        A refusal (401 or 503) moves on to the next credential, and the last
+        answer is returned whatever it is.
+        """
+        import aiohttp
+
+        status, text = 0, ""
+        tried = await self._mind_operator_credentials(mind_id, mind_row)
+        for attempt, headers in enumerate(tried):
+            if attempt:
+                # Logged, so it is visible which of the owner's minds still
+                # need the admin credential and when the setting can go.
+                log_event(log, "mind.admin_credential.fallback", level=logging.WARNING,
+                          mind_id=mind_id, url=url, refused=status)
+            async with aiohttp.ClientSession() as http:
+                async with getattr(http, method)(url, headers=headers, **kwargs) as resp:
+                    status, text = resp.status, await resp.text()
+            if status not in (401, 503):
+                break
+        return status, text
 
     async def mind_models(self, mind_id: str, harness: str | None = None) -> list[dict]:
         """What a mind reports it may run, asked of the mind.
@@ -4042,26 +4271,23 @@ class SessionManager:
         harness = normalise_harness(harness)
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.get(
-                    f"{gateway_url}/models",
-                    params={"harness": harness} if harness else None,
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status in (401, 503):
-                        # Raised, not returned as []. An empty list reaches the
-                        # console as "this mind offers nothing" and makes
-                        # `mind_offers_model` refuse a model change with the
-                        # wrong reason entirely.
-                        await resp.read()
-                        raise MindRefusedCredential(
-                            f"mind {mind_id} refused the gateway's admin "
-                            f"credential on /models (HTTP {resp.status})"
-                        )
-                    if resp.status != 200:
-                        return []
-                    body = await resp.json()
+            status, text = await self._mind_operator_call(
+                mind_id, mind_row, "get", f"{gateway_url}/models",
+                params={"harness": harness} if harness else None,
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            if status in (401, 503):
+                # Raised, not returned as []. An empty list reaches the
+                # console as "this mind offers nothing" and makes
+                # `mind_offers_model` refuse a model change with the
+                # wrong reason entirely.
+                raise MindRefusedCredential(
+                    f"mind {mind_id} refused the gateway's credential on "
+                    f"/models (HTTP {status})"
+                )
+            if status != 200:
+                return []
+            body = json.loads(text)
         except MindCallFailed:
             raise
         except Exception:
@@ -4095,21 +4321,18 @@ class SessionManager:
             return None
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.get(
-                    f"{gateway_url}/harnesses",
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status in (401, 503):
-                        await resp.read()
-                        raise MindRefusedCredential(
-                            f"mind {mind_id} refused the gateway's admin "
-                            f"credential on /harnesses (HTTP {resp.status})"
-                        )
-                    if resp.status != 200:
-                        return None
-                    body = await resp.json()
+            status, text = await self._mind_operator_call(
+                mind_id, mind_row, "get", f"{gateway_url}/harnesses",
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            if status in (401, 503):
+                raise MindRefusedCredential(
+                    f"mind {mind_id} refused the gateway's credential on "
+                    f"/harnesses (HTTP {status})"
+                )
+            if status != 200:
+                return None
+            body = json.loads(text)
         except MindCallFailed:
             raise
         except Exception:
@@ -4134,15 +4357,12 @@ class SessionManager:
         gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.post(
-                    f"{gateway_url}/skills/check",
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    await resp.read()
-                    if resp.status >= 400:
-                        log.info("skill check on mind %s answered %s", mind_id, resp.status)
+            status, _ = await self._mind_operator_call(
+                mind_id, mind_row, "post", f"{gateway_url}/skills/check",
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if status >= 400:
+                log.info("skill check on mind %s answered %s", mind_id, status)
         except Exception as exc:
             log.info("skill check on mind %s failed: %s", mind_id, exc)
 
@@ -4170,47 +4390,47 @@ class SessionManager:
         gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.post(
-                    f"{gateway_url}/handover",
-                    json={
-                        "harness": harness,
-                        "conversation_id": conversation_id,
-                        "harness_sid": harness_sid,
-                        "summary": summary,
-                        "budget_bytes": budget_bytes,
-                        # A conversation that took turns has a transcript;
-                        # one missing then is unreadable, not empty.
-                        "had_turns": had_turns,
-                        # A handover not yet delivered, rendered in front.
-                        "prior_handover": prior_handover,
-                        # Lets a codex mind find the thread from its own map
-                        # when the row holds no thread id.
-                        "session_id": session_id,
-                    },
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status in (401, 503):
-                        await resp.read()
-                        raise MindRefusedCredential(
-                            f"mind {mind_id} refused the gateway's admin "
-                            f"credential on /handover (HTTP {resp.status})"
-                        )
-                    if resp.status == 422:
-                        await resp.read()
-                        raise ValueError(
-                            "This conversation's transcript can't be read and "
-                            "there is no summary to carry instead, so it stays "
-                            f"on {harness}."
-                        )
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise ValueError(
-                            f"The mind couldn't render this conversation for "
-                            f"handover (HTTP {resp.status}): {body}"
-                        )
-                    body = await resp.json()
+            status, text = await self._mind_operator_call(
+                mind_id, mind_row, "post", f"{gateway_url}/handover",
+                json={
+                    "harness": harness,
+                    "conversation_id": conversation_id,
+                    "harness_sid": harness_sid,
+                    "summary": summary,
+                    "budget_bytes": budget_bytes,
+                    # A conversation that took turns has a transcript;
+                    # one missing then is unreadable, not empty.
+                    "had_turns": had_turns,
+                    # A handover not yet delivered, rendered in front.
+                    "prior_handover": prior_handover,
+                    # Lets a codex mind find the thread from its own map
+                    # when the row holds no thread id.
+                    "session_id": session_id,
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if status in (401, 503):
+                raise MindRefusedCredential(
+                    f"mind {mind_id} refused the gateway's credential on "
+                    f"/handover (HTTP {status})"
+                )
+            if status == 422:
+                raise ValueError(
+                    "This conversation's transcript can't be read and "
+                    "there is no summary to carry instead, so it stays "
+                    f"on {harness}."
+                )
+            if status != 200:
+                raise ValueError(
+                    f"The mind couldn't render this conversation for "
+                    f"handover (HTTP {status}): {text}"
+                )
+            try:
+                body = json.loads(text) if text.strip() else None
+            except json.JSONDecodeError as exc:
+                raise MindCallFailed(
+                    f"mind {mind_id} answered the handover with no JSON: {exc}"
+                ) from exc
         except (MindCallFailed, ValueError):
             raise
         except Exception as exc:

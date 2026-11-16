@@ -58,7 +58,7 @@ from minds import (
     transcript,
 )
 from minds.harness import dsh_hooks, rotation_hooks
-from minds.proactive import make_proactive_router
+from minds.proactive import BUFFER as proactive_buffer, make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -108,11 +108,12 @@ HARNESS_OF: dict[str, str] = {}
 app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
 
-# Only the claude adapter has an idle stream to drain into this buffer; the
-# per-turn harnesses leave it empty, as they do when run alone.
+# One buffer for every adapter that can produce an unsolicited turn: claude's
+# idle drain, and dsh's resident process reporting a background child that
+# settled after the turn that dispatched it had closed. The codex adapter
+# spawns per turn with no idle stream and leaves it empty.
 app.include_router(make_proactive_router(
-    getattr(ADAPTERS.get("claude"), "PROACTIVE_BUFFER", []),
-    os.environ.get("COMMS_BEARER_TOKEN") or None,
+    proactive_buffer, os.environ.get("COMMS_BEARER_TOKEN") or None,
 ))
 
 
@@ -559,7 +560,7 @@ async def release_idle_chat(sid: str) -> str | None:
 @app.get("/harnesses")
 async def get_harnesses(request: Request) -> Any:
     """Which harnesses a conversation here may run on, and why not the rest."""
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     return harness_report()
@@ -577,7 +578,7 @@ async def handover(request: Request) -> Any:
     the switch would lose the conversation it was moving, so it is refused
     and the old harness keeps running.
     """
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     body = await request.json()
@@ -650,7 +651,7 @@ async def skills_check(request: Request) -> Any:
     where the render pass is not installed: a 200 that rendered nothing would
     let a switch go ahead on stale copies with every surface reporting fine.
     """
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     check_all = getattr(skills_api, "check_all", None)

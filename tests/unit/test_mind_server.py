@@ -142,13 +142,23 @@ class _Stdout:
     polls for, so the drain backs off and the turn's own reader gets them.
     """
 
-    def __init__(self, lines: list[bytes], gate: asyncio.Event | None):
+    def __init__(self, lines: list[bytes], gate: asyncio.Event | None,
+                 holds_open: bool = False):
         self._lines, self._gate = list(lines), gate
+        #: A resident process does not end its stdout when it has nothing to
+        #: say: it is waiting for the next turn, and an EOF would be read as
+        #: the conversation's process having died.
+        self._holds_open = holds_open
+
+    def feed(self, line: bytes) -> None:
+        self._lines.append(line)
 
     async def readline(self) -> bytes:
         if self._gate is not None:
             await self._gate.wait()
             await asyncio.sleep(0.3)
+        while self._holds_open and not self._lines:
+            await asyncio.sleep(0.01)
         return self._lines.pop(0) if self._lines else b""
 
     def __aiter__(self):
@@ -167,6 +177,7 @@ class _Stdin:
 
     def write(self, data: bytes) -> None:
         self._proc.stdin_bytes += data
+        self._proc.answer(data)
         if self._proc.gate is not None:
             self._proc.gate.set()
 
@@ -189,16 +200,43 @@ class _Stderr:
 
 
 class _Proc:
-    def __init__(self, lines: list[bytes], gated: bool):
+    """One spawned harness process.
+
+    ``resident`` is dsh: the process holds the conversation open, announces it
+    on stdout before any turn, and answers each turn written to its stdin with
+    that turn's id on the report — so the adapter can match a report to the
+    request that asked for it.
+    """
+
+    def __init__(self, lines: list[bytes], gated: bool, resident: bool = False):
         self.gate = asyncio.Event() if gated else None
         self.stdin_bytes = b""
         self.stdin = _Stdin(self)
-        self.stdout = _Stdout(lines, self.gate)
+        self.script = list(lines)
+        self.turns: list[dict] = []
+        self.resident = resident
+        self.stdout = _Stdout([_line(RESIDENT_READY)] if resident else lines,
+                              self.gate, holds_open=resident)
         self.stderr = _Stderr()
         # A per-turn harness has exited by the time it is reaped, so a reaper
         # signals nothing; claude's process lives across turns.
         self.returncode = None if gated else 0
         self.pid = NO_SUCH_PID
+
+    def answer(self, data: bytes) -> None:
+        """Answer one turn request, as the resident runner answers it."""
+        if not self.resident:
+            return
+        for raw in data.decode().splitlines():
+            if not raw.strip():
+                continue
+            request = json.loads(raw)
+            self.turns.append(request)
+            for line in self.script:
+                parsed = json.loads(line.decode())
+                if "sessionId" in parsed or isinstance(parsed.get("message"), str):
+                    parsed["id"] = request["id"]
+                self.stdout.feed(_line(parsed))
 
     async def wait(self) -> int:
         return 0
@@ -210,6 +248,10 @@ class _Proc:
 def _line(event: dict) -> bytes:
     return json.dumps(event).encode() + b"\n"
 
+
+#: What a resident dsh process writes before it reads its first turn.
+RESIDENT_READY = {"ready": {"sessionId": "conv-1", "mode": "create",
+                            "model": "qwen35-131k"}}
 
 #: What each harness writes for one finished turn.
 TURN_OUTPUT = {
@@ -236,10 +278,11 @@ class _Spawner:
     async def __call__(self, *argv: str, **kwargs: Any) -> _Proc:
         call = {"argv": list(argv), "env": kwargs.get("env") or {}}
         if "--task-file" in argv:
-            # dsh's turn arrives in a file the adapter deletes afterwards.
+            # A goal dispatch's task arrives in a file the adapter deletes.
             call["task"] = Path(argv[argv.index("--task-file") + 1]).read_text()
         lines = self.outputs.pop(0) if self.outputs else TURN_OUTPUT[self.harness]
-        proc = _Proc(lines, gated=self.harness == "claude")
+        proc = _Proc(lines, gated=self.harness == "claude",
+                     resident="--resident" in argv)
         call["proc"] = proc
         self.calls.append(call)
         return proc
@@ -252,6 +295,9 @@ def _delivered(harness: str, call: dict) -> str:
         return message["message"]["content"][0]["text"]
     if harness == "codex":
         return call["proc"].stdin_bytes.decode()
+    if call["proc"].resident:
+        # dsh's turn is written to its resident process as a JSON line.
+        return call["proc"].turns[-1]["turn"]
     return call["task"]
 
 
@@ -330,13 +376,58 @@ def test_a_harness_is_offered_only_with_its_cli_hooks_and_login(homes, monkeypat
     assert body["default"] == "claude"
 
 
-def test_the_harness_report_refuses_a_caller_without_the_admin_token(homes):
-    assert TestClient(mind_server.app).get("/harnesses", headers=SESSION).status_code == 401
+def test_the_gateway_reaches_the_routes_it_calls_on_a_switch_with_this_minds_own_credential(
+    homes, proxy, monkeypatch,
+):
+    """DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+    credentials. So the gateway calls these with this mind's session
+    credential, not the hive's admin one, and the mind must answer it; a
+    caller holding neither is still refused."""
+    proxy({"claude": [{"id": "claude-opus-5"}]})
+    monkeypatch.setattr(mind_server.skills_api, "check_all",
+                        lambda **kw: {"rendered": 1}, raising=False)
+    client = TestClient(mind_server.app)
+    stranger = {"Authorization": "Bearer someone-else"}  # secret-guard: allow
+    calls = {
+        "/models": lambda h: client.get("/models", headers=h),
+        "/harnesses": lambda h: client.get("/harnesses", headers=h),
+        "/skills/check": lambda h: client.post("/skills/check", headers=h),
+        "/handover": lambda h: client.post("/handover", headers=h, json={
+            "harness": "claude", "conversation_id": "conv-none", "summary": "s",
+            "harness_sid": None, "budget_bytes": 1000}),
+    }
+    for route, call in calls.items():
+        assert call(SESSION).status_code == 200, route
+        assert call(stranger).status_code == 401, route
 
 
 # ---------------------------------------------------------------------------
 # 17. One server runs a chat session on whichever adapter the harness names
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_every_harness_hands_the_turn_the_gateway_session_id(
+    equipped, proxy, monkeypatch, harness,
+):
+    """A mind's `/end-session` deletes the gateway's row for the conversation
+    it is in. Until this was set nothing exported an id that could resolve
+    one: claude and codex each export their own conversation id, which the
+    skill then had to match against the live list, and dsh exports neither —
+    so ending a session was impossible on a dsh mind, which is how a chief of
+    staff closing a finished task found it."""
+    proxy(DSH_WINDOWS)
+    spawner = _Spawner(harness)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "row-1", "resume_sid": "conv-1", "model": "some-model",
+        "harness": harness,
+    })
+    client.post("/sessions/row-1/message", headers=SESSION, json={"content": "hello"})
+
+    assert spawner.calls[0]["env"]["HIVE_SESSION_ID"] == "row-1"
+
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
 def test_a_chat_session_runs_on_the_adapter_its_harness_names(
@@ -1251,8 +1342,12 @@ def test_a_dsh_turn_points_the_hook_bridge_at_the_minds_hooks(homes, proxy, monk
     (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
     client.post("/sessions/h6/message", headers=SESSION, json={"content": "two"})
 
-    assert "DSH_HOOKS_CONFIG" not in spawner.calls[0]["env"]
-    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(homes["dsh"] / "hooks.json")
+    effective = homes["dsh"] / "hooks.effective.json"
+    assert spawner.calls[0]["env"]["DSH_HOOKS_CONFIG"] == str(effective)
+    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(effective)
+    written = json.dumps(json.loads(effective.read_text()))
+    for event in _all_hooks()["hooks"]:
+        assert event in json.loads(written)["hooks"]
 
 
 async def _none():

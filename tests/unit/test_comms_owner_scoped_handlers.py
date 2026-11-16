@@ -101,6 +101,15 @@ def gateway(broker_db, monkeypatch):
             ("telegram-bot", "daniel", ua.SERVICE, SERVICE_TOKEN),
         ):
             await put_credential_row(holder, username, role, ua.digest(token))
+        # Each person's Telegram account, linked to them as claiming their
+        # mind's bot links it (story 2.1.15): a bot's sender reaches only a
+        # mind its account's person owns.
+        for ref, username in (("111", "daniel"), ("222", "sloan")):
+            await execute(
+                "INSERT INTO core.surface_accounts (surface, account_ref, "
+                "username, linked_at) VALUES ('telegram', $1, $2, 0)",
+                ref, username,
+            )
 
     asyncio.run(seed())
 
@@ -318,7 +327,9 @@ def test_a_mind_keyed_by_name_opens_a_conversation_on_its_own_mind_by_uuid(gatew
 
     answer = client.post(
         "/sessions",
-        json=_create_body(MORDECAI_MIND),
+        # Sent by Daniel's own account: Mordecai is his, and since story
+        # 2.1.15 a bot's sender has to be the mind's owner.
+        json={**_create_body(MORDECAI_MIND), "surface_id": "111", "client_ref": "111"},
         headers=_auth(MORDECAI_MIND_TOKEN),
     )
 
