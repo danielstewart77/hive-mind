@@ -152,28 +152,45 @@ def _valid_repo(ctx: Ctx, path: Path) -> bool:
 
 
 def clone_repos(ctx: Ctx):
-    done = []
-    for name in plan.repos(ctx.answers):
-        path = ctx.home.repo(name)
-        if path.exists() and not _valid_repo(ctx, path):
-            # A clone a deadline killed half way: ours, unusable, redone.
-            shutil.rmtree(path)
-        if path.exists():
-            ctx.sh.run(["git", "-C", str(path), "pull", "--ff-only", "--quiet"], timeout=300)
-        else:
-            # Into a temporary name, renamed only once whole, so an
-            # interrupted clone is never mistaken for a repository.
-            partial = path.with_name(f".{name}.partial")
-            if partial.exists():
-                shutil.rmtree(partial)
-            ctx.sh.run(["git", "clone", "--quiet", f"{REPO_BASE}/{name}.git", str(partial)],
-                       timeout=900)
-            if not _valid_repo(ctx, partial):
-                raise StepFailed(f"the clone of {name} has no HEAD")
-            partial.rename(path)
-        head = ctx.sh.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"]).stdout.strip()
-        done.append(f"{name}@{head}")
-    return ", ".join(done)
+    """hive-mind, and with it every module in its manifest, at the latest.
+
+    The modules are not chosen by the pieces ticked: cloning hive-mind clones
+    all of them, and the pieces decide only what is built and run.
+    """
+    name = "hive-mind"
+    path = ctx.home.repo(name)
+    if path.exists() and not _valid_repo(ctx, path):
+        # A clone a deadline killed half way: ours, unusable, redone.
+        shutil.rmtree(path)
+    if path.exists():
+        ctx.sh.run(["git", "-C", str(path), "pull", "--ff-only", "--quiet"], timeout=300)
+    else:
+        # Into a temporary name, renamed only once whole, so an
+        # interrupted clone is never mistaken for a repository.
+        partial = path.with_name(f".{name}.partial")
+        if partial.exists():
+            shutil.rmtree(partial)
+        ctx.sh.run(["git", "clone", "--quiet", f"{REPO_BASE}/{name}.git", str(partial)],
+                   timeout=900)
+        if not _valid_repo(ctx, partial):
+            raise StepFailed(f"the clone of {name} has no HEAD")
+        partial.rename(path)
+    head = ctx.sh.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    # Every module, then each brought to the newest commit of its branch.
+    proc = ctx.sh.run(["bash", str(path / "scripts" / "modules.sh"), str(path)],
+                      env={"HIVE_REPO_BASE": REPO_BASE}, timeout=1800, check=False)
+    if proc.returncode != 0:
+        raise StepFailed("hive-mind's modules could not all be brought to the latest: "
+                         + ((proc.stderr or proc.stdout or "").strip() or "no detail"))
+    modules = [line.split(":", 1)[0].removeprefix("modules/") + "@" + line.rsplit(" ", 1)[-1]
+               for line in (proc.stdout or "").splitlines() if line.startswith("modules/")]
+    # An install made before the manifest cloned each repository beside
+    # hive-mind. Those clones are no longer built from or updated; any work in
+    # them is the operator's to move, so they are named and left alone.
+    from installer.paths import REPOS
+    stale = [f"{ctx.home.repos / r} is no longer used" for r in REPOS
+             if r != name and (ctx.home.repos / r).exists()]
+    return ", ".join([f"{name}@{head}", *modules, *stale])
 
 
 # ---- 2. dsh tree ------------------------------------------------------------

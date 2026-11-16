@@ -159,16 +159,11 @@ def runs_elsewhere(answers: dict, piece: str) -> bool:
 
 
 def repos(answers: dict) -> list[str]:
-    """The repositories this install clones."""
-    # hive-data and the console's repo always: the installer seeds the first
-    # admin with the console's own site code (hive_site), whatever is ticked.
-    names: set[str] = {"hive-mind", "hive-data", "hive"}
-    for piece in installed(answers):
-        if PIECES[piece].modes and mode(answers, piece) != HERE:
-            continue
-        names.update(PIECES[piece].repos)
+    """The repositories this install has: hive-mind and every module in its
+    manifest, whatever is ticked. The pieces decide what is built and run."""
+    del answers
     from installer.paths import REPOS
-    return [r for r in REPOS if r in names]
+    return list(REPOS)
 
 
 @dataclass(frozen=True)
