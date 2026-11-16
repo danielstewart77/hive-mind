@@ -375,8 +375,29 @@ def test_a_harness_is_offered_only_with_its_cli_hooks_and_login(homes, monkeypat
     assert body["default"] == "claude"
 
 
-def test_the_harness_report_refuses_a_caller_without_the_admin_token(homes):
-    assert TestClient(mind_server.app).get("/harnesses", headers=SESSION).status_code == 401
+def test_the_gateway_reaches_the_routes_it_calls_on_a_switch_with_this_minds_own_credential(
+    homes, proxy, monkeypatch,
+):
+    """DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+    credentials. So the gateway calls these with this mind's session
+    credential, not the hive's admin one, and the mind must answer it; a
+    caller holding neither is still refused."""
+    proxy({"claude": [{"id": "claude-opus-5"}]})
+    monkeypatch.setattr(mind_server.skills_api, "check_all",
+                        lambda **kw: {"rendered": 1}, raising=False)
+    client = TestClient(mind_server.app)
+    stranger = {"Authorization": "Bearer someone-else"}  # secret-guard: allow
+    calls = {
+        "/models": lambda h: client.get("/models", headers=h),
+        "/harnesses": lambda h: client.get("/harnesses", headers=h),
+        "/skills/check": lambda h: client.post("/skills/check", headers=h),
+        "/handover": lambda h: client.post("/handover", headers=h, json={
+            "harness": "claude", "conversation_id": "conv-none", "summary": "s",
+            "harness_sid": None, "budget_bytes": 1000}),
+    }
+    for route, call in calls.items():
+        assert call(SESSION).status_code == 200, route
+        assert call(stranger).status_code == 401, route
 
 
 # ---------------------------------------------------------------------------
