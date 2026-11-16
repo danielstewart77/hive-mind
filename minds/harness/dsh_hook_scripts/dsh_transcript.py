@@ -90,6 +90,24 @@ def session_header(lines: list[str]) -> dict:
     return {}
 
 
+def log_origin(path: Path) -> str:
+    """Whose turn this log records: "delegate", "mind", or "unknown".
+
+    The harness marks a delegate's header with `origin: subagent` and its
+    `parentSession`; a nested delegate carries both too. "unknown" is a log
+    that could not be read, and each reader decides what that means for it:
+    a harvester must not take it for the mind's (`is_delegate_log`), while
+    rotation must, or an unreadable log would stop the mind's own rotation.
+    """
+    try:
+        header = session_header(read_log_lines(path))
+    except UnreadableLog:
+        return "unknown"
+    if header.get("origin") == "subagent" or header.get("parentSession"):
+        return "delegate"
+    return "mind"
+
+
 def is_delegate_log(path: Path) -> bool:
     """Whether this log belongs to a delegate rather than to the mind.
 
@@ -100,13 +118,9 @@ def is_delegate_log(path: Path) -> bool:
     uses, so this is one question with one answer rather than a guess from
     the turn's content.
     """
-    try:
-        header = session_header(read_log_lines(path))
-    except UnreadableLog:
-        # Unreadable is not "hers". Harvesting a log nobody can identify is
-        # how a delegate's work is attributed to her by default.
-        return True
-    return header.get("origin") == "subagent" or bool(header.get("parentSession"))
+    # Unreadable is not "hers". Harvesting a log nobody can identify is
+    # how a delegate's work is attributed to her by default.
+    return log_origin(path) != "mind"
 
 
 # dsh reports uncached input, cache reads and cache writes as three
