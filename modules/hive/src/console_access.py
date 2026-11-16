@@ -189,6 +189,18 @@ TABLE.add(
     # Filtered to the Minds the user owns by the handler, like the two above.
     "GET /api/bots",
     "GET /api/settings/hive-comms/sessions",
+    # Roles (feature 10.18): anyone signed in may read them, because a
+    # person gives their own mind roles from this list; only an admin
+    # changes one, since a role changes every mind holding it.
+    "GET /roles",
+    "GET /api/roles",
+    # A skill submission is a pull request and nothing else, whoever sends
+    # it (story 10.18.8), so any signed-in person may make one and read the
+    # list of what has been submitted.
+    "GET /skills/submit",
+    "GET /api/skill-submissions",
+    "POST /api/skill-submissions",
+    "POST /api/skill-submissions/{submission_id}/retry",
 )
 # The settings page is one route; only its sessions section is a user's.
 TABLE.add(
@@ -234,6 +246,10 @@ TABLE.add(
     "DELETE /api/minds/{name}/bot-claim",
     "PUT /api/minds/{name}/github-token",
     "POST /api/minds/{name}/restart",
+    # The roles a mind holds: its owner decides them, within the roles an
+    # admin defined.
+    "GET /api/minds/{name}/roles",
+    "PUT /api/minds/{name}/roles",
 )
 TABLE.add(
     Rule(OWNER, param="session_id"),
@@ -420,6 +436,13 @@ TABLE.add(
     "POST /api/settings/holders/{service}/{holder}/revoke",
     "GET /downloads/{filename}",
     "POST /api/voices/sample",
+    # roles: defining one, and the three repo choices
+    "POST /api/roles",
+    "PUT /api/roles/{role_id}",
+    "DELETE /api/roles/{role_id}",
+    "POST /api/roles/{role_id}/keep",
+    "POST /api/roles/{role_id}/promote",
+    "POST /api/roles/repo/{slug}/take",
     # users and groups
     "GET /api/admin/users",
     "POST /api/admin/users",

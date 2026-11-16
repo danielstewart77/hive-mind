@@ -57,12 +57,14 @@ import mind_runtime
 import mind_skills
 import mind_soul
 import mind_symbols
+import roles_data
 import route_access
+import skill_submissions
 import sentinel_review
 import sso
 import store
 from hive_data import core
-from hive_data.errors import HiveDataError
+from hive_data.errors import HiveDataError, ValueRefused
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
@@ -132,6 +134,15 @@ async def lifespan(app: FastAPI):
     log_event(log, "store.opened", component="hive-control-plane",
               engine="postgres")
     await seed_first_user()
+    # The ready-made roles, once per hive (story 10.18.3). A failure is
+    # logged and the console still starts: the roles page then says what the
+    # repo holds and offers each as "take the repo copy".
+    try:
+        seeded = await roles_data.seed()
+        log_event(log, "roles.seed", component="hive-control-plane", **seeded)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "roles.seed_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
     log_event(log, "service.started", component="hive-control-plane")
@@ -740,6 +751,16 @@ async def minds_page(request: Request):
     return await _console_page(request, "minds.html")
 
 
+@app.get("/roles", response_class=HTMLResponse)
+async def roles_page(request: Request):
+    return await _console_page(request, "roles.html")
+
+
+@app.get("/skills/submit", response_class=HTMLResponse)
+async def skill_submit_page(request: Request):
+    return await _console_page(request, "skill_submit.html")
+
+
 @app.get("/bots", response_class=HTMLResponse)
 async def bots_page(request: Request):
     return await _console_page(request, "bots.html")
@@ -1196,6 +1217,18 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     # proxy key is sent to a host that is not the proxy.
     ollama_base_url = DEFAULT_OLLAMA_BASE_URL if provider == "ollama" else ""
 
+    # Created from a role (story 10.18.2): the roles are checked before
+    # anything is written, and held before the Mind's first turn.
+    role_ids = body.get("role_ids") or []
+    if not isinstance(role_ids, list) or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in role_ids):
+        raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    if role_ids:
+        known = {r["id"] for r in await store.roles_list()}
+        unknown = [i for i in role_ids if i not in known]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"No such role: {unknown[0]}")
+
     owner = await _new_mind_owner(body, user)
     try:
         written = scaffold_internal_mind(
@@ -1214,6 +1247,8 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(
             status_code=500, detail=f"Could not write the Mind scaffold: {exc}"
         ) from exc
+    if role_ids:
+        await store.set_mind_roles(mind_id, role_ids)
 
     # Minted here rather than left for a shell. The generated compose file
     # reads this mind's own variables, so without this the container comes up
@@ -1306,6 +1341,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     )
     return {
         "mind_id": mind_id,
+        "roles": role_ids,
         "written": written,
         "credentials": minted,
         "credential_error": credential_error,
@@ -3963,10 +3999,17 @@ async def api_mind_image_upload(
 
 
 @app.get("/api/minds/{name}/skills")
-async def api_mind_skills(name: str, user: dict = Depends(require_auth)):
-    """Every skill this Mind knows, repo side against installed side."""
+async def api_mind_skills(name: str, community: int = 0,
+                          user: dict = Depends(require_auth)):
+    """Every skill this Mind knows, repo side against installed side.
+
+    Community submissions are left out unless `community=1` asks for them,
+    and labelled when they are listed (story 10.18.9). How many were left
+    out is part of the answer, so the page can say so.
+    """
     del user
-    return await mind_skills.fetch_skills(await _mind_gateway_url(name))
+    payload = await mind_skills.fetch_skills(await _mind_gateway_url(name))
+    return await skill_submissions.filter_skills(payload, include_community=bool(community))
 
 
 @app.get("/api/minds/{name}/skills/{skill}/diff")
@@ -4008,6 +4051,185 @@ async def api_mind_skill_remove(
         log, "mind.skill.removed", **_actor_fields(user), mind_name=name, skill=skill
     )
     return result
+
+
+# ── roles (feature 10.18) ─────────────────────────────────────────────
+
+
+def _role_id(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="No such role") from exc
+
+
+@app.get("/api/roles")
+async def api_roles(user: dict = Depends(require_auth)):
+    """Every role, each marked tracked, local, differs, repo only or unreadable."""
+    del user
+    return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS)}
+
+
+@app.post("/api/roles")
+async def api_create_role(body: dict, user: dict = Depends(require_auth)):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="A role needs a name")
+    grants = roles_data.grants_from(body)
+    try:
+        role_id = await store.create_role(name, **grants)
+    except roles_data.store_conflict() as exc:
+        raise HTTPException(status_code=409,
+                            detail=f"A role called {name.strip()!r} already exists") from exc
+    except (ValueError, ValueRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(log, "role.created", **_actor_fields(user), role_id=role_id, name=name)
+    return {"ok": True, "id": role_id}
+
+
+@app.put("/api/roles/{role_id}")
+async def api_update_role(role_id: str, body: dict, user: dict = Depends(require_auth)):
+    rid = _role_id(role_id)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    fields = roles_data.grants_from(body)
+    if "name" in body:
+        if not isinstance(body["name"], str) or not body["name"].strip():
+            raise HTTPException(status_code=400, detail="A role needs a name")
+        fields["name"] = body["name"]
+    try:
+        changed = await store.update_role(rid, **fields)
+    except roles_data.store_conflict() as exc:
+        raise HTTPException(status_code=409,
+                            detail=f"A role called {str(body.get('name')).strip()!r} already exists") from exc
+    except (ValueError, ValueRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not changed:
+        raise HTTPException(status_code=404, detail="No such role")
+    log_event(log, "role.updated", **_actor_fields(user), role_id=rid,
+              fields=sorted(fields))
+    return {"ok": True}
+
+
+@app.delete("/api/roles/{role_id}")
+async def api_delete_role(role_id: str, user: dict = Depends(require_auth)):
+    rid = _role_id(role_id)
+    role = await store.role(rid)
+    if role is None:
+        raise HTTPException(status_code=404, detail="No such role")
+    if role["slug"] == roles_data.GENERAL:
+        raise HTTPException(
+            status_code=409,
+            detail="The general role cannot be deleted: every agent under role "
+                   "management holds it. It can be edited.")
+    await store.delete_role(rid)
+    log_event(log, "role.deleted", **_actor_fields(user), role_id=rid, slug=role["slug"])
+    return {"ok": True}
+
+
+@app.post("/api/roles/{role_id}/keep")
+async def api_keep_role(role_id: str, user: dict = Depends(require_auth)):
+    result = await roles_data.keep_yours(_role_id(role_id))
+    log_event(log, "role.kept", **_actor_fields(user), role_id=role_id)
+    return result
+
+
+@app.post("/api/roles/{role_id}/promote")
+async def api_promote_role(role_id: str, user: dict = Depends(require_auth)):
+    result = await roles_data.promote(_role_id(role_id))
+    log_event(log, "role.promoted", **_actor_fields(user), role_id=role_id)
+    return result
+
+
+@app.post("/api/roles/repo/{slug}/take")
+async def api_take_repo_role(slug: str, user: dict = Depends(require_auth)):
+    result = await roles_data.take_repo(slug)
+    log_event(log, "role.taken_from_repo", **_actor_fields(user), slug=slug)
+    return result
+
+
+# ── skill submissions (stories 10.18.8 and 10.18.9) ───────────────────
+
+
+async def _uploaded_files(request: Request) -> list[tuple[str, bytes]]:
+    """The skill folder's files, each with its path inside the folder.
+
+    The browser sends `paths` beside `files`, one per file and in the same
+    order, because an upload's own filename is only the last segment.
+    """
+    form = await request.form()
+    files = [f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)]
+    paths = [str(p) for p in form.getlist("paths")]
+    if len(paths) != len(files):
+        raise HTTPException(status_code=400, detail="Every file needs its path inside the folder")
+    out = []
+    for path, upload in zip(paths, files):
+        out.append((path, await upload.read(skill_submissions.MAX_BYTES + 1)))
+    return out
+
+
+@app.get("/api/skill-submissions")
+async def api_skill_submissions(user: dict = Depends(require_auth)):
+    """What has been submitted. A person sees their own; an admin, all."""
+    await skill_submissions.refresh()
+    rows = await store.skill_submissions()
+    if not user.get("is_admin"):
+        rows = [r for r in rows if r["submitted_by"] == str(user.get("username") or "").lower()]
+    return {"submissions": rows, "repository": skill_submissions.REPOSITORY}
+
+
+@app.post("/api/skill-submissions")
+async def api_submit_skill(request: Request, user: dict = Depends(require_auth)):
+    """Open a pull request adding a skill folder. Nothing else is written."""
+    result = await skill_submissions.submit(user, await _uploaded_files(request))
+    log_event(log, "skill.submitted", **_actor_fields(user), skill=result["skill"],
+              pr_number=result["pr_number"])
+    return result
+
+
+@app.post("/api/skill-submissions/{submission_id}/retry")
+async def api_retry_skill_submission(submission_id: int, request: Request,
+                                     user: dict = Depends(require_auth)):
+    result = await skill_submissions.retry(submission_id, user, await _uploaded_files(request))
+    log_event(log, "skill.submission_retried", **_actor_fields(user),
+              submission_id=submission_id, pr_number=result["pr_number"])
+    return result
+
+
+async def _mind_id_for(name: str) -> str:
+    mind = await _mind_row(name)
+    mind_id = str(mind.get("mind_id") or "").strip()
+    if not mind_id:
+        raise HTTPException(status_code=404, detail="That Mind has no id in the registry")
+    return mind_id
+
+
+@app.get("/api/minds/{name}/roles")
+async def api_mind_roles(name: str, user: dict = Depends(require_auth)):
+    """The roles a Mind holds and what their union grants it, read now."""
+    del user
+    mind_id = await _mind_id_for(name)
+    return {"grants": await store.grants_for(mind_id),
+            "roles": [{"id": r["id"], "slug": r["slug"], "name": r["name"]}
+                      for r in await store.roles_of(mind_id)]}
+
+
+@app.put("/api/minds/{name}/roles")
+async def api_set_mind_roles(name: str, body: dict, user: dict = Depends(require_auth)):
+    """Give a Mind these roles beside general, and put it under role management."""
+    ids = body.get("role_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    known = {r["id"] for r in await store.roles_list()}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"No such role: {missing[0]}")
+    mind_id = await _mind_id_for(name)
+    await store.set_mind_roles(mind_id, ids)
+    log_event(log, "mind.roles.set", **_actor_fields(user), mind_name=name, role_ids=ids)
+    return {"ok": True, "grants": await store.grants_for(mind_id)}
 
 
 @app.get("/api/minds/{name}/files/{tree}")

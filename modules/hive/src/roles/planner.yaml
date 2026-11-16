@@ -1,0 +1,12 @@
+name: Planner
+model: claude-fable-5-2
+tools:
+  - files
+  - sub-minds
+  - web
+skills:
+  - backlog
+  - brainstorm
+  - design-spec
+  - plan-feature
+hooks: []

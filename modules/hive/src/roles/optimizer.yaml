@@ -1,0 +1,11 @@
+name: Optimizer
+model: claude-sonnet-5-5
+tools:
+  - shell
+  - files
+skills:
+  - optimize-context
+  - prune-memory
+  - skill-curator
+  - skill-proposer
+hooks: []

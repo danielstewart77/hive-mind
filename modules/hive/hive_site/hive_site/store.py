@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from typing import Any, Literal
 
 import hive_data
-from hive_data import board, core, memory
+from hive_data import board, core, memory, roles
 
 #: The variable naming the database. Without it there is nothing to open.
 DSN_VAR = "HIVE_DATABASE_URL"
@@ -542,6 +542,87 @@ async def edge_mind(name: str) -> Row | None:
 
 async def edge_minds() -> list[Row]:
     return await board.edge_minds(unit=_live())
+
+
+# -------------------------------------------------------------------- roles
+#
+# Feature 10.18. The rules — what the union is, that general cannot be
+# deleted, that a managed mind stays managed — are `hive_data.roles`'s, once,
+# because the gateway reads the same union. These only bind the unit.
+
+async def roles_list() -> list[Row]:
+    return await roles.list_roles(unit=_live())
+
+
+async def role(role_id: int) -> Row | None:
+    return await roles.get_role(role_id, unit=_live())
+
+
+async def role_by_slug(slug: str) -> Row | None:
+    return await roles.role_by_slug(slug, unit=_live())
+
+
+async def create_role(name: str, **grants: Any) -> int:
+    made = await roles.create_role(name, unit=_live(), **grants)
+    return int(made["row"]["id"])
+
+
+async def update_role(role_id: int, **fields: Any) -> int:
+    written = await roles.update_role(role_id, unit=_live(), **fields)
+    return int(written["rows"])
+
+
+async def delete_role(role_id: int) -> int:
+    written = await roles.delete_role(role_id, unit=_live())
+    return int(written["rows"])
+
+
+async def roles_of(mind_id: str) -> list[Row]:
+    return await roles.roles_of(mind_id, unit=_live())
+
+
+async def role_holders(role_id: int) -> list[str]:
+    return await roles.holders(role_id, unit=_live())
+
+
+async def set_mind_roles(mind_id: str, role_ids: list[int]) -> None:
+    await roles.set_mind_roles(mind_id, role_ids, unit=_live())
+
+
+async def grants_for(mind_id: str) -> Row:
+    return await roles.grants_for(mind_id, unit=_live())
+
+
+async def roles_seeded() -> bool:
+    """Whether this hive has had its ready-made roles put in, ever."""
+    return await core.get_setting(ROLES_SEEDED, unit=_live()) is not None
+
+
+async def mark_roles_seeded(at: float) -> None:
+    await core.put_setting(ROLES_SEEDED, "1", at, unit=_live())
+
+
+#: The setting saying the seed has run. A marker of its own rather than "the
+#: table has rows", which a hive whose every role was deleted also says.
+ROLES_SEEDED = "roles.seeded"
+
+
+async def add_skill_submission(**fields: Any) -> int:
+    made = await roles.add_submission(unit=_live(), **fields)
+    return int(made["row"]["id"])
+
+
+async def update_skill_submission(submission_id: int, **fields: Any) -> int:
+    written = await roles.update_submission(submission_id, unit=_live(), **fields)
+    return int(written["rows"])
+
+
+async def skill_submission(submission_id: int) -> Row | None:
+    return await roles.get_submission(submission_id, unit=_live())
+
+
+async def skill_submissions() -> list[Row]:
+    return await roles.list_submissions(unit=_live())
 
 
 # ------------------------------------------------------ who started an operation

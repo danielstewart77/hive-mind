@@ -1,0 +1,19 @@
+name: General
+model: null
+tools:
+  - files
+skills:
+  - always-remember
+  - end-session
+  - memory
+  - remember
+  - review-identity-proposal
+  - rotate-session
+  - save-session
+  - self-reflect
+hooks:
+  - prose_reminder
+  - skill_telemetry
+  - surface_inject
+  - time_inject
+  - training_capture

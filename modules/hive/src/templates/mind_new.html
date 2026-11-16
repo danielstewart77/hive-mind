@@ -20,6 +20,7 @@
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
                 </div>
+                <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
             </form>
@@ -84,6 +85,18 @@ window.addEventListener("DOMContentLoaded", function () {
         } catch (error) { status.textContent = error.message; }
     });
 
+    (async function () { try {
+        const roles = ((await h.requestJson("/api/roles")).roles || []).filter(function (r) { return r.id !== null; });
+        const box = document.getElementById("mind-roles");
+        box.innerHTML = roles.map(function (r) {
+            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-model="' + h.escapeHtml(r.model || "") + '"' + (r.general ? " disabled" : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind)" : "") + '</label>';
+        }).join("");
+        box.addEventListener("change", function (event) {
+            const model = event.target.dataset && event.target.dataset.model;
+            if (event.target.checked && model) form.elements.default_model.value = model;
+        });
+    } catch (error) { document.getElementById("mind-roles").textContent = "Roles could not be read: " + error.message; } })();
+
     form.addEventListener("submit", async function (event) {
         event.preventDefault();
         const errorBox = document.getElementById("mind-error");
@@ -94,7 +107,8 @@ window.addEventListener("DOMContentLoaded", function () {
             description: form.elements.description.value,
             harness: selectedHarness(),
             provider: form.elements.provider.value,
-            default_model: form.elements.default_model.value
+            default_model: form.elements.default_model.value,
+            role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([disabled])")).map(function (i) { return Number(i.value); })
         };
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});

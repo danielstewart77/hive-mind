@@ -1,0 +1,78 @@
+{% extends "layout.html" %}
+{% block title %}Submit a skill · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Skills</p><h1 class="page-title">Submit a skill</h1><p class="page-description">Pick a skill's folder on your own machine. The hive opens a pull request with it, and a person reviews and merges it. Nothing reaches the hive until then.</p></div>
+        <div class="page-actions"><a class="button button-quiet" href="/roles"><i data-lucide="arrow-left"></i>Roles</a></div>
+    </header>
+    <section class="surface">
+        <form class="surface-body overview-stack" id="submit-form">
+            <div class="field"><label for="submit-folder">Skill folder (it must hold a SKILL.md)</label><input id="submit-folder" type="file" webkitdirectory directory multiple required></div>
+            <div class="form-actions"><button class="button button-primary" type="submit" id="submit-button">Open pull request</button></div>
+            <small id="submit-status"></small>
+        </form>
+    </section>
+    <section class="surface">
+        <div class="surface-header"><div><h2>Submissions</h2><p id="submit-repo"></p></div></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Skill</th><th>By</th><th>Kind</th><th>Pull request</th><th>State</th></tr></thead><tbody id="submissions"><tr><td colspan="5" class="loading-state">Loading…</td></tr></tbody></table></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    const form = document.getElementById("submit-form");
+    const input = document.getElementById("submit-folder");
+    const status = document.getElementById("submit-status");
+    function payload() {
+        const data = new FormData();
+        Array.from(input.files).forEach(function (file) {
+            data.append("files", file, file.name);
+            data.append("paths", file.webkitRelativePath || file.name);
+        });
+        return data;
+    }
+    function state(row) {
+        if (!row.pr_number) return "Recorded, pull request not open yet";
+        if (row.merged_at) return "Merged";
+        if (row.closed_at) return "Closed without merging";
+        return "Waiting for a person to review";
+    }
+    async function load() {
+        const tbody = document.getElementById("submissions");
+        try {
+            const body = await h.requestJson("/api/skill-submissions");
+            document.getElementById("submit-repo").textContent = "Pull requests on " + body.repository + ".";
+            const rows = body.submissions || [];
+            tbody.innerHTML = rows.length ? rows.map(function (row) {
+                const link = row.pr_url ? '<a href="' + h.escapeHtml(row.pr_url) + '" target="_blank" rel="noopener">#' + row.pr_number + '</a>' :
+                    '<button class="button button-quiet" type="button" data-retry="' + row.id + '">Retry with the folder above</button>';
+                return '<tr><td>' + h.escapeHtml(row.skill) + '</td><td>' + h.escapeHtml(row.submitted_by) + '</td><td>' + (row.new_skill ? "New skill" : "Change to an existing skill") +
+                    '</td><td>' + link + '</td><td>' + h.escapeHtml(state(row)) + '</td></tr>';
+            }).join("") : '<tr><td colspan="5"><div class="empty-state"><h3>Nothing submitted yet</h3></div></td></tr>';
+        } catch (error) { tbody.innerHTML = '<tr><td colspan="5"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
+    }
+    form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const button = document.getElementById("submit-button");
+        button.disabled = true; status.textContent = "Opening the pull request…";
+        try {
+            const result = await h.requestJson("/api/skill-submissions", {method: "POST", body: payload()});
+            status.innerHTML = 'Pull request opened: <a href="' + h.escapeHtml(result.pr_url) + '" target="_blank" rel="noopener">#' + result.pr_number + '</a>.';
+            form.reset();
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; await load(); }
+    });
+    document.getElementById("submissions").addEventListener("click", async function (event) {
+        const button = event.target.closest("button[data-retry]");
+        if (!button) return;
+        if (!input.files.length) { status.textContent = "Pick the same skill folder above, then retry."; return; }
+        button.disabled = true;
+        try { await h.requestJson("/api/skill-submissions/" + button.dataset.retry + "/retry", {method: "POST", body: payload()}); }
+        catch (error) { status.textContent = error.message; }
+        finally { await load(); }
+    });
+    await load();
+});
+</script>
+{% endblock %}
