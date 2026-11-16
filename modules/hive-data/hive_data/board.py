@@ -242,13 +242,16 @@ async def first_position(*, unit: Unit | None = None) -> int:
 #: story's to change.
 #:
 #: A **task** numbers under whatever it hangs off, and as a root when it
-#: stands alone - the one kind made to have no parent (story 3.7.4).
+#: stands alone - the one kind made to have no parent (story 3.7.4). A
+#: story under a task numbers beneath it: no such row predates tasks, so
+#: that renames nothing.
 def numbering_parent(row: Row) -> str | None:
     """The id this row is numbered under, or None when it numbers as a root."""
     kind = row.get("kind")
     if kind in ("feature", "task"):
         return row.get("parent_id")
-    if kind == "story" and row.get("parent_kind") in ("feature", "epic"):
+    if kind == "story" and row.get("parent_kind") in ("feature", "epic",
+                                                       "task"):
         return row.get("parent_id")
     return None
 
