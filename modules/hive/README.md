@@ -33,6 +33,8 @@ signed-in admin session reaches them.
 
 The suite runs on a scratch Postgres: set `HIVE_DATA_TEST_ADMIN_DSN` to a
 server it may create and drop a database on (see `hive_site/testing.py`).
+The browser tests drive the real pages in headless Chromium:
+`.venv/bin/python -m playwright install chromium` once.
 
 ## Run
 

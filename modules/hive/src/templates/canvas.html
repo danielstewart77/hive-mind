@@ -15,6 +15,22 @@
     background: #090912;
     user-select: none;
   }
+  /* On a phone the console's top bar stays pinned, so the board is the
+     window under that bar less the content column's own top and bottom
+     padding (console.css) — otherwise its tools sit under the bar or its
+     bottom edge sits off screen, whichever way the page is scrolled. */
+  @media (max-width: 820px) {
+    .draw-container {
+      height: calc(100vh - var(--console-topbar-height, 55px) - 66px);
+      height: calc(100dvh - var(--console-topbar-height, 55px) - 66px);
+    }
+  }
+  @media (max-width: 620px) {
+    .draw-container {
+      height: calc(100vh - var(--console-topbar-height, 55px) - 56px);
+      height: calc(100dvh - var(--console-topbar-height, 55px) - 56px);
+    }
+  }
 
   /* Toolbar */
   .draw-toolbar {

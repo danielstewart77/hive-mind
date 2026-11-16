@@ -1,21 +1,28 @@
 {% extends "layout.html" %}
+{% block mobile_header_actions %}
+<button type="button" class="cos-topbar-done" data-barrel-toggle
+        aria-expanded="false" aria-controls="cos-barrel-pane">
+  Done <b data-done-count>0</b>
+</button>
+{% endblock %}
 {% block content %}
 <style>
   .cos-head { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap; }
   .cos-head h1 { margin:0; }
   .cos-sub { color:#94a3b8; font-size:0.9rem; }
 
-  /* The three panes. The graph and the barrel sit in one row that slides:
-     "pushes the graph aside" is Daniel's phrase for it, so the graph moves
-     over rather than being squeezed into the strip a 280px barrel leaves on
-     a 375px phone. The questions are NOT in the barrel — see below. */
+  /* The panes. On a large screen the graph and the barrel share one row.
+     On a phone-size screen the barrel slides in over the page instead and
+     never pushes it (feature 3.6, 2026-11-15, which replaced the push).
+     The questions are NOT in the barrel — see below. */
   .cos-stage { position:relative; overflow:hidden; margin-top:1rem; }
-  .cos-wrap {
-    display:flex; gap:1rem; align-items:stretch;
-    transition:transform .2s ease;
-  }
+  .cos-wrap { display:flex; gap:1rem; align-items:stretch; }
+  /* min-width:0 is what keeps the barrel on screen. A flex item's minimum
+     is its content, and Cytoscape sizes its canvas to the widest the window
+     has been — so widening the window and narrowing it again left the graph
+     at the old width and pushed the barrel off the right-hand edge. */
   #cos-cy {
-    flex:0 0 100%; min-height:62vh; height:62vh;
+    flex:1 1 auto; min-width:0; min-height:62vh; height:62vh;
     background:#0a0e19; border-radius:10px; border:1px solid rgba(56,189,248,0.18);
     position:relative;
   }
@@ -53,16 +60,27 @@
     .cos-spin { animation-duration:3s; }
   }
 
-  /* The barrel. Collapsed to the right by default and brought in by the
-     handle; on desktop the media query below opens it. */
+  /* The barrel. Its header, with the close control, stays put and only the
+     list under it scrolls, so a long list never scrolls the way out away. */
   .cos-barrel {
     flex:0 0 280px; max-width:280px; box-sizing:border-box;
+    display:flex; flex-direction:column; overflow:hidden;
     background:#0a0e19; border:1px solid rgba(56,189,248,0.18);
-    border-radius:10px; padding:1rem; overflow-y:auto; height:62vh;
+    border-radius:10px; padding:1rem; height:62vh;
     font-size:0.82rem; color:#cbd5e1;
   }
+  .cos-barrel-head { display:flex; align-items:center; justify-content:space-between;
+    gap:.5rem; margin:0 0 0.75rem 0; flex:0 0 auto; }
   .cos-barrel h2 { font-size:0.85rem; letter-spacing:0.08em; text-transform:uppercase;
-    color:#64748b; margin:0 0 0.75rem 0; }
+    color:#64748b; margin:0; }
+  .cos-barrel-close {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:2rem; height:2rem; padding:0; border-radius:8px; cursor:pointer;
+    border:1px solid rgba(56,189,248,0.3); background:#0d1424; color:#cbd5e1;
+    font-size:1.2rem; line-height:1;
+  }
+  .cos-barrel-list { flex:1 1 auto; min-height:0; overflow-y:auto;
+    overscroll-behavior:contain; }
   .cos-done {
     display:flex; gap:0.5rem; align-items:flex-start;
     padding:0.45rem 0.55rem; margin-bottom:0.4rem; border-radius:6px;
@@ -78,7 +96,20 @@
     border-radius:0 10px 0 10px; background:#0d1424; color:#cbd5e1;
     font-size:.75rem; cursor:pointer;
   }
-  .cos-handle b { color:#4ade80; }
+  .cos-handle b, .cos-topbar-done b { color:#4ade80; }
+  /* The phone's done button, in the console's top bar. */
+  .cos-topbar-done {
+    display:inline-flex; align-items:center; gap:.35rem; min-height:34px;
+    padding:.3rem .65rem; border:1px solid rgba(56,189,248,0.3);
+    border-radius:8px; background:#0d1424; color:#cbd5e1;
+    font-size:.8rem; cursor:pointer;
+  }
+  /* The site-wide button hover paints a solid accent, which a tap leaves
+     behind on a phone and which drowns the count. These keep their own. */
+  .cos-topbar-done:hover, .cos-handle:hover, .cos-barrel-close:hover {
+    background:#132036; color:#e2e8f0; border-color:rgba(56,189,248,0.55);
+    transform:none; box-shadow:none;
+  }
 
   /* The questions are their own pane and are never inside the barrel. The
      count of answers the hive is waiting on is the one thing this page is
@@ -109,24 +140,45 @@
   .cos-error { color:#f87171; }
   .cos-stale { color:#fbbf24; }
 
-  /* Desktop: the barrel is open, and the graph gives it the room rather
-     than sliding out from under it. 820px is the site's one mobile
-     breakpoint and this uses it rather than inventing a second. */
-  /* Collapsed means gone, at every width. The barrel used to keep its 280
-     pixels whatever the class said, so on a workstation the handle toggled a
-     class, flipped aria-expanded and changed nothing on screen. */
+  /* 820px is the site's one mobile breakpoint, and the console's top bar
+     exists only at or below it. Large screen: the barrel sits in the row and
+     the graph gives it the room. Docked means gone — the barrel used to keep
+     its 280 pixels whatever the class said, so on a workstation the handle
+     toggled a class, flipped aria-expanded and changed nothing on screen. */
   .cos-stage:not(.barrel-open) .cos-barrel { display:none; }
-
   @media (min-width: 821px) {
-    #cos-cy { flex:1 1 auto; }
-    .cos-stage.barrel-open .cos-wrap { transform:none; }
+    .cos-topbar-done { display:none; }
   }
+  /* Phone-size: the done button is the one in the top bar, and the barrel
+     slides in over the page below that bar, so the bar stays reachable. It
+     never pushes: the page underneath does not move. Docked, it is slid
+     away and hidden, so Tab and a screen reader do not land in it. */
   @media (max-width: 820px) {
-    /* The row is the graph at full width plus the barrel beyond the right
-       edge; opening slides the row left by exactly the barrel and its gap. */
-    .cos-stage.barrel-open .cos-wrap { transform:translateX(calc(-280px - 1rem)); }
+    .cos-handle { display:none; }
     #cos-cy { min-height:68vh; height:68vh; }
-    .cos-barrel { height:68vh; }
+    .cos-barrel {
+      position:fixed; top:var(--console-topbar-height, 55px); right:0; bottom:0;
+      z-index:105; width:min(360px, 100vw); max-width:none; height:auto;
+      border-radius:0; border-width:0 0 0 1px;
+      box-shadow:-18px 0 48px rgba(0,0,0,.45);
+      transform:translateX(100%); visibility:hidden;
+      transition:transform .2s ease, visibility 0s linear .2s;
+      /* A scroll over any part of it — the header too, not just the list —
+         stays in it and never moves the page underneath. */
+      overflow-y:auto; overscroll-behavior:contain;
+    }
+    .cos-stage:not(.barrel-open) .cos-barrel { display:flex; }
+    .cos-barrel-head { touch-action:none; }
+    .cos-stage.barrel-open .cos-barrel {
+      transform:none; visibility:visible; transition:transform .2s ease;
+    }
+  }
+  /* A narrow phone: open, the barrel is the whole screen under the bar. */
+  @media (max-width: 620px) {
+    .cos-barrel { left:0; width:auto; border-width:0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cos-barrel { transition:none !important; }
   }
 </style>
 
@@ -140,14 +192,19 @@
   <div class="cos-wrap">
     <div id="cos-cy">
       <button type="button" class="cos-handle" id="cos-barrel-toggle"
+              data-barrel-toggle
               aria-expanded="false" aria-controls="cos-barrel-pane">
-        Done <b id="cos-done-n">0</b>
+        Done <b id="cos-done-n" data-done-count>0</b>
       </button>
       <div class="cos-deco" id="cos-deco"></div>
     </div>
-    <aside class="cos-barrel" id="cos-barrel-pane">
-      <h2>Done</h2>
-      <div id="cos-barrel"><p class="cos-empty">Nothing yet.</p></div>
+    <aside class="cos-barrel" id="cos-barrel-pane" aria-label="Done stories">
+      <div class="cos-barrel-head">
+        <h2>Done</h2>
+        <button type="button" class="cos-barrel-close" data-barrel-close
+                aria-label="Close done stories" title="Close">&times;</button>
+      </div>
+      <div id="cos-barrel" class="cos-barrel-list"><p class="cos-empty">Nothing yet.</p></div>
     </aside>
   </div>
 </div>
@@ -628,6 +685,7 @@
   // and flickers; positioning existing elements does not.
   var decoFor = {};
   var decoKey = '';
+  var lastBarrelHtml = null;
 
   function decoSignature() {
     return cy.nodes().map(function (n) {
@@ -792,13 +850,20 @@
       : '<p class="cos-empty">Nothing.</p>';
 
     var barrel = document.getElementById('cos-barrel');
-    barrel.innerHTML = data.barrel.length
+    var barrelHtml = data.barrel.length
       ? data.barrel.map(function (d) {
           return '<div class="cos-done"><span class="k">' +
                  esc(d.work_kind || d.kind) + '</span><span>' +
                  esc(d.label) + '</span></div>';
         }).join('')
       : '<p class="cos-empty">Nothing yet.</p>';
+    // Only when it changed: replacing the rows under a finger that is
+    // swiping the barrel away detaches the element the touch started on,
+    // and the rest of that swipe never reaches the barrel.
+    if (barrelHtml !== lastBarrelHtml) {
+      barrel.innerHTML = barrelHtml;
+      lastBarrelHtml = barrelHtml;
+    }
 
     var live = data.nodes.filter(function (n) { return n.kind === 'task'; });
     // Delegates still running. An orphaned card is drawn so its death is
@@ -810,7 +875,11 @@
     document.getElementById('cos-agents').textContent = agents.length;
     document.getElementById('cos-asks-n').textContent = data.questions.length;
     document.getElementById('cos-done').textContent = data.barrel.length;
-    document.getElementById('cos-done-n').textContent = data.barrel.length;
+    // Both done buttons, the top bar's and the graph corner's: whichever is
+    // on screen shows the count.
+    document.querySelectorAll('[data-done-count]').forEach(function (n) {
+      n.textContent = data.barrel.length;
+    });
     // The barrel holds finished stories only, so the bar is stories over
     // stories: finished ones against every story on the page.
     // One story counts once, however many tasks are on it.
@@ -838,12 +907,36 @@
   }
 
   var stage = document.getElementById('cos-stage');
-  var toggle = document.getElementById('cos-barrel-toggle');
+  var pane = document.getElementById('cos-barrel-pane');
+  // Two done buttons: the top bar's on a phone-size screen, the graph
+  // corner's on a large one. CSS shows one; both say the same thing.
+  var toggles = document.querySelectorAll('[data-barrel-toggle]');
   var mobile = window.matchMedia(MOBILE);
+
+  function isOpen() { return stage.classList.contains('barrel-open'); }
+
+  // The done button on screen right now — the top bar's or the graph's.
+  function visibleToggle() {
+    for (var i = 0; i < toggles.length; i++) {
+      if (toggles[i].offsetParent !== null) return toggles[i];
+    }
+    return null;
+  }
+
+  // Docking hides the barrel; focus inside it would fall to the page body,
+  // so it goes back to the done button that opened it.
+  function dock() {
+    var hadFocus = pane.contains(document.activeElement);
+    setBarrel(false);
+    var t = hadFocus && visibleToggle();
+    if (t) t.focus({ preventScroll: true });
+  }
 
   function setBarrel(open) {
     stage.classList.toggle('barrel-open', open);
-    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggles.forEach(function (t) {
+      t.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
     // Cytoscape only measures its container on a window resize, so a panel
     // that changes the graph's width by a CSS class leaves the canvas
     // stretched and every tap landing on the wrong node. Told after the
@@ -854,14 +947,55 @@
     }
   }
 
-  toggle.addEventListener('click', function () {
-    var open = !stage.classList.contains('barrel-open');
-    setBarrel(open);
-    // Two push panels open at once on a 375px phone leaves the graph no
-    // width at all, so the nav yields to the barrel.
-    if (open) document.querySelector('[data-console-app]')
-      .classList.remove('sidebar-open');
+  toggles.forEach(function (t) {
+    t.addEventListener('click', function () {
+      var open = !isOpen();
+      setBarrel(open);
+      // Over the page on a phone-size screen: the keyboard goes with it.
+      if (open && mobile.matches) {
+        pane.querySelector('[data-barrel-close]').focus({ preventScroll: true });
+      }
+      // The nav and the barrel are never open together on a phone: the
+      // nav yields to the barrel, as the barrel yields to the nav.
+      if (open) document.querySelector('[data-console-app]')
+        .classList.remove('sidebar-open');
+    });
+    // The graph corner's button sits inside Cytoscape's container, whose
+    // touch handlers cancel the tap — on a touch screen it did nothing at
+    // all. Its touches stop at the button and never reach the graph.
+    ['touchstart', 'touchmove', 'touchend', 'mousedown'].forEach(function (n) {
+      t.addEventListener(n, function (e) { e.stopPropagation(); },
+                         { passive: true });
+    });
   });
+
+  pane.querySelector('[data-barrel-close]').addEventListener('click', dock);
+
+  // Escape docks an open barrel where it lies over the page.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && mobile.matches && isOpen()) dock();
+  });
+
+  // Swiping the open barrel away docks it: a rightward swipe, towards the
+  // edge it came in from, long enough and mostly sideways, so scrolling the
+  // list never closes it. Touch only — a mouse dragging to select text is
+  // not a swipe. Nothing anywhere opens on a swipe (DECIDED 2026-11-15).
+  var SWIPE_MIN_PX = 60;
+  var swipe = null;
+  pane.addEventListener('touchstart', function (e) {
+    swipe = (isOpen() && e.touches.length === 1)
+      ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+  }, { passive: true });
+  pane.addEventListener('touchend', function (e) {
+    if (swipe === null || !e.changedTouches.length) { swipe = null; return; }
+    var t = e.changedTouches[0];
+    var dx = t.clientX - swipe.x;
+    var dy = t.clientY - swipe.y;
+    swipe = null;
+    if (dx >= SWIPE_MIN_PX && dx > Math.abs(dy) * 1.5) dock();
+  }, { passive: true });
+  pane.addEventListener('touchcancel', function () { swipe = null; },
+                        { passive: true });
 
   // Desktop opens with it; a phone does not. Re-decided when the viewport
   // crosses the breakpoint, so a rotated phone does not keep a default it
@@ -870,9 +1004,9 @@
   listenMedia(mobile, applyDefault);
   applyDefault();
 
-  // The nav is the other push panel on this page, and it closes this one
-  // through the real toggle rather than by stripping the class, so
-  // aria-expanded cannot be left saying "true" on a closed barrel.
+  // The nav docks the barrel when it opens, through the real setter rather
+  // than by stripping the class, so aria-expanded cannot be left saying
+  // "true" on a closed barrel.
   document.addEventListener('hive:close-push-panels', function () {
     setBarrel(false);
   });
