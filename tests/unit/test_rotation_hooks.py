@@ -193,21 +193,40 @@ def test_native_hook_install_preserves_user_settings_and_replaces_only_managed_e
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("custom_kind", ["same_name", "python_wrapper", "direct_wrapper"])
 def test_rotation_hook_refresh_preserves_custom_rotation_named_command_in_mixed_group(
-    harness, tmp_path,
+    harness, custom_kind, tmp_path,
 ):
     mind_dir = tmp_path / "minds" / "probe"
     runtime_path = mind_dir / "runtime.yaml"
     _runtime(runtime_path, 60)
     app_root = Path(__file__).resolve().parents[2]
     config_path = _write_config(harness, mind_dir, runtime_path, app_root)
-    custom_command = "python /projects/custom/rotation_check.py --report"
+    managed_script = (
+        mind_dir.parent / "probe" / ".dsh" / "hooks" / "rotation_check.py"
+        if harness == "dsh"
+        else app_root / "minds" / "harness" / "rotation_hooks.py"
+    )
+    generated_commands = _commands(harness, config_path)
+    generated_check = generated_commands["Stop"][-1]
+    generated_fire = generated_commands["UserPromptSubmit"][-1]
+    custom_command = {
+        "same_name": "python /projects/custom/rotation_check.py --report",
+        "python_wrapper": shlex.join([
+            "python", "/projects/custom/audit.py", str(managed_script), "check",
+        ]),
+        "direct_wrapper": shlex.join([
+            "/projects/custom/audit", str(managed_script), "check",
+        ]),
+    }[custom_kind]
+    sibling_command = "custom-stop"
 
     if harness in ("claude", "dsh"):
         saved = json.loads(config_path.read_text())
-        saved["hooks"]["Stop"][0]["hooks"].append({
-            "type": "command", "command": custom_command,
-        })
+        saved["hooks"]["Stop"][0]["hooks"].extend([
+            {"type": "command", "command": sibling_command},
+            {"type": "command", "command": custom_command},
+        ])
         config_path.write_text(json.dumps(saved))
     else:
         text = config_path.read_text()
@@ -215,6 +234,9 @@ def test_rotation_hook_refresh_preserves_custom_rotation_named_command_in_mixed_
         assert boundary in text
         text = text.replace(
             boundary,
+            '[[hooks.Stop.hooks]]\n'
+            'type = "command"\n'
+            f'command = {json.dumps(sibling_command)}\n\n'
             '[[hooks.Stop.hooks]]\n'
             'type = "command"\n'
             f'command = {json.dumps(custom_command)}\n\n'
@@ -236,14 +258,9 @@ def test_rotation_hook_refresh_preserves_custom_rotation_named_command_in_mixed_
 
     commands = _commands(harness, config_path)["Stop"]
     assert commands.count(custom_command) == 1
-    if harness == "dsh":
-        container_hooks_dir = str(mind_dir.parent / "probe" / ".dsh" / "hooks")
-        generated_check = dsh_hooks.hooks_config(
-            container_hooks_dir, python=sys.executable,
-        )["hooks"]["Stop"][0]["hooks"][1]["command"]
-        assert commands.count(generated_check) == 1
-    else:
-        assert sum("rotation_hooks.py check" in command for command in commands) == 1
+    assert commands.count(sibling_command) == 1
+    assert commands.count(generated_check) == 1
+    assert _commands(harness, config_path)["UserPromptSubmit"].count(generated_fire) == 1
 
 
 def test_native_hook_install_does_not_create_an_undeclared_home(tmp_path):

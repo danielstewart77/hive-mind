@@ -41,6 +41,15 @@ def _command(python: str, app_root: Path, action: str, harness: str,
     return " ".join(shlex.quote(value) for value in values)
 
 
+def _is_python_launcher(argument: str) -> bool:
+    name = Path(argument).name.lower().removesuffix(".exe")
+    if name in {"py", "python", "python3"}:
+        return True
+    if not name.startswith("python3."):
+        return False
+    return all(part.isdigit() for part in name.removeprefix("python3.").split("."))
+
+
 def _is_rotation(command: object, script_path: Path) -> bool:
     if not isinstance(command, str) or not command:
         return False
@@ -48,15 +57,14 @@ def _is_rotation(command: object, script_path: Path) -> bool:
         arguments = shlex.split(command)
     except ValueError:
         return False
+    if (len(arguments) < 3 or not _is_python_launcher(arguments[0])
+            or arguments[2] not in ("check", "fire")):
+        return False
     managed_path = Path(script_path).resolve()
-    for index, argument in enumerate(arguments[:-1]):
-        try:
-            candidate = Path(argument).resolve()
-        except (OSError, ValueError):
-            continue
-        if candidate == managed_path and arguments[index + 1] in ("check", "fire"):
-            return True
-    return False
+    try:
+        return Path(arguments[1]).resolve() == managed_path
+    except (OSError, ValueError):
+        return False
 
 
 def _claude_settings(text: str) -> dict:
