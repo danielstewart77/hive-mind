@@ -391,11 +391,16 @@ def _dsh_log(path: Path, header: dict) -> Path:
     ({"parentSession": "conv-parent"}, False),
 ], ids=["mind", "delegate", "origin-only", "parent-only"])
 def test_only_the_minds_own_turn_becomes_a_training_row_and_a_skill_use(
-        mind, tmp_path, header, harvested):
+        mind, tmp_path, monkeypatch, header, harvested):
     from core.skill_telemetry_detect import detect_claude_skills
     from core.training_capture_claude import capture_session
     dsh_transcript = importlib.import_module("dsh_transcript")
-    translated = dsh_transcript.materialize(_dsh_log(tmp_path / "s-1.jsonl", header))
+    # The wrappers' own path: resolve() on the payload's zstd log. Only the
+    # decompression is stood in for, since it needs the harness's node reader.
+    log = _dsh_log(tmp_path / "session.jsonl.zstd", header)
+    monkeypatch.setattr(dsh_transcript, "read_log_lines",
+                        lambda path: Path(path).read_text().splitlines())
+    translated = dsh_transcript.resolve({"session_id": "s-1", "transcript_path": str(log)})
 
     wrote = capture_session(translated, session_id="s-1", mind_id="m-1",
                             db_path=tmp_path / "training.db")
