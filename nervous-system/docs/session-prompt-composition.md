@@ -139,3 +139,23 @@ capitalized short-name string (e.g., `entity_name=Ada`).
 The soul self-reflect branch of the Stop hook writes back to the same
 KG node via `POST /graph/properties/merge`, keyed on the mind's UUID,
 so the next composition picks up the new `soul_values`.
+
+## Withholding blocks from a mind
+
+`HIVE_PROMPT_BLOCKS_OFF` withholds named blocks from named minds so a mind can be run without them and compared with
+one that has them:
+
+    HIVE_PROMPT_BLOCKS_OFF=bob=all,bilby=recent-memory+session-memory
+
+Entries are comma-separated `mind=block+block`. The mind is its name or id,
+or `*` for every mind. The blocks are `soul`, `recent-memory` and
+`session-memory`; `all` is all three. Unset, or naming nothing that exists,
+it withholds nothing. A pending continuation is never withheld: with
+`session-memory` off the carry-forward is dropped and the unanswered turn
+still arrives.
+
+Set in the `hive-comms` environment it needs a restart to change. Left unset,
+the same value is read from `/data/prompt_blocks_off` inside the container
+(`nervous-system/data/prompt_blocks_off` on the host), entries separated by
+commas or newlines, at every compose — so writing or deleting that file takes
+effect at the mind's next spawn or rotation with no restart.
