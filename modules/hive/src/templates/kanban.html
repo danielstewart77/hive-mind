@@ -235,7 +235,7 @@
   let expandedIds=loadExpanded();
   function rememberState(node,id){if(!id)return;const on=node.dataset.collapsed!=='true';if(on)expandedIds.add(id);else expandedIds.delete(id);saveExpanded(expandedIds);}
   function makeToggle(node,hasChildren){const t=el('button','button kanban-toggle');t.type='button';t.disabled=!hasChildren;t.setAttribute('aria-label','Expand or collapse');t.setAttribute('aria-expanded',String(node.dataset.collapsed!=='true'));const icon=el('i','');icon.setAttribute('data-lucide','chevron-right');t.append(icon);t.addEventListener('click',e=>{e.stopPropagation();setCollapsed(node,node.dataset.collapsed!=='true');rememberState(node,node.dataset.itemId);});return t;}
-  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-inline .kanban-toggle');if(t&&!t.disabled)t.setAttribute('aria-expanded',String(!on));}
+  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-inline .kanban-toggle, :scope > .kanban-cols .kanban-toggle');if(t&&!t.disabled)t.setAttribute('aria-expanded',String(!on));}
   function labelRow(node,row,label,hasChildren,id,meta){
     node.dataset.itemId=id||'';
     if(id&&hasChildren){setCollapsed(node,!expandedIds.has(id));}else if(hasChildren){setCollapsed(node,true);}

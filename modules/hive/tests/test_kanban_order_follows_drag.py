@@ -261,3 +261,33 @@ def test_a_feature_nested_onto_a_story_is_drawn_under_it_with_its_number(monkeyp
         [feature["id"], "1.1.1 Feature"],
         [below["id"], "1.1.1.1 Below"],
     ]
+
+
+def test_reordering_stories_drawn_at_the_top_level_keeps_the_story_they_hang_off(monkeypatch):
+    client = _client(monkeypatch)
+    epic = run(kanban_data.create_epic("Epic"))
+    host = run(kanban_data.create_story("Host", epic_id=epic["id"]))
+    first = run(kanban_data.create_story("First", epic_id=epic["id"]))
+    second = run(kanban_data.create_story("Second", epic_id=epic["id"]))
+    run(kanban_data.set_parent(first["id"], host["id"]))
+    run(kanban_data.set_parent(second["id"], host["id"]))
+
+    response = client.patch(f"/api/kanban/stories/{second['id']}",
+                            json={"before_id": first["id"]})
+
+    assert response.status_code == 200
+    numbers = run(kanban_data.backlog_numbers())
+    assert (numbers[second["id"]], numbers[first["id"]]) == ("2", "3")
+    assert run(kanban_data.item_relations(second["id"]))["parent"]["id"] == host["id"]
+
+
+def test_a_type_change_that_keeps_an_item_in_its_list_keeps_its_place():
+    epic = run(kanban_data.create_epic("Epic"))
+    feature = run(kanban_data.create_feature(epic["id"], "Feature"))
+    stories = [run(kanban_data.create_story(t, feature_id=feature["id"]))
+               for t in ("x", "y", "z")]
+
+    run(kanban_data.change_type(stories[1]["id"], "bug"))
+
+    numbers = run(kanban_data.backlog_numbers())
+    assert [numbers[s["id"]] for s in stories] == ["1.1.1", "1.1.2", "1.1.3"]

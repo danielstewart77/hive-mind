@@ -631,9 +631,17 @@ async def change_type(record_id: str, new_kind: str,
         status = (None if target_kind in ("epic", "feature")
                   else (row["status"] or "backlog"))
         before = await store.work_items()
+        kinds = {r["id"]: r["kind"] for r in before}
+        # A change that leaves the item in the list it numbers in (a story to
+        # a bug, a feature to a story under the same epic) keeps its place;
+        # sent to the end, every sibling after it would change number.
+        stays = _numbering_parent(_row_to_record(row)) == _numbering_parent(
+            _row_to_record(row | {"kind": target_kind, "parent_id": new_parent,
+                                  "parent_kind": kinds.get(new_parent)}))
         await store.retype(record_id, target_kind, status=status,
                            subtype=subtype, parent_id=new_parent,
-                           position=await store.next_position())
+                           position=(row["position"] if stays
+                                     else await store.next_position()))
         await _settle(before, record_id)
         moved = await store.work_item(record_id)
         assert moved is not None  # it was read above, inside this unit
@@ -665,11 +673,20 @@ async def place_before(record_id: str, before_id: str) -> dict[str, Any]:
         # story under a story, or an epic given a parent, is drawn and
         # numbered at the top level whatever parent it stores.
         landing = _numbering_parent(_row_to_record(target))
-        parent_row = by_id.get(landing) if landing is not None else None
-        under = _row_to_record(moved_row | {
-            "parent_id": landing,
-            "parent_kind": parent_row["kind"] if parent_row else None})
-        if _numbering_parent(under) != landing:
+
+        def numbers_in_landing(parent_id: str | None) -> bool:
+            parent_row = by_id.get(parent_id) if parent_id is not None else None
+            under = _row_to_record(moved_row | {
+                "parent_id": parent_id,
+                "parent_kind": parent_row["kind"] if parent_row else None})
+            return _numbering_parent(under) == landing
+
+        # The parent it stores: its own when it already numbers in that list
+        # (a pure reorder keeps a story-under-a-story's link to its story),
+        # else the target's, else the list's own parent.
+        fitting = [p for p in (moved_row["parent_id"], target["parent_id"],
+                               landing) if numbers_in_landing(p)]
+        if not fitting:
             # An epic numbers at the top level whatever its parent, and a
             # story under a story does too. Stored under the target's parent
             # it would be drawn somewhere other than where it was dropped,
@@ -678,7 +695,7 @@ async def place_before(record_id: str, before_id: str) -> dict[str, Any]:
                 "This item cannot sit in that list: dropped there it would be "
                 "numbered and drawn somewhere else. Drop it before an item of "
                 "the list it belongs in, or onto the item it should go under.")
-        await _place_in_list(record_id, landing, before_id)
+        await _place_in_list(record_id, fitting[0], before_id)
         moved = await store.work_item(record_id)
         assert moved is not None
         return _row_to_record(moved)
