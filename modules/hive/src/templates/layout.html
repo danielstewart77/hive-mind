@@ -50,7 +50,9 @@
         <div class="console-nav" role="navigation" aria-label="Main navigation">
             <a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
             <a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>
+            <a href="/usage" class="console-nav-link {% if path.startswith('/usage') %}is-active{% endif %}"><i data-lucide="gauge"></i><span>Usage</span></a>
             {% if current_user.is_admin %}
+            <a href="/roles" class="console-nav-link {% if path.startswith('/roles') %}is-active{% endif %}"><i data-lucide="badge-check"></i><span>Roles</span></a>
             <a href="/bots" class="console-nav-link {% if path.startswith('/bots') %}is-active{% endif %}"><i data-lucide="bot"></i><span>Bots</span></a>
             <a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>
             <a href="/dashboard" class="console-nav-link {% if path == '/dashboard' %}is-active{% endif %}"><i data-lucide="radio-tower"></i><span>Dashboard</span></a>
@@ -97,7 +99,10 @@
         <header class="console-mobile-header">
             <button class="icon-button" type="button" data-sidebar-open aria-label="Open navigation"><i data-lucide="menu"></i></button>
             <a href="/overview" class="mobile-brand"><img src="{{ request.url_for('static', path='favicon.svg') }}" alt="">Hive</a>
-            <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
+            <div class="console-mobile-actions">
+                {% block mobile_header_actions %}{% endblock %}
+                <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
+            </div>
         </header>
         <div class="console-content">
             {% block content %}{% endblock %}

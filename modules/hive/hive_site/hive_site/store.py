@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from typing import Any, Literal
 
 import hive_data
-from hive_data import board, core, memory
+from hive_data import board, core, memory, roles
 
 #: The variable naming the database. Without it there is nothing to open.
 DSN_VAR = "HIVE_DATABASE_URL"
@@ -268,7 +268,7 @@ async def first_position() -> int:
 
 async def create_work_item(item_id: str, kind: str, title: str, position: int,
                            *, parent_id: str | None = None,
-                           status: str | None = None, subtype: str = "",
+                           status: str = "backlog", subtype: str = "",
                            description: str = "", requirements: str = "",
                            acceptance_criteria: str = "",
                            qa_tests: str = "") -> int:
@@ -288,18 +288,18 @@ async def update_work_item(item_id: str, fields: dict[str, Any]) -> int:
     return int(written["rows"])
 
 
-async def retype(item_id: str, kind: str, *, status: str | None = None,
+async def retype(item_id: str, kind: str, *, status: str = "backlog",
                  subtype: str = "", parent_id: str | None = None,
                  position: int) -> int:
     """Change what an item *is*, in one statement.
 
     A retype is one fact made of five columns and every one follows from the
-    new kind: an epic has no status and a story has one, a bug is a story
-    carrying the bug subtype, a row becoming an epic loses its parent, and a
+    new kind: a bug is a story carrying the bug subtype, a row becoming an epic loses its parent, and a
     row that moves parents needs a position because the number it held was
     only unique under the parent it left. Written one column at a time the
-    board is briefly a feature with a story's status, or a row at a duplicate
-    number, and the console reads it in between.
+    board is briefly a story with an epic's subtype, or a row at a duplicate
+    number, and the console reads it in between. Every kind carries a status
+    (hive-data step 13), so it rides along.
     """
     written = await board.retype(
         item_id, kind, status=status, subtype=subtype,
@@ -330,6 +330,38 @@ async def delete_subtree(item_id: str) -> int:
     """Delete a row and everything beneath it, in one statement."""
     written = await board.delete_subtree(item_id, unit=_live())
     return int(written["rows"])
+
+
+# ---------------------------------------------------------------- attachments
+
+async def add_attachment(item_id: str, filename: str, content_type: str,
+                         content: bytes) -> Row:
+    """Keep a file against a work item; the row kept, without its bytes.
+
+    An item that is not there - deleted while the file was on its way in -
+    is `UnknownReference`, so the caller reports the file as not kept rather
+    than as attached to nothing.
+    """
+    with _reference_refused():
+        written = await board.add_attachment(
+            item_id, filename, content_type, content, time.time(),
+            unit=_live())
+    return written["row"]
+
+
+async def attachments(item_id: str) -> list[Row]:
+    """An item's attachments, oldest first, without their bytes."""
+    return await board.attachments(item_id, unit=_live())
+
+
+async def attachment(item_id: str, attachment_id: int) -> Row | None:
+    """One of this item's attachments with its bytes, or None."""
+    return await board.attachment(item_id, attachment_id, unit=_live())
+
+
+async def subtree_attachment_count(item_id: str) -> int:
+    """How many files a delete of this row and its subtree would take."""
+    return await board.subtree_attachment_count(item_id, unit=_live())
 
 
 @contextlib.contextmanager
@@ -510,6 +542,87 @@ async def edge_mind(name: str) -> Row | None:
 
 async def edge_minds() -> list[Row]:
     return await board.edge_minds(unit=_live())
+
+
+# -------------------------------------------------------------------- roles
+#
+# Feature 10.18. The rules — what the union is, that general cannot be
+# deleted, that a managed mind stays managed — are `hive_data.roles`'s, once,
+# because the gateway reads the same union. These only bind the unit.
+
+async def roles_list() -> list[Row]:
+    return await roles.list_roles(unit=_live())
+
+
+async def role(role_id: int) -> Row | None:
+    return await roles.get_role(role_id, unit=_live())
+
+
+async def role_by_slug(slug: str) -> Row | None:
+    return await roles.role_by_slug(slug, unit=_live())
+
+
+async def create_role(name: str, **grants: Any) -> int:
+    made = await roles.create_role(name, unit=_live(), **grants)
+    return int(made["row"]["id"])
+
+
+async def update_role(role_id: int, **fields: Any) -> int:
+    written = await roles.update_role(role_id, unit=_live(), **fields)
+    return int(written["rows"])
+
+
+async def delete_role(role_id: int) -> int:
+    written = await roles.delete_role(role_id, unit=_live())
+    return int(written["rows"])
+
+
+async def roles_of(mind_id: str) -> list[Row]:
+    return await roles.roles_of(mind_id, unit=_live())
+
+
+async def role_holders(role_id: int) -> list[str]:
+    return await roles.holders(role_id, unit=_live())
+
+
+async def set_mind_roles(mind_id: str, role_ids: list[int]) -> None:
+    await roles.set_mind_roles(mind_id, role_ids, unit=_live())
+
+
+async def grants_for(mind_id: str) -> Row:
+    return await roles.grants_for(mind_id, unit=_live())
+
+
+async def roles_seeded() -> bool:
+    """Whether this hive has had its ready-made roles put in, ever."""
+    return await core.get_setting(ROLES_SEEDED, unit=_live()) is not None
+
+
+async def mark_roles_seeded(at: float) -> None:
+    await core.put_setting(ROLES_SEEDED, "1", at, unit=_live())
+
+
+#: The setting saying the seed has run. A marker of its own rather than "the
+#: table has rows", which a hive whose every role was deleted also says.
+ROLES_SEEDED = "roles.seeded"
+
+
+async def add_skill_submission(**fields: Any) -> int:
+    made = await roles.add_submission(unit=_live(), **fields)
+    return int(made["row"]["id"])
+
+
+async def update_skill_submission(submission_id: int, **fields: Any) -> int:
+    written = await roles.update_submission(submission_id, unit=_live(), **fields)
+    return int(written["rows"])
+
+
+async def skill_submission(submission_id: int) -> Row | None:
+    return await roles.get_submission(submission_id, unit=_live())
+
+
+async def skill_submissions() -> list[Row]:
+    return await roles.list_submissions(unit=_live())
 
 
 # ------------------------------------------------------ who started an operation

@@ -359,3 +359,69 @@ async def test_the_shutdown_settles_an_in_flight_delivery_before_the_store_goes(
     assert [n["id"] for n in pending] == [notice_id]
     assert pending[0]["claimed_at"] is None, (
         "the notice is still claimed, so no later sweep will send it")
+
+
+class _Registry:
+    """Comms' mind registry over HTTP, as the console reads it."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def install(self, monkeypatch):
+        import httpx
+        import route_access
+
+        rows = self.rows
+
+        def answer(request):
+            assert request.url.path == "/broker/minds"
+            return httpx.Response(200, json=rows)
+
+        real = httpx.AsyncClient
+
+        def client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(answer)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(route_access.httpx, "AsyncClient", client)
+
+
+async def test_a_second_users_design_session_names_them_not_daniel(store, gateway, monkeypatch):
+    """Story 2.1.19: the person a design message speaks for is the owner of
+    the mind the session is attached to."""
+    from hive_data import core
+
+    await core.upsert_mind(mind_id="arnold-id", name="arnold-t",
+                           gateway_url="http://arnold:8421", model="a-model",
+                           harness="claude", registered_at=1.0, last_seen=1.0,
+                           owner="sloan")
+    _Registry([{"id": "arnold-id", "name": "arnold-t", "owner": "sloan"}]).install(monkeypatch)
+    record = await store.create_design_session(
+        "Sloan's design", conversation_id="conv-2", mind_id="arnold-id")
+    published = await store.publish_page(
+        record["id"], "requirements", {"r1": {"order": 1, "text": "A thing"}},
+        revision=record["revision"])
+    await store.submit_page(
+        published["id"], "requirements",
+        items={"r1": {"feedback": "Why this?"}}, revision=published["revision"])
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
+
+    await design_delivery.deliver_notice(notice_id)
+
+    content = gateway.calls[1]["body"]["content"]
+    assert "Sloan submitted feedback" in content
+    assert "Sloan asks: Why this?" in content
+    assert "Daniel" not in content
+
+
+async def test_the_build_and_accept_messages_name_the_owner_and_nobody_else(store):
+    record = await _session_with_feedback(store)
+
+    build = design_delivery.compose_message(record, "requirements", "build", "aiden")
+    accept = design_delivery.compose_message(record, "requirements", "accept", "aiden")
+    nobody = design_delivery.compose_message(record, "requirements", "build", "")
+
+    assert "Aiden pressed Build" in build
+    assert "Aiden accepted the requirements page" in accept
+    assert "The owner pressed Build" in nobody
+    assert all("Daniel" not in text for text in (build, accept, nobody))

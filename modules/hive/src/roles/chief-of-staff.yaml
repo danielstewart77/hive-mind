@@ -1,0 +1,11 @@
+name: Chief of Staff
+model: claude-haiku-5-5
+tools:
+  - files
+  - sub-minds
+  - web
+skills:
+  - backlog
+  - brainstorm
+  - plan-feature
+hooks: []

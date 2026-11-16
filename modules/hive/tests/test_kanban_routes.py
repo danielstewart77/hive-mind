@@ -46,6 +46,7 @@ def test_a_new_board_is_served_with_every_lane_present_and_empty(client):
         "epics": [],
         "features": [],
         "stories": [],
+        "tasks": [],
     }
 
 
@@ -107,11 +108,12 @@ def test_deleting_an_epic_clears_the_whole_board_and_reports_what_it_took(client
 
     removed = client.delete(f"/api/kanban/epics/{epic['id']}")
     assert removed.status_code == 200
-    assert removed.json()["removed"] == {"features": 1, "stories": 2}
+    assert removed.json()["removed"] == {"features": 1, "stories": 2, "tasks": 0, "attachments": 0}
     assert client.get("/api/kanban/data").json() == {
         "epics": [],
         "features": [],
         "stories": [],
+        "tasks": [],
     }
 
 
@@ -122,10 +124,14 @@ def test_the_descendant_count_is_read_from_the_board_not_from_the_caller(client)
     assert client.get(f"/api/kanban/epics/{epic['id']}/descendants").json() == {
         "features": 1,
         "stories": 2,
+        "tasks": 0,
+        "attachments": 0,
     }
     assert client.get(f"/api/kanban/features/{feature['id']}/descendants").json() == {
         "features": 0,
         "stories": 1,
+        "tasks": 0,
+        "attachments": 0,
     }
 
 
@@ -223,6 +229,8 @@ def test_the_descendant_count_follows_the_row_not_the_kind_in_the_url(client):
     assert client.get(f"/api/kanban/stories/{story['id']}/descendants").json() == {
         "features": 0,
         "stories": 0,
+        "tasks": 0,
+        "attachments": 0,
     }
 
 

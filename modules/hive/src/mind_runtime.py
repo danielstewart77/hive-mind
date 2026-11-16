@@ -23,12 +23,23 @@ from fastapi import HTTPException
 _TIMEOUT = 8.0
 
 
-def admin_headers() -> dict[str, str]:
-    """The bearer a Mind accepts on its config-write route.
+async def admin_headers(target_url: str) -> dict[str, str]:
+    """The bearer a Mind accepts on its config-write route, for `target_url`.
 
     The same admin token the gateway uses; Minds accept it (or their own
-    `MIND_ADMIN_TOKEN`, when an install sets one).
+    `MIND_ADMIN_TOKEN`, when an install sets one). Never for a mind created
+    locked down: that admin token opens every person's conversations, and
+    such a mind belongs to someone who is not to hold it (DECIDED 2026-11-15,
+    Daniel). It refuses these calls with 503 either way.
     """
+    import configuration_data
+
+    if await configuration_data.withholds_admin_credential(target_url):
+        raise HTTPException(
+            status_code=503,
+            detail="this mind was created locked down and is not sent the hive's "
+            "admin credential",
+        )
     token = os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")
     if not token:
         raise HTTPException(
@@ -73,7 +84,7 @@ async def fetch_configuration(gateway_url: str) -> dict:
     """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(_endpoint(gateway_url), headers=admin_headers())
+            response = await client.get(_endpoint(gateway_url), headers=await admin_headers(gateway_url))
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -97,7 +108,7 @@ async def push_default_model(
             response = await client.patch(
                 _endpoint(gateway_url),
                 json=payload,
-                headers=admin_headers(),
+                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -125,7 +136,7 @@ async def fetch_models(gateway_url: str) -> list[dict]:
         return []
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(f"{url}/models", headers=admin_headers())
+            response = await client.get(f"{url}/models", headers=await admin_headers(gateway_url))
     except (httpx.HTTPError, HTTPException):
         return []
     if response.status_code != 200:
@@ -200,7 +211,7 @@ async def fetch_surface_token(gateway_url: str, surface: str = "telegram") -> di
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.get(
                 _surface_token_endpoint(gateway_url, surface),
-                headers=admin_headers(),
+                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -238,7 +249,7 @@ async def push_surface_token(
             response = await client.put(
                 _surface_token_endpoint(gateway_url, surface),
                 json={"token": token},
-                headers=admin_headers(),
+                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -309,7 +320,7 @@ async def push_github_token(gateway_url: str, token: str) -> dict:
             response = await client.put(
                 _github_token_endpoint(gateway_url),
                 json={"token": token},
-                headers=admin_headers(),
+                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -360,7 +371,7 @@ async def push_voice(gateway_url: str, voice: str, engine: str = "") -> dict:
             response = await client.patch(
                 _endpoint(gateway_url),
                 json=body,
-                headers=admin_headers(),
+                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -495,7 +506,7 @@ async def fetch_settings(gateway_url: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.get(
-                _settings_endpoint(gateway_url), headers=admin_headers()
+                _settings_endpoint(gateway_url), headers=await admin_headers(gateway_url)
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -518,7 +529,7 @@ async def push_settings(gateway_url: str, settings: dict) -> dict:
             response = await client.patch(
                 _settings_endpoint(gateway_url),
                 json={"settings": settings},
-                headers=admin_headers(),
+                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(

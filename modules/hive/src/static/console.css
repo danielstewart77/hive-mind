@@ -16,6 +16,9 @@
     --console-red: #ef746f;
     --console-red-soft: #3b1d1e;
     --console-sidebar-width: 232px;
+    /* The phone top bar's height, in one place: the bar itself, the pinned
+       bands that sit under it and the scroll padding all read this. */
+    --console-topbar-height: 55px;
     --console-radius: 7px;
 }
 
@@ -365,8 +368,34 @@ a { color: inherit; }
     .console-app.sidebar-open .console-sidebar { transform: translateX(0); }
     .console-app.sidebar-open .console-overlay { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110; }
     .sidebar-close { display: inline-flex !important; }
-    .console-main { margin-left: 0; }
-    .console-mobile-header { height: 55px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--console-line); background: #101316; }
+    .console-main { margin-left: 0; transition: transform .2s ease; }
+    /* The nav pushes the page aside rather than covering it. Translated
+       rather than narrowed: on a 375px phone a 232px rail would reflow every
+       page into 143px, which is not "aside", it is ruined. The page slides
+       out of the way instead and slides back when the nav closes. The
+       dimmed overlay stays — it is what closing by tapping beside the nav
+       is, and a push with no way back is a trap on a phone. */
+    .console-app.sidebar-open .console-main { transform: translateX(var(--console-sidebar-width)); }
+    /* The push would otherwise give the document 232px of horizontal scroll:
+       scroll right, close the nav, and the page is left looking blank until
+       you scroll back. */
+    /* `clip`, not `hidden`, where the browser has it: `hidden` makes the app
+       a scroll container, and the top bar's sticky would then pin to a box
+       that never scrolls — the bar would ride away with the page whenever
+       the nav is open. */
+    .console-app.sidebar-open { overflow-x: hidden; overflow-x: clip; }
+    /* The top bar stays put while the page scrolls: the hamburger is how a
+       phone reaches the nav at all. Sticky rather than fixed, so it keeps
+       its place in the flow and covers nothing at the top of the page, and
+       so it still rides along when the nav pushes the page aside. Above the
+       page's own layers (a graph's decorations reach 10), under the nav's
+       overlay (110) and the rail (120). Three columns so the brand stays
+       centred whatever a page adds on the right. */
+    .console-mobile-header { position: sticky; top: 0; z-index: 100; height: var(--console-topbar-height); display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--console-line); background: #101316; }
+    .console-mobile-header > :first-child { justify-self: start; }
+    .console-mobile-actions { justify-self: end; display: flex; align-items: center; gap: 8px; }
+    /* An in-page jump lands below the bar rather than under it. */
+    html { scroll-padding-top: var(--console-topbar-height); }
     .mobile-brand { display: inline-flex; align-items: center; gap: 8px; color: var(--console-text); text-decoration: none; font-weight: 700; }
     .mobile-brand img { width: 23px; height: 23px; }
     .console-content { padding: 24px 18px 42px; }
@@ -894,3 +923,26 @@ a { color: inherit; }
 .credential-token { -webkit-text-security: disc; }
 .button:disabled { opacity: 0.55; cursor: default; pointer-events: none; }
 .credential-set input { max-width: 180px; }
+
+/* A board item description drawn as markdown (static/markdown.js). The
+   source shows as typed until the rendering is ready, and stays if it never is. */
+.md-render { min-width: 0; overflow-wrap: anywhere; line-height: 1.55; }
+.md-source { white-space: pre-wrap; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 { margin: 1.1em 0 .45em; line-height: 1.25; }
+.md-body h1 { font-size: 1.35rem; }
+.md-body h2 { font-size: 1.18rem; }
+.md-body h3 { font-size: 1.05rem; }
+.md-body p, .md-body ul, .md-body ol, .md-body pre, .md-body table, .md-body blockquote { margin: 0 0 .75em; }
+.md-body ul, .md-body ol { padding-left: 1.5em; }
+.md-body a { color: var(--console-cyan); }
+.md-body code { font-family: 'Fira Code', ui-monospace, monospace; font-variant-ligatures: none; font-size: .88em; background: var(--console-surface-2); padding: .1em .3em; border-radius: 4px; }
+.md-body pre { background: var(--console-surface-2); border: 1px solid var(--console-line); border-radius: var(--console-radius); padding: .75rem; overflow-x: auto; }
+.md-body pre code { background: none; padding: 0; white-space: pre; }
+.md-body blockquote { border-left: 3px solid var(--console-line-strong); padding-left: .75rem; color: var(--console-muted); }
+.md-body table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md-body th, .md-body td { border: 1px solid var(--console-line); padding: .3rem .55rem; text-align: left; }
+.md-body hr { border: 0; border-top: 1px solid var(--console-line); }
+.md-diagram { margin: 0 0 .75em; overflow-x: auto; }
+.md-diagram svg { max-width: 100%; height: auto; }

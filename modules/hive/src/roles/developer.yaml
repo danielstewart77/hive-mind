@@ -1,0 +1,13 @@
+name: Developer
+model: claude-opus-5-5
+tools:
+  - shell
+  - files
+  - sub-minds
+  - web
+skills:
+  - code
+  - code-review
+  - security-review
+  - simplify
+hooks: []

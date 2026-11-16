@@ -189,6 +189,21 @@ TABLE.add(
     # Filtered to the Minds the user owns by the handler, like the two above.
     "GET /api/bots",
     "GET /api/settings/hive-comms/sessions",
+    # Roles (feature 10.18): anyone signed in may read them, because a
+    # person gives their own mind roles from this list; only an admin
+    # changes one, since a role changes every mind holding it.
+    "GET /roles",
+    "GET /api/roles",
+    # A skill submission is a pull request and nothing else, whoever sends
+    # it (story 10.18.8), so any signed-in person may make one and read the
+    # list of what has been submitted.
+    "GET /skills/submit",
+    "GET /api/skill-submissions",
+    "POST /api/skill-submissions",
+    "POST /api/skill-submissions/{submission_id}/retry",
+    # Filtered by the handler to the user's own minds (story 2.1.17).
+    "GET /usage",
+    "GET /api/usage",
 )
 # The settings page is one route; only its sessions section is a user's.
 TABLE.add(
@@ -196,7 +211,15 @@ TABLE.add(
     "GET /settings/{section}",
 )
 
-TABLE.add(Rule(OWNER, param="mind_id"), "GET /minds/{mind_id}")
+TABLE.add(
+    Rule(OWNER, param="mind_id"),
+    "GET /minds/{mind_id}",
+    # A mind's picture, read and set. Keyed by id rather than by name, like
+    # the page above it and unlike the per-name routes below, because the
+    # file on disk has to survive a rename — see `mind_images`.
+    "GET /api/minds/{mind_id}/image",
+    "POST /api/minds/{mind_id}/image",
+)
 TABLE.add(
     Rule(OWNER, param="name"),
     "GET /api/minds/{name}/configuration",
@@ -226,6 +249,10 @@ TABLE.add(
     "DELETE /api/minds/{name}/bot-claim",
     "PUT /api/minds/{name}/github-token",
     "POST /api/minds/{name}/restart",
+    # The roles a mind holds: its owner decides them, within the roles an
+    # admin defined.
+    "GET /api/minds/{name}/roles",
+    "PUT /api/minds/{name}/roles",
 )
 TABLE.add(
     Rule(OWNER, param="session_id"),
@@ -285,7 +312,13 @@ TABLE.add(
     "POST /api/kanban/epics",
     "POST /api/kanban/features",
     "POST /api/kanban/stories",
+    "POST /api/kanban/tasks",
     "PATCH /api/kanban/{kind}/{record_id}",
+    # An item's files. Attaching adds and destroys nothing, so it sits with
+    # the board's other writes rather than with its one delete.
+    "GET /api/kanban/items/{record_id}/attachments",
+    "POST /api/kanban/items/{record_id}/attachments",
+    "GET /api/kanban/items/{record_id}/attachments/{attachment_id}",
 )
 
 # House-wide: named so the table is complete, and so nobody mistakes a
@@ -339,6 +372,9 @@ TABLE.add(
     "GET /kanban/board",
     "GET /kanban/backlog",
     "GET /kanban/item/{record_id}",
+    # The page's own read of the board and its numbers together. A mind has
+    # /api/kanban/data and /api/kanban/numbers; this needs no bearer.
+    "GET /api/kanban/board",
     "DELETE /api/kanban/{kind}/{record_id}",
     # design pages
     "GET /design",
@@ -403,6 +439,13 @@ TABLE.add(
     "POST /api/settings/holders/{service}/{holder}/revoke",
     "GET /downloads/{filename}",
     "POST /api/voices/sample",
+    # roles: defining one, and the three repo choices
+    "POST /api/roles",
+    "PUT /api/roles/{role_id}",
+    "DELETE /api/roles/{role_id}",
+    "POST /api/roles/{role_id}/keep",
+    "POST /api/roles/{role_id}/promote",
+    "POST /api/roles/repo/{slug}/take",
     # users and groups
     "GET /api/admin/users",
     "POST /api/admin/users",

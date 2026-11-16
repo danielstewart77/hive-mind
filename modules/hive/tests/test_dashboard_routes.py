@@ -315,6 +315,9 @@ def _probe(monkeypatch, result, *, token="admin-token"):
     else:
         monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
     monkeypatch.setattr(main_mod.httpx, "AsyncClient", lambda **kw: _Client(result))
+    # The registry the admin credential is judged against: nothing in it.
+    import route_access
+    monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=[]))
     import asyncio
 
     return asyncio.run(
