@@ -905,3 +905,26 @@ a { color: inherit; }
 .credential-token { -webkit-text-security: disc; }
 .button:disabled { opacity: 0.55; cursor: default; pointer-events: none; }
 .credential-set input { max-width: 180px; }
+
+/* A board item description drawn as markdown (static/markdown.js). The
+   source shows as typed until the rendering is ready, and stays if it never is. */
+.md-render { min-width: 0; overflow-wrap: anywhere; line-height: 1.55; }
+.md-source { white-space: pre-wrap; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 { margin: 1.1em 0 .45em; line-height: 1.25; }
+.md-body h1 { font-size: 1.35rem; }
+.md-body h2 { font-size: 1.18rem; }
+.md-body h3 { font-size: 1.05rem; }
+.md-body p, .md-body ul, .md-body ol, .md-body pre, .md-body table, .md-body blockquote { margin: 0 0 .75em; }
+.md-body ul, .md-body ol { padding-left: 1.5em; }
+.md-body a { color: var(--console-cyan); }
+.md-body code { font-family: 'Fira Code', ui-monospace, monospace; font-variant-ligatures: none; font-size: .88em; background: var(--console-surface-2); padding: .1em .3em; border-radius: 4px; }
+.md-body pre { background: var(--console-surface-2); border: 1px solid var(--console-line); border-radius: var(--console-radius); padding: .75rem; overflow-x: auto; }
+.md-body pre code { background: none; padding: 0; white-space: pre; }
+.md-body blockquote { border-left: 3px solid var(--console-line-strong); padding-left: .75rem; color: var(--console-muted); }
+.md-body table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md-body th, .md-body td { border: 1px solid var(--console-line); padding: .3rem .55rem; text-align: left; }
+.md-body hr { border: 0; border-top: 1px solid var(--console-line); }
+.md-diagram { margin: 0 0 .75em; overflow-x: auto; }
+.md-diagram svg { max-width: 100%; height: auto; }
