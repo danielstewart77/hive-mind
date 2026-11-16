@@ -414,3 +414,15 @@ def test_clone_hive_tools_installs_alongside_the_env_placeholder(
 
     assert result["installed"] is True
     assert (destination / ".env").exists()
+
+
+def test_a_module_of_hive_minds_manifest_reads_as_installed(tmp_path, monkeypatch):
+    # A submodule's .git is a file naming its history, not a folder.
+    destination = tmp_path / "modules" / "hive-tools"
+    destination.mkdir(parents=True)
+    (destination / ".git").write_text("gitdir: ../../.git/modules/modules/hive-tools\n")
+    (destination / "server.py").write_text("")
+    monkeypatch.setenv("HIVE_TOOLS_REPO_DIR", str(destination))
+
+    assert capability_install.hive_tools_install_status()["installed"] is True
+
