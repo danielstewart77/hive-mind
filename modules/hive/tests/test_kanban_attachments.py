@@ -125,3 +125,14 @@ async def test_an_attachment_survives_every_edit_move_reorder_retype_and_status_
     await still_there("retype to bug")
     await kanban_data.change_type(story["id"], "epic")
     await still_there("retype to epic")
+
+
+async def test_a_standalone_task_carries_a_file_and_it_comes_back_with_it():
+    """Tasks too, now that a task can stand alone on the board."""
+    task = await kanban_data.create_task("A task on its own")
+    kept = await kanban_data.add_attachment(task["id"], "shot.jpg", A_SCREENSHOT)
+
+    opened = await kanban_data.find_item(task["id"])
+    assert [a["id"] for a in opened["attachments"]] == [kept["id"]]
+    got = await kanban_data.get_attachment(task["id"], kept["id"])
+    assert got["content"] == A_SCREENSHOT
