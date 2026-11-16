@@ -9,6 +9,8 @@ counts — is what `chief_of_staff` built out of those rows.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import chief_of_staff as cos
@@ -16,7 +18,11 @@ import kanban_data
 from hive_data import core, staff
 from hive_site import testing as suite
 
-NOW = 1_800_000_000.0
+#: The present, to the second. The board stamps when an item finished with
+#: the database's own clock, which no test can fix, so the tree is read at
+#: the moment it is written: a clock years away would put every finished
+#: story outside the barrel's window (feature 6.11).
+NOW = float(int(time.time()))
 
 #: The statuses the schema seeds, re-seeded here because the suite truncates
 #: every staff table between tests and a status is a row like any other.
@@ -146,11 +152,10 @@ async def test_a_finished_story_leaves_the_tree_for_the_barrel():
     assert _ids(tree["barrel"], "story") == [shipped["id"]]
 
 
-async def test_a_feature_whose_every_story_is_done_leaves_its_stories_in_the_barrel():
-    """Only a story carries a status, so a finished feature is one with
-    nothing left under it, and it is not a place to hang live children. The
-    barrel holds finished stories only (2026-11-15), so they go and it does
-    not."""
+async def test_a_feature_whose_every_story_is_done_goes_to_the_barrel_with_its_stories():
+    """A feature with nothing left under it is not a place to hang live
+    children. The barrel holds finished stories, features and tasks
+    (feature 6.11), so the feature goes there and its stories with it."""
     epic = await kanban_data.create_epic("Chief of Staff")
     feature = await kanban_data.create_feature(epic["id"], "Done one")
     story = await kanban_data.create_story("Under it",
@@ -162,7 +167,7 @@ async def test_a_feature_whose_every_story_is_done_leaves_its_stories_in_the_bar
 
     assert _ids(tree["nodes"], "story") == []
     assert _ids(tree["nodes"], "feature") == []
-    assert _ids(tree["barrel"]) == [story["id"]]
+    assert sorted(_ids(tree["barrel"])) == sorted([feature["id"], story["id"]])
 
 
 async def test_a_feature_with_one_story_left_stays_in_the_tree():
@@ -955,13 +960,17 @@ async def test_a_second_task_on_a_story_hangs_beside_the_first():
     assert _parents(tree, second["id"]) == [feature_task["id"]]
 
 
-# ---------------------------------------- the barrel's one kind (2026-11-15)
+# ------------------------------- finished work in the barrel (feature 6.11)
 #
-# Protected behaviour c: the barrel holds only finished stories, never an
-# agent, a task or anything else.
+# Protected behaviours of 2026-11-16: (1) finished stories, features and
+# tasks within the window appear in the barrel; (2) finished work older than
+# the window is left out, and widening the window brings it back; (3) with
+# no choice made, the window is seven days.
+
+DAY = 24 * 60 * 60
 
 
-async def test_the_barrel_holds_finished_stories_and_nothing_else():
+async def test_finished_stories_features_and_tasks_all_appear_in_the_barrel():
     epic = await kanban_data.create_epic("Chief of Staff")
     finished = await kanban_data.create_feature(epic["id"], "All done")
     under_finished = await kanban_data.create_story(
@@ -978,23 +987,113 @@ async def test_the_barrel_holds_finished_stories_and_nothing_else():
     await kanban_data.update_story(by_a_task["id"], status="done")
 
     epic_task = await _task("The epic", board_item=epic["id"])
-    await _task("A plain finished task", status="done")
+    plain = await _task("A plain finished task", status="done")
     await _task("Its story's task", status="done", board_item=by_a_task["id"])
-    # Under an epic nobody is watching, so nothing but its task reaches it.
-    unwatched = await kanban_data.create_epic("Unwatched")
-    aside = await kanban_data.create_feature(unwatched["id"], "Aside")
+    # A finished feature named by a finished ledger row: the row's feature
+    # is what finished. Marked done on the board itself, with no stories.
+    other_epic = await kanban_data.create_epic("Unwatched")
+    closed_feature = await kanban_data.create_feature(other_epic["id"],
+                                                      "Closed whole")
+    await kanban_data.update_feature(closed_feature["id"], status="done")
+    await _task("The closed feature", status="done",
+                board_item=closed_feature["id"])
+    # A board task, finished on the board and by its ledger row.
+    board_task = await kanban_data.create_task("A board task")
+    await kanban_data.update_task(board_task["id"], status="done")
+    await _task("The board task", status="done", board_item=board_task["id"])
+    # A ledger row closed before the board story it names: the row is the
+    # finished work, so it stands for itself.
+    aside = await kanban_data.create_feature(other_epic["id"], "Aside")
     still_open = await kanban_data.create_story("Closed early",
                                                 feature_id=aside["id"])
-    await _task("Closed before its story", status="done",
-                board_item=still_open["id"])
+    early = await _task("Closed before its story", status="done",
+                        board_item=still_open["id"])
     delegate = await staff.start_agent(epic_task["id"], "chase.md", now=NOW)
     await staff.finish_agent(delegate["id"], now=NOW + 1)
 
     tree = await cos.get_tree(now=NOW + 2)
 
     assert sorted(_ids(tree["barrel"])) == sorted(
-        [under_finished["id"], shipped["id"], by_a_task["id"]])
-    assert {row["kind"] for row in tree["barrel"]} == {"story"}
+        [finished["id"], under_finished["id"], shipped["id"], by_a_task["id"],
+         # Its one story is done, so it is a finished feature too.
+         elsewhere["id"],
+         plain["id"], closed_feature["id"], board_task["id"], early["id"]])
+    kinds = {row["id"]: row["kind"] for row in tree["barrel"]}
+    assert kinds[finished["id"]] == kinds[closed_feature["id"]] == "feature"
+    assert kinds[plain["id"]] == kinds[early["id"]] == "task"
+    assert kinds[board_task["id"]] == "task"
+    assert kinds[shipped["id"]] == "story"
+    assert delegate["id"] not in kinds
+
+
+async def test_closing_the_task_that_watched_finished_stories_keeps_them_in_the_barrel():
+    """The stories under a feature and an epic finished whether or not the
+    task watching them is still open; closing it is not time passing."""
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "All done")
+    story = await kanban_data.create_story("Shipped",
+                                           feature_id=feature["id"])
+    await kanban_data.update_story(story["id"], status="done")
+    other = await kanban_data.create_epic("Another")
+    half = await kanban_data.create_feature(other["id"], "Half done")
+    shipped = await kanban_data.create_story("Shipped too",
+                                             feature_id=half["id"])
+    await kanban_data.update_story(shipped["id"], status="done")
+    await kanban_data.create_story("Left", feature_id=half["id"])
+    await _task("The feature", status="done", board_item=feature["id"])
+    epic_task = await _task("The other epic", status="done",
+                            board_item=other["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert sorted(_ids(tree["barrel"])) == sorted(
+        [feature["id"], story["id"], shipped["id"], epic_task["id"]])
+
+
+async def test_finished_work_older_than_the_window_is_left_out_until_it_is_widened():
+    old = await staff.create_task("Finished a while ago", "in progress",
+                                  now=NOW - 20 * DAY)
+    await staff.update_task(old["id"], status="done", now=NOW - 20 * DAY)
+    recent = await staff.create_task("Finished yesterday", "in progress",
+                                     now=NOW - DAY)
+    await staff.update_task(recent["id"], status="done", now=NOW - DAY)
+    # A later edit to the old one is not a later finish.
+    await staff.update_task(old["id"], question="anything left?", now=NOW)
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "The page")
+    story = await kanban_data.create_story("Shipped today",
+                                           feature_id=feature["id"])
+    await kanban_data.update_story(story["id"], status="done")
+    await kanban_data.create_story("Left", feature_id=feature["id"])
+    await _task("The feature", board_item=feature["id"])
+
+    narrow = await cos.get_tree(now=NOW, window_days=7)
+    wide = await cos.get_tree(now=NOW, window_days=30)
+    # Read ten days on, the story the board finished today is old too.
+    later = await cos.get_tree(now=NOW + 10 * DAY, window_days=7)
+    later_wide = await cos.get_tree(now=NOW + 10 * DAY, window_days=30)
+
+    assert _ids(narrow["barrel"]) == [story["id"], recent["id"]]
+    # Newest finished first.
+    assert _ids(wide["barrel"]) == [story["id"], recent["id"], old["id"]]
+    assert _ids(later["barrel"]) == []
+    assert _ids(later_wide["barrel"]) == [story["id"], recent["id"],
+                                          old["id"]]
+    # Left out is not gone: the ledger and the board still hold all three.
+    assert (await staff.task(old["id"]))["status"] == "done"
+    assert (await kanban_data.find_item(story["id"]))["status"] == "done"
+
+
+async def test_with_no_window_chosen_the_barrel_reaches_back_seven_days():
+    inside = await staff.create_task("Six days and change", "done",
+                                     now=NOW - 7 * DAY + 60)
+    outside = await staff.create_task("Seven days and change", "done",
+                                      now=NOW - 7 * DAY - 60)
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _ids(tree["barrel"]) == [inside["id"]]
+    assert outside["id"] not in _ids(tree["barrel"])
 
 
 async def test_a_live_task_on_a_story_the_board_marks_done_stays_live_work():

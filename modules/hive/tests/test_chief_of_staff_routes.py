@@ -80,3 +80,27 @@ def test_one_call_answers_with_the_tree_the_barrel_and_the_questions(
     assert [q["question"] for q in data["questions"]] == ["Which model?"]
     assert next(n for n in data["nodes"]
                 if n["kind"] == "chief")["questions"] == 1
+
+
+def test_the_barrel_window_is_seven_days_unless_the_page_asks_for_another(
+        signed_in):
+    """Feature 6.11: with no window named the answer reaches back seven
+    days; a wider one brings older finished work back."""
+    import time
+    day = 24 * 60 * 60
+
+    async def rows():
+        await staff.add_status("done")
+        now = time.time()
+        recent = await staff.create_task("Six days ago", "done",
+                                         now=now - 6 * day)
+        old = await staff.create_task("Eight days ago", "done",
+                                      now=now - 8 * day)
+        return recent["id"], old["id"]
+    recent, old = suite.run(rows())
+
+    default = signed_in.get("/api/chief-of-staff").json()
+    wide = signed_in.get("/api/chief-of-staff?days=30").json()
+
+    assert [b["id"] for b in default["barrel"]] == [recent]
+    assert [b["id"] for b in wide["barrel"]] == [recent, old]

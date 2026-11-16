@@ -115,6 +115,12 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "acceptance_criteria": row["acceptance_criteria"],
         "qa_tests": row["qa_tests"],
         "status": row["status"],
+        # When its status moved into done, stamped by the store and cleared
+        # when it is reopened (hive-data step 15); None while it is not done.
+        # What the Chief of Staff barrel's time window counts from. Read with
+        # .get so a console restarted onto this module before its image is
+        # rebuilt onto that hive-data still reads the board.
+        "done_at": row.get("done_at"),
     }
 
     if row["kind"] == "feature":

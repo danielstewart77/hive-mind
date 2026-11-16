@@ -74,6 +74,10 @@
     gap:.5rem; margin:0 0 0.75rem 0; flex:0 0 auto; }
   .cos-barrel h2 { font-size:0.85rem; letter-spacing:0.08em; text-transform:uppercase;
     color:#64748b; margin:0; }
+  /* The window: how far back the barrel reaches (feature 6.11). */
+  .cos-window { margin-left:auto; min-height:2rem; padding:0 .4rem;
+    border:1px solid rgba(56,189,248,0.3); border-radius:8px;
+    background:#0d1424; color:#cbd5e1; font-size:.75rem; }
   .cos-barrel-close {
     display:inline-flex; align-items:center; justify-content:center;
     width:2rem; height:2rem; padding:0; border-radius:8px; cursor:pointer;
@@ -199,11 +203,20 @@
       </button>
       <div class="cos-deco" id="cos-deco"></div>
     </div>
-    <aside class="cos-barrel" id="cos-barrel-pane" aria-label="Done stories">
+    <aside class="cos-barrel" id="cos-barrel-pane" aria-label="Done work">
       <div class="cos-barrel-head">
         <h2>Done</h2>
+        <select id="cos-window" class="cos-window"
+                aria-label="Show work finished within">
+          <option value="1">1 day</option>
+          <option value="7">7 days</option>
+          <option value="14">14 days</option>
+          <option value="30">30 days</option>
+          <option value="60">60 days</option>
+          <option value="90">90 days</option>
+        </select>
         <button type="button" class="cos-barrel-close" data-barrel-close
-                aria-label="Close done stories" title="Close">&times;</button>
+                aria-label="Close done work" title="Close">&times;</button>
       </div>
       <div id="cos-barrel" class="cos-barrel-list"><p class="cos-empty">Nothing yet.</p></div>
     </aside>
@@ -249,6 +262,34 @@
   })();
   document.getElementById('cos-stage').classList
     .toggle('barrel-open', window.cosBarrelMemory.start());
+
+  // How far back the barrel reaches, in days (feature 6.11, 2026-11-16).
+  // Seven with nothing chosen. A choice is remembered per browser, one
+  // value for every screen size: it is what Daniel wants to see, not where
+  // the bucket sits. Storage that is blocked or throws, or a remembered
+  // value the control does not offer, is remembering nothing.
+  window.cosBarrelWindow = (function () {
+    var KEY = 'hive.cos.barrelWindowDays';
+    var DEFAULT = '7';
+    var select = document.getElementById('cos-window');
+    function offered(v) {
+      return Array.prototype.some.call(select.options,
+                                       function (o) { return o.value === v; });
+    }
+    var start = DEFAULT;
+    try {
+      var v = window.localStorage.getItem(KEY);
+      if (v !== null && offered(v)) { start = v; }
+    } catch (e) { /* nothing remembered */ }
+    select.value = start;
+    return {
+      days: function () { return select.value; },
+      remember: function () {
+        try { window.localStorage.setItem(KEY, select.value); }
+        catch (e) { /* not remembered; this visit still uses it */ }
+      }
+    };
+  })();
 </script>
 
 <div class="cos-asks-pane">
@@ -910,7 +951,7 @@
                  esc(d.work_kind || d.kind) + '</span><span>' +
                  esc(d.label) + '</span></div>';
         }).join('')
-      : '<p class="cos-empty">Nothing yet.</p>';
+      : '<p class="cos-empty">Nothing finished in this window.</p>';
     // Only when it changed: replacing the rows under a finger that is
     // swiping the barrel away detaches the element the touch started on,
     // and the rest of that swipe never reaches the barrel.
@@ -934,17 +975,19 @@
     document.querySelectorAll('[data-done-count]').forEach(function (n) {
       n.textContent = data.barrel.length;
     });
-    // The barrel holds finished stories only, so the bar is stories over
-    // stories: finished ones against every story on the page.
-    // One story counts once, however many tasks are on it.
+    // The bar is stories over stories: finished ones against every story
+    // on the page. Finished stories are counted by the server at every
+    // window, so neither the barrel's tasks and features nor a narrower
+    // window move it. One story counts once, however many tasks are on it.
     var liveStories = {};
     data.nodes.forEach(function (n) {
       if (n.work_kind === 'story' || n.work_kind === 'bug') {
         liveStories[n.board_item || n.id] = true;
       }
     });
-    var total = Object.keys(liveStories).length + data.barrel.length;
-    var pct = total ? Math.round((data.barrel.length / total) * 100) : 0;
+    var doneStories = data.finished_stories || 0;
+    var total = Object.keys(liveStories).length + doneStories;
+    var pct = total ? Math.round((doneStories / total) * 100) : 0;
     document.getElementById('cos-progress').style.width = pct + '%';
     document.getElementById('cos-pct').textContent = pct + '%';
 
@@ -1159,21 +1202,25 @@
   }, { capture: true, passive: false });
 
   // ── loading ─────────────────────────────────────────────────────────
-  var inFlight = false;
+  var inFlight = null;
   var sequence = 0;
 
-  function load() {
+  function load(force) {
     // One at a time. Two overlapping fetches can answer out of order and
     // paint the older tree last, which on this page means showing work as
-    // running after it stopped.
-    if (inFlight) return;
-    inFlight = true;
+    // running after it stopped. A changed window is the exception: the
+    // fetch in flight asked for the old one, so it is dropped rather than
+    // left to paint a barrel the control no longer describes.
+    if (inFlight && !force) return;
+    if (inFlight) { inFlight.abort(); }
     var mine = ++sequence;
     var abort = new AbortController();
+    inFlight = abort;
     var timer = window.setTimeout(function () { abort.abort(); },
                                   FETCH_TIMEOUT_MS);
-    fetch('/api/chief-of-staff', { credentials: 'same-origin',
-                                   signal: abort.signal })
+    fetch('/api/chief-of-staff?days=' +
+          encodeURIComponent(window.cosBarrelWindow.days()),
+          { credentials: 'same-origin', signal: abort.signal })
       .then(function (r) {
         if (!r.ok) { throw new Error('HTTP ' + r.status); }
         return r.json();
@@ -1183,6 +1230,8 @@
         paint(data);
       })
       .catch(function (err) {
+        // Superseded by a newer load, which answers for the page.
+        if (mine !== sequence) return;
         // A page that cannot read the hive knows nothing about what is
         // running, so it stops claiming anything is.
         spinnersOn = false;
@@ -1194,9 +1243,20 @@
       })
       .finally(function () {
         window.clearTimeout(timer);
-        inFlight = false;
+        if (inFlight === abort) { inFlight = null; }
       });
   }
+
+  document.getElementById('cos-window').addEventListener('change',
+    function () {
+      window.cosBarrelWindow.remember();
+      // The rows on screen answered the old window. Until the new answer
+      // arrives - or if it never does - they must not stand under it.
+      document.getElementById('cos-barrel').innerHTML =
+        '<p class="cos-empty">Loading…</p>';
+      lastBarrelHtml = null;
+      load(true);
+    });
 
   // A load that keeps failing leaves the last tree on screen; this is what
   // stops that tree going on claiming work is running.
@@ -1212,7 +1272,7 @@
   }
 
   load();
-  setInterval(load, REFRESH_MS);
+  setInterval(function () { load(); }, REFRESH_MS);
   setInterval(checkStale, 5000);
 })();
 </script>
