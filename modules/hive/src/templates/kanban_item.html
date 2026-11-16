@@ -25,6 +25,13 @@
 .item-description-head { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
 .item-description-toggle { padding:.2rem .6rem; font-size:.8rem; min-height:0; }
 .item-description-view { padding:.6rem .75rem; border:1px solid var(--console-line, #333); border-radius:var(--console-radius, 7px); min-height:2.5rem; }
+.item-attachments { display:grid; gap:.75rem; padding:1rem; }
+.item-attachments-header { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; }
+.item-attachments-header h2 { font-size:1rem; margin:0; }
+.item-attachment-list { display:grid; gap:.75rem; }
+.item-attachment figure { margin:0; display:grid; gap:.3rem; }
+.item-attachment img { max-width:100%; height:auto; border:1px solid var(--console-line, #333); border-radius:4px; }
+.item-attachment figcaption, .item-attachment a { font-size:.85rem; overflow-wrap:anywhere; }
 </style>
 <main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}" data-item-number="{{ item.backlog_number }}">
   <nav class="item-back-nav"><a href="/kanban/backlog">Back to backlog</a></nav>
@@ -56,6 +63,10 @@
     <div class="relation-row"><select id="child-choice" aria-label="Choose a child to add"></select><button class="button" type="button" id="child-add">Add child</button></div>
   </aside>
   </div>
+  <section class="surface item-attachments" id="item-attachments" aria-label="Attachments">
+    <div class="item-attachments-header"><h2>Attachments</h2><label class="button" for="attachment-file">Attach a file</label><input type="file" id="attachment-file" multiple hidden><span id="attachment-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
+    <div id="attachment-list" class="item-attachment-list"></div>
+  </section>
 </main>
 <script type="application/json" id="description-source">{{ item.description | tojson }}</script>
 <script src="{{ request.url_for('static', path='markdown.js') }}?v={{ asset_versions['markdown.js'] }}"></script>
@@ -205,6 +216,71 @@
       feedback.textContent = `Not saved: ${err.message}`;
     }
   });
+})();
+</script>
+<script>
+(() => {
+  'use strict';
+  // An item's files. The list shown is always the server's, read again after
+  // every upload whether it was refused or not: a file is only ever shown as
+  // attached once the server says it holds it, and a refusal is shown with
+  // the server's own reason.
+  const itemId = document.getElementById('item-page').dataset.itemId;
+  const base = `/api/kanban/items/${encodeURIComponent(itemId)}/attachments`;
+  const list = document.getElementById('attachment-list');
+  const feedback = document.getElementById('attachment-feedback');
+  const input = document.getElementById('attachment-file');
+  const size = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  async function loadAttachments(){
+    let rows;
+    try {
+      const response = await fetch(base, {headers: {'Accept': 'application/json'}});
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      rows = await response.json();
+    } catch (err) { feedback.textContent = `Could not load attachments: ${err.message}`; return; }
+    list.replaceChildren();
+    if (!rows.length) { const none = document.createElement('p'); none.textContent = 'No attachments'; list.append(none); return; }
+    for (const a of rows) {
+      const url = `${base}/${encodeURIComponent(a.id)}`;
+      const row = document.createElement('div'); row.className = 'item-attachment';
+      if (a.is_image) {
+        const figure = document.createElement('figure');
+        const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener';
+        const img = document.createElement('img'); img.src = url; img.alt = a.filename; img.loading = 'lazy';
+        link.append(img);
+        const caption = document.createElement('figcaption'); caption.textContent = `${a.filename} · ${size(a.size_bytes)}`;
+        figure.append(link, caption); row.append(figure);
+      } else {
+        const link = document.createElement('a'); link.href = url; link.download = a.filename;
+        link.textContent = `${a.filename} · ${size(a.size_bytes)}`;
+        row.append(link);
+      }
+      list.append(row);
+    }
+  }
+  input.addEventListener('change', async () => {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    const failed = [];
+    let kept = 0;
+    for (const file of files) {
+      feedback.textContent = `Attaching ${file.name}…`;
+      const body = new FormData(); body.append('file', file, file.name);
+      try {
+        const response = await fetch(base, {method: 'POST', headers: {'Accept': 'application/json'}, body});
+        if (!response.ok) {
+          let detail = `Request failed (${response.status})`;
+          try { detail = (await response.json()).detail || detail; } catch (_) {}
+          failed.push(`${file.name}: ${detail}`);
+        } else { kept += 1; }
+      } catch (err) { failed.push(`${file.name}: ${err.message}`); }
+    }
+    await loadAttachments();
+    feedback.textContent = failed.length
+      ? `Not kept: ${failed.join('; ')}${kept ? ` (${kept} attached)` : ''}`
+      : `Attached ${kept === 1 ? '1 file' : `${kept} files`}.`;
+  });
+  loadAttachments();
 })();
 </script>
 {% endblock %}

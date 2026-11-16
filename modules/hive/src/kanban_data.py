@@ -352,6 +352,9 @@ async def find_item(record_id: str) -> dict[str, Any]:
     # does not carry it.
     record["kind"] = row["kind"]
     record["backlog_number"] = _numbers_for(rows)[record_id]
+    # The files come back with the item, without their bytes.
+    record["attachments"] = [_attachment_record(r)
+                             for r in await store.attachments(record_id)]
     return record
 
 
@@ -453,7 +456,133 @@ async def count_descendants(record_id: str,
     if row is None or (kind is not None and row["kind"] != kind):
         label = _LABEL.get(kind or "", "Item")
         raise KeyError(f"{label} not found: {record_id}")
-    return _tally(await store.descendants(record_id))
+    tally = _tally(await store.descendants(record_id))
+    # The files on this row and every row beneath it, which the delete takes
+    # with them.
+    tally["attachments"] = await store.subtree_attachment_count(record_id)
+    return tally
+
+
+# --- attachments -------------------------------------------------------------
+#
+# Kept in the hive's Postgres beside the row they belong to, not on the
+# console's `/data` volume beside the minds' pictures: the board's delete is
+# one recursive statement in the database, and a file kept anywhere else is a
+# file that delete leaves behind. Keyed by the item's id and nothing else, so
+# no kind is consulted and a kind the board gains later carries attachments
+# with no change here.
+
+#: The largest file kept, the console's one existing upload cap (a mind's
+#: picture, `mind_images.MAX_BYTES`), for the same reason it is that size:
+#: nothing in front of the console bounds a body, and an ordinary exported
+#: screenshot has to fit. A byte cap only. The picture's pixel cap exists
+#: because the chart decodes every card's image on every redraw, and nothing
+#: here does: a three-monitor screenshot is exactly what gets attached.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+#: The longest file name kept. Names are shown on the item page and travel in
+#: a header on every download.
+MAX_ATTACHMENT_NAME = 255
+
+#: The images shown on the page, by their own first bytes. Everything else is
+#: kept and offered only as a download: an SVG or an HTML file served inline
+#: from the console's origin runs script, and the browser's own content type
+#: is whatever the caller said.
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+DOWNLOAD_TYPE = "application/octet-stream"
+
+
+def attachment_type(data: bytes) -> str:
+    """What a file is served as, from its own bytes and never its name."""
+    for magic, content_type in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return content_type
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return DOWNLOAD_TYPE
+
+
+def _attachment_name(value: Any) -> str:
+    """The name a file is kept under: its last path segment, as given."""
+    name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not name:
+        return "attachment"
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError(
+            "that file name contains a control character, which no name "
+            "kept here will take. Rename the file and attach it again.")
+    if len(name) > MAX_ATTACHMENT_NAME:
+        raise ValueError(
+            f"that file name is {len(name)} characters; the limit is "
+            f"{MAX_ATTACHMENT_NAME}.")
+    return name
+
+
+def _attachment_record(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "item_id": row["item_id"],
+        "filename": row["filename"],
+        "content_type": row["content_type"],
+        "size_bytes": row["size_bytes"],
+        "created_at": row["created_at"],
+        "is_image": row["content_type"] != DOWNLOAD_TYPE,
+    }
+
+
+async def add_attachment(record_id: str, filename: Any,
+                         data: bytes) -> dict[str, Any]:
+    """Keep a file against an item, of whatever kind, and say what was kept.
+
+    Every refusal is raised, never swallowed: a file that cannot be kept is
+    reported as failed rather than appearing to succeed. Nothing on the item's
+    own row is written, so its id, its place and its status stay as they were.
+    """
+    if not data:
+        raise ValueError("that file is empty; there is nothing to keep.")
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise ValueError(
+            f"that file is {len(data)} bytes; the limit is "
+            f"{MAX_ATTACHMENT_BYTES}. It was not kept.")
+    name = _attachment_name(filename)
+    if not await _exists(record_id):
+        raise KeyError(f"Item not found: {record_id}")
+    try:
+        row = await store.add_attachment(
+            record_id, name, attachment_type(data), data)
+    except store.UnknownReference as exc:
+        # Deleted between the check above and the write. The file was not
+        # kept, and the item it was meant for is gone.
+        raise KeyError(f"Item not found: {record_id}") from exc
+    return _attachment_record(row)
+
+
+async def list_attachments(record_id: str) -> list[dict[str, Any]]:
+    """An item's attachments, oldest first, without their bytes."""
+    if not await _exists(record_id):
+        raise KeyError(f"Item not found: {record_id}")
+    return [_attachment_record(row)
+            for row in await store.attachments(record_id)]
+
+
+async def get_attachment(record_id: str,
+                         attachment_id: int) -> dict[str, Any]:
+    """One of this item's attachments with its bytes.
+
+    Asked for through the item: an attachment id under another item's id is
+    not found, so one item's file is never served as another's.
+    """
+    row = await store.attachment(record_id, attachment_id)
+    if row is None:
+        raise KeyError(f"Attachment not found: {attachment_id}")
+    record = _attachment_record(row)
+    record["content"] = bytes(row["content"])
+    return record
 
 
 async def kind_of(record_id: str) -> str:
@@ -791,9 +920,10 @@ async def _delete(kind: str, record_id: str) -> dict[str, Any]:
     async with store.board_transaction():
         record = _row_to_record(await _fetch(record_id, kind))
         below = await store.descendants(record_id)
+        files = await store.subtree_attachment_count(record_id)
         await store.delete_subtree(record_id)
     # What went, not what the caller's page thought would go.
-    record["removed"] = _tally(below)
+    record["removed"] = _tally(below) | {"attachments": files}
     return record
 
 

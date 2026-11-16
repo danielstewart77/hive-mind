@@ -332,6 +332,38 @@ async def delete_subtree(item_id: str) -> int:
     return int(written["rows"])
 
 
+# ---------------------------------------------------------------- attachments
+
+async def add_attachment(item_id: str, filename: str, content_type: str,
+                         content: bytes) -> Row:
+    """Keep a file against a work item; the row kept, without its bytes.
+
+    An item that is not there - deleted while the file was on its way in -
+    is `UnknownReference`, so the caller reports the file as not kept rather
+    than as attached to nothing.
+    """
+    with _reference_refused():
+        written = await board.add_attachment(
+            item_id, filename, content_type, content, time.time(),
+            unit=_live())
+    return written["row"]
+
+
+async def attachments(item_id: str) -> list[Row]:
+    """An item's attachments, oldest first, without their bytes."""
+    return await board.attachments(item_id, unit=_live())
+
+
+async def attachment(item_id: str, attachment_id: int) -> Row | None:
+    """One of this item's attachments with its bytes, or None."""
+    return await board.attachment(item_id, attachment_id, unit=_live())
+
+
+async def subtree_attachment_count(item_id: str) -> int:
+    """How many files a delete of this row and its subtree would take."""
+    return await board.subtree_attachment_count(item_id, unit=_live())
+
+
 @contextlib.contextmanager
 def _reference_refused() -> Iterator[None]:
     """Turn the access layer's missing-reference refusal into this module's.

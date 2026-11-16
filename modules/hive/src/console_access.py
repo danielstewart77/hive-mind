@@ -295,6 +295,11 @@ TABLE.add(
     "POST /api/kanban/stories",
     "POST /api/kanban/tasks",
     "PATCH /api/kanban/{kind}/{record_id}",
+    # An item's files. Attaching adds and destroys nothing, so it sits with
+    # the board's other writes rather than with its one delete.
+    "GET /api/kanban/items/{record_id}/attachments",
+    "POST /api/kanban/items/{record_id}/attachments",
+    "GET /api/kanban/items/{record_id}/attachments/{attachment_id}",
 )
 
 # House-wide: named so the table is complete, and so nobody mistakes a

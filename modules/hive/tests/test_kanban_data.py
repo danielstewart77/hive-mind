@@ -191,8 +191,8 @@ async def test_descendants_counts_what_a_delete_would_take():
     await store.create_story("Nested", feature_id=feature["id"])
     await store.create_story("Direct", epic_id=epic["id"])
 
-    assert await store.count_descendants(epic["id"]) == {"features": 1, "stories": 2, "tasks": 0}
-    assert await store.count_descendants(feature["id"]) == {"features": 0, "stories": 1, "tasks": 0}
+    assert await store.count_descendants(epic["id"]) == {"features": 1, "stories": 2, "tasks": 0, "attachments": 0}
+    assert await store.count_descendants(feature["id"]) == {"features": 0, "stories": 1, "tasks": 0, "attachments": 0}
 
 
 async def test_ids_are_unique_across_many_creations():
@@ -227,8 +227,8 @@ async def test_a_feature_moved_to_another_epic_is_stored_under_the_new_one():
     assert (await store.list_features())[0]["epic_id"] == destination["id"]
     # The story rides along: it hangs off the feature, not off the epic.
     assert (await store.list_stories())[0]["feature_id"] == feature["id"]
-    assert await store.count_descendants(destination["id"]) == {"features": 1, "stories": 1, "tasks": 0}
-    assert await store.count_descendants(origin["id"]) == {"features": 0, "stories": 0, "tasks": 0}
+    assert await store.count_descendants(destination["id"]) == {"features": 1, "stories": 1, "tasks": 0, "attachments": 0}
+    assert await store.count_descendants(origin["id"]) == {"features": 0, "stories": 0, "tasks": 0, "attachments": 0}
 
 
 async def test_a_story_moved_to_another_feature_is_stored_under_the_new_one():
