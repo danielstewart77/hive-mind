@@ -653,6 +653,26 @@ def admin_token() -> str:
     )
 
 
+def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
+    """Guard a route the gateway calls for this mind's own conversations.
+
+    `/models`, `/harnesses`, `/handover` and `/skills/check`: the gateway
+    asks them while it switches a conversation's model or harness. It
+    presents this mind's session credential there, as on `/sessions`, and
+    not the hive's admin credential, which would open every person's
+    conversations to whatever answers at this mind's registered address
+    (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+    credentials). The admin credential is still accepted, for the console
+    and the operator, and checked first, so a mind that cannot read its own
+    session credential still answers them. Configuration writes keep
+    `authorize_admin`.
+    """
+    admin = admin_token()
+    if admin and any(tokens_match(t, admin) for t in presented_bearers(request)):
+        return None
+    return authorize_session(request, mind_dir)
+
+
 def authorize_admin(request: Request) -> JSONResponse | None:
     """Guard a config-write route. None means the caller may proceed."""
     expected = admin_token()

@@ -4095,12 +4095,60 @@ class SessionManager:
             )
         return data["rotated"]
 
-    def _mind_admin_headers(self) -> dict[str, str]:
-        """The admin credential for a mind's operator routes."""
+    async def _mind_operator_credentials(
+        self, mind_id: str, mind_row: dict | None
+    ) -> list[dict[str, str]]:
+        """What the gateway presents on a mind's `/models`, `/harnesses`,
+        `/handover` and `/skills/check`, in the order it tries them.
+
+        That mind's own session credential first. The hive's admin credential
+        follows only for a mind owned by `config.admin_credential_owner()`:
+        it opens every person's conversations, and anything at the address a
+        mind registered - which a mind may change with its own credential -
+        receives what is sent there (DECIDED 2026-11-15, Daniel: a mind not
+        owned by him never reaches his credentials). It is the fallback for
+        his minds still running code that accepts only the admin credential
+        on these routes. A mind with neither is called with no credential
+        and refuses.
+        """
+        from comms.config import admin_credential_owner
+
+        # Its own credential, or none when it registered none: either way
+        # the admin credential is only ever a second try after a refusal.
+        tried = [await self.mind_auth_headers(mind_id)]
+        owner = str((mind_row or {}).get("owner") or "").strip().lower()
+        trusted = admin_credential_owner()
         admin = os.environ.get("MIND_ADMIN_TOKEN") or os.environ.get(
             "COMMS_ADMIN_BEARER_TOKEN", ""
         )
-        return {"Authorization": f"Bearer {admin}"} if admin else {}
+        if admin and trusted and owner == trusted:
+            tried.append({"Authorization": f"Bearer {admin}"})
+        return tried
+
+    async def _mind_operator_call(
+        self, mind_id: str, mind_row: dict | None, method: str, url: str, **kwargs
+    ) -> tuple[int, str]:
+        """One call to a mind's operator route; its status and body text.
+
+        A refusal (401 or 503) moves on to the next credential, and the last
+        answer is returned whatever it is.
+        """
+        import aiohttp
+
+        status, text = 0, ""
+        tried = await self._mind_operator_credentials(mind_id, mind_row)
+        for attempt, headers in enumerate(tried):
+            if attempt:
+                # Logged, so it is visible which of the owner's minds still
+                # need the admin credential and when the setting can go.
+                log_event(log, "mind.admin_credential.fallback", level=logging.WARNING,
+                          mind_id=mind_id, url=url, refused=status)
+            async with aiohttp.ClientSession() as http:
+                async with getattr(http, method)(url, headers=headers, **kwargs) as resp:
+                    status, text = resp.status, await resp.text()
+            if status not in (401, 503):
+                break
+        return status, text
 
     async def mind_models(self, mind_id: str, harness: str | None = None) -> list[dict]:
         """What a mind reports it may run, asked of the mind.
@@ -4125,26 +4173,23 @@ class SessionManager:
         harness = normalise_harness(harness)
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.get(
-                    f"{gateway_url}/models",
-                    params={"harness": harness} if harness else None,
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status in (401, 503):
-                        # Raised, not returned as []. An empty list reaches the
-                        # console as "this mind offers nothing" and makes
-                        # `mind_offers_model` refuse a model change with the
-                        # wrong reason entirely.
-                        await resp.read()
-                        raise MindRefusedCredential(
-                            f"mind {mind_id} refused the gateway's admin "
-                            f"credential on /models (HTTP {resp.status})"
-                        )
-                    if resp.status != 200:
-                        return []
-                    body = await resp.json()
+            status, text = await self._mind_operator_call(
+                mind_id, mind_row, "get", f"{gateway_url}/models",
+                params={"harness": harness} if harness else None,
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            if status in (401, 503):
+                # Raised, not returned as []. An empty list reaches the
+                # console as "this mind offers nothing" and makes
+                # `mind_offers_model` refuse a model change with the
+                # wrong reason entirely.
+                raise MindRefusedCredential(
+                    f"mind {mind_id} refused the gateway's credential on "
+                    f"/models (HTTP {status})"
+                )
+            if status != 200:
+                return []
+            body = json.loads(text)
         except MindCallFailed:
             raise
         except Exception:
@@ -4178,21 +4223,18 @@ class SessionManager:
             return None
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.get(
-                    f"{gateway_url}/harnesses",
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status in (401, 503):
-                        await resp.read()
-                        raise MindRefusedCredential(
-                            f"mind {mind_id} refused the gateway's admin "
-                            f"credential on /harnesses (HTTP {resp.status})"
-                        )
-                    if resp.status != 200:
-                        return None
-                    body = await resp.json()
+            status, text = await self._mind_operator_call(
+                mind_id, mind_row, "get", f"{gateway_url}/harnesses",
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            if status in (401, 503):
+                raise MindRefusedCredential(
+                    f"mind {mind_id} refused the gateway's credential on "
+                    f"/harnesses (HTTP {status})"
+                )
+            if status != 200:
+                return None
+            body = json.loads(text)
         except MindCallFailed:
             raise
         except Exception:
@@ -4217,15 +4259,12 @@ class SessionManager:
         gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.post(
-                    f"{gateway_url}/skills/check",
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    await resp.read()
-                    if resp.status >= 400:
-                        log.info("skill check on mind %s answered %s", mind_id, resp.status)
+            status, _ = await self._mind_operator_call(
+                mind_id, mind_row, "post", f"{gateway_url}/skills/check",
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if status >= 400:
+                log.info("skill check on mind %s answered %s", mind_id, status)
         except Exception as exc:
             log.info("skill check on mind %s failed: %s", mind_id, exc)
 
@@ -4253,47 +4292,47 @@ class SessionManager:
         gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
         import aiohttp
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.post(
-                    f"{gateway_url}/handover",
-                    json={
-                        "harness": harness,
-                        "conversation_id": conversation_id,
-                        "harness_sid": harness_sid,
-                        "summary": summary,
-                        "budget_bytes": budget_bytes,
-                        # A conversation that took turns has a transcript;
-                        # one missing then is unreadable, not empty.
-                        "had_turns": had_turns,
-                        # A handover not yet delivered, rendered in front.
-                        "prior_handover": prior_handover,
-                        # Lets a codex mind find the thread from its own map
-                        # when the row holds no thread id.
-                        "session_id": session_id,
-                    },
-                    headers=self._mind_admin_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status in (401, 503):
-                        await resp.read()
-                        raise MindRefusedCredential(
-                            f"mind {mind_id} refused the gateway's admin "
-                            f"credential on /handover (HTTP {resp.status})"
-                        )
-                    if resp.status == 422:
-                        await resp.read()
-                        raise ValueError(
-                            "This conversation's transcript can't be read and "
-                            "there is no summary to carry instead, so it stays "
-                            f"on {harness}."
-                        )
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise ValueError(
-                            f"The mind couldn't render this conversation for "
-                            f"handover (HTTP {resp.status}): {body}"
-                        )
-                    body = await resp.json()
+            status, text = await self._mind_operator_call(
+                mind_id, mind_row, "post", f"{gateway_url}/handover",
+                json={
+                    "harness": harness,
+                    "conversation_id": conversation_id,
+                    "harness_sid": harness_sid,
+                    "summary": summary,
+                    "budget_bytes": budget_bytes,
+                    # A conversation that took turns has a transcript;
+                    # one missing then is unreadable, not empty.
+                    "had_turns": had_turns,
+                    # A handover not yet delivered, rendered in front.
+                    "prior_handover": prior_handover,
+                    # Lets a codex mind find the thread from its own map
+                    # when the row holds no thread id.
+                    "session_id": session_id,
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if status in (401, 503):
+                raise MindRefusedCredential(
+                    f"mind {mind_id} refused the gateway's credential on "
+                    f"/handover (HTTP {status})"
+                )
+            if status == 422:
+                raise ValueError(
+                    "This conversation's transcript can't be read and "
+                    "there is no summary to carry instead, so it stays "
+                    f"on {harness}."
+                )
+            if status != 200:
+                raise ValueError(
+                    f"The mind couldn't render this conversation for "
+                    f"handover (HTTP {status}): {text}"
+                )
+            try:
+                body = json.loads(text) if text.strip() else None
+            except json.JSONDecodeError as exc:
+                raise MindCallFailed(
+                    f"mind {mind_id} answered the handover with no JSON: {exc}"
+                ) from exc
         except (MindCallFailed, ValueError):
             raise
         except Exception as exc:
