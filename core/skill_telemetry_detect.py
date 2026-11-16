@@ -17,6 +17,13 @@ or as a leading ``/slash`` token in a user turn. The ``input.skill`` value may
 carry a ``namespace:`` prefix (plugin skills surface as ``hivemind:planka``);
 the bare name is whatever follows the last ``:``.
 
+**dsh**, read through ``dsh_transcript``'s translation into the Claude shape.
+Its skill tool is ``skill`` and its arguments arrive as the JSON text the
+model wrote, ``{"name": "take-a-task"}``, so the translated block is
+``{"type":"tool_use","name":"skill","input":"{\"name\": \"take-a-task\"}"}``.
+Arguments that are not JSON, and a name dsh's own pattern refuses (a
+``namespace:`` prefix, capitals), name no skill: dsh loaded nothing.
+
 **Codex (codex).** Codex loads a skill by reading its ``SKILL.md`` through an
 ``exec_command`` tool call, so the skill name appears inside the call's
 ``input`` (and may echo back in the ``tool_result``). Scanning the serialized
@@ -37,6 +44,8 @@ from core.training_capture_codex import _parse_grouped as _parse_codex
 _SLASH_RE = re.compile(r"^/([a-z0-9][a-z0-9._-]*)")
 # A ``skills/<name>/SKILL.md`` reference anywhere in a Codex block's text.
 _CODEX_SKILL_RE = re.compile(r"skills/([a-z0-9][a-z0-9._-]*)/SKILL\.md")
+# The only names dsh's skill tool accepts; it refuses any other before loading.
+_DSH_SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _bare_name(raw: str) -> str:
@@ -44,11 +53,31 @@ def _bare_name(raw: str) -> str:
     return raw.rsplit(":", 1)[-1]
 
 
+def _invoked_skill(block: dict) -> object:
+    """The skill a tool-use block invokes, in either harness's shape, or None."""
+    name, args = block.get("name"), block.get("input")
+    if name == "Skill":
+        return args.get("skill") if isinstance(args, dict) else None
+    if name != "skill":
+        return None
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (ValueError, RecursionError):
+            return None
+    skill = args.get("name") if isinstance(args, dict) else None
+    # A name dsh refuses loaded nothing, so it is not a use.
+    if not isinstance(skill, str) or not _DSH_SKILL_NAME_RE.match(skill):
+        return None
+    return skill
+
+
 def detect_claude_skills(transcript_path: str | Path) -> set[str]:
     """Return the set of bare skill names that fired in a Claude transcript.
 
-    Scans every ``Skill`` tool-use block's ``input.skill`` (namespace-stripped)
-    and every user turn for a leading ``/slash`` command. Empty/None names are
+    Scans every ``Skill`` tool-use block's ``input.skill`` and every dsh
+    ``skill`` block's ``name`` argument (namespace-stripped), and every user
+    turn for a leading ``/slash`` command. Empty/None names are
     ignored.
     """
     names: set[str] = set()
@@ -60,9 +89,9 @@ def detect_claude_skills(transcript_path: str | Path) -> set[str]:
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") != "tool_use" or block.get("name") != "Skill":
+            if block.get("type") != "tool_use":
                 continue
-            skill = (block.get("input") or {}).get("skill")
+            skill = _invoked_skill(block)
             if isinstance(skill, str) and skill:
                 bare = _bare_name(skill)
                 if bare:
