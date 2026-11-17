@@ -40,23 +40,35 @@ _ERRORS = deque(maxlen=100)
 # Re-entrant: a handler that logs an error while this thread holds the lock
 # must not hang the process that is logging.
 _ERROR_LOCK = RLock()
-_DIAGNOSTIC_LIMIT = 4096
 _STARTED_AT = datetime.now(timezone.utc).isoformat()
+_DIAGNOSTIC_LIMIT = 4096
+# How much of a text is scrubbed, and how much of its end is dropped when it
+# was longer than that: longer than anything the address pattern can match.
+_SCRUB_WINDOW = 16 * _DIAGNOSTIC_LIMIT
+_FRAGMENT = 2048
 
 
 def _diagnostic_text(value: str) -> str:
-    # Cut before scrubbing, never after: the address pattern below is quadratic
-    # in the length of an unbroken run, and this runs on the thread that
-    # logged - the event loop. A 100,000-character error froze it for seconds.
-    # Twice the limit is scrubbed so a credential lying across the final cut
-    # is still replaced whole rather than shown in part.
-    value = value[:2 * _DIAGNOSTIC_LIMIT]
+    # This runs on the thread that logged - in a server, the event loop - so
+    # its cost is bounded whatever the text: only a window is scrubbed, and
+    # every pattern is linear in it. The address pattern used to start at the
+    # scheme and was quadratic in an unbroken run: a 100,000-character error
+    # held the loop for seconds.
+    cut = len(value) > _SCRUB_WINDOW
+    value = value[:_SCRUB_WINDOW]
     value = re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1[REDACTED]", value)
     value = re.sub(r"(?i)((?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+", r"\1[REDACTED]", value)
-    value = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:)[^@\s]+@", r"\1[REDACTED]@", value)
-    for key, secret in os.environ.items():
+    value = re.sub(r"(://[^/\s:@]{1,256}:)[^@\s]{1,1024}@", r"\1[REDACTED]@", value)
+    longest = _FRAGMENT
+    # A copy: another thread may set a variable while this one is logging.
+    for key, secret in list(os.environ.items()):
         if (_SENSITIVE.search(key) or key.upper().endswith("_API_KEY")) and len(secret) >= 8:
             value = value.replace(secret, "[REDACTED]")
+            longest = max(longest, len(secret))
+    if cut:
+        # The window may have ended inside a credential, which then matched
+        # nothing above. Whatever part of one is left is at the very end.
+        value = value[:max(0, len(value) - longest)]
     return value[:_DIAGNOSTIC_LIMIT]
 
 
