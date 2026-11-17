@@ -70,6 +70,9 @@ provider: <provider>
 default_model: <model>
 runtime_config_dir: /usr/src/app/minds/<name>/.claude
 resume_policy: always
+# Percentage of the model's context window at which a conversation is handed
+# over. No line means 100 (no early rotation), so a new mind gets one.
+rotation_threshold_percent: 30
 
 prompt_files:
   - prompts/common.md
