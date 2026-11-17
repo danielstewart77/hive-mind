@@ -136,6 +136,65 @@ def test_a_stop_already_reported_is_not_reported_again_while_nothing_ran(
     assert plan["wake"] == []
 
 
+def _pane(session_id, *, last_block_at, reported_at, quiet=True,
+          kind="usage", mind_id=OTHER):
+    """A feed entry for a conversation the feed still calls producing."""
+    return {"session_id": session_id, "mind_id": mind_id, "generating": True,
+            "quiet": quiet, "last_block_at": last_block_at,
+            "context": {"observed_at": reported_at, "kind": kind}}
+
+
+def test_a_finished_turn_the_feed_still_calls_producing_is_a_stop_and_a_wake(
+        watch):
+    """A pane never ends its turn on the feed; the Stop hook's report does."""
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 300)
+    plan = watch.decide(_live(generating=[pane]), [_task("t1")], STASH, NOW)
+
+    assert plan["running"] == []
+    assert plan["stopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_finished_pane_turn_is_a_new_stop_over_one_already_reported(watch):
+    reported = NOW - 600
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 299)
+    plan = watch.decide(
+        _live(generating=[pane]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_turn_that_has_put_out_work_since_its_last_stop_is_still_running(
+        watch):
+    """Quiet inside a long tool call, after an earlier turn's Stop report."""
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 900)
+    plan = watch.decide(_live(generating=[pane]), [_task("t1")], STASH, NOW)
+
+    assert plan["running"] == ["t1"]
+    assert plan["stopped"] == []
+
+
+def test_a_new_conversations_opening_estimate_does_not_end_its_first_turn(
+        watch):
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 299,
+                 kind="estimated")
+    plan = watch.decide(_live(generating=[pane]), [_task("t1")], STASH, NOW)
+
+    assert plan["running"] == ["t1"]
+
+
+def test_a_chief_of_staff_whose_own_pane_turn_finished_no_longer_holds_wakes(
+        watch):
+    own = _pane("stash-1", last_block_at=NOW - 300, reported_at=NOW - 300,
+                mind_id=STASH)
+    plan = watch.decide(_live(generating=[own]), [_task("t1")], STASH, NOW)
+
+    assert plan["mid_turn"] is False
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
 def test_a_task_with_several_sessions_stops_only_when_all_of_them_have(watch):
     """A bake-off is several sessions under one task."""
     plan = watch.decide(
