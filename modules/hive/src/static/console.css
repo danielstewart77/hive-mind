@@ -924,6 +924,11 @@ a { color: inherit; }
 .button:disabled { opacity: 0.55; cursor: default; pointer-events: none; }
 .credential-set input { max-width: 180px; }
 
+.feature-choice { display: flex; align-items: center; gap: 12px; padding: 10px 0; cursor: pointer; }
+.feature-choice input { width: 18px; height: 18px; }
+.feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); column-gap: 24px; }
+#hive-error-components { display: grid; gap: 16px; }
+
 /* A board item description drawn as markdown (static/markdown.js). The
    source shows as typed until the rendering is ready, and stays if it never is. */
 .md-render { min-width: 0; overflow-wrap: anywhere; line-height: 1.55; }
