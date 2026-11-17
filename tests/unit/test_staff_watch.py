@@ -97,6 +97,45 @@ def test_a_task_whose_stop_is_already_recorded_is_not_recorded_twice(watch):
     assert plan["stopped"] == []
 
 
+def test_a_turn_that_ran_between_two_passes_is_a_new_stop_and_owed_a_wake(
+        watch):
+    """Shorter than a pass, so no pass saw it running and cleared the stop."""
+    reported = NOW - 600
+    plan = watch.decide(
+        _live(idle=[_entry("sess-1", last_active=NOW - 30)]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+    assert plan["wake"][0]["stopped_at"] == NOW
+
+
+def test_a_turn_the_mind_took_by_itself_is_a_new_stop_and_owed_a_wake(watch):
+    """The gateway relays none of it, so only the Stop hook's report moves."""
+    reported = NOW - 600
+    entry = _entry("sess-1", last_active=reported - 5)
+    entry["context"] = {"observed_at": NOW - 30}
+    plan = watch.decide(
+        _live(idle=[entry]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_stop_already_reported_is_not_reported_again_while_nothing_ran(
+        watch):
+    reported = NOW - 600
+    entry = _entry("sess-1", last_active=reported - 5)
+    entry["context"] = {"observed_at": reported - 6}
+    plan = watch.decide(
+        _live(idle=[entry]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == []
+    assert plan["wake"] == []
+
+
 def test_a_task_with_several_sessions_stops_only_when_all_of_them_have(watch):
     """A bake-off is several sessions under one task."""
     plan = watch.decide(
