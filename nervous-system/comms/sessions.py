@@ -2816,17 +2816,15 @@ class SessionManager:
     async def role_model(self, session: dict, wanted: str | None = None) -> str:
         """The model this conversation may run on, as its mind's roles say.
 
-        Only a DSH conversation of a mind under role management is decided
-        here (story 10.18.5; the Codex and Claude harnesses follow in their
-        own stories). Every other conversation runs on the model it names.
-        For a managed one the model must be one some held role names: the
+        Decided here for a mind under role management on every harness
+        (stories 10.18.5 to 10.18.7); a mind never put under role management
+        runs on the model it names. For a managed one the model must be one
+        some held role names: the
         one asked for when it is, else the mind's default when that is, else
         the first a held role names, general first. None named by any role
         is refused, because anything no role grants is denied.
         """
         model = wanted or session["model"]
-        if normalise_harness(await self.conversation_harness(session)) != "dsh":
-            return model
         grants = await roles.grants_for(session["mind_id"])
         if not grants["managed"]:
             return model
@@ -2844,7 +2842,16 @@ class SessionManager:
                 f"{', '.join(allowed)}.")
         mind_row = await self._get_mind_row(session["mind_id"])
         default = str((mind_row or {}).get("model") or "")
-        return default if default in allowed else allowed[0]
+        if default in allowed:
+            return default
+        # A role's models are one list across every harness, so prefer one
+        # this conversation's harness actually offers; only when none is
+        # offered is the first named taken, and its spawn says why it fails.
+        harness = await self.conversation_harness(session)
+        for candidate in allowed:
+            if await self.mind_model_row(session["mind_id"], candidate, harness=harness):
+                return candidate
+        return allowed[0]
 
     async def _move_to_role_model(self, session: dict, model: str) -> None:
         """Put a conversation onto the model its roles allow, before a turn.
@@ -3293,7 +3300,7 @@ class SessionManager:
                     f"{target} isn't available on this mind: "
                     f"{entry.get('reason') or 'no reason given'}."
                 )
-            # Onto dsh, a managed mind may only take a model its roles allow.
+            # A managed mind may only take a model its roles allow.
             await self.role_model({**session, "harness": target}, wanted=model)
             offered = await self.mind_model_row(mind_id, model, harness=target)
             if offered is None:
