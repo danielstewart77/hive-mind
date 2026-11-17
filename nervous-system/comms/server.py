@@ -33,6 +33,7 @@ import comms.session_access as session_access
 import comms.user_access as user_access
 import comms.sessions as sessions
 from comms.sessions import SessionManager, normalise_harness
+import hive_logging
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 
 log = configure_logging("hive-mind.server")
@@ -340,6 +341,19 @@ async def _owned_mind_keys(
 
 
 install_fastapi_logging(app, log, "hive-comms")
+
+
+# hive_logging.py is copied into this service's image while this file is
+# mounted from the checkout. A pull therefore brings this route before a
+# rebuild brings the feed, and the service must still start: the feed is
+# looked up when asked for, and an image without it answers 404, which the
+# console shows as a component to update.
+@app.get("/diagnostics/errors", dependencies=[Depends(require_admin_bearer)])
+async def diagnostic_errors():
+    feed = getattr(hive_logging, "recent_errors", None)
+    if feed is None:
+        raise HTTPException(404, "This image was built before the error feed; rebuild it")
+    return feed()
 
 
 @app.get("/health")
