@@ -12,6 +12,14 @@ overlapping all reach the same answer.
 
 It always records what it sees. It only sometimes wakes the mind:
 
+A turn shorter than the gap between two passes is never seen producing
+output. The feed's record of when each idle conversation last finished is
+what catches it: a finish later than the stop on the row is a new stop.
+
+A terminal pane never tells the feed its turn ended, so the feed can go on
+calling a finished conversation producing. The Stop hook's report, later
+than the conversation's last output, is what ends it here.
+
 * A task whose status says Daniel is not waiting on it - `on hold` overnight,
   `with Daniel` because he took it himself, `done` - is recorded and pings
   nobody. Anything else is woken, including a status added later, because
@@ -38,22 +46,24 @@ own, outliving the pass that sent it.
 
 A wake is a turn in the mind's own conversation, so whatever the mind says
 back reaches Daniel on that surface whether it meant to tell him or not.
-That is why the wake itself carries the quiet hours: while the mind's
-`goodnight` marker exists, the wake says so, and the mind's skill holds the
-question for the sitrep instead of answering into the room. The watch keeps
-waking it — goodnight stops the telling, not the work.
+
+There are no quiet hours. The wake used to carry Daniel's goodnight so the
+mind would work without telling him; he withdrew it on 2026-11-13 because
+his phone silences itself at bedtime, which solves the same problem without
+a marker file, a branch in the wake text, and a path naming one mind inside
+a tool meant for whichever mind holds the role.
 
 Environment: `COMMS_URL` and `COMMS_ADMIN_BEARER_TOKEN` (the live feed and
 the message route are both admin), `MIND_ID` (whose conversation not to
-interrupt, and where to deliver), `HIVE_DATABASE_URL` for the ledger, as a
-role that sees only the `staff` schema, and `STAFF_GOODNIGHT_MARKER` for the
-file the mind touches when Daniel says goodnight.
+interrupt, and where to deliver), and `HIVE_DATABASE_URL` for the ledger, as
+a role that sees only the `staff` schema.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -64,7 +74,15 @@ import urllib.request
 from typing import Any, Iterable
 
 import hive_data
-from hive_data import staff
+
+try:
+    from hive_data import staff
+    _STAFF_UNIMPORTABLE = ""
+except ImportError as exc:  # a hive-data with no ledger module: named below
+    staff = None
+    # Kept, because the same ImportError is also a dependency the image
+    # never installed, and "pull hive-data" does not fix that one.
+    _STAFF_UNIMPORTABLE = f" (importing it raised {exc!r})"
 
 #: Statuses that are watched and recorded but never ping anybody. `on hold`
 #: is the overnight case the morning brief reads; `with Daniel` is work he
@@ -79,11 +97,6 @@ EVERY = 60.0
 #: a pass, so a hung gateway costs one pass rather than stacking them.
 TIMEOUT = 20.0
 
-#: The file the mind touches when Daniel says goodnight, and removes on his
-#: first message after. The watch only reads it: whose marker it is, and when
-#: it goes, are the mind's business.
-GOODNIGHT = "/usr/src/app/minds/stash/data/goodnight"
-
 #: Past this much silence, a conversation the feed still calls generating is
 #: a stalled turn rather than a working one. The gateway kills a turn at the
 #: mind's own `turn_timeout_seconds` (900 for the chief of staff), so silence
@@ -93,10 +106,38 @@ GOODNIGHT = "/usr/src/app/minds/stash/data/goodnight"
 #: silence inside a long turn is not the turn ending.
 STALLED = 900.0
 
+#: How far a conversation's last block may trail its Stop hook's report and
+#: still belong to the turn that report ended.
+SETTLE = 5.0
+
 #: How long a wake's own stream may be held open. It is the length of a
 #: model's turn rather than of a request, because the gateway runs the turn
 #: only while a reader is attached.
 TURN_TIMEOUT = 1800.0
+
+#: How long a sub-agent record that belongs to no conversation may stay open
+#: before the sweep writes its ending. Only those: a record with a
+#: conversation is decided by whether that conversation is still producing
+#: output, which is a real answer rather than a guess.
+#:
+#: Deliberately longer than any turn this hive allows a mind that has a
+#: bound - the longest configured is four hours - because the cost of the
+#: two errors is not symmetric. Retiring a child that is still running
+#: records work as abandoned that was not, and nothing afterwards can tell
+#: a reader it was wrong. Retiring a dead one late leaves a record open that
+#: every reader already draws as stale from its own clock. `STAFF_AGENT_GRACE`
+#: overrides it for a hive whose minds run longer still.
+GRACE = float(os.environ.get("STAFF_AGENT_GRACE") or 4 * 60 * 60)
+
+
+def generating_sessions(live: dict[str, Any]) -> set[str]:
+    """The conversations the feed says are producing output right now.
+
+    Only the generating half. A conversation the feed calls idle is one whose
+    turn has ended, and a child of that turn died with it.
+    """
+    return {str(entry.get("session_id") or "")
+            for entry in live.get("sessions") or []}
 
 
 class Refused(RuntimeError):
@@ -119,13 +160,59 @@ def live_state(live: dict) -> tuple[dict[str, dict], dict[str, dict]]:
                 out[str(entry["session_id"])] = entry
         return out
 
-    return by_id(live.get("sessions")), by_id(live.get("idle"))
+    generating, idle = by_id(live.get("sessions")), by_id(live.get("idle"))
+    # The feed's word that a conversation is producing is an inference for a
+    # terminal pane, which never says when a turn ends, and one that used to
+    # be a chat conversation is held as producing for fifteen silent minutes.
+    # The mind's own Stop hook does say, so its report is believed first.
+    for session_id in [sid for sid, entry in generating.items()
+                       if _finished(entry)]:
+        idle[session_id] = generating.pop(session_id)
+    return generating, idle
+
+
+def _finished(entry: dict) -> bool:
+    """Whether a conversation the feed calls producing has ended its turn.
+
+    Ended means the Stop hook reported after the last thing the conversation
+    put on the feed, and nothing has followed: the feed's own `quiet`. The
+    last block may trail the report by `SETTLE`, because a pane's prose is
+    tailed out of the transcript after the hook has already run. A size
+    estimated when the conversation opened is not a Stop report and ends
+    nothing.
+    """
+    context = entry.get("context")
+    if not entry.get("quiet") or not isinstance(context, dict):
+        return False
+    if context.get("kind") == "estimated":
+        return False
+    observed, last = context.get("observed_at"), entry.get("last_block_at")
+    if observed is None or last is None:
+        return False
+    return float(observed) >= float(last) - SETTLE
 
 
 def _stalled(entry: dict, now: float) -> bool:
     """Whether a generating conversation has been silent too long to be one."""
     last = entry.get("last_block_at") or entry.get("started_at")
     return last is not None and (now - last) > STALLED
+
+
+def _ended_at(entry: dict | None) -> float:
+    """When an idle conversation last finished a turn, as the feed has it.
+
+    Two clocks, the later of them. `last_active` moves with every event of a
+    turn the gateway relays. `context.observed_at` is written by the mind's
+    own Stop hook, so it also moves for a turn the mind took by itself - one
+    started by a background job finishing - which the gateway never relays.
+    A conversation absent from the feed, or carrying neither, has not been
+    seen to finish anything.
+    """
+    if not entry:
+        return 0.0
+    context = entry.get("context")
+    observed = context.get("observed_at") if isinstance(context, dict) else None
+    return max(float(entry.get("last_active") or 0.0), float(observed or 0.0))
 
 
 def decide(live: dict, tasks: list[dict], mind_id: str,
@@ -135,7 +222,8 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
     Pure: every argument is data and the answer is data, so the rules are
     decided in one place and the writes happen in another.
 
-    `running` and `stopped` are task ids to record. `pending` is every task
+    `running` and `stopped` are task ids to record, and `restopped` is a
+    stop to record over one already there. `pending` is every task
     owed a wake, read from the rows by `staff.wake_pending` and ordered
     oldest stop first; `wake` is that list minus the quiet statuses, and is
     empty while the mind is mid-turn.
@@ -147,6 +235,7 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
 
     running: list[str] = []
     stopped: list[str] = []
+    restopped: list[str] = []
     for task in tasks:
         sessions = [str(s) for s in (task.get("sessions") or ())]
         if not sessions or task.get("status") == "done":
@@ -157,13 +246,20 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
             running.append(task["id"])
         elif task.get("stopped_at") is None:
             stopped.append(task["id"])
+        elif any(_ended_at(idle.get(session)) > task["stopped_at"]
+                 for session in sessions):
+            # A turn that began and ended between two passes was never seen
+            # producing output, so nothing cleared the stop it already had
+            # and the row reads as old news. The feed's own record of when
+            # the conversation last finished says otherwise.
+            restopped.append(task["id"])
 
     # The rows as they will stand once this pass's writes land, so the wake
     # covers a stop recorded in the same pass that reports it.
     settled = []
     for task in tasks:
         row = dict(task)
-        if row["id"] in stopped:
+        if row["id"] in stopped or row["id"] in restopped:
             row["stopped_at"] = now
         elif row["id"] in running:
             row["stopped_at"] = None
@@ -173,37 +269,18 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
                      key=lambda row: row["stopped_at"])
     wake = [] if mid_turn else [row for row in pending
                                 if row.get("status") not in QUIET]
-    return {"running": running, "stopped": stopped, "mid_turn": mid_turn,
+    return {"running": running, "stopped": stopped, "restopped": restopped,
+            "mid_turn": mid_turn,
             "pending": [row["id"] for row in pending], "wake": wake}
 
 
-def goodnight() -> bool:
-    """Whether Daniel has said goodnight, as the mind's own marker says."""
-    marker = os.environ.get("STAFF_GOODNIGHT_MARKER") or GOODNIGHT
-    try:
-        return os.path.exists(marker)
-    except OSError:
-        return False
-
-
-def wake_message(rows: list[dict], quiet: bool = False) -> str:
-    """The one turn the mind is woken with, naming every task at once.
-
-    `quiet` is Daniel's goodnight. It has to ride on the wake because the
-    wake is a turn in the mind's own conversation: anything the mind says
-    back is delivered to Daniel's surface whether it meant to tell him or
-    not, so "do not tell him" is an instruction the turn has to carry.
-    """
+def wake_message(rows: list[dict]) -> str:
+    """The one turn the mind is woken with, naming every task at once."""
     head = ("The watch: a session you are watching has stopped producing "
             "output." if len(rows) == 1 else
             f"The watch: {len(rows)} sessions you are watching have stopped "
             "producing output.")
-    tail = ("Daniel has said goodnight, so say nothing to him: run "
-            "/tend-the-ledger, answer every session the task already answers, "
-            "and put anything that needs him on hold for the sitrep. Reply "
-            "with nothing at all."
-            if quiet else
-            "Run /tend-the-ledger and read each one before saying anything "
+    tail = ("Run /tend-the-ledger and read each one before saying anything "
             "to Daniel.")
     lines = []
     for row in rows:
@@ -344,7 +421,14 @@ def _drain(answer: Any, session_id: str) -> None:
 
 
 async def tick(now: float | None = None) -> dict[str, Any]:
-    """One pass. Reports what it recorded and what it woke, as data."""
+    """One pass. Reports what it recorded and what it woke, as data.
+
+    Also retires the sub-agent records nothing has been heard from, which is
+    the one piece of work here that is not about tasks at all. It lives in
+    this process because this is the hive's only timer holding the ledger's
+    own database role, and it runs before the live feed is read so that a
+    comms outage cannot skip it.
+    """
     moment = time.time() if now is None else now
     mind_id = (os.environ.get("MIND_ID") or "").strip()
     if not mind_id:
@@ -359,27 +443,101 @@ async def tick(now: float | None = None) -> dict[str, Any]:
         task["sessions"] = [row["session_id"] for row in
                             await staff.task_sessions(task["id"])]
 
+    # After the live read, and that ordering was wrong the first time. The
+    # earlier version swept before it, so that a comms outage could not skip
+    # the pass - but it had to pick a window with no way to tell a dead child
+    # from a slow one, and `TURN_TIMEOUT` here is this process's own stream
+    # limit rather than any mind's turn length. On a hive whose minds allow
+    # 900 seconds, 14400 seconds and no bound at all, that retired work that
+    # was still running and reported it as abandoned, which is the one thing
+    # a record of what ran must never say.
+    #
+    # So the sweep asks the live feed instead. A child dies with its turn's
+    # process, so a record whose conversation is no longer producing output
+    # is a record whose child is gone - whatever that mind's turn length. The
+    # grace window below is only for records that resolve to no conversation
+    # at all, where there is nothing to ask.
+    #
+    # The cost is that a pass refused by comms sweeps nothing. That is the
+    # right trade: the requirement is that a child nobody closed is retired
+    # *eventually*, and the first pass after comms returns does it. Retiring
+    # a live child early is a wrong record; retiring a dead one late is a
+    # record that arrives late.
+    retired = await staff.retire_stale_agents(
+        now=moment, timeout=GRACE, alive=generating_sessions(live))
+
     plan = decide(live, tasks, mind_id, moment)
 
     for task_id in plan["running"]:
         await staff.note_running(task_id)
     for task_id in plan["stopped"]:
         await staff.note_stopped(task_id, now=moment)
+    for task_id in plan["restopped"]:
+        # The ledger keeps the first stop it is given, so the old one is
+        # cleared as a turn seen running would have cleared it.
+        await staff.note_running(task_id)
+        await staff.note_stopped(task_id, now=moment)
 
     woken: list[str] = []
     if plan["wake"]:
         session_id = target_session(live, mind_id)
-        quiet = goodnight()
         if session_id is not None and send_wake(
-                session_id, wake_message(plan["wake"], quiet)):
+                session_id, wake_message(plan["wake"])):
             for row in plan["wake"]:
                 await staff.note_woken(row["id"], now=moment)
                 woken.append(row["id"])
         plan["target"] = session_id
-    return {"at": moment, "recorded_stopped": plan["stopped"],
+    return {"at": moment,
+            "recorded_stopped": plan["stopped"] + plan["restopped"],
             "recorded_running": plan["running"], "mid_turn": plan["mid_turn"],
             "pending": plan["pending"], "woken": woken,
-            "target": plan.get("target"), "goodnight": goodnight()}
+            "target": plan.get("target"),
+            # The count rather than the ids. The first pass after a
+            # deployment can close a backlog of every child left open since
+            # the last one, and a pass's report is one line in a log.
+            "retired_agents": len(retired)}
+
+
+#: What a pass calls on `hive_data.staff`, and the keywords it passes.
+#: The library reaches this process by a different route from this file, so
+#: the two can stand at different commits; checked at start, a library that
+#: is behind ends the watch with its name rather than failing one pass a
+#: minute in a log nobody reads. A call added to `tick` is added here with it.
+NEEDS: dict[str, tuple[str, ...]] = {
+    "tasks": (), "task_sessions": (), "wake_pending": (),
+    "retire_stale_agents": ("now", "timeout", "alive"),
+    "note_running": (), "note_stopped": ("now",), "note_woken": ("now",),
+}
+
+
+def missing() -> list[str]:
+    """What a pass calls that the loaded `hive_data.staff` lacks."""
+    if staff is None:
+        return ["hive_data.staff"]
+    absent: list[str] = []
+    for name, keywords in NEEDS.items():
+        function = getattr(staff, name, None)
+        if function is None:
+            absent.append(f"hive_data.staff.{name}")
+            continue
+        params = inspect.signature(function).parameters
+        if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            continue
+        absent += [f"{name}({keyword}=)" for keyword in keywords
+                   if keyword not in params]
+    return absent
+
+
+def _level() -> None:
+    absent = missing()
+    if absent:
+        where = getattr(hive_data, "__file__", None) or "an unknown path"
+        raise Refused(
+            f"hive_data at {where} is behind the staff watch: it has no "
+            f"{', '.join(absent)}{_STAFF_UNIMPORTABLE}. Bring hive-data level "
+            "with the hive_mind "
+            "checkout; a container that bakes its own copy needs the host's "
+            "mounted over it, or a rebuild.")
 
 
 async def _connect() -> None:
@@ -423,6 +581,7 @@ def main(argv: list[str] | None = None) -> int:
                      help=f"seconds between passes (default {EVERY:g})")
     args = parser.parse_args(argv)
     try:
+        _level()
         if args.command == "tick":
             return asyncio.run(_once())
         return asyncio.run(_forever(args.every))

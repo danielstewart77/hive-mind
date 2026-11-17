@@ -47,6 +47,27 @@ docker compose up -d --build
 
 All services run on a shared Docker network (`hivemind`). The gateway (`hive-comms`, built from `nervous-system/`) is at `http://localhost:8426`; the vector store + knowledge graph (`hive-lucent`) is at `http://localhost:8425`.
 
+## Modules (`modules/`)
+
+Every repository hive-mind depends on is a module in its manifest,
+[`.gitmodules`](.gitmodules): hive-tools, hive-data, hive (the console),
+terminal, inference-proxy, hive-harness-dsh, hive-surfaces and auth-service
+(where people sign in to the hive, with local accounts or third-party
+sign-in; every hive runs it), each under `modules/<name>`. Clone hive-mind and bring them all in at the latest:
+
+```bash
+git clone https://github.com/danielstewart77/hive-mind.git && cd hive-mind
+scripts/modules.sh
+```
+
+Nothing is pinned. `scripts/modules.sh` brings each module to the newest
+commit of its branch and leaves it checked out on that branch, so you can
+work in it, commit and push as in any clone; run it again to update. A module
+you have switched to another branch is left alone. To pin one for a reason,
+add `pin = <commit>` to its entry. The installer runs the same script, and
+the containers that mount hive-mind never see the modules: a mind reaches
+Hive Tools over its API, not its code.
+
 ## Documentation (`docs/`)
 
 Human-readable guides, background, and reference material — organized by topic.

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from installer import compose
+from installer.shell import Shell
+from installer.steps import Ctx
 
 from tests.unit.installer_helpers import (a_host, all_pieces, answers, installer_at, needs_compose,
                                           render)
@@ -65,8 +67,22 @@ def test_existing_services_and_bot_tokens_land_in_each_service_that_uses_them(tm
     assert console["KOKORO_VOICE_URL"] == "http://voice.corp.example:8422"
     assert services[compose.TERMINAL]["environment"]["VOICE_API_URL"] == \
         "http://voice.corp.example:8422"
-    assert services["hive-tools"]["environment"]["OLLAMA_BASE_URL"] == \
-        "http://gpu.corp.example:11434"
+    tools_env = services["hive-tools"]["environment"]
+    assert tools_env["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
+    assert tools_env["INFERENCE_PROXY_KEY"] == "client-key-1"
+
+
+def test_the_tools_service_calls_models_through_the_proxy_with_the_hives_classifier(tmp_path):
+    inst = installer_at(tmp_path, answers(
+        pieces=["tools"], modes={"proxy": "existing"},
+        proxy_url="http://proxy.corp.example:8888", proxy_key="client-key-1"))
+    Ctx(inst, Shell(inst.home.log)).set_env(**{compose.CLASSIFIER_MODEL_VAR: "classifier-of-record"})
+
+    tools_env = render(inst)["services"]["hive-tools"]["environment"]
+
+    assert tools_env["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
+    assert tools_env["INFERENCE_PROXY_KEY"] == "client-key-1"
+    assert tools_env["HIVE_TOOLS_DEFAULT_MODEL"] == "classifier-of-record"
 
 
 def test_nothing_waits_on_a_service_that_is_not_rendered(tmp_path):
@@ -187,3 +203,23 @@ def test_mind_lucent_hooks_and_console_carry_the_one_proxy_key_and_the_proxy_add
         assert hive_mind_env.proxy() == (proxy, key)
     finally:
         sys.modules.pop("hive_mind_env", None)
+
+
+def test_services_build_from_hive_minds_modules_and_minds_cannot_read_them(tmp_path):
+    inst = installer_at(tmp_path, answers(pieces=all_pieces(), modes={"voice": "here"},
+                                          telegram_token="t", discord_token="d"))
+    services = render(inst)["services"]
+    modules = inst.home.root / "repos" / "hive-mind" / "modules"
+
+    builds = {name: svc["build"]["context"] for name, svc in services.items() if "build" in svc}
+    assert builds["hive-tools"] == str(modules / "hive-tools")
+    assert builds[compose.CONSOLE] == str(modules / "hive")
+    assert builds[compose.TERMINAL] == str(modules / "terminal")
+    assert builds["inference-proxy"] == str(modules / "inference-proxy")
+    console_mounts = {v["target"]: v for v in services[compose.CONSOLE]["volumes"]}
+    assert console_mounts["/hive_tools_repo"]["source"] == str(modules / "hive-tools")
+    assert console_mounts["/hive_tools_repo"]["read_only"] is True
+    assert services[compose.CONSOLE]["environment"]["HIVE_TOOLS_DIR"] == str(modules / "hive-tools")
+    for name in ("wren", compose.VOICE, compose.TELEGRAM, compose.DISCORD):
+        hidden = {entry.split(":", 1)[0] for entry in services[name]["tmpfs"]}
+        assert {"/usr/src/app/modules", "/usr/src/app/.git/modules"} <= hidden, name

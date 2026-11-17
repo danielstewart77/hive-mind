@@ -11,13 +11,6 @@ def _keys(answer_set: dict) -> set[str]:
     return {q.key for q in plan.questions(answer_set)}
 
 
-def test_ticking_the_terminal_clones_the_terminal_and_the_console_code_it_is_built_from():
-    assert {"terminal", "hive"} <= set(plan.repos(answers(pieces=["terminal"])))
-    # The console's code is cloned regardless — the first admin is seeded
-    # with it — but the terminal's only when it is ticked.
-    assert "terminal" not in plan.repos(answers(pieces=["console"]))
-
-
 def test_ticking_a_bot_selects_the_console_where_it_is_claimed():
     assert "console" not in plan.closure([])
     assert "console" in plan.closure(["telegram"])

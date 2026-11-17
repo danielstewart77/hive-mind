@@ -629,7 +629,7 @@ async def graph_upsert(
         from lucent_api.kg_guards import (
             check_disambiguation,
             check_orphan_guard,
-            send_disambiguation_message,
+            notify_disambiguation,
         )
 
         label = await _validate_label(entity_type)
@@ -645,7 +645,7 @@ async def graph_upsert(
         disambig = await _call(
             check_disambiguation, name, entity_type, mind_id, owner)
         if disambig.action == "disambiguate":
-            await _call(send_disambiguation_message, name, disambig.existing_nodes)
+            await notify_disambiguation(name, disambig.existing_nodes, owner)
             return json.dumps({
                 "upserted": False,
                 "reason": "disambiguation_required",
