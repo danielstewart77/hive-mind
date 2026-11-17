@@ -8,6 +8,7 @@ import store
 # Stable IDs, shared by the settings list and the sidebar.
 FEATURES = [
     ('overview', 'Overview', False), ('minds', 'Minds', False),
+    ('usage', 'Usage', False), ('roles', 'Roles', True),
     ('bots', 'Bots', True), ('activity', 'Activity', True),
     ('dashboard', 'Dashboard', True), ('hive-errors', 'Hive Errors', True),
     ('edge-minds', 'Edge Minds', True), ('capability-nodes', 'Capability Nodes', True),

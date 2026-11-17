@@ -9,13 +9,15 @@ import hive_logging
 
 def test_saved_features_hide_navigation_and_keep_settings(builtin_console):
     client = builtin_console.admin()
-    response = client.put('/api/settings/features', json={'graph': False, 'setup': False})
+    response = client.put('/api/settings/features', json={'graph': False, 'setup': False, 'usage': False, 'roles': False})
     assert response.status_code == 200
     page = client.get('/settings/features')
     assert page.status_code == 200
     nav = page.text.split('aria-label="Main navigation"')[1].split('</aside>')[0]
     assert 'href="/graph"' not in nav
     assert 'href="/setup"' not in nav
+    assert 'href="/usage"' not in nav
+    assert 'href="/roles"' not in nav
     assert 'href="/settings/general"' in nav
     assert client.get('/api/settings/features').json()['enabled']['graph'] is False
     assert client.put('/api/settings/features', json={'graph': True}).status_code == 200

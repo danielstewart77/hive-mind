@@ -63,3 +63,7 @@ the site changes. No new database schema or Docker socket mount is needed. The
 site uses its existing admin credentials for component diagnostics. Until a
 component is updated its feed is marked unavailable. Historical Docker errors
 from before the updated process started are not imported.
+
+## Upstream refresh — 2026-11-17
+
+Usage and Roles, introduced upstream after the original feature work, are now included in the per-account feature choices. The navigation route regression rejected the omission and passed after the repair. The updated deployment preserves the current mind rotation percentage and terminal conversation record.
