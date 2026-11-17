@@ -268,21 +268,40 @@ window.addEventListener("DOMContentLoaded", async function () {
     // because a default displayed as a value reads as a decision somebody
     // made.
     let settingsState = null;
+    let settingsRequest = 0;
+    let settingsSaving = false;
+    let settingsSummaryRefreshPending = false;
 
     function settingsSummary(state) {
         if (state.unreachable) return [["Settings", "Could not be read"], ["Reason", state.detail || "This Mind did not answer"]];
-        const rows = (state.settings || []).map(function (entry) {
+        const rows = (state.settings || []).filter(function (entry) {
+            return entry.key !== "rotation_threshold_percent";
+        }).map(function (entry) {
             return [entry.label, entry.present ? String(entry.value) : "Not set"];
         });
-        // The window belongs to the model and is read from the proxy, so it
-        // is reported here and editable nowhere.
-        rows.push(["Context window", state.context_window ? String(state.context_window) + " tokens" : "Not reported"]);
+        const percentage = state.rotation_threshold_percent;
+        const invalid = state.rotation_policy_error === "invalid_runtime_policy";
+        rows.push(["Rotation threshold", invalid ? "Saved value is invalid" :
+            (percentage === null || percentage === undefined ? "Unavailable" :
+                String(percentage) + "%" + ((state.settings || []).some(function (entry) {
+                    return entry.key === "rotation_threshold_percent" && !entry.present;
+                }) ? " (default)" : ""))]);
+        rows.push(["Context window", state.context_window !== null && state.context_window !== undefined
+            ? Number(state.context_window).toLocaleString() + " tokens" : "Unavailable for this model"]);
+        rows.push(["Token threshold", state.rotation_threshold_tokens !== null &&
+            state.rotation_threshold_tokens !== undefined
+            ? Number(state.rotation_threshold_tokens).toLocaleString() + " tokens"
+            : "Cannot be calculated without a known context window"]);
         return rows;
     }
 
     function settingsControl(entry) {
         const id = "mind-setting-" + entry.key;
-        const value = entry.present ? entry.value : "";
+        const value = entry.present ? entry.value :
+            (entry.key === "rotation_threshold_percent" && settingsState &&
+                settingsState.rotation_threshold_percent !== null &&
+                settingsState.rotation_threshold_percent !== undefined
+                ? settingsState.rotation_threshold_percent : "");
         let control;
         // A setting the Mind has no line for gets an explicit "Not set" entry,
         // selected. Without one a browser selects the first option of every
@@ -313,7 +332,19 @@ window.addEventListener("DOMContentLoaded", async function () {
             control + '<small>' + h.escapeHtml(entry.help || "") + '</small></div>';
     }
 
+    function paintSettings(state) {
+        settingsState = state;
+        paintSummary("mind-settings-summary", settingsSummary(state));
+        const form = document.getElementById("mind-settings-form");
+        if (state.unreachable) { form.hidden = true; return; }
+        form.hidden = false;
+        document.getElementById("mind-settings-fields").innerHTML =
+            (state.settings || []).map(settingsControl).join("");
+    }
+
     async function renderSettings(name) {
+        if (settingsSaving) return;
+        const request = ++settingsRequest;
         const section = document.getElementById("mind-settings");
         section.dataset.mindName = name;
         section.hidden = false;
@@ -323,13 +354,26 @@ window.addEventListener("DOMContentLoaded", async function () {
         } catch (error) {
             state = {unreachable: true, detail: error.message};
         }
-        settingsState = state;
+        if (request !== settingsRequest || settingsSaving) return;
+        paintSettings(state);
+    }
+
+    async function refreshSettingsSummary(name) {
+        if (settingsSaving) {
+            settingsSummaryRefreshPending = true;
+            return;
+        }
+        const section = document.getElementById("mind-settings");
+        if (section.dataset.mindName !== name) return;
+        const request = ++settingsRequest;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/settings");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        if (request !== settingsRequest || settingsSaving || section.dataset.mindName !== name) return;
         paintSummary("mind-settings-summary", settingsSummary(state));
-        const form = document.getElementById("mind-settings-form");
-        if (state.unreachable) { form.hidden = true; return; }
-        form.hidden = false;
-        document.getElementById("mind-settings-fields").innerHTML =
-            (state.settings || []).map(settingsControl).join("");
     }
 
 
@@ -514,6 +558,8 @@ window.addEventListener("DOMContentLoaded", async function () {
     // A provider added to the proxy therefore appears here with no change on
     // this side, and nothing is offered that the proxy would refuse.
     let modelRows = [];
+    let configurationRequest = 0;
+    let configurationSaving = false;
 
     // Declared here, not beside the file-browser code below: the page-load
     // block runs before those statements, and a `let` read from inside its
@@ -531,16 +577,19 @@ window.addEventListener("DOMContentLoaded", async function () {
     // whatever sorts first: silently swapping it means an operator who opened
     // this page for an unrelated reason and pressed Save rewrites the Mind's
     // model without ever seeing the change.
-    // The rotation threshold belongs to the model: a percentage of its
-    // window, written on the proxy's row for it.
+    // Each model row comes from the Mind and carries that Mind's saved
+    // percentage beside the proxy-owned capacity.
     function rotationNote(row) {
         return row && row.rotation_threshold_percent ? " — rotates at " + row.rotation_threshold_percent + "%" : "";
     }
 
     function rotationThreshold(row) {
-        if (!row || !row.rotation_threshold_percent) return "Not reported by the proxy";
-        return row.rotation_threshold_percent + "% of the window" +
-            (row.context_window ? " (" + Math.floor(row.context_window * row.rotation_threshold_percent / 100).toLocaleString() + " tokens)" : "");
+        if (!row || row.rotation_threshold_percent === null ||
+            row.rotation_threshold_percent === undefined) return "Saved percentage unavailable";
+        if (row.context_window === null || row.context_window === undefined)
+            return row.rotation_threshold_percent + "% — token threshold unavailable for this model";
+        return row.rotation_threshold_percent + "% (" +
+            Math.floor(row.context_window * row.rotation_threshold_percent / 100).toLocaleString() + " tokens)";
     }
 
     function renderModelOptions(provider, preferred) {
@@ -587,6 +636,31 @@ window.addEventListener("DOMContentLoaded", async function () {
             status.textContent = "This Mind is set to " + currentModel + ", which its provider no longer offers. It stays selected until you pick something else.";
         }
         providerSelect.onchange = function () { renderModelOptions(providerSelect.value, ""); };
+    }
+
+    function paintModelConfiguration(configuration, fallbackModel, fallbackProvider) {
+        const runtime = configuration.configuration || {};
+        const currentModel = runtime.default_model || fallbackModel || "";
+        populateModelPicker(configuration.models || [], currentModel,
+            runtime.provider || fallbackProvider || "");
+        const row = (configuration.models || []).find(function (item) {
+            return item.name === currentModel;
+        });
+        paintSummary("mind-model-summary", [
+            ["Model", currentModel || "Unknown"],
+            ["Provider", runtime.provider || fallbackProvider || "Not reported"],
+            ["Rotation threshold", rotationThreshold(row)]
+        ]);
+    }
+
+    async function refreshModelConfiguration(name, fallbackModel, fallbackProvider) {
+        const request = ++configurationRequest;
+        const configuration = await h.requestJson(
+            "/api/minds/" + encodeURIComponent(name) + "/configuration"
+        );
+        if (request !== configurationRequest) return null;
+        paintModelConfiguration(configuration, fallbackModel, fallbackProvider);
+        return configuration;
     }
 
     document.getElementById("mind-files").addEventListener("click", function (event) {
@@ -771,14 +845,9 @@ window.addEventListener("DOMContentLoaded", async function () {
         const editor = document.getElementById("mind-editor"); editor.dataset.mindName = mind.name; editor.hidden = false;
         let down = false, downReason = "";
         try {
-            const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
-            populateModelPicker(configuration.models || [], configuration.configuration.default_model || cfg.default_model || mind.model || "", configuration.configuration.provider || cfg.provider || "");
-            const currentModel = configuration.configuration.default_model || cfg.default_model || mind.model || "";
-            paintSummary("mind-model-summary", [
-                ["Model", currentModel || "Unknown"],
-                ["Provider", configuration.configuration.provider || cfg.provider || "Not reported"],
-                ["Rotation threshold", rotationThreshold((configuration.models || []).find(function (row) { return row.name === currentModel; }))]
-            ]);
+            await refreshModelConfiguration(
+                mind.name, cfg.default_model || mind.model || "", cfg.provider || ""
+            );
         } catch (error) {
             // 502 is the console saying the Mind itself did not answer. Its
             // model, voice, settings, skills and files are the Mind's own
@@ -1181,6 +1250,7 @@ window.addEventListener("DOMContentLoaded", async function () {
     document.getElementById("mind-settings-form").addEventListener("submit", async function (event) {
         event.preventDefault();
         const section = document.getElementById("mind-settings"), status = document.getElementById("mind-settings-status");
+        if (settingsSaving) return;
         // Only what the operator actually changed. A form that resent every
         // field would write values nobody touched back over an edit made
         // elsewhere since this page was opened.
@@ -1202,18 +1272,32 @@ window.addEventListener("DOMContentLoaded", async function () {
             }
             if (entry.kind === "number") {
                 const now = Number(raw);
+                if (entry.key === "rotation_threshold_percent" && !entry.present &&
+                    now === settingsState.rotation_threshold_percent) return;
                 if (!entry.present || Number(entry.value) !== now) changed[entry.key] = now;
                 return;
             }
             if (!entry.present || String(entry.value) !== raw) changed[entry.key] = raw;
         });
         if (!Object.keys(changed).length) { status.textContent = "Nothing changed."; return; }
+        settingsSaving = true;
+        const request = ++settingsRequest;
+        const saveButton = document.getElementById("mind-settings-save");
+        saveButton.disabled = true;
         status.textContent = "Saving…";
         try {
-            await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({settings: changed})});
+            const saved = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({settings: changed})});
             status.textContent = "Saved to this Mind's runtime.yaml.";
-            await renderSettings(section.dataset.mindName);
+            if (request === settingsRequest) paintSettings(saved);
         } catch (error) { status.textContent = error.message; }
+        finally {
+            settingsSaving = false;
+            saveButton.disabled = false;
+            if (settingsSummaryRefreshPending) {
+                settingsSummaryRefreshPending = false;
+                await refreshSettingsSummary(section.dataset.mindName);
+            }
+        }
     });
 
     document.getElementById("mind-token-form").addEventListener("submit", async function (event) {
@@ -1236,6 +1320,11 @@ window.addEventListener("DOMContentLoaded", async function () {
     document.getElementById("mind-model-form").addEventListener("submit", async function (event) {
         event.preventDefault();
         const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status");
+        if (configurationSaving) return;
+        configurationSaving = true;
+        const request = ++configurationRequest;
+        const saveButton = document.getElementById("mind-model-save");
+        saveButton.disabled = true;
         status.textContent = "Saving…";
         try {
             // No restart is offered here. The broker row the gateway reads at
@@ -1245,8 +1334,25 @@ window.addEventListener("DOMContentLoaded", async function () {
             // Offering a restart anyway read as one being needed, and bouncing
             // a container kills every conversation it is holding.
             const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value, provider: event.target.elements.provider.value})});
-            status.textContent = "Saved. The next session this Mind is asked for starts on " + (data.configuration.default_model || "the new model") + ".";
+            if (request !== configurationRequest) return;
+            const savedConfiguration = data.configuration || {};
+            const mindName = editor.dataset.mindName;
+            const savedModel = savedConfiguration.default_model || "";
+            const savedProvider = event.target.elements.provider.value;
+            status.textContent = "Saved. The next session this Mind is asked for starts on " + (savedModel || "the new model") + ".";
+            // The PATCH response is already the Mind's confirmed saved state.
+            // Paint it immediately so a slow catalog refresh cannot leave the
+            // visible model and threshold summary describing the old choice.
+            paintModelConfiguration({configuration: savedConfiguration, models: modelRows}, savedModel, savedProvider);
+            await Promise.all([
+                refreshModelConfiguration(mindName, savedModel, savedProvider),
+                refreshSettingsSummary(mindName),
+            ]);
         } catch (error) { status.textContent = error.message; }
+        finally {
+            configurationSaving = false;
+            saveButton.disabled = false;
+        }
     });
 });
 </script>
