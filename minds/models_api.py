@@ -36,6 +36,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
+from minds.rotation_policy import read_policy
 from minds.runtime_api import authorize_gateway, load_runtime
 
 _TIMEOUT = aiohttp.ClientTimeout(total=6)
@@ -115,6 +116,8 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
     file's `harness` is only the answer when the caller names none.
     """
     runtime = load_runtime(path)
+    policy = read_policy(runtime)
+    percentage = policy["percentage"] if policy["status"] == "ok" else None
     env = _mind_env(path)
     base_url = _first_env(_BASE_URL_VARS, env)
     key = _first_env(_KEY_VARS, env)
@@ -151,19 +154,10 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
                 # thing that knows it. Relayed rather than mapped here, and
                 # left absent when nobody has declared it: a zero would make
                 # every conversation render as infinitely full.
-                "context_window": (
-                    row.get("context_window")
-                    if isinstance(row.get("context_window"), int)
-                    else None
-                ),
-                # The share of that window a conversation fills before it
-                # rotates, also the model's own and also the proxy's to say.
-                # Absent when the proxy names none or names one that is not a
-                # share: a conversation with no threshold does not rotate on
-                # one, which is better than rotating at a guessed one.
-                "rotation_threshold_percent": _percent(
-                    row.get("rotation_threshold_percent")
-                ),
+                "context_window": _context_window(row.get("context_window")),
+                # Capacity belongs to the model; the rotation preference
+                # belongs to this mind, regardless of proxy legacy metadata.
+                "rotation_threshold_percent": percentage,
                 # Whether the model reads pictures: true, false, or None when
                 # the proxy does not know. Three states, relayed as they are,
                 # because "unknown" must not be read as "no" for a
@@ -186,28 +180,24 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
     return rows
 
 
-def _percent(value: Any) -> int | None:
-    """A rotation share of a window, or None when it is not one."""
-    if isinstance(value, bool) or not isinstance(value, int):
+def _context_window(value: Any) -> int | None:
+    """A published positive integer capacity; bool is not a capacity."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
-    return value if 0 < value < 100 else None
+    return value
 
 
 async def model_sizing(
     path: Path, harness: str, model: str,
 ) -> tuple[int | None, int | None]:
-    """The window and rotation percentage the proxy declares for one model.
+    """The model window and this mind's current rotation percentage.
 
-    Both come off the same row of the harness's listing, because both belong
-    to the model. Each is None when the proxy names none for it; both are None
-    for an unreachable proxy or a model the harness does not offer. A guessed
-    window or share is a rotation threshold sized for room the conversation
-    does not have.
+    An unknown model capacity does not erase a saved preference. Neither value
+    is borrowed from a different model or another proxy row.
     """
     for row in await build_catalog(path, harness=harness):
         if row.get("name") == model:
-            window = row.get("context_window")
-            window = window if isinstance(window, int) and window > 0 else None
+            window = _context_window(row.get("context_window"))
             return window, row.get("rotation_threshold_percent")
     return None, None
 

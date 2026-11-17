@@ -22,7 +22,9 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,42 @@ from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
 from minds import runtime_settings
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - runtime write targets Linux mind hosts
+    fcntl = None
+
+_RUNTIME_LOCKS: dict[Path, threading.Lock] = {}
+_RUNTIME_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _runtime_write_transaction(path: Path):
+    """Serialize complete read/modify/replace writes for one runtime path.
+
+    The stable sidecar remains after a write because unlinking it could let two
+    processes lock different inodes for the same runtime file.
+    """
+    if fcntl is None:
+        raise RuntimeError("runtime writes require POSIX file locking")
+    target = Path(path).resolve()
+    with _RUNTIME_LOCKS_GUARD:
+        thread_lock = _RUNTIME_LOCKS.setdefault(target, threading.Lock())
+    thread_lock.acquire()
+    descriptor = None
+    try:
+        sidecar = target.with_name(f".{target.name}.lock")
+        descriptor = os.open(sidecar, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield target
+    finally:
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        thread_lock.release()
 
 # An alias (`opus`), an Ollama tag (`qwen3:30b-a3b-instruct-2507-q4_K_M`),
 # or a vendor id (`gpt-5.4`). The console validates the same shape.
@@ -193,7 +231,8 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
             f"{engine} is not a speech engine: " + ", ".join(VOICE_ENGINES)
         )
 
-    return _substitute_lines(path, fields, CREATABLE_FIELDS, _FIELD_COMMENTS)
+    with _runtime_write_transaction(path) as target:
+        return _substitute_lines(target, fields, CREATABLE_FIELDS, _FIELD_COMMENTS)
 
 
 def _substitute_lines(
@@ -301,25 +340,28 @@ def update_settings(path: Path, values: dict[str, Any]) -> dict[str, Any]:
     """
     if not values:
         raise ValueError("Nothing to write")
-    loaded = load_runtime(path)
-    allowed = {
-        setting.key
-        for setting in runtime_settings.settings_for_harness(
-            str(loaded.get("harness") or "")
-        )
-    }
-    unknown = sorted(set(values) - allowed)
-    if unknown:
-        raise ValueError(
-            "This Mind's harness has no such setting: " + ", ".join(unknown)
-        )
-    rendered = {key: runtime_settings.render_value(key, values[key]) for key in values}
-    comments = {
-        setting.key: setting.comment
-        for setting in runtime_settings.SETTINGS
-        if setting.comment
-    }
-    return _substitute_lines(path, rendered, tuple(allowed), comments)
+    with _runtime_write_transaction(path) as target:
+        loaded = load_runtime(target)
+        allowed = {
+            setting.key
+            for setting in runtime_settings.settings_for_harness(
+                str(loaded.get("harness") or "")
+            )
+        }
+        unknown = sorted(set(values) - allowed)
+        if unknown:
+            raise ValueError(
+                "This Mind's harness has no such setting: " + ", ".join(unknown)
+            )
+        rendered = {
+            key: runtime_settings.render_value(key, values[key]) for key in values
+        }
+        comments = {
+            setting.key: setting.comment
+            for setting in runtime_settings.SETTINGS
+            if setting.comment
+        }
+        return _substitute_lines(target, rendered, tuple(allowed), comments)
 
 
 def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
@@ -964,7 +1006,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
                 )
             fields["model_context_window"] = str(window)
         try:
-            configuration = update_runtime_fields(path, fields)
+            configuration = await asyncio.to_thread(update_runtime_fields, path, fields)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except OSError as exc:
@@ -1001,7 +1043,28 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             loaded = load_runtime(path)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
-        return runtime_settings.settings_view(loaded)
+        view = runtime_settings.settings_view(loaded)
+        model = str(loaded.get("default_model") or "")
+        harness = harness_name(loaded.get("harness"))
+        window = None
+        if model and harness:
+            try:
+                from minds import models_api
+
+                window, _ = await models_api.model_sizing(path, harness, model)
+            except Exception:  # noqa: BLE001 — unavailable capacity is explicit
+                window = None
+        from minds.rotation_policy import effective_threshold
+
+        view.update({
+            "model": model or None,
+            "context_window": window,
+            "rotation_threshold_tokens": effective_threshold(
+                window, view["rotation_threshold_percent"]
+            ),
+            "rotation_threshold_status": "known" if window is not None else "unavailable",
+        })
+        return view
 
     @app.patch("/runtime/settings")
     async def patch_runtime_settings(req: Request) -> Any:
@@ -1022,7 +1085,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
                 {"error": "settings must be a non-empty object"}, status_code=400
             )
         try:
-            loaded = update_settings(path, values)
+            loaded = await asyncio.to_thread(update_settings, path, values)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except OSError as exc:
@@ -1033,4 +1096,25 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             log, "mind.settings.updated", mind_id=mind_id,
             settings=sorted(values),
         )
-        return {"saved": True, **runtime_settings.settings_view(loaded)}
+        view = runtime_settings.settings_view(loaded)
+        model = str(loaded.get("default_model") or "")
+        harness = harness_name(loaded.get("harness"))
+        window = None
+        if model and harness:
+            try:
+                from minds import models_api
+
+                window, _ = await models_api.model_sizing(path, harness, model)
+            except Exception:  # noqa: BLE001 — unavailable capacity is explicit
+                window = None
+        from minds.rotation_policy import effective_threshold
+
+        view.update({
+            "model": model or None,
+            "context_window": window,
+            "rotation_threshold_tokens": effective_threshold(
+                window, view["rotation_threshold_percent"]
+            ),
+            "rotation_threshold_status": "known" if window is not None else "unavailable",
+        })
+        return {"saved": True, **view}
