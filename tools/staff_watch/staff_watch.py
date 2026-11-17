@@ -16,6 +16,10 @@ A turn shorter than the gap between two passes is never seen producing
 output. The feed's record of when each idle conversation last finished is
 what catches it: a finish later than the stop on the row is a new stop.
 
+A terminal pane never tells the feed its turn ended, so the feed can go on
+calling a finished conversation producing. The Stop hook's report, later
+than the conversation's last output, is what ends it here.
+
 * A task whose status says Daniel is not waiting on it - `on hold` overnight,
   `with Daniel` because he took it himself, `done` - is recorded and pings
   nobody. Anything else is woken, including a status added later, because
@@ -102,6 +106,10 @@ TIMEOUT = 20.0
 #: silence inside a long turn is not the turn ending.
 STALLED = 900.0
 
+#: How far a conversation's last block may trail its Stop hook's report and
+#: still belong to the turn that report ended.
+SETTLE = 5.0
+
 #: How long a wake's own stream may be held open. It is the length of a
 #: model's turn rather than of a request, because the gateway runs the turn
 #: only while a reader is attached.
@@ -152,7 +160,36 @@ def live_state(live: dict) -> tuple[dict[str, dict], dict[str, dict]]:
                 out[str(entry["session_id"])] = entry
         return out
 
-    return by_id(live.get("sessions")), by_id(live.get("idle"))
+    generating, idle = by_id(live.get("sessions")), by_id(live.get("idle"))
+    # The feed's word that a conversation is producing is an inference for a
+    # terminal pane, which never says when a turn ends, and one that used to
+    # be a chat conversation is held as producing for fifteen silent minutes.
+    # The mind's own Stop hook does say, so its report is believed first.
+    for session_id in [sid for sid, entry in generating.items()
+                       if _finished(entry)]:
+        idle[session_id] = generating.pop(session_id)
+    return generating, idle
+
+
+def _finished(entry: dict) -> bool:
+    """Whether a conversation the feed calls producing has ended its turn.
+
+    Ended means the Stop hook reported after the last thing the conversation
+    put on the feed, and nothing has followed: the feed's own `quiet`. The
+    last block may trail the report by `SETTLE`, because a pane's prose is
+    tailed out of the transcript after the hook has already run. A size
+    estimated when the conversation opened is not a Stop report and ends
+    nothing.
+    """
+    context = entry.get("context")
+    if not entry.get("quiet") or not isinstance(context, dict):
+        return False
+    if context.get("kind") == "estimated":
+        return False
+    observed, last = context.get("observed_at"), entry.get("last_block_at")
+    if observed is None or last is None:
+        return False
+    return float(observed) >= float(last) - SETTLE
 
 
 def _stalled(entry: dict, now: float) -> bool:
