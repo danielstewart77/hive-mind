@@ -5,6 +5,7 @@
     <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">System configuration</p><h1 class="page-title">Settings</h1><p class="page-description">Durable owner, connection, voice, and installation configuration.</p></div></header>
     <div class="settings-layout">
         <div class="settings-nav" role="navigation" aria-label="Settings sections">
+            <a href="/settings/features" class="{% if settings_section == 'features' %}is-active{% endif %}">Features</a>
             {% if current_user.is_admin %}<a href="/settings/general" class="{% if settings_section == 'general' %}is-active{% endif %}">General</a>{% endif %}
             <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">{{ 'Owner and access' if current_user.is_admin else 'Account and sessions' }}</a>
             {% if current_user.is_admin %}<a href="/settings/users" class="{% if settings_section == 'users' %}is-active{% endif %}">Users and groups</a>
@@ -14,7 +15,18 @@
             <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>{% endif %}
         </div>
         <div class="settings-content">
-        {% if settings_section == 'general' %}
+        {% if settings_section == 'features' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Features</h2><p>Choose which tabs appear in your left navigation. Settings always stays visible. Saved choices follow your account across browsers.</p></div>
+                <form id="feature-form" class="surface-body">
+                    <div class="feature-grid">
+                    {% for key, label, admin_only in feature_catalogue %}
+                    <label class="feature-choice"><input type="checkbox" name="{{ key }}" {% if feature_enabled[key] %}checked{% endif %}><span>{{ label }}{% if admin_only and not current_user.is_admin %}<small> · Requires admin access</small>{% endif %}</span></label>
+                    {% endfor %}
+                    </div>
+                    <p><button class="button button-primary" type="submit">Save features</button></p><p id="feature-save-status" role="status"></p>
+                </form>
+            </section>
+        {% elif settings_section == 'general' %}
             <section class="surface"><div class="settings-section-copy"><h2>Installation</h2><p>Identity and first-run state for this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Product</dt><dd>Hive control center</dd></div><div class="detail-item"><dt>Owner</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Default view</dt><dd>System overview</dd></div></dl></div></section>
             <section class="surface"><div class="settings-section-copy"><h2>Setup guide</h2><p>Re-run readiness checks or continue an incomplete installation.</p></div><div class="surface-body"><a class="button" href="/setup"><i data-lucide="list-checks"></i>Open setup guide</a></div></section>
         {% elif settings_section == 'access' %}
@@ -82,6 +94,19 @@
 <script>
 window.addEventListener("DOMContentLoaded", function () {
     const h = window.HiveConsole;
+    const featureForm = document.getElementById("feature-form");
+    if (featureForm) featureForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const button = featureForm.querySelector("button");
+        const status = document.getElementById("feature-save-status");
+        const choices = {};
+        featureForm.querySelectorAll("input[type=checkbox]").forEach(input => choices[input.name] = input.checked);
+        button.disabled = true; status.textContent = "Saving…";
+        try {
+            await h.requestJson("/api/settings/features", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(choices)});
+            window.location.reload();
+        } catch (error) { status.textContent = "Could not save features: " + error.message; button.disabled = false; }
+    });
     const section = document.querySelector("[data-settings-section]").dataset.settingsSection;
     function refreshIcons() { if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}}); }
     async function loadSessions() {

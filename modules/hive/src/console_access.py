@@ -207,7 +207,7 @@ TABLE.add(
 )
 # The settings page is one route; only its sessions section is a user's.
 TABLE.add(
-    Rule(USER, only_when=(("section", frozenset({"access"})),)),
+    Rule(USER, only_when=(("section", frozenset({"access", "features"})),)),
     "GET /settings/{section}",
 )
 
@@ -459,3 +459,6 @@ TABLE.add(
     "DELETE /api/admin/groups/{group}/members/{username}",
 )
 
+
+TABLE.add(Rule(USER), "GET /api/settings/features", "PUT /api/settings/features")
+TABLE.add(Rule(ADMIN), "GET /hive-errors", "GET /api/hive-errors")
