@@ -57,7 +57,7 @@ from minds import (
     surface_token_api,
     transcript,
 )
-from minds.harness import dsh_hooks, rotation_hooks
+from minds.harness import dsh_hooks, hook_commands, rotation_hooks
 from minds.proactive import BUFFER as proactive_buffer, make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
@@ -234,12 +234,48 @@ def _hook_commands(config: dict) -> dict[str, list[str]]:
     return events
 
 
+def _keeps_its_own_rotation_check(harness: str, app_root: Path) -> bool:
+    """Whether this harness already runs a rotation check nobody generated.
+
+    A mind installed before the generated hooks registers a check of its own
+    — a copied script, or a shell wrapper around one. Installing the generated
+    check beside it would run two checks a turn, and refreshing dsh's scripts
+    would replace the copies that check is built from. Such a home is left
+    exactly as it is: its check still takes the mind's percentage, through the
+    threshold each conversation is spawned with.
+    """
+    if harness == "dsh":
+        adapter = ADAPTERS["dsh"]
+        named = adapter.hooks_config()
+        own_file = Path(adapter.DSH_HOME) / "hooks.json"
+        if named and Path(named).resolve() != own_file.resolve():
+            # dsh reads another file, so nothing written here would be run.
+            return True
+        generated_script = Path(adapter.DSH_HOME) / "hooks" / "rotation_check.py"
+        actions = None
+    else:
+        generated_script = app_root / "minds" / "harness" / "rotation_hooks.py"
+        actions = ("check",)
+    config, _ = _hook_config(harness)
+    if config is None:
+        return False
+    for command in _hook_commands(config).get("Stop", []):
+        if "rotation_check" not in command and "rotation_hooks" not in command:
+            continue
+        if hook_commands.managed_python_command(
+            command, script_path=generated_script, actions=actions,
+        ) is None:
+            return True
+    return False
+
+
 def _install_rotation_hooks() -> None:
     """Refresh managed rotation hooks in already declared harness homes."""
     app_root = Path(__file__).resolve().parents[1]
     claude = ADAPTERS.get("claude")
     claude_home = getattr(claude, "CONFIG_DIR", None)
-    if claude_home is not None and Path(claude_home).is_dir():
+    if (claude_home is not None and Path(claude_home).is_dir()
+            and not _keeps_its_own_rotation_check("claude", app_root)):
         rotation_hooks.write_harness_hooks(
             "claude", Path(claude_home), runtime_path=RUNTIME_PATH,
             python=sys.executable, app_root=app_root,
@@ -248,7 +284,8 @@ def _install_rotation_hooks() -> None:
     codex = ADAPTERS.get("codex")
     codex_home = getattr(codex, "CODEX_HOME", None)
     if (codex_home is not None and Path(codex_home).is_dir()
-            and getattr(codex, "home_declared", lambda: False)()):
+            and getattr(codex, "home_declared", lambda: False)()
+            and not _keeps_its_own_rotation_check("codex", app_root)):
         rotation_hooks.write_harness_hooks(
             "codex", Path(codex_home), runtime_path=RUNTIME_PATH,
             python=sys.executable, app_root=app_root,
@@ -257,7 +294,8 @@ def _install_rotation_hooks() -> None:
     dsh = ADAPTERS.get("dsh")
     dsh_home = getattr(dsh, "DSH_HOME", None)
     if (dsh_home is not None and Path(dsh_home).is_dir()
-            and getattr(dsh, "home_declared", lambda: False)()):
+            and getattr(dsh, "home_declared", lambda: False)()
+            and not _keeps_its_own_rotation_check("dsh", app_root)):
         dsh_hooks.write_hooks(
             MIND_NAME, MIND_DIR.parent, python=sys.executable, home=Path(dsh_home),
             container_hooks_dir=str(Path(dsh_home) / "hooks"),

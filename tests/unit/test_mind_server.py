@@ -1312,6 +1312,56 @@ def test_startup_refreshes_managed_rotation_hooks_in_provisioned_homes(homes):
     assert "operator-stop" in dsh_stop and "rotation_check.py" in dsh_stop
 
 
+def test_startup_leaves_a_home_that_runs_its_own_rotation_check_untouched(homes):
+    """A mind installed before the generated hooks keeps the check it has:
+    no second check beside it, and none of its copied scripts replaced."""
+    claude, codex, dsh = homes["claude"], homes["codex"], homes["dsh"]
+    (claude / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command",
+         "command": f"python3 {claude}/hooks/rotation_check.py"},
+    ]}]}}))
+    (codex / "config.toml").write_text(
+        "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\n"
+        'type = "command"\n'
+        f'command = "python3 {codex}/hooks/rotation_check.py"\n'
+    )
+    (dsh / "hooks").mkdir(exist_ok=True)
+    (dsh / "hooks" / "rotation_check.py").write_text("# this mind's own copy\n")
+    (dsh / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": f"bash {dsh}/hooks/rotation_check.sh"},
+    ]}]}}))
+    before = {path: path.read_bytes() for path in (
+        claude / "settings.json", codex / "config.toml", dsh / "hooks.json",
+        dsh / "hooks" / "rotation_check.py",
+    )}
+
+    mind_server._install_rotation_hooks()
+
+    assert {path: path.read_bytes() for path in before} == before
+    assert sorted(item.name for item in (dsh / "hooks").iterdir()) == ["rotation_check.py"]
+
+
+def test_startup_writes_nothing_into_a_dsh_home_whose_hook_file_is_elsewhere(
+    homes, monkeypatch, tmp_path,
+):
+    """dsh reads the file the environment names; a second hook file and a
+    folder of scripts written into its home would be run by nothing."""
+    dsh = homes["dsh"]
+    elsewhere = tmp_path / "mind hooks" / "hooks.json"
+    elsewhere.parent.mkdir()
+    elsewhere.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": f"bash {elsewhere.parent}/rotation_check.sh"},
+    ]}]}}))
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(elsewhere))
+    listing = sorted(item.name for item in dsh.iterdir())
+    named = elsewhere.read_bytes()
+
+    mind_server._install_rotation_hooks()
+
+    assert sorted(item.name for item in dsh.iterdir()) == listing
+    assert elsewhere.read_bytes() == named
+
+
 def test_startup_does_not_create_missing_codex_or_dsh_homes(homes, monkeypatch):
     codex_home = homes["codex"].parent / "codex-not-provisioned"
     dsh_home = homes["dsh"].parent / "dsh-not-provisioned"

@@ -18,6 +18,27 @@ os.environ["MIND_NAME"] = "example"
 # those routes a value to present.
 os.environ["MIND_SESSION_TOKEN"] = "test-mind-session-token"
 
+# The harness modules also resolve their config homes from the environment at
+# import time, and a mind's startup writes its rotation hooks and role guard
+# files into them. Run from inside a mind's own session, the suite would
+# otherwise write those into that mind's live Claude and Codex settings,
+# pointing at this checkout. The homes are throwaway directories instead, for
+# this process and every worker it spawns.
+import tempfile  # noqa: E402
+
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+
+_SUITE_HOMES = tempfile.mkdtemp(prefix="hive-mind-suite-homes-")
+atexit.register(shutil.rmtree, _SUITE_HOMES, ignore_errors=True)
+for _variable, _folder in (("CLAUDE_CONFIG_DIR", "claude"), ("CODEX_HOME", "codex")):
+    os.makedirs(os.path.join(_SUITE_HOMES, _folder))
+    os.environ[_variable] = os.path.join(_SUITE_HOMES, _folder)
+# Set rather than deleted, so a `load_dotenv()` cannot refill them: a dsh home
+# nobody made is an undeclared one, and an empty hook file name is none.
+os.environ["DSH_HOME"] = os.path.join(_SUITE_HOMES, "dsh-never-made")
+os.environ["DSH_HOOKS_CONFIG"] = ""
+
 
 import pytest  # noqa: E402
 

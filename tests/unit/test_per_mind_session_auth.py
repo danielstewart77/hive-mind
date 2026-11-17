@@ -492,11 +492,14 @@ class TestTheDeployedAppIsGuarded:
 
         assert TestClient(mind_server.app).delete("/sessions/s1").status_code == 401
 
-    def test_the_config_surface_answers_its_own_guard_not_the_session_one(self):
+    def test_the_config_surface_answers_its_own_guard_not_the_session_one(self, monkeypatch):
         """The session guard is scoped to `/sessions` and must not have
         swallowed the routes the console reads. `/runtime` has an admin guard
         of its own, so what this pins is that it is reached and refused on
         those terms rather than by the middleware."""
+        # The admin guard answers 503 until a mind has an admin token at all;
+        # the suite names one rather than borrowing the invoking shell's.
+        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "an-admin-token")
         from minds import mind_server
 
         client = TestClient(mind_server.app)
