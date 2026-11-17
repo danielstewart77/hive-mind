@@ -1,8 +1,13 @@
-"""What a DSH mind's roles let it use, enforced per tool call and per hook.
+"""What a mind's roles let it use, enforced per tool call and per hook.
 
 Feature 10.18. A mind under role management may use exactly the union of
-what its roles grant. On dsh that is enforced here, by two commands the
-adapter writes into the hooks file it hands dsh (`effective_hooks`):
+what its roles grant. On every harness the built-in tools are enforced here,
+by one guard and one table of tool names (`FAMILIES`), so a role grants the
+same thing on dsh, Claude and Codex (stories 10.18.5 to 10.18.7). Each
+adapter hands its harness the guard per spawn: dsh in the hooks file
+`effective_hooks` writes, Claude in a settings file (`prepare_claude`),
+Codex as config overrides (`prepare_codex`). On dsh the mind's own hooks
+are gated by role as well, by the second command:
 
 * ``role_guard.py guard`` — a PreToolUse hook on every tool. A built-in tool
   (shell, files, sub-minds, web) no held role allows is refused, and so is a
@@ -52,7 +57,9 @@ from pathlib import Path
 #: The built-in tool families a role's allow-list names.
 TOOLS = ("shell", "files", "sub-minds", "web")
 
-#: dsh's tool names, by the family a role allows them under.
+#: Every harness's tool names, by the family a role allows them under. The
+#: three harnesses name their tools differently and never the same way, so
+#: one table serves all of them and one role grants the same on each.
 FAMILIES = {
     # A persistent terminal, a background job and a workflow run are each a
     # shell by another name: a role that leaves shell unticked must leave
@@ -60,12 +67,35 @@ FAMILIES = {
     "shell": {"bash", "pwsh", "terminal_open", "terminal_send", "terminal_read",
               "terminal_signal", "terminal_close", "terminal_list",
               "job_kill", "job_list", "job_output",
-              "cordis_run", "cordis_define", "cordis_stop", "cordis_undefine"},
+              "cordis_run", "cordis_define", "cordis_stop", "cordis_undefine",
+              # Claude; Codex reports its shell as Bash too.
+              "Bash", "BashOutput", "KillShell", "KillBash", "Monitor", "PowerShell",
+              "TaskOutput",
+              # Codex's own names for a command, its stdin and its REPL.
+              "exec_command", "write_stdin", "shell", "shell_command", "local_shell",
+              "unified_exec", "js_repl"},
     "files": {"read", "write", "edit", "glob", "grep", "read_image",
-              "str_replace", "str_replace_editor"},
-    "web": {"web_fetch", "web_search"},
-    "sub-minds": {"subagent", "list_agents", "send_message", "interrupt_agent"},
+              "str_replace", "str_replace_editor",
+              "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "NotebookRead",
+              "Glob", "Grep", "LS",
+              "apply_patch", "view_image"},
+    "web": {"web_fetch", "web_search", "WebFetch", "WebSearch"},
+    "sub-minds": {"subagent", "list_agents", "send_message", "interrupt_agent",
+                  "Task", "Agent", "SendMessage", "TaskStop", "Workflow",
+                  # Codex's, which arrive under a `collaboration` prefix too.
+                  "spawn_agent", "send_input", "wait_agent", "close_agent",
+                  "resume_agent"},
 }
+
+#: Tool-name prefixes a family owns: Codex's sub-agent tools are all
+#: `collaboration…`, and its web search arrives as an apps MCP tool.
+FAMILY_PREFIXES = {
+    "sub-minds": ("subagent", "collaboration"),
+    "web": ("mcp__codex_apps__search_service",),
+}
+
+#: The tools that load a skill by name, and the argument naming it.
+SKILL_TOOLS = {"skill": "name", "Skill": "skill"}
 
 #: The hooks that keep a mind alive rather than shape what it does.
 ESSENTIAL_HOOKS = frozenset({
@@ -83,6 +113,10 @@ FETCH_TIMEOUT = 2.0
 DENY = 2
 
 GUARD = Path(__file__).resolve()
+
+
+class NotStarted(RuntimeError):
+    """A mind that cannot be held to its roles is not run; the message says why."""
 
 
 # ------------------------------------------------------------------ naming
@@ -111,7 +145,10 @@ def family_of(tool: str, delegates: set[str]) -> str | None:
     for family, names in FAMILIES.items():
         if tool in names:
             return family
-    if tool.startswith("subagent") or tool in delegates:
+    for family, prefixes in FAMILY_PREFIXES.items():
+        if tool.startswith(prefixes):
+            return family
+    if tool in delegates:
         return "sub-minds"
     return None
 
@@ -147,7 +184,7 @@ def _fetch(mind: str, url: str, token: str, timeout: float) -> dict | None:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            return {"managed": False}
+            return {"managed": False, "unregistered": True}
         return None
     except (OSError, ValueError):
         return None
@@ -220,6 +257,11 @@ def current(env: dict[str, str] | None = None) -> dict:
     saved = read_grants(path) or {}
     fresh = fetch(env.get("MIND_ID") or env.get("MIND_NAME", ""),
                   env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""))
+    if fresh is not None and fresh.get("unregistered") and saved.get("managed"):
+        # The gateway knew this mind as managed when the process was started
+        # and a managed mind stays managed, so a "never heard of it" now is a
+        # credential or an id gone wrong inside this process, not an answer.
+        return saved
     if fresh is not None:
         # The delegate tool names are the adapter's to record: they come from
         # the agents overlay this process was started with.
@@ -240,8 +282,8 @@ def tool_refusal(grants: dict, tool: str, arguments: dict | None) -> str | None:
     if family is not None and family not in (grants.get("tools") or []):
         return (f"The {family} tool ({tool}) is not allowed for this mind's roles "
                 f"({', '.join(grants.get('roles') or []) or 'none'}).")
-    if tool == "skill":
-        name = str((arguments or {}).get("name") or "").strip()
+    if tool in SKILL_TOOLS:
+        name = str((arguments or {}).get(SKILL_TOOLS[tool]) or "").strip().lstrip("/")
         if name not in (grants.get("skills") or []):
             return (f"The skill {name or '(unnamed)'} is not granted by this mind's roles "
                     f"({', '.join(grants.get('roles') or []) or 'none'}).")
@@ -286,15 +328,32 @@ def effective_hooks(source: dict | None, python: str = "python3") -> dict:
                     continue
                 hook["command"] = (f"{python} {shlex.quote(str(GUARD))} gate "
                                    f"{shlex.quote(name)} -- sh -c {shlex.quote(command)}")
-    events.setdefault("PreToolUse", []).insert(0, {"hooks": [{
-        "type": "command", "command": f"{python} {shlex.quote(str(GUARD))} guard",
-        "timeout": 10}]})
-    # A typed `/name` loads a skill without any tool call, so the skill grant
-    # is checked on the prompt as well.
-    events.setdefault("UserPromptSubmit", []).insert(0, {"hooks": [{
-        "type": "command", "command": f"{python} {shlex.quote(str(GUARD))} prompt",
-        "timeout": 10}]})
+    for event, group in guard_hooks(python).items():
+        events.setdefault(event, []).insert(0, group)
     return config
+
+
+def guard_hooks(python: str = "python3", checked: bool = False) -> dict[str, dict]:
+    """The guard's hook group per event, in the shape every harness reads.
+
+    PreToolUse on every tool; UserPromptSubmit too, because a typed `/name`
+    loads a skill without any tool call, so the skill grant is checked on
+    the prompt as well.
+
+    ``checked`` is for Claude and Codex, which run a hook through a shell
+    and let a tool run on any exit but 2. A terminal pane keeps its command
+    for as long as it lives, so an interpreter or a guard file that has
+    since gone would otherwise exit 127 and wave every tool through; the
+    command refuses instead.
+    """
+    def group(command: str) -> dict:
+        run = f"{shlex.quote(python)} {shlex.quote(str(GUARD))} {command}"
+        if checked:
+            run = (f"[ -x {shlex.quote(python)} ] && [ -r {shlex.quote(str(GUARD))} ] || "
+                   f"{{ echo 'The role guard cannot run, so this is refused.' >&2; exit {DENY}; }}; "
+                   f"exec {run}")
+        return {"hooks": [{"type": "command", "timeout": 10, "command": run}]}
+    return {"PreToolUse": group("guard"), "UserPromptSubmit": group("prompt")}
 
 
 def delegate_names(patch_file: Path) -> list[str]:
@@ -328,16 +387,117 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
     before dsh is handed it, since a file dsh cannot parse registers no
     hooks at all — guard, memory and rotation together.
     """
-    grants = fetch(mind, url, token, timeout=timeout)
-    if grants is None:
-        raise RuntimeError("the gateway did not say what this mind's roles allow, so it is not started")
+    grants = _fetch_for_spawn(mind, url, token, timeout)
     try:
         return _write_spawn_files(dsh_home, source_hooks, grants, python)
     except (OSError, ValueError) as exc:
         # One kind of failure for every caller: a hooks file that will not
         # parse or a home that cannot be written is a mind that is not run,
         # said out loud, not a turn that ends in silence.
-        raise RuntimeError(f"the role guard's files could not be written: {exc}") from exc
+        raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
+
+
+def _fetch_for_spawn(mind: str, url: str, token: str, timeout: float) -> dict:
+    grants = fetch(mind, url, token, timeout=timeout)
+    if grants is None:
+        raise NotStarted("the gateway did not say what this mind's roles allow, so it is not started")
+    return grants
+
+
+def _who(mind: str, url: str) -> dict[str, str]:
+    """Who the guard asks about, and where, on the guard's own environment.
+
+    A terminal pane inherits from a tmux server that may predate both, and
+    a guard asking about the wrong mind is told "unmanaged".
+    """
+    return {"MIND_ID": mind, "COMMS_URL": url}
+
+
+def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token: str,
+                   python: str = sys.executable or "python3",
+                   timeout: float = 10.0) -> tuple[list[str], dict[str, str]]:
+    """The arguments and environment a Claude process is started with.
+
+    The guard rides in a settings file of its own (`--settings`), which
+    Claude merges with the mind's settings, so the mind's own hooks run as
+    before and nothing in its config directory is rewritten. Written for
+    every spawn, managed or not, like dsh's: a mind given roles mid-
+    conversation is guarded from its next tool call. Raised, like dsh's,
+    when the gateway cannot say what the mind may use.
+    """
+    grants = _fetch_for_spawn(mind, url, token, timeout)
+    try:
+        grants_file = state_dir / "role-grants.json"
+        write_grants(grants_file, grants)
+        settings = state_dir / "role-settings.json"
+        write_grants(settings, {"hooks": {event: [group] for event, group
+                                          in guard_hooks(python, checked=True).items()}})
+    except OSError as exc:
+        raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
+    return (["--settings", str(settings)],
+            {"HIVE_ROLE_GRANTS_FILE": str(grants_file), "HIVE_SKILLS_DIR": str(skills_dir),
+             **_who(mind, url)})
+
+
+def toml_inline(value) -> str:
+    """A value as a TOML inline literal, for a Codex `-c key=value` override."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        # Not ASCII-escaped: JSON writes a character outside the basic plane
+        # as a surrogate pair, which TOML refuses.
+        return json.dumps(value, ensure_ascii=False)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_inline(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{json.dumps(str(k))} = {toml_inline(v)}"
+                               for k, v in value.items()) + "}"
+    raise ValueError(f"no TOML form for {type(value).__name__}")
+
+
+def prepare_codex(codex_home: Path, mind: str, url: str, token: str,
+                  python: str = sys.executable or "python3",
+                  timeout: float = 10.0) -> tuple[list[str], dict[str, str]]:
+    """The arguments and environment a Codex process is started with.
+
+    The guard goes in as a `-c hooks.PreToolUse=...` override, ahead of
+    whatever PreToolUse hooks the mind's `config.toml` already declares
+    (an override replaces the key, so those are carried in with it), and
+    nothing in the mind's codex home is rewritten. Codex's own web search
+    runs inside the model's turn and reaches no hook, so for a managed
+    mind whose roles leave web out it is switched off at spawn; a codex
+    chat turn is a process of its own, so that too follows a role edit
+    from the next turn.
+    """
+    import tomllib
+
+    grants = _fetch_for_spawn(mind, url, token, timeout)
+    try:
+        grants_file = codex_home / "role-grants.json"
+        write_grants(grants_file, grants)
+    except OSError as exc:
+        raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
+    try:
+        config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+    except OSError:
+        config = {}
+    except tomllib.TOMLDecodeError as exc:
+        # Codex would refuse the same file; said here, with the reason.
+        raise NotStarted(f"the mind's codex config.toml does not parse: {exc}") from exc
+    hooks = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+    own = hooks.get("PreToolUse") if isinstance(hooks.get("PreToolUse"), list) else []
+    groups = [guard_hooks(python, checked=True)["PreToolUse"], *own]
+    try:
+        args = ["-c", f"hooks.PreToolUse={toml_inline(groups)}"]
+    except ValueError as exc:
+        raise NotStarted(f"the mind's codex hooks could not be carried over: {exc}") from exc
+    if grants.get("managed") and "web" not in (grants.get("tools") or []):
+        args += ["-c", 'web_search="disabled"']
+    return args, {"HIVE_ROLE_GRANTS_FILE": str(grants_file), **_who(mind, url)}
 
 
 def _write_spawn_files(dsh_home: Path, source_hooks: str, grants: dict,
@@ -426,9 +586,11 @@ def prompt_refusal(grants: dict, prompt: str, skills_dir: Path | None) -> str | 
 def _prompt() -> int:
     try:
         event = json.loads(sys.stdin.read() or "{}")
-        home = _mind_env(dict(os.environ)).get("DSH_HOME", "")
+        env = _mind_env(dict(os.environ))
+        skills = env.get("HIVE_SKILLS_DIR") or (
+            str(Path(env["DSH_HOME"]) / "skills") if env.get("DSH_HOME") else "")
         reason = prompt_refusal(current(), str(event.get("prompt") or ""),
-                                Path(home) / "skills" if home else None)
+                                Path(skills) if skills else None)
     except Exception as exc:  # noqa: BLE001 - every failure is a refusal
         print(f"The role guard could not decide, so the prompt is refused: {exc}", file=sys.stderr)
         return DENY
