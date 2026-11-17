@@ -17,6 +17,24 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 # own machine that is a real mind whose folder this repo does not ship.
 os.environ["MIND_NAME"] = "example"
 
+# The harness modules resolve their config homes from the environment too, and
+# a mind's startup writes rotation hooks and role guard files into them. From
+# inside a mind's own session that would be its live Claude and Codex
+# settings, so the homes are throwaway directories for this process and every
+# worker it spawns. Set rather than deleted, for the reason given below.
+import tempfile  # noqa: E402
+
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+
+_SUITE_HOMES = tempfile.mkdtemp(prefix="hive-mind-suite-homes-")
+atexit.register(shutil.rmtree, _SUITE_HOMES, ignore_errors=True)
+for _variable, _folder in (("CLAUDE_CONFIG_DIR", "claude"), ("CODEX_HOME", "codex")):
+    os.makedirs(os.path.join(_SUITE_HOMES, _folder))
+    os.environ[_variable] = os.path.join(_SUITE_HOMES, _folder)
+os.environ["DSH_HOME"] = os.path.join(_SUITE_HOMES, "dsh-never-made")
+os.environ["DSH_HOOKS_CONFIG"] = ""
+
 # Point every gateway variable at a closed port before anything imports the
 # code under test. A mind now asks comms for a stored carry-forward when it
 # opens a cold terminal, so a suite that inherits a live COMMS_URL issues

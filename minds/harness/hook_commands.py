@@ -42,3 +42,26 @@ def managed_python_command(
     if actions is not None and arguments[2] not in actions:
         return None
     return arguments
+
+
+def managed_shell_command(command: object, *, script_path: Path | str) -> list[str] | None:
+    """Return a directly registered shell wrapper's parsed argv, or ``None``.
+
+    The same structural rule as `managed_python_command`, for the installs
+    that register their check as ``bash <hooks dir>/rotation_check.sh``: a
+    shell must directly run the exact script path, and nothing else counts.
+    """
+    if not isinstance(command, str) or not command:
+        return None
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return None
+    if len(arguments) < 2 or Path(arguments[0]).name not in {"bash", "sh"}:
+        return None
+    try:
+        if Path(arguments[1]).resolve() != Path(script_path).resolve():
+            return None
+    except (OSError, ValueError):
+        return None
+    return arguments

@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from minds.harness.hook_commands import managed_python_command
+from minds.harness.hook_commands import managed_python_command, managed_shell_command
 
 #: How long the check may take to read its input. It detaches its own work.
 CHECK_TIMEOUT_SECONDS = 30
@@ -41,9 +41,19 @@ def rotation_check_command(
             )
             if selected is not None:
                 return selected
+    copied_scripts = list(copied_scripts)
     for script in copied_scripts:
         for command in commands:
             selected = managed_python_command(command, script_path=script)
+            if selected is not None:
+                return selected
+    # An install older than the generated hooks registers its check as a
+    # shell wrapper beside the copy: `bash <hooks dir>/rotation_check.sh`.
+    # It is the same owned check, and a failed turn still has to reach it.
+    for script in copied_scripts:
+        wrapper = Path(script).with_suffix(".sh")
+        for command in commands:
+            selected = managed_shell_command(command, script_path=wrapper)
             if selected is not None:
                 return selected
     return None

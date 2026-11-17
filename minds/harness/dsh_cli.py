@@ -987,6 +987,8 @@ def _rotation_check_command() -> list[str] | None:
         DSH_HOME / "hooks" / "rotation_check.py",
         MIND_DIR / ".dsh" / "hooks" / "rotation_check.py",
         config_parent / "hooks" / "rotation_check.py",
+        # A hook file kept in the same folder as the scripts it registers.
+        config_parent / "rotation_check.py",
     ]
     return failed_turn.rotation_check_command(
         (hooks or {}).get("Stop"), copied_scripts=copied_scripts,
