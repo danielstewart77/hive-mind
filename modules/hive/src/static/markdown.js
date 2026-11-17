@@ -173,13 +173,23 @@
 
     let diagramSeq = 0;
     let renderSeq = 0;
+    function diagramNotice(code) {
+        const notice = document.createElement('p');
+        notice.className = 'md-diagram-notice';
+        notice.textContent = 'This diagram could not be drawn; its source is shown below.';
+        code.closest('pre').before(notice);
+    }
+
     async function drawDiagrams(target, token, blocks) {
         let mermaid;
-        try { mermaid = await getMermaid(); } catch (_) { return; }
+        try { mermaid = await getMermaid(); } catch (_) {
+            if (target.dataset.mdToken === token) blocks.forEach(diagramNotice);
+            return;
+        }
         for (const code of blocks) {
             if (target.dataset.mdToken !== token) return;
             const text = code.textContent;
-            if (text.length > MERMAID_MAX_TEXT) continue;
+            if (text.length > MERMAID_MAX_TEXT) { diagramNotice(code); continue; }
             const id = `hive-mermaid-${++diagramSeq}`;
             try {
                 await mermaid.parse(text);
@@ -196,8 +206,17 @@
                 // Left as its source block; mermaid's scratch node goes too.
                 document.getElementById(`d${id}`)?.remove();
                 document.getElementById(id)?.remove();
+                if (target.dataset.mdToken === token) diagramNotice(code);
             }
         }
+    }
+
+    function noticeSourceFailure(target, token, source) {
+        if (target.dataset.mdToken !== token || !/^\s*(`{3,}|~{3,})\s*mermaid\s*$/im.test(source)) return;
+        const notice = document.createElement('p');
+        notice.className = 'md-diagram-notice';
+        notice.textContent = 'Diagrams could not be drawn; the description source is shown below.';
+        target.prepend(notice);
     }
 
     /* Draw `source` into `target`. Safe to call again on the same target:
@@ -212,6 +231,7 @@
         try {
             await Promise.all([load('marked'), load('purify')]);
         } catch (_) {
+            noticeSourceFailure(target, token, source);
             return;
         }
         if (target.dataset.mdToken !== token) return;
@@ -222,6 +242,7 @@
             body.className = 'md-body';
             body.innerHTML = purifier.sanitize(parser.parse(source), HTML_RULES);
         } catch (_) {
+            noticeSourceFailure(target, token, source);
             return;
         }
         // Markdown that draws nothing (a lone link reference) keeps the source.
