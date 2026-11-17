@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from comms import sessions as sessions_mod
 from comms.sessions import SessionManager
 from comms_pg_fixture import (  # noqa: F401 - fixtures
@@ -203,6 +205,35 @@ def test_a_refused_release_aborts_the_handover(comms_db):
             assert row["surface"] == TELEGRAM
             assert row["surface_id"] == CHAT
             assert await _bindings(mgr, "in-the-pane") == []
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_a_terminal_opened_on_a_conversation_mid_turn_is_refused_and_ends_nothing(
+        comms_db):
+    """The turn somebody is waiting on outlives a click on the terminal."""
+    async def scenario():
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "answering")
+            released = _releasing(mgr)
+            mgr.dashboard.begin("answering", conversation_id="conv-1")
+            mgr.dashboard.frame("answering")
+            before = await _row(mgr, "answering")
+
+            with pytest.raises(sessions_mod.MindCallFailed):
+                await mgr.adopt_into_terminal("answering")
+
+            assert released == []
+            after = await _row(mgr, "answering")
+            assert (after["surface"], after["surface_id"]) == (
+                before["surface"], before["surface_id"])
+
+            mgr.dashboard.end("answering")
+            await mgr.adopt_into_terminal("answering")
+            assert (await _row(mgr, "answering"))["surface"] == "terminal"
         finally:
             await close_manager(mgr)
 

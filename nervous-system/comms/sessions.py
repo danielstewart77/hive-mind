@@ -1902,6 +1902,17 @@ class SessionManager:
             and session.get("surface_id") == client_ref
         )
         if not already_here:
+            # Releasing ends the chat-side process whatever it is doing, and
+            # a turn it is in the middle of dies with it: the sender's stream
+            # just stops. A terminal opened on a conversation that is
+            # answering somebody waits its turn instead - the attach is
+            # refused, the same way a failed release refuses it, and nothing
+            # has been touched.
+            if self.dashboard.state(sid)["generating"]:
+                raise MindCallFailed(
+                    f"session {sid} is mid-turn on {session.get('surface')!r}; "
+                    "a terminal may take it once the turn has finished"
+                )
             # Ends the chat-side harness only. The pane being attached to is
             # the `terminal` surface and releasing that would kill the tmux
             # session this attach is for.
