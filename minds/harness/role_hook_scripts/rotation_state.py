@@ -43,6 +43,7 @@ def state_dir() -> Path:
         return Path(explicit)
     return Path(
         os.environ.get("HIVE_PROJECT_DIR")
+        or os.environ.get("HIVE_MIND_DIR")
         or Path(__file__).resolve().parents[2]
     ) / "data" / "auto-remember"
 
@@ -88,7 +89,9 @@ def _write_json(path: Path, payload: dict) -> bool:
     """
     try:
         state_dir().mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(".tmp")
+        # One temp file per writer: Stop and SubagentStop land together for
+        # one conversation, and a shared name loses one of the two renames.
+        temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         temp.write_text(json.dumps(payload))
         os.replace(temp, path)
         return True

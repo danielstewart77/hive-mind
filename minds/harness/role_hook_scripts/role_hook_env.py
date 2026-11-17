@@ -15,8 +15,10 @@ from pathlib import Path
 #: The harness home these hooks were installed into.
 HOME = Path(__file__).resolve().parents[1]
 
-#: The mind's folder: the harness home sits directly inside it.
-MIND_DIR = Path(__file__).resolve().parents[2]
+#: The mind's folder: ``HIVE_MIND_DIR`` when the mind names it, which a mind
+#: whose harness home is not inside its own folder has to; else the folder
+#: the harness home sits directly inside.
+MIND_DIR = Path(os.environ.get("HIVE_MIND_DIR") or Path(__file__).resolve().parents[2])
 
 
 def state_dir() -> Path:
@@ -106,4 +108,13 @@ def detach() -> bool:
     if pid > 0:
         return False
     os.setsid()
+    # Let go of the harness's pipes, or it waits on them for as long as the
+    # work here takes.
+    try:
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        os.close(null)
+    except OSError:
+        pass
     return True
