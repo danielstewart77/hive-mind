@@ -107,7 +107,10 @@ def test_generated_hook_file_passes_the_mind_servers_hook_check(mind, monkeypatc
 def test_failed_turn_path_finds_the_generated_rotation_check_in_the_container():
     config = dsh_hooks.hooks_config("/usr/src/app/minds/probe/.dsh/hooks")
 
-    assert failed_turn.rotation_check_command(config["hooks"]["Stop"]) == [
+    assert failed_turn.rotation_check_command(
+        config["hooks"]["Stop"],
+        copied_scripts=("/usr/src/app/minds/probe/.dsh/hooks/rotation_check.py",),
+    ) == [
         "/opt/venv/bin/python", "/usr/src/app/minds/probe/.dsh/hooks/rotation_check.py",
     ]
 
@@ -175,7 +178,10 @@ def test_generated_dsh_goal_check_uses_the_latest_saved_percentage(
         "HIVE_MIND_APP_ROOT", str(Path(__file__).resolve().parents[2])
     )
     config = json.loads((mind / "hooks.json").read_text())
-    command = failed_turn.rotation_check_command(config["hooks"]["Stop"])
+    command = failed_turn.rotation_check_command(
+        config["hooks"]["Stop"],
+        copied_scripts=(mind / "hooks/rotation_check.py",),
+    )
     assert command is not None
     command[0] = sys.executable
     result = subprocess.run(

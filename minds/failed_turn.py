@@ -13,23 +13,39 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shlex
 from pathlib import Path
 from typing import Any, Iterable
+
+from minds.harness.hook_commands import managed_python_command
 
 #: How long the check may take to read its input. It detaches its own work.
 CHECK_TIMEOUT_SECONDS = 30
 
 
-def rotation_check_command(stop_groups: Iterable[Any]) -> list[str] | None:
-    """The registered Stop command that is the rotation check, as argv."""
+def rotation_check_command(
+    stop_groups: Iterable[Any], *, native_script: Path | str | None = None,
+    copied_scripts: Iterable[Path | str] = (),
+) -> list[str] | None:
+    """The owned registered Stop check, as argv, preferring the native check."""
+    commands = []
     for group in stop_groups or []:
         if not isinstance(group, dict):
             continue
         for hook in group.get("hooks") or []:
-            command = str((hook or {}).get("command") or "") if isinstance(hook, dict) else ""
-            if "rotation_check" in command or "rotation_hooks.py check" in command:
-                return shlex.split(command)
+            if isinstance(hook, dict):
+                commands.append(hook.get("command"))
+    if native_script is not None:
+        for command in commands:
+            selected = managed_python_command(
+                command, script_path=native_script, actions=("check",),
+            )
+            if selected is not None:
+                return selected
+    for script in copied_scripts:
+        for command in commands:
+            selected = managed_python_command(command, script_path=script)
+            if selected is not None:
+                return selected
     return None
 
 

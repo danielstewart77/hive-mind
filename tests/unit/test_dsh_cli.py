@@ -11,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from minds.harness import dsh_cli
+from minds.harness import dsh_cli, dsh_hooks
 
 
 def _set_live(monkeypatch, dsh, key: str, value) -> None:
@@ -1724,12 +1725,12 @@ async def test_a_turn_dsh_fired_no_stop_for_runs_the_minds_rotation_check(
     killed, crashed or wrote nothing readable fired none, and what it read
     before it stopped is in the conversation all the same — so the adapter
     runs the check the mind registered for Stop, as a failed turn."""
-    hooks = tmp_path / "hooks.json"
-    hooks.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
-        {"type": "command", "command": "bash /minds/x/hooks/auto_remember.sh"},
-        {"type": "command", "command": "bash /minds/x/hooks/rotation_check.sh"},
-    ]}]}}))
-    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(hooks))
+    generated = dsh_hooks.write_hooks(
+        "probe", tmp_path / "minds", container_minds_dir=str(tmp_path / "minds"),
+        home=dsh.DSH_HOME, container_hooks_dir=str(dsh.DSH_HOME / "hooks"),
+        python=sys.executable,
+    )
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", generated["hooks_config"])
     state = _session(dsh)
     if ending == "timeout":
         monkeypatch.setattr(
@@ -1756,7 +1757,9 @@ async def test_a_turn_dsh_fired_no_stop_for_runs_the_minds_rotation_check(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
 
-    assert [argv for argv, _ in checks] == [["bash", "/minds/x/hooks/rotation_check.sh"]]
+    assert [argv for argv, _ in checks] == [[
+        sys.executable, str(dsh.DSH_HOME / "hooks" / "rotation_check.py"),
+    ]]
     payload = json.loads(checks[0][1].data)
     assert (payload["session_id"], payload["stop_reason"]) == ("conv-1", "error")
 

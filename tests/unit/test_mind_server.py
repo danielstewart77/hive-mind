@@ -16,6 +16,7 @@ import pty
 import shutil
 import struct
 import subprocess
+import sys
 import termios
 import tomllib
 from pathlib import Path
@@ -27,7 +28,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from minds import mind_server, models_api, pty_attach, runtime_api
-from minds.harness import claude_cli, codex_cli, dsh_cli
+from minds.harness import claude_cli, codex_cli, dsh_cli, rotation_hooks
 
 SESSION = {"Authorization": "Bearer test-mind-session-token"}  # secret-guard: allow
 ADMIN_TOKEN = "test-admin-token"  # secret-guard: allow
@@ -1072,9 +1073,17 @@ def equipped(homes, monkeypatch, tmp_path):
     (homes["claude"] / ".credentials.json").write_text("{}")
     (homes["codex"] / "config.toml").write_text(
         '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "auto_remember.sh"\n'
-        '[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "rotation_check.sh"\n'
         '[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
         'type = "command"\ncommand = "surface_inject.sh"\n')
+    runtime_path = homes["codex"] / "runtime.yaml"
+    runtime_path.write_text(
+        "name: example\nmind_id: example\nharness: codex\n"
+        "default_model: gpt-5\nrotation_threshold_percent: 75\n"
+    )
+    rotation_hooks.write_harness_hooks(
+        "codex", homes["codex"], runtime_path=runtime_path,
+        python=sys.executable, app_root=Path(__file__).resolve().parents[2],
+    )
     (homes["codex"] / "auth.json").write_text("{}")
     # dsh's hooks resolve under DSH_HOME, the way its adapter resolves it.
     (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
@@ -1525,7 +1534,12 @@ def test_a_failed_codex_turn_runs_the_minds_rotation_check(
     client.post("/sessions/f1/message", headers=SESSION, json={"content": "one"})
 
     _, checks = _codex_turns_and_checks(spawner)
-    assert [c["argv"] for c in checks] == [["rotation_check.sh"]]
+    assert [c["argv"] for c in checks] == [[
+        sys.executable, str(Path(__file__).resolve().parents[2] / "minds/harness/rotation_hooks.py"),
+        "check", "--harness", "codex", "--runtime",
+        str(equipped["codex"] / "runtime.yaml"), "--app-root",
+        str(Path(__file__).resolve().parents[2]),
+    ]]
     payload = json.loads(checks[0]["proc"].stdin_bytes)
     assert (payload["hook_event_name"], payload["session_id"], payload["stop_reason"]) == (
         "Stop", "thread-f", "error")
