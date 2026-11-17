@@ -8,13 +8,15 @@
     </header>
     <div id="roles-status" class="event-hints"></div>
     <section class="surface" id="role-editor" hidden>
-        <div class="surface-header"><div><h2 id="role-editor-title">New role</h2><p>Names one per line. A tool left unticked is not allowed.</p></div></div>
+        <div class="surface-header"><div><h2 id="role-editor-title">New role</h2><p>Tick what this role grants. Anything left unticked is not allowed. The lists are what exists: the models the proxy serves, and the skills and hooks the Minds report.</p></div></div>
         <form class="surface-body overview-stack" id="role-form">
             <div class="field"><label for="role-name">Name</label><input id="role-name" name="name" required maxlength="80"></div>
-            <div class="field"><label for="role-model">Model</label><input id="role-model" name="model" placeholder="none: this role names no model"></div>
+            <div class="field"><label for="role-model">Model</label><select id="role-model" name="model"></select><small id="role-model-note"></small></div>
             <fieldset class="field"><legend>Built-in tools</legend><div id="role-tools"></div></fieldset>
-            <div class="field"><label for="role-skills">Skills</label><textarea id="role-skills" name="skills" rows="5" spellcheck="false"></textarea></div>
-            <div class="field"><label for="role-hooks">Hooks</label><textarea id="role-hooks" name="hooks" rows="3" spellcheck="false"></textarea></div>
+            <div class="field"><label>Skills</label><small id="role-skills-note"></small><label class="checkbox-row"><input type="checkbox" id="role-community"> Show community submissions</label>
+                <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Granted</th><th>Skill</th><th>Repo</th><th>Minds that have it</th></tr></thead><tbody id="role-skills"></tbody></table></div></div>
+            <div class="field"><label>Hooks</label><small id="role-hooks-note"></small>
+                <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Granted</th><th>Hook</th><th>Minds that have it</th></tr></thead><tbody id="role-hooks"></tbody></table></div></div>
             <div class="form-actions"><button class="button" type="submit" id="role-save">Save role</button><button class="button button-quiet" type="button" id="role-cancel">Cancel</button></div>
             <small id="role-form-status"></small>
         </form>
@@ -42,9 +44,11 @@ window.addEventListener("DOMContentLoaded", async function () {
         unreadable: {label: "Repo copy unreadable", actions: []}
     };
     const ACTION_LABELS = {diff: "Diff", keep: "Keep yours", take: "Take the repo update", promote: "Promote yours to the hive"};
-    let roles = [], tools = [], editing = null;
-
-    function lines(text) { return text.split("\n").map(function (v) { return v.trim(); }).filter(Boolean); }
+    let roles = [], tools = [], editing = null, catalog = null;
+    // What the role grants while it is being edited. The tables are painted
+    // from these, and saving sends these: a grant leaves a role only by
+    // being unticked, never by its row being off the screen.
+    const chosen = {skills: new Set(), hooks: new Set()};
     function toolsCell(role) {
         return tools.map(function (tool) {
             const allowed = (role.tools || []).indexOf(tool) >= 0;
@@ -81,32 +85,103 @@ window.addEventListener("DOMContentLoaded", async function () {
             render();
         } catch (error) { tbody.innerHTML = '<tr><td colspan="7"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
     }
-    function openEditor(role) {
+    function paintModel(current) {
+        const select = form.elements.model;
+        const models = catalog ? catalog.models || [] : [];
+        const providers = [];
+        models.forEach(function (m) { if (providers.indexOf(m.provider) < 0) providers.push(m.provider); });
+        let html = '<option value="">none: this role names no model</option>';
+        if (current && !models.some(function (m) { return m.id === current; })) html += '<option value="' + h.escapeHtml(current) + '">' + h.escapeHtml(current) + ' (not listed by the proxy)</option>';
+        providers.forEach(function (provider) {
+            html += '<optgroup label="' + h.escapeHtml(provider) + '">' + models.filter(function (m) { return m.provider === provider; }).map(function (m) { return '<option value="' + h.escapeHtml(m.id) + '">' + h.escapeHtml(m.id) + '</option>'; }).join("") + '</optgroup>';
+        });
+        select.innerHTML = html;
+        select.value = current || "";
+        document.getElementById("role-model-note").textContent = !catalog ? "" : catalog.models_error ? "The proxy's model list could not be read (" + catalog.models_error + "), so only this role's own model is offered." : "";
+    }
+    // One table of ticks. Every name the Minds report, and every name the
+    // role already grants whether or not a Mind reported it.
+    function paintGrants(kind, rows, silent) {
+        const known = new Set(rows.map(function (r) { return r.name; }));
+        const unseen = Array.from(chosen[kind]).filter(function (n) { return !known.has(n); }).sort();
+        const showCommunity = document.getElementById("role-community").checked;
+        const listed = rows.filter(function (r) { return !r.community || showCommunity || chosen[kind].has(r.name); });
+        const asked = catalog.minds_asked || 0;
+        const missing = asked - silent.length <= 0 ? "could not be checked: no Mind answered" : silent.length ? "not reported by the Minds that answered" : "not on any Mind";
+        const cells = function (name, rest) {
+            return '<tr><td><input type="checkbox" data-grant="' + kind + '" value="' + h.escapeHtml(name) + '" aria-label="' + h.escapeHtml(name) + '"' + (chosen[kind].has(name) ? " checked" : "") + '></td><td>' + h.escapeHtml(name) + rest + '</td></tr>';
+        };
+        const span = kind === "skills" ? 2 : 1;
+        const body = listed.map(function (r) {
+            const minds = h.escapeHtml((r.minds || []).join(", ") || "none");
+            return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.repo ? "present" : "absent") : "") + '</td><td>' + minds);
+        }).concat(unseen.map(function (name) { return cells(name, '</td><td colspan="' + span + '">' + missing); }));
+        document.getElementById("role-" + kind).innerHTML = body.join("") || '<tr><td colspan="' + (span + 2) + '">' + (asked - silent.length > 0 ? "No Mind reported any." : "No Mind answered.") + '</td></tr>';
+        const notes = [];
+        if (!asked) notes.push("No Mind could be asked.");
+        if (kind === "skills" && catalog.community_unread) notes.push("Which skills are community submissions could not be read, so none is marked.");
+        if (silent.length) notes.push("Did not answer, so what only they have is not listed: " + silent.join(", ") + ".");
+        const left = rows.length - listed.length;
+        if (left) notes.push(left + (left === 1 ? " community submission is" : " community submissions are") + " left out.");
+        document.getElementById("role-" + kind + "-note").textContent = notes.join(" ");
+    }
+    function paintLists() {
+        if (!catalog) return;
+        paintGrants("skills", catalog.skills || [], catalog.skills_unanswered || []);
+        paintGrants("hooks", catalog.hooks || [], catalog.hooks_unanswered || []);
+    }
+    async function openEditor(role) {
         editing = role;
         document.getElementById("role-editor-title").textContent = role ? "Edit " + role.name : "New role";
         form.elements.name.value = role ? role.name : "";
-        form.elements.model.value = role && role.model ? role.model : "";
-        form.elements.skills.value = role ? (role.skills || []).join("\n") : "";
-        form.elements.hooks.value = role ? (role.hooks || []).join("\n") : "";
+        chosen.skills = new Set(role ? role.skills || [] : []);
+        chosen.hooks = new Set(role ? role.hooks || [] : []);
         document.getElementById("role-tools").innerHTML = tools.map(function (tool) {
             const on = role && (role.tools || []).indexOf(tool) >= 0;
             return '<label class="checkbox-row"><input type="checkbox" name="tools" value="' + h.escapeHtml(tool) + '"' + (on ? " checked" : "") + '> ' + h.escapeHtml(TOOL_LABELS[tool] || tool) + '</label>';
         }).join("");
-        document.getElementById("role-form-status").textContent = "";
+        const formStatus = document.getElementById("role-form-status");
+        const current = role && role.model ? role.model : "";
+        catalog = null;
+        paintModel(current);
+        ["skills", "hooks"].forEach(function (kind) { document.getElementById("role-" + kind).innerHTML = ""; document.getElementById("role-" + kind + "-note").textContent = ""; });
+        formStatus.textContent = "Asking the proxy and the Minds what exists…";
+        document.getElementById("role-save").disabled = true;
+        form.elements.model.disabled = true;
         editor.hidden = false;
         form.elements.name.focus();
+        try {
+            const read = await h.requestJson("/api/roles/catalog");
+            if (editing !== role) return;
+            catalog = read;
+            formStatus.textContent = "";
+        } catch (error) {
+            if (editing !== role) return;
+            catalog = {models: [], models_error: error.message, skills: [], hooks: [], skills_unanswered: [], hooks_unanswered: [], minds_asked: 0};
+            formStatus.textContent = "What exists could not be read: " + error.message + ". Only what this role already grants is shown.";
+        }
+        paintModel(current);
+        form.elements.model.disabled = false;
+        paintLists();
+        document.getElementById("role-save").disabled = false;
     }
+    document.getElementById("role-community").addEventListener("change", paintLists);
+    form.addEventListener("change", function (event) {
+        const box = event.target.closest("input[data-grant]");
+        if (!box) return;
+        if (box.checked) chosen[box.dataset.grant].add(box.value); else chosen[box.dataset.grant].delete(box.value);
+    });
     const newButton = document.getElementById("role-new");
     if (newButton) newButton.addEventListener("click", function () { openEditor(null); });
-    document.getElementById("role-cancel").addEventListener("click", function () { editor.hidden = true; });
+    document.getElementById("role-cancel").addEventListener("click", function () { editing = null; editor.hidden = true; });
     form.addEventListener("submit", async function (event) {
         event.preventDefault();
         const body = {
             name: form.elements.name.value,
-            model: form.elements.model.value.trim() || null,
+            model: form.elements.model.value || null,
             tools: Array.from(form.querySelectorAll('input[name="tools"]:checked')).map(function (i) { return i.value; }),
-            skills: lines(form.elements.skills.value),
-            hooks: lines(form.elements.hooks.value)
+            skills: Array.from(chosen.skills).sort(),
+            hooks: Array.from(chosen.hooks).sort()
         };
         const formStatus = document.getElementById("role-form-status");
         try {

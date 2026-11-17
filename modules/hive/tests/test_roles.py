@@ -371,6 +371,29 @@ def test_asking_for_community_submissions_lists_them_labelled(repo, monkeypatch,
     assert body["community_hidden"] == 0
 
 
+def test_the_role_editors_skill_list_labels_a_community_submission(repo, monkeypatch, mind_listing):
+    _submitted("weather")
+
+    async def registry():
+        return [{"name": "stash", "id": "mind-stash", "gateway_url": GATEWAY},
+                {"name": "ada", "id": "mind-ada", "gateway_url": "http://ada.local:8420"}]
+
+    async def no_proxy(path):
+        raise httpx.ConnectError(f"no proxy for {path}")
+
+    monkeypatch.setattr(main_mod, "_broker_minds_safe", registry)
+    monkeypatch.setattr(main_mod, "_proxy_json", no_proxy)
+    client = _client(monkeypatch)
+
+    body = client.get("/api/roles/catalog").json()
+
+    labelled = {s["name"]: s["community"] for s in body["skills"]}
+    assert labelled == {"changed": False, "memory": False, "owners-own": False, "weather": True}
+    assert next(s for s in body["skills"] if s["name"] == "weather")["minds"] == ["stash"]
+    assert body["skills_unanswered"] == ["ada"]
+    assert body["hooks_unanswered"] == ["ada", "stash"]
+
+
 def test_a_community_submission_closed_without_merging_is_not_hidden(repo, monkeypatch, mind_listing):
     _submitted("weather", state="closed")
     client = _client(monkeypatch)
@@ -503,10 +526,11 @@ def test_an_owner_gives_their_mind_roles_and_its_grants_are_their_union(repo, mo
     writer = testing.run(store.create_role("Writer", slug="writer", skills=["remember"], tools=["files"]))
     builder = testing.run(store.create_role("Builder", slug="builder", skills=["code"], tools=["shell"]))
 
-    async def mind_row(name):
-        return {"name": name, "mind_id": "mind-stash", "owner": "daniel"}
+    # The registry's own row for a Mind: its id is filed under `id`.
+    async def registry():
+        return [{"name": "stash", "id": "mind-stash", "owner": "daniel", "gateway_url": GATEWAY}]
 
-    monkeypatch.setattr(main_mod, "_mind_row", mind_row)
+    monkeypatch.setattr(main_mod, "_broker_minds_safe", registry)
     client = _client(monkeypatch)
 
     response = client.put("/api/minds/stash/roles", json={"role_ids": [writer, builder]})

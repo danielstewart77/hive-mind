@@ -305,6 +305,74 @@ def store_conflict() -> type[BaseException]:
     return hive_data.Conflict
 
 
+# ------------------------------------------------------- what can be ticked
+
+#: A hook is a script directly in a Mind's hooks directory, named by its file
+#: name without this suffix — the name the guard on the Mind matches.
+HOOK_SUFFIXES = (".sh", ".py")
+
+
+def hook_names(tree: dict[str, Any]) -> list[str]:
+    """The hooks in one Mind's hooks listing, each name once.
+
+    Only scripts at the top of the directory: what sits in a folder under it
+    is a cache or the hooks' own state, never something a harness runs.
+    """
+    names: list[str] = []
+    for entry in tree.get("files") or []:
+        path = str(entry.get("path") or "") if isinstance(entry, dict) else ""
+        if "/" in path or path.startswith("."):
+            continue
+        for suffix in HOOK_SUFFIXES:
+            stem = path[: -len(suffix)]
+            if path.endswith(suffix) and stem and stem not in names:
+                names.append(stem)
+    return names
+
+
+def catalog(reports: list[dict[str, Any]], community: set[str]) -> dict[str, Any]:
+    """Every skill and hook the answering Minds report, for the role editor.
+
+    A skill or a hook exists nowhere but on a Mind, so the list is what the
+    Minds say: one row per name, with whether any Mind's repo carries the
+    skill and which Minds have it. A Mind that did not answer is named, per
+    list, so a short list is never read as a complete one.
+    """
+    skills: dict[str, dict[str, Any]] = {}
+    hooks: dict[str, list[str]] = {}
+    silent: dict[str, list[str]] = {"skills": [], "hooks": []}
+    for report in reports:
+        mind = str(report.get("mind") or "")
+        listing = report.get("skills")
+        if not isinstance(listing, dict):
+            silent["skills"].append(mind)
+        else:
+            for item in listing.get("skills") or []:
+                name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
+                if not name:
+                    continue
+                row = skills.setdefault(name, {"name": name, "repo": False, "minds": [],
+                                               "community": name in community})
+                if item.get("repo") is not None:
+                    row["repo"] = True
+                if item.get("installed") is not None and mind not in row["minds"]:
+                    row["minds"].append(mind)
+        tree = report.get("hooks")
+        if not isinstance(tree, dict):
+            silent["hooks"].append(mind)
+        else:
+            for name in hook_names(tree):
+                holders = hooks.setdefault(name, [])
+                if mind not in holders:
+                    holders.append(mind)
+    return {
+        "skills": sorted(skills.values(), key=lambda r: r["name"].lower()),
+        "hooks": [{"name": n, "minds": hooks[n]} for n in sorted(hooks, key=str.lower)],
+        "skills_unanswered": sorted(silent["skills"]),
+        "hooks_unanswered": sorted(silent["hooks"]),
+    }
+
+
 # ------------------------------------------------------------- editing
 
 def grants_from(body: dict[str, Any]) -> dict[str, Any]:

@@ -9,7 +9,11 @@
         const response = await fetch(url, options);
         let body = {};
         try { body = await response.json(); } catch (error) { body = {}; }
-        if (!response.ok) throw new Error(body.detail || ("Request failed with status " + response.status));
+        if (!response.ok) {
+            const failure = new Error(body.detail || ("Request failed with status " + response.status));
+            failure.status = response.status;
+            throw failure;
+        }
         return body;
     }
 
