@@ -149,13 +149,19 @@ next attach to open the new harness on.
 
 Each process a conversation runs in is told its own model's window
 (`HIVE_MODEL_CONTEXT_WINDOW`) and rotation threshold
-(`HIVE_ROTATION_THRESHOLD_TOKENS`, the window times the model's
-`rotation_threshold_percent`), both read off the proxy's row for that
-conversation's harness and model. The percentage is the model's, never the
-mind's: no mind's file carries one. A model the proxy declares no window for
-gets neither variable, and one with a window and no percentage gets no
-threshold; a lookup missing either is not remembered, so the next spawn asks
-again. A dsh turn runs under that window,
+(`HIVE_ROTATION_THRESHOLD_TOKENS`, the window times the mind's
+`rotation_threshold_percent`). The window is the model's, read off the
+proxy's row for that conversation's harness and model. The percentage is the
+mind's, never the model's (Daniel, 2026-11-17): a line in the mind's
+`runtime.yaml`, set from its Settings card on the console
+(`minds/rotation_policy.py`), 100 when the file has no line, so every mind
+that should rotate early carries one; a percentage a proxy row still names is
+read by nothing. A model the proxy declares no window for gets neither
+variable, and a mind whose line is not a whole number from 1 to 100 gets a
+window and no threshold; a window lookup that failed is not remembered, so
+the next spawn asks again. A mind installed before the generated hooks keeps
+its own rotation check, which reads the threshold its process was spawned
+with, so a changed percentage reaches it at its next conversation. A dsh turn runs under that window,
 or — with none composed for it — under the
 window the proxy lists for its model, asked per turn; a model with no window
 is refused rather than run behind a guessed one. The rotation hook takes the
