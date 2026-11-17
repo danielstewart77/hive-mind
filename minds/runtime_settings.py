@@ -66,6 +66,21 @@ SETTINGS: tuple[Setting, ...] = (
         help="What this Mind is for. Shown wherever Minds are listed.",
     ),
     Setting(
+        key="rotation_threshold_percent",
+        label="Rotation threshold",
+        kind=NUMBER,
+        minimum=1,
+        maximum=100,
+        help=(
+            "The percentage of this conversation model's context window at"
+            " which its next safe check may begin the existing handover."
+        ),
+        comment=(
+            "# Percentage of the conversation model's context window at which",
+            "# the next safe check may begin the existing handover.",
+        ),
+    ),
+    Setting(
         key="on_harness_error",
         label="When a turn fails",
         kind=CHOICE,
@@ -214,12 +229,17 @@ def settings_view(loaded: dict[str, Any], harness: str = "") -> dict[str, Any]:
         )
     window = loaded.get(CONTEXT_WINDOW_FIELD)
     usable = isinstance(window, int) and not isinstance(window, bool) and window > 0
+    from minds.rotation_policy import read_policy
+
+    policy = read_policy(loaded)
     return {
         "harness": which,
         "settings": entries,
         # Zero is the proxy declaring none for this mind's model, reported as
         # nothing rather than as a window of no tokens.
         "context_window": window if usable else None,
+        "rotation_threshold_percent": policy["percentage"],
+        "rotation_policy_error": policy["error"],
     }
 
 

@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 import tomllib
 from collections.abc import Callable
@@ -50,12 +51,14 @@ from minds import (
     github_token_api,
     models_api,
     rotation_marker_api,
+    rotation_policy,
     runtime_api,
     skills_api,
     surface_token_api,
     transcript,
 )
-from minds.proactive import make_proactive_router
+from minds.harness import dsh_hooks, rotation_hooks
+from minds.proactive import BUFFER as proactive_buffer, make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -105,11 +108,12 @@ HARNESS_OF: dict[str, str] = {}
 app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
 
-# Only the claude adapter has an idle stream to drain into this buffer; the
-# per-turn harnesses leave it empty, as they do when run alone.
+# One buffer for every adapter that can produce an unsolicited turn: claude's
+# idle drain, and dsh's resident process reporting a background child that
+# settled after the turn that dispatched it had closed. The codex adapter
+# spawns per turn with no idle stream and leaves it empty.
 app.include_router(make_proactive_router(
-    getattr(ADAPTERS.get("claude"), "PROACTIVE_BUFFER", []),
-    os.environ.get("COMMS_BEARER_TOKEN") or None,
+    proactive_buffer, os.environ.get("COMMS_BEARER_TOKEN") or None,
 ))
 
 
@@ -139,43 +143,48 @@ def _live_runtime() -> dict:
 #: and its reply.
 WINDOW_TTL_SECONDS = 600.0
 
-_WINDOWS: dict[tuple[str, str], tuple[float, int, int | None]] = {}
+_WINDOWS: dict[tuple[str, str], tuple[float, int | None]] = {}
 
 
 async def conversation_env(harness: str, model: str) -> dict[str, str]:
     """Environment naming this conversation's own model window and threshold.
 
-    The window and the share of it a conversation fills before rotating both
-    belong to the model, and the proxy's row for that model is the only place
-    either is declared. A conversation switched to another model (or another
-    harness) has that model's room and that model's share, so every process
-    a conversation runs in is told both, as the window and the threshold they
-    give. A model the proxy has not measured gets neither; one with a window
-    and no share gets no threshold.
+    Capacity is cached for the exact conversation model. The mind's saved
+    percentage is reread for every new conversation, so configuration changes
+    never wait for the capacity cache to expire.
     """
     key = (harness, model)
     cached = _WINDOWS.get(key)
     if cached is not None and time.monotonic() - cached[0] < WINDOW_TTL_SECONDS:
-        window, percent = cached[1], cached[2]
+        window = cached[1]
     else:
         try:
-            window, percent = await models_api.model_sizing(RUNTIME_PATH, harness, model)
+            window, _ = await models_api.model_sizing(RUNTIME_PATH, harness, model)
         except Exception:  # noqa: BLE001 — a spawn must not fail for a listing
-            window, percent = None, None
+            window = None
         # Only a whole answer is remembered. A miss — the proxy down for a
         # moment, a model whose window or share was filled in a minute ago —
         # remembered for the whole TTL is every conversation on that model
         # sized by nothing until it expires.
-        if window and percent:
-            _WINDOWS[key] = (time.monotonic(), window, percent)
-    env = {"HIVE_HARNESS": harness}
+        if window:
+            _WINDOWS[key] = (time.monotonic(), window)
+    policy = rotation_policy.read_policy(RUNTIME_PATH)
+    percent = policy["percentage"] if policy["status"] == "ok" else None
+    env = {
+        "HIVE_HARNESS": harness,
+        "HIVE_MODEL": model,
+        "HIVE_MIND_APP_ROOT": str(Path(__file__).resolve().parents[1]),
+        "HIVE_RUNTIME_PATH": str(Path(RUNTIME_PATH).resolve()),
+    }
     # Omitted, not zero, when nobody has measured the model: a hook reading
     # zero would have to know it means "fall back", and one that forgot would
     # rotate on every turn.
     if window:
         env["HIVE_MODEL_CONTEXT_WINDOW"] = str(window)
-    if window and percent:
-        env["HIVE_ROTATION_THRESHOLD_TOKENS"] = str(window * percent // 100)
+    if window is not None and percent is not None:
+        threshold = rotation_policy.effective_threshold(window, percent)
+        if threshold is not None:
+            env["HIVE_ROTATION_THRESHOLD_TOKENS"] = str(threshold)
     return env
 
 
@@ -225,6 +234,36 @@ def _hook_commands(config: dict) -> dict[str, list[str]]:
     return events
 
 
+def _install_rotation_hooks() -> None:
+    """Refresh managed rotation hooks in already declared harness homes."""
+    app_root = Path(__file__).resolve().parents[1]
+    claude = ADAPTERS.get("claude")
+    claude_home = getattr(claude, "CONFIG_DIR", None)
+    if claude_home is not None and Path(claude_home).is_dir():
+        rotation_hooks.write_harness_hooks(
+            "claude", Path(claude_home), runtime_path=RUNTIME_PATH,
+            python=sys.executable, app_root=app_root,
+        )
+
+    codex = ADAPTERS.get("codex")
+    codex_home = getattr(codex, "CODEX_HOME", None)
+    if (codex_home is not None and Path(codex_home).is_dir()
+            and getattr(codex, "home_declared", lambda: False)()):
+        rotation_hooks.write_harness_hooks(
+            "codex", Path(codex_home), runtime_path=RUNTIME_PATH,
+            python=sys.executable, app_root=app_root,
+        )
+
+    dsh = ADAPTERS.get("dsh")
+    dsh_home = getattr(dsh, "DSH_HOME", None)
+    if (dsh_home is not None and Path(dsh_home).is_dir()
+            and getattr(dsh, "home_declared", lambda: False)()):
+        dsh_hooks.write_hooks(
+            MIND_NAME, MIND_DIR.parent, python=sys.executable, home=Path(dsh_home),
+            container_hooks_dir=str(Path(dsh_home) / "hooks"),
+        )
+
+
 def _hook_config(harness: str) -> tuple[dict | None, str]:
     """The harness's hook configuration and where it was read from."""
     try:
@@ -250,7 +289,10 @@ def _hooks_check(harness: str) -> str | None:
         return f"no hook configuration ({source})"
     commands = _hook_commands(config)
     stop = " ".join(commands.get("Stop", []))
-    missing = [name for name in REQUIRED_STOP_HOOKS if name not in stop]
+    missing = [name for name in REQUIRED_STOP_HOOKS
+               if name not in stop and not (
+                   name == "rotation_check" and "rotation_hooks.py" in stop
+               )]
     if not commands.get("UserPromptSubmit"):
         missing.append("a UserPromptSubmit hook")
     return f"hooks missing in {source}: {', '.join(missing)}" if missing else None
@@ -382,6 +424,10 @@ async def _startup() -> None:
         github_token_api.adopt_stored_token()
     except Exception:  # noqa: BLE001
         log.exception("could not adopt this mind's own GitHub token")
+    try:
+        _install_rotation_hooks()
+    except Exception:  # stale hooks must not prevent the mind starting
+        log.exception("could not refresh managed rotation hooks")
     asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
     ))
@@ -522,7 +568,7 @@ async def release_idle_chat(sid: str) -> str | None:
 @app.get("/harnesses")
 async def get_harnesses(request: Request) -> Any:
     """Which harnesses a conversation here may run on, and why not the rest."""
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     return harness_report()
@@ -540,7 +586,7 @@ async def handover(request: Request) -> Any:
     the switch would lose the conversation it was moving, so it is refused
     and the old harness keeps running.
     """
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     body = await request.json()
@@ -613,7 +659,7 @@ async def skills_check(request: Request) -> Any:
     where the render pass is not installed: a 200 that rendered nothing would
     let a switch go ahead on stale copies with every surface reporting fine.
     """
-    denied = runtime_api.authorize_admin(request)
+    denied = runtime_api.authorize_gateway(request, MIND_DIR)
     if denied is not None:
         return denied
     check_all = getattr(skills_api, "check_all", None)

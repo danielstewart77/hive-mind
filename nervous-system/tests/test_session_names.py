@@ -314,3 +314,210 @@ def test_a_name_on_an_ended_conversation_can_still_be_cleared(comms_db) -> None:
             await close_manager(mgr)
 
     _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# A name arrives with the conversation, not by a second call
+# ---------------------------------------------------------------------------
+def test_a_conversation_created_with_a_name_holds_it_from_birth(comms_db) -> None:
+    """R2, R4: the create stamps the label, and every reader of one sees it.
+
+    A second call is a thing that gets skipped, refused, or lost with the turn
+    that was going to make it — and until it lands every picker draws the
+    conversation as the mind's own name, which is the bug this exists to close.
+    Asserted on all three readers a surface actually uses: the create's own
+    answer, the stored column, and the bulk `session_names` read the terminal's
+    rail is drawn from. Breaks if the columns stop riding the insert, or if
+    `name` is dropped from `_session_dict`'s hand-written allowlist.
+    """
+    async def scenario() -> None:
+        mgr = await _make_manager()
+        try:
+            await register_mind("ada", model="opus", harness="")
+            with _a_registered_mind([]):
+                named = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-1",
+                    mind_id="ada", name="  CoS: Session names  ",
+                    color="#5c913b",
+                )
+                bare = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-2",
+                    mind_id="ada",
+                )
+
+            assert named["name"] == "CoS: Session names"
+            assert named["color"] == "#5c913b"
+            assert await fetchval(
+                "SELECT name FROM core.sessions WHERE id = $1", named["id"]
+            ) == "CoS: Session names"
+
+            labels = await mgr.session_names()
+            assert labels[named["id"]]["name"] == "CoS: Session names"
+            assert labels[named["id"]]["color"] == "#5c913b"
+
+            # The create that names nothing is the one every surface bot
+            # already makes, and it has to come out exactly as it did.
+            assert bare["name"] is None
+            assert bare["color"] is None
+            assert bare["id"] not in labels
+
+            # Empty is not a short name, it is no name — so a conversation
+            # created with one is indistinguishable from one created with
+            # none, and the rail falls back rather than drawing a blank tile.
+            with _a_registered_mind([]):
+                blank = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-3",
+                    mind_id="ada", name="   ",
+                )
+            assert blank["name"] is None
+            assert await fetchval(
+                "SELECT name FROM core.sessions WHERE id = $1", blank["id"]
+            ) is None
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_a_name_is_normalised_the_same_at_creation_as_at_a_rename(comms_db) -> None:
+    """R2: one normaliser, so the two writes cannot drift apart.
+
+    The trim and the forty-character cap were an inline expression in
+    `set_session_name` while renaming was the only way a name could arrive. A
+    copy of that expression in the create passes every test on the day it is
+    written and drifts later — a name stored at a length a rename would have
+    cut, with nothing failing. So the two paths are given the same awkward
+    input and their stored values compared to each other rather than to a
+    literal. Breaks when the two paths normalise *differently* — which is the
+    whole of what a behavioural test can see here. An exact copy of the
+    expression in either path passes this and always will; nothing short of
+    reading the code catches that, and it is not what drift looks like.
+    """
+    async def scenario() -> None:
+        mgr = await _make_manager()
+        try:
+            long_name = "  " + "Re-index every lucent collection on the hive" + "  "
+
+            await _seed(mgr, "sess-renamed")
+            renamed = await mgr.set_session_name("sess-renamed", name=long_name)
+
+            await register_mind("ada", model="opus", harness="")
+            with _a_registered_mind([]):
+                created = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-1",
+                    mind_id="ada", name=long_name,
+                )
+
+            assert created["name"] == renamed["name"]
+            # Sourced from the input rather than stated as a number: the test
+            # must fail if the cap moves in one path only, not if it moves.
+            assert len(created["name"]) < len(long_name.strip())
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_a_colour_that_is_not_a_hex_value_creates_no_conversation(comms_db) -> None:
+    """R3: refused before anything is written, not after.
+
+    The row and its surface binding go in one unit of work and the harness is
+    spawned after it, so a colour checked any later would have to be refused
+    by undoing a conversation that already exists — and the binding it
+    replaced is not coming back. The valid colour is created in the same test
+    so that a create which simply never works cannot pass it. Breaks if the
+    check moves below `_atomically(_write)` or is dropped.
+    """
+    async def scenario() -> None:
+        mgr = await _make_manager()
+        try:
+            await register_mind("ada", model="opus", harness="")
+            with _a_registered_mind([]):
+                accepted = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-1",
+                    mind_id="ada", color="#5c913b",
+                )
+                assert accepted["color"] == "#5c913b"
+
+                with pytest.raises(ValueError):
+                    await mgr.create_session(
+                        surface="web", surface_id="terminal",
+                        client_ref="staff-2", mind_id="ada",
+                        color="red; content:url(x)",
+                    )
+
+            assert await fetchval("SELECT COUNT(*) FROM core.sessions") == 1
+            assert await fetchval(
+                "SELECT COUNT(*) FROM core.active_sessions "
+                "WHERE client_ref = 'staff-2'"
+            ) == 0
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_a_name_that_cannot_be_stored_costs_the_label_and_not_the_conversation(
+    comms_db,
+) -> None:
+    """R2: a label is a label, and losing one must not lose the conversation.
+
+    Two characters would otherwise take the whole create down with them: a NUL,
+    which a Postgres `text` column refuses outright, and an unpaired surrogate,
+    which no UTF-8 encoder will accept. The name rides the same unit of work as
+    the session row and its binding, so either one rolls back the create and
+    the caller is told the mind is unreachable. Breaks if the laundering leaves
+    `normalised_name` — and it breaks loudly, because the refusal comes from
+    the driver and not from this module.
+    """
+    async def scenario() -> None:
+        mgr = await _make_manager()
+        try:
+            await register_mind("ada", model="opus", harness="")
+            with _a_registered_mind([]):
+                created = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-1",
+                    mind_id="ada", name="CoS: re\x00index \ud800lucent",
+                )
+
+            stored = await fetchval(
+                "SELECT name FROM core.sessions WHERE id = $1", created["id"]
+            )
+            assert created["id"]
+            assert stored == created["name"]
+            assert "\x00" not in stored
+            assert stored.startswith("CoS: re")
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())
+
+
+def test_renaming_a_conversation_named_at_creation_leaves_its_colour_alone(
+    comms_db,
+) -> None:
+    """R5: the partial update still holds over a colour set at creation.
+
+    The rename route takes only the fields it was sent, and the colour it must
+    not touch now has a second way of getting onto the row. Breaks if the
+    create fails to store the colour, or if the rename goes back to writing
+    both columns unconditionally.
+    """
+    async def scenario() -> None:
+        mgr = await _make_manager()
+        try:
+            await register_mind("ada", model="opus", harness="")
+            with _a_registered_mind([]):
+                created = await mgr.create_session(
+                    surface="web", surface_id="terminal", client_ref="staff-1",
+                    mind_id="ada", name="CoS: Health", color="#5c913b",
+                )
+
+            after = await mgr.set_session_name(created["id"], name="CoS: Health app")
+
+            assert after["name"] == "CoS: Health app"
+            assert after["color"] == "#5c913b"
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())

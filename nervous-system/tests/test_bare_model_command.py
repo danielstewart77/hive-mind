@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from comms_pg_fixture import comms_db, execute, scratch_dsn  # noqa: F401
+from comms_pg_fixture import comms_db, execute, link_account, scratch_dsn  # noqa: F401
 
 MIND = "11111111-1111-1111-1111-111111111111"
 
@@ -44,6 +44,22 @@ def app_client(comms_db, monkeypatch):  # noqa: F811 - the imported fixture
         yield client, server_module
 
 
+def _seed_mind() -> None:
+    """The mind and its owner's Telegram account, and no conversation."""
+    now = time.time()
+
+    async def seed() -> None:
+        await execute(
+            "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+            "registered_at, last_seen, owner) VALUES ($1, 'bare-model-mind', "
+            "'http://mind.invalid:8420', 'opus', 'claude_cli', $2, $2, 'daniel') "
+            "ON CONFLICT (mind_id) DO NOTHING", MIND, now,
+        )
+        await link_account("telegram", "123", "daniel")
+
+    _run(seed())
+
+
 def _seed_active(model: str) -> None:
     """Written on a plain connection: the gateway's pool lives on the test
     client's own loop, not on this one."""
@@ -52,10 +68,11 @@ def _seed_active(model: str) -> None:
     async def seed() -> None:
         await execute(
             "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
-            "registered_at, last_seen) VALUES ($1, 'bare-model-mind', "
-            "'http://mind.invalid:8420', 'opus', 'claude_cli', $2, $2) "
+            "registered_at, last_seen, owner) VALUES ($1, 'bare-model-mind', "
+            "'http://mind.invalid:8420', 'opus', 'claude_cli', $2, $2, 'daniel') "
             "ON CONFLICT (mind_id) DO NOTHING", MIND, now,
         )
+        await link_account("telegram", "123", "daniel")
         await execute(
             "INSERT INTO core.sessions (id, surface, surface_id, model, "
             "conversation_id, created_at, last_active, status, mind_id) "
@@ -96,6 +113,7 @@ def test_the_listing_carries_the_conversations_own_model(app_client) -> None:
 def test_a_chat_holding_no_conversation_is_told_so_rather_than_listed_at(app_client) -> None:
     """The remedy is `/new`, not "the proxy is down"."""
     client, server_module = app_client
+    _seed_mind()
 
     with patch.object(server_module.session_mgr, "mind_models",
                       new=AsyncMock(return_value=[{"name": "claude-opus-5-5"}])):

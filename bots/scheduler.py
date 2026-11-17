@@ -397,13 +397,14 @@ async def _send_text(bot_token: str, chat_id: int, text: str) -> bool:
 async def _deliver_text(
     mind_id: str, bot_token: str, text: str, *, chat_id: int | None = None
 ) -> int:
-    """Deliver to the mind's own person, falling back to the operator.
+    """Deliver to the mind's own person; the operator only when there is none.
 
-    A reminder belongs to whoever asked for it. But the bot this process
-    holds may have no conversation with that person — their mind's bot is a
-    different bot — and a refusal there must not end as a reminder that
-    simply never arrives. So a refused delivery is logged and repeated to the
-    stack-wide chat, which is where every one of these went before.
+    A reminder belongs to whoever asked for it. A refused delivery to a chat
+    that is not the operator's is somebody else's claim, so it is logged and
+    not repeated anywhere (story 2.1.19). The operator chat is used only when
+    no claim was found at all - and this scheduler can only fire for minds its
+    own credential's user owns (comms refuses it a session on anyone else's),
+    so that chat is never another person's reminder's destination.
 
     Answers with the chat the words actually reached, or zero if none did, so
     anything following them lands in the same place rather than resolving the
@@ -415,6 +416,15 @@ async def _deliver_text(
         return chat_id
     fallback = config.telegram_owner_chat_id
     if not fallback or fallback == chat_id:
+        return 0
+    if chat_id:
+        # A chat that is not the operator's is somebody else's claim, so the
+        # reminder is theirs. Repeating it to the operator is a disclosure
+        # and still not a delivery (story 2.1.19); it is logged instead.
+        log_event(
+            log, "scheduled_skill.delivery_refused", level=logging.WARNING,
+            mind_id=mind_id, intended=str(chat_id),
+        )
         return 0
     log_event(
         log, "scheduled_skill.delivery_fell_back", level=logging.WARNING,

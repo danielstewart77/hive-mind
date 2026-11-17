@@ -78,7 +78,10 @@ def test_the_surface_named_takes_the_conversation(client):
 def test_a_request_with_no_surface_is_still_a_plain_activation(client):
     response = client.post(
         "/sessions/sess-1/activate",
-        json={"client_type": "telegram", "client_ref": "chat-1"},
+        # Not a bot's client: since story 2.1.15 a Telegram or Discord
+        # binding names the sender it is checked against, and a plain
+        # activation names none.
+        json={"client_type": "browser", "client_ref": "tab-1"},
     )
 
     assert response.status_code == 200, response.text

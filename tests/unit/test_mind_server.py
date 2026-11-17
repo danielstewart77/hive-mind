@@ -16,7 +16,9 @@ import pty
 import shutil
 import struct
 import subprocess
+import sys
 import termios
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +28,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from minds import mind_server, models_api, pty_attach, runtime_api
-from minds.harness import claude_cli, codex_cli, dsh_cli
+from minds.harness import claude_cli, codex_cli, dsh_cli, rotation_hooks
 
 SESSION = {"Authorization": "Bearer test-mind-session-token"}  # secret-guard: allow
 ADMIN_TOKEN = "test-admin-token"  # secret-guard: allow
@@ -141,13 +143,23 @@ class _Stdout:
     polls for, so the drain backs off and the turn's own reader gets them.
     """
 
-    def __init__(self, lines: list[bytes], gate: asyncio.Event | None):
+    def __init__(self, lines: list[bytes], gate: asyncio.Event | None,
+                 holds_open: bool = False):
         self._lines, self._gate = list(lines), gate
+        #: A resident process does not end its stdout when it has nothing to
+        #: say: it is waiting for the next turn, and an EOF would be read as
+        #: the conversation's process having died.
+        self._holds_open = holds_open
+
+    def feed(self, line: bytes) -> None:
+        self._lines.append(line)
 
     async def readline(self) -> bytes:
         if self._gate is not None:
             await self._gate.wait()
             await asyncio.sleep(0.3)
+        while self._holds_open and not self._lines:
+            await asyncio.sleep(0.01)
         return self._lines.pop(0) if self._lines else b""
 
     def __aiter__(self):
@@ -166,6 +178,7 @@ class _Stdin:
 
     def write(self, data: bytes) -> None:
         self._proc.stdin_bytes += data
+        self._proc.answer(data)
         if self._proc.gate is not None:
             self._proc.gate.set()
 
@@ -188,16 +201,43 @@ class _Stderr:
 
 
 class _Proc:
-    def __init__(self, lines: list[bytes], gated: bool):
+    """One spawned harness process.
+
+    ``resident`` is dsh: the process holds the conversation open, announces it
+    on stdout before any turn, and answers each turn written to its stdin with
+    that turn's id on the report — so the adapter can match a report to the
+    request that asked for it.
+    """
+
+    def __init__(self, lines: list[bytes], gated: bool, resident: bool = False):
         self.gate = asyncio.Event() if gated else None
         self.stdin_bytes = b""
         self.stdin = _Stdin(self)
-        self.stdout = _Stdout(lines, self.gate)
+        self.script = list(lines)
+        self.turns: list[dict] = []
+        self.resident = resident
+        self.stdout = _Stdout([_line(RESIDENT_READY)] if resident else lines,
+                              self.gate, holds_open=resident)
         self.stderr = _Stderr()
         # A per-turn harness has exited by the time it is reaped, so a reaper
         # signals nothing; claude's process lives across turns.
         self.returncode = None if gated else 0
         self.pid = NO_SUCH_PID
+
+    def answer(self, data: bytes) -> None:
+        """Answer one turn request, as the resident runner answers it."""
+        if not self.resident:
+            return
+        for raw in data.decode().splitlines():
+            if not raw.strip():
+                continue
+            request = json.loads(raw)
+            self.turns.append(request)
+            for line in self.script:
+                parsed = json.loads(line.decode())
+                if "sessionId" in parsed or isinstance(parsed.get("message"), str):
+                    parsed["id"] = request["id"]
+                self.stdout.feed(_line(parsed))
 
     async def wait(self) -> int:
         return 0
@@ -209,6 +249,10 @@ class _Proc:
 def _line(event: dict) -> bytes:
     return json.dumps(event).encode() + b"\n"
 
+
+#: What a resident dsh process writes before it reads its first turn.
+RESIDENT_READY = {"ready": {"sessionId": "conv-1", "mode": "create",
+                            "model": "qwen35-131k"}}
 
 #: What each harness writes for one finished turn.
 TURN_OUTPUT = {
@@ -235,10 +279,11 @@ class _Spawner:
     async def __call__(self, *argv: str, **kwargs: Any) -> _Proc:
         call = {"argv": list(argv), "env": kwargs.get("env") or {}}
         if "--task-file" in argv:
-            # dsh's turn arrives in a file the adapter deletes afterwards.
+            # A goal dispatch's task arrives in a file the adapter deletes.
             call["task"] = Path(argv[argv.index("--task-file") + 1]).read_text()
         lines = self.outputs.pop(0) if self.outputs else TURN_OUTPUT[self.harness]
-        proc = _Proc(lines, gated=self.harness == "claude")
+        proc = _Proc(lines, gated=self.harness == "claude",
+                     resident="--resident" in argv)
         call["proc"] = proc
         self.calls.append(call)
         return proc
@@ -251,6 +296,9 @@ def _delivered(harness: str, call: dict) -> str:
         return message["message"]["content"][0]["text"]
     if harness == "codex":
         return call["proc"].stdin_bytes.decode()
+    if call["proc"].resident:
+        # dsh's turn is written to its resident process as a JSON line.
+        return call["proc"].turns[-1]["turn"]
     return call["task"]
 
 
@@ -329,13 +377,58 @@ def test_a_harness_is_offered_only_with_its_cli_hooks_and_login(homes, monkeypat
     assert body["default"] == "claude"
 
 
-def test_the_harness_report_refuses_a_caller_without_the_admin_token(homes):
-    assert TestClient(mind_server.app).get("/harnesses", headers=SESSION).status_code == 401
+def test_the_gateway_reaches_the_routes_it_calls_on_a_switch_with_this_minds_own_credential(
+    homes, proxy, monkeypatch,
+):
+    """DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+    credentials. So the gateway calls these with this mind's session
+    credential, not the hive's admin one, and the mind must answer it; a
+    caller holding neither is still refused."""
+    proxy({"claude": [{"id": "claude-opus-5"}]})
+    monkeypatch.setattr(mind_server.skills_api, "check_all",
+                        lambda **kw: {"rendered": 1}, raising=False)
+    client = TestClient(mind_server.app)
+    stranger = {"Authorization": "Bearer someone-else"}  # secret-guard: allow
+    calls = {
+        "/models": lambda h: client.get("/models", headers=h),
+        "/harnesses": lambda h: client.get("/harnesses", headers=h),
+        "/skills/check": lambda h: client.post("/skills/check", headers=h),
+        "/handover": lambda h: client.post("/handover", headers=h, json={
+            "harness": "claude", "conversation_id": "conv-none", "summary": "s",
+            "harness_sid": None, "budget_bytes": 1000}),
+    }
+    for route, call in calls.items():
+        assert call(SESSION).status_code == 200, route
+        assert call(stranger).status_code == 401, route
 
 
 # ---------------------------------------------------------------------------
 # 17. One server runs a chat session on whichever adapter the harness names
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_every_harness_hands_the_turn_the_gateway_session_id(
+    equipped, proxy, monkeypatch, harness,
+):
+    """A mind's `/end-session` deletes the gateway's row for the conversation
+    it is in. Until this was set nothing exported an id that could resolve
+    one: claude and codex each export their own conversation id, which the
+    skill then had to match against the live list, and dsh exports neither —
+    so ending a session was impossible on a dsh mind, which is how a chief of
+    staff closing a finished task found it."""
+    proxy(DSH_WINDOWS)
+    spawner = _Spawner(harness)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "row-1", "resume_sid": "conv-1", "model": "some-model",
+        "harness": harness,
+    })
+    client.post("/sessions/row-1/message", headers=SESSION, json={"content": "hello"})
+
+    assert spawner.calls[0]["env"]["HIVE_SESSION_ID"] == "row-1"
+
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
 def test_a_chat_session_runs_on_the_adapter_its_harness_names(
@@ -668,13 +761,12 @@ def test_a_default_harness_without_a_model_it_offers_is_refused_and_nothing_writ
 def test_a_conversations_rotation_threshold_is_its_own_models_share_of_its_window(
     homes, proxy, monkeypatch, tmp_path,
 ):
-    """Both the window and the share of it belong to the model, and both come
-    off the proxy's row for the conversation's own model — not the default
-    model's, and not the mind's."""
+    """Capacity follows the measured model while the saved percentage is mind-local."""
     runtime = tmp_path / "runtime.yaml"
     runtime.write_text(
         "name: example\nmind_id: example\nharness: claude_cli\n"
         "default_model: claude-sonnet-5\nmodel_context_window: 200000\n"
+        "rotation_threshold_percent: 40\n"
     )
     monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
     proxy({"claude": [{"id": "claude-sonnet-5", "context_window": 200_000,
@@ -693,20 +785,31 @@ def test_a_conversations_rotation_threshold_is_its_own_models_share_of_its_windo
 
     env = spawner.calls[0]["env"]
     assert env["HIVE_MODEL_CONTEXT_WINDOW"] == str(1_000_000)
-    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 15 // 100)
+    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 40 // 100)
+    assert env["HIVE_MODEL"] == "claude-opus-5"
+    assert env["HIVE_HARNESS"] == "claude"
+    assert env["HIVE_RUNTIME_PATH"] == str(runtime.resolve())
 
 
-async def test_a_share_declared_after_a_spawn_is_picked_up_by_the_next(proxy):
-    """A row missing its share is not remembered for the TTL: the operator who
-    fills it in a minute later is not ignored for ten."""
-    fake = proxy({"dsh": [{"id": "qwen", "context_window": 131_072}]})
+async def test_a_saved_percentage_change_bypasses_the_capacity_cache(
+    proxy, tmp_path, monkeypatch,
+):
+    runtime = tmp_path / "runtime.yaml"
+    runtime.write_text(
+        "name: example\nmind_id: example\nharness: dsh_cli\n"
+        "default_model: qwen\nrotation_threshold_percent: 75\n"
+    )
+    monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
+    fake = proxy({"dsh": [{"id": "qwen", "context_window": 131_072,
+                            "rotation_threshold_percent": 20}]})
 
-    await mind_server.conversation_env("dsh", "qwen")
-    fake.listings["dsh"] = [{"id": "qwen", "context_window": 131_072,
-                             "rotation_threshold_percent": 50}]
+    first = await mind_server.conversation_env("dsh", "qwen")
+    runtime_api.update_settings(runtime, {"rotation_threshold_percent": 40})
     second = await mind_server.conversation_env("dsh", "qwen")
 
-    assert second["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 50 // 100)
+    assert first["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 75 // 100)
+    assert second["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 40 // 100)
+    assert len(fake.seen) == 1
 
 
 def test_a_dsh_pane_is_sized_by_its_models_own_window(
@@ -970,9 +1073,17 @@ def equipped(homes, monkeypatch, tmp_path):
     (homes["claude"] / ".credentials.json").write_text("{}")
     (homes["codex"] / "config.toml").write_text(
         '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "auto_remember.sh"\n'
-        '[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "rotation_check.sh"\n'
         '[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
         'type = "command"\ncommand = "surface_inject.sh"\n')
+    runtime_path = homes["codex"] / "runtime.yaml"
+    runtime_path.write_text(
+        "name: example\nmind_id: example\nharness: codex\n"
+        "default_model: gpt-5\nrotation_threshold_percent: 75\n"
+    )
+    rotation_hooks.write_harness_hooks(
+        "codex", homes["codex"], runtime_path=runtime_path,
+        python=sys.executable, app_root=Path(__file__).resolve().parents[2],
+    )
     (homes["codex"] / "auth.json").write_text("{}")
     # dsh's hooks resolve under DSH_HOME, the way its adapter resolves it.
     (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
@@ -1172,6 +1283,47 @@ def test_startup_runs_the_skills_start_check_and_survives_its_failure(homes, mon
     assert ran == ["ran"]
 
 
+def test_startup_refreshes_managed_rotation_hooks_in_provisioned_homes(homes):
+    claude = homes["claude"]
+    codex = homes["codex"]
+    dsh = homes["dsh"]
+    (claude / "settings.json").write_text(json.dumps({"operator": "preserved"}))
+    (codex / "config.toml").write_text('model_provider = "local"\n')
+    (dsh / "hooks.json").write_text(json.dumps({
+        "custom": "preserved", "hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "operator-stop"},
+        ]}]},
+    }))
+
+    mind_server._install_rotation_hooks()
+
+    claude_hooks = json.loads((claude / "settings.json").read_text())["hooks"]
+    claude_stop = " ".join(mind_server._hook_commands({"hooks": claude_hooks})["Stop"])
+    codex_config = tomllib.loads((codex / "config.toml").read_text())
+    codex_stop = " ".join(mind_server._hook_commands(codex_config)["Stop"])
+    dsh_config = json.loads((dsh / "hooks.json").read_text())
+    dsh_stop = " ".join(mind_server._hook_commands(dsh_config)["Stop"])
+
+    assert "operator" in json.loads((claude / "settings.json").read_text())
+    assert "rotation_hooks.py check" in claude_stop
+    assert tomllib.loads((codex / "config.toml").read_text())["model_provider"] == "local"
+    assert "rotation_hooks.py check" in codex_stop
+    assert dsh_config["custom"] == "preserved"
+    assert "operator-stop" in dsh_stop and "rotation_check.py" in dsh_stop
+
+
+def test_startup_does_not_create_missing_codex_or_dsh_homes(homes, monkeypatch):
+    codex_home = homes["codex"].parent / "codex-not-provisioned"
+    dsh_home = homes["dsh"].parent / "dsh-not-provisioned"
+    monkeypatch.setattr(codex_cli, "CODEX_HOME", codex_home)
+    monkeypatch.setattr(dsh_cli, "DSH_HOME", dsh_home)
+
+    mind_server._install_rotation_hooks()
+
+    assert not codex_home.exists()
+    assert not dsh_home.exists()
+
+
 def test_an_unmeasured_models_window_is_omitted_not_zero(homes, proxy, monkeypatch):
     proxy({"claude": [{"id": "claude-opus-5"}]})
     spawner = _Spawner("claude")
@@ -1199,8 +1351,12 @@ def test_a_dsh_turn_points_the_hook_bridge_at_the_minds_hooks(homes, proxy, monk
     (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
     client.post("/sessions/h6/message", headers=SESSION, json={"content": "two"})
 
-    assert "DSH_HOOKS_CONFIG" not in spawner.calls[0]["env"]
-    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(homes["dsh"] / "hooks.json")
+    effective = homes["dsh"] / "hooks.effective.json"
+    assert spawner.calls[0]["env"]["DSH_HOOKS_CONFIG"] == str(effective)
+    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(effective)
+    written = json.dumps(json.loads(effective.read_text()))
+    for event in _all_hooks()["hooks"]:
+        assert event in json.loads(written)["hooks"]
 
 
 async def _none():
@@ -1378,7 +1534,12 @@ def test_a_failed_codex_turn_runs_the_minds_rotation_check(
     client.post("/sessions/f1/message", headers=SESSION, json={"content": "one"})
 
     _, checks = _codex_turns_and_checks(spawner)
-    assert [c["argv"] for c in checks] == [["rotation_check.sh"]]
+    assert [c["argv"] for c in checks] == [[
+        sys.executable, str(Path(__file__).resolve().parents[2] / "minds/harness/rotation_hooks.py"),
+        "check", "--harness", "codex", "--runtime",
+        str(equipped["codex"] / "runtime.yaml"), "--app-root",
+        str(Path(__file__).resolve().parents[2]),
+    ]]
     payload = json.loads(checks[0]["proc"].stdin_bytes)
     assert (payload["hook_event_name"], payload["session_id"], payload["stop_reason"]) == (
         "Stop", "thread-f", "error")

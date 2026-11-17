@@ -8,6 +8,8 @@ live feed and dropping the wake into a conversation — are driven by replacing
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import importlib.util
 import io
 import json
@@ -93,6 +95,104 @@ def test_a_task_whose_stop_is_already_recorded_is_not_recorded_twice(watch):
                         STASH, NOW)
 
     assert plan["stopped"] == []
+
+
+def test_a_turn_that_ran_between_two_passes_is_a_new_stop_and_owed_a_wake(
+        watch):
+    """Shorter than a pass, so no pass saw it running and cleared the stop."""
+    reported = NOW - 600
+    plan = watch.decide(
+        _live(idle=[_entry("sess-1", last_active=NOW - 30)]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+    assert plan["wake"][0]["stopped_at"] == NOW
+
+
+def test_a_turn_the_mind_took_by_itself_is_a_new_stop_and_owed_a_wake(watch):
+    """The gateway relays none of it, so only the Stop hook's report moves."""
+    reported = NOW - 600
+    entry = _entry("sess-1", last_active=reported - 5)
+    entry["context"] = {"observed_at": NOW - 30}
+    plan = watch.decide(
+        _live(idle=[entry]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_stop_already_reported_is_not_reported_again_while_nothing_ran(
+        watch):
+    reported = NOW - 600
+    entry = _entry("sess-1", last_active=reported - 5)
+    entry["context"] = {"observed_at": reported - 6}
+    plan = watch.decide(
+        _live(idle=[entry]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == []
+    assert plan["wake"] == []
+
+
+def _pane(session_id, *, last_block_at, reported_at, quiet=True,
+          kind="usage", mind_id=OTHER):
+    """A feed entry for a conversation the feed still calls producing."""
+    return {"session_id": session_id, "mind_id": mind_id, "generating": True,
+            "quiet": quiet, "last_block_at": last_block_at,
+            "context": {"observed_at": reported_at, "kind": kind}}
+
+
+def test_a_finished_turn_the_feed_still_calls_producing_is_a_stop_and_a_wake(
+        watch):
+    """A pane never ends its turn on the feed; the Stop hook's report does."""
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 300)
+    plan = watch.decide(_live(generating=[pane]), [_task("t1")], STASH, NOW)
+
+    assert plan["running"] == []
+    assert plan["stopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_finished_pane_turn_is_a_new_stop_over_one_already_reported(watch):
+    reported = NOW - 600
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 299)
+    plan = watch.decide(
+        _live(generating=[pane]),
+        [_task("t1", stopped_at=reported, woken_at=reported)], STASH, NOW)
+
+    assert plan["restopped"] == ["t1"]
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
+
+
+def test_a_turn_that_has_put_out_work_since_its_last_stop_is_still_running(
+        watch):
+    """Quiet inside a long tool call, after an earlier turn's Stop report."""
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 900)
+    plan = watch.decide(_live(generating=[pane]), [_task("t1")], STASH, NOW)
+
+    assert plan["running"] == ["t1"]
+    assert plan["stopped"] == []
+
+
+def test_a_new_conversations_opening_estimate_does_not_end_its_first_turn(
+        watch):
+    pane = _pane("sess-1", last_block_at=NOW - 300, reported_at=NOW - 299,
+                 kind="estimated")
+    plan = watch.decide(_live(generating=[pane]), [_task("t1")], STASH, NOW)
+
+    assert plan["running"] == ["t1"]
+
+
+def test_a_chief_of_staff_whose_own_pane_turn_finished_no_longer_holds_wakes(
+        watch):
+    own = _pane("stash-1", last_block_at=NOW - 300, reported_at=NOW - 300,
+                mind_id=STASH)
+    plan = watch.decide(_live(generating=[own]), [_task("t1")], STASH, NOW)
+
+    assert plan["mid_turn"] is False
+    assert [row["id"] for row in plan["wake"]] == ["t1"]
 
 
 def test_a_task_with_several_sessions_stops_only_when_all_of_them_have(watch):
@@ -433,37 +533,140 @@ def test_a_wake_stream_that_genuinely_breaks_is_let_go(watch):
     watch._drain(Stream(), "sess-1")  # reported, never raised
 
 
-# ------------------------------------------------------------ quiet hours
 
 
-def test_the_wake_carries_the_goodnight_so_the_mind_says_nothing_back(watch):
-    """The wake is a turn in the mind's own conversation.
-
-    Whatever it says back is delivered to Daniel's surface whether it meant
-    to tell him or not, so "do not tell him" has to ride on the wake itself.
-    """
-    rows = [_task("t1", name="Health app coach tab")]
-
-    text = watch.wake_message(rows, quiet=True)
-
-    assert "said goodnight" in text
-    assert "Reply with nothing at all." in text
-    assert "on hold for the sitrep" in text
-    assert "Health app coach tab" in text, "it still names the work"
+# ----------------------------------------- retiring the sub-agent records
+#
+# The pass also closes the sub-agent records nothing has been heard from.
+# The ordering is the whole of the behaviour: `read_live` refuses the pass
+# on any non-200 from comms, and a comms that is down is exactly when
+# harnesses are being killed and records left open.
 
 
-def test_the_wake_says_nothing_about_goodnight_when_he_has_not_said_it(watch):
-    text = watch.wake_message([_task("t1")], quiet=False)
+def test_the_sweep_is_told_which_conversations_are_still_producing_output(
+        watch, monkeypatch):
+    """The whole of why it runs after the live read rather than before it.
+    Without this the sweep has no way to tell a dead child from a slow one
+    and has to pick a window, and no window is right for a hive whose minds
+    allow 900 seconds, 14400 and no bound at all."""
+    swept: list[dict] = []
 
-    assert "goodnight" not in text
+    async def retire_stale_agents(*, now, timeout, alive):
+        swept.append({"now": now, "timeout": timeout, "alive": set(alive)})
+        return []
+
+    async def tasks():
+        return []
+
+    monkeypatch.setattr(watch.staff, "retire_stale_agents",
+                        retire_stale_agents)
+    monkeypatch.setattr(watch.staff, "tasks", tasks)
+    monkeypatch.setattr(watch, "read_live", lambda: _live(
+        generating=[_entry("sess-busy")], idle=[_entry("sess-quiet")]))
+    monkeypatch.setenv("MIND_ID", STASH)
+
+    asyncio.run(watch.tick(now=NOW))
+
+    assert swept == [{"now": NOW, "timeout": watch.GRACE,
+                      "alive": {"sess-busy"}}]
 
 
-def test_goodnight_is_read_from_the_minds_own_marker(watch, monkeypatch,
-                                                     tmp_path):
-    marker = tmp_path / "goodnight"
-    monkeypatch.setenv("STAFF_GOODNIGHT_MARKER", str(marker))
-    assert watch.goodnight() is False
+def test_an_idle_conversation_does_not_shield_its_children(watch):
+    """A conversation the feed calls idle has ended its turn, and a child of
+    that turn died with it."""
+    alive = watch.generating_sessions(_live(
+        generating=[_entry("sess-busy")],
+        idle=[_entry("sess-quiet"), _entry("sess-done")]))
 
-    marker.touch()
+    assert alive == {"sess-busy"}
 
-    assert watch.goodnight() is True
+
+def test_the_grace_window_is_longer_than_any_turn_a_mind_here_allows(watch):
+    """Retiring a live child records work as abandoned that was not, and
+    nothing afterwards can tell a reader it was wrong. Retiring a dead one
+    late leaves a record every reader already draws as stale."""
+    assert watch.GRACE >= 4 * 60 * 60
+
+
+def test_the_sweep_reports_how_many_records_it_retired(watch, monkeypatch):
+    """A pass that closed somebody's child says so: it is the only record
+    that the child was killed rather than finished. The count rather than
+    the ids, because the first pass after a deployment can close every child
+    left open since the last one and a pass's report is one log line."""
+
+    async def retire_stale_agents(*, now, timeout, alive):
+        return [{"id": "mind-skippy:conv-1:a1b2c3"},
+                {"id": "mind-skippy:conv-2:d4e5f6"}]
+
+    async def tasks():
+        return []
+
+    monkeypatch.setattr(watch.staff, "retire_stale_agents",
+                        retire_stale_agents)
+    monkeypatch.setattr(watch.staff, "tasks", tasks)
+    monkeypatch.setattr(watch, "read_live", lambda: _live())
+    monkeypatch.setenv("MIND_ID", STASH)
+
+    report = asyncio.run(watch.tick(now=NOW))
+
+    assert report["retired_agents"] == 2
+
+
+# ------------------------------------------- a hive_data that is behind it
+
+
+def test_the_watch_finds_what_a_pass_calls_in_the_hive_data_beside_it(watch):
+    assert watch.missing() == []
+
+
+def test_a_hive_data_with_no_sweep_ends_the_watch_by_name_before_any_pass(
+        watch, capsys, monkeypatch):
+    # Inside the loop a pass's failure is logged and the next one tried, so
+    # a library behind the watch would fail once a minute in a log nobody
+    # reads; at start it ends the process, and the container's restarts say so.
+    monkeypatch.delenv("HIVE_DATABASE_URL", raising=False)
+    monkeypatch.delattr(watch.staff, "retire_stale_agents")
+    code = watch.main(["run"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "behind the staff watch" in out["error"]
+    assert "retire_stale_agents" in out["error"]
+
+
+def test_every_call_the_watch_makes_on_hive_data_is_one_it_checks_for(watch):
+    tree = ast.parse(Path(watch.__file__).read_text())
+    unchecked = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "staff"):
+            name = node.func.attr
+            keywords = {k.arg for k in node.keywords if k.arg}
+            if name not in watch.NEEDS or keywords - set(watch.NEEDS[name]):
+                unchecked.append(name)
+    assert unchecked == []
+
+
+def test_a_sweep_that_predates_the_live_feed_ends_the_watch_by_name(
+        watch, capsys, monkeypatch):
+    # The shape the step-10 sweep had before it asked the live feed.
+    async def retire_stale_agents(*, now=None, timeout=None, unit=None):
+        raise AssertionError("reached the library")
+
+    monkeypatch.delenv("HIVE_DATABASE_URL", raising=False)
+    monkeypatch.setattr(watch.staff, "retire_stale_agents", retire_stale_agents)
+    code = watch.main(["run"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "retire_stale_agents(alive=)" in out["error"]
+
+
+def test_a_hive_data_with_no_ledger_module_ends_the_watch_by_name(
+        watch, capsys, monkeypatch):
+    monkeypatch.delenv("HIVE_DATABASE_URL", raising=False)
+    monkeypatch.setattr(watch, "staff", None)
+    code = watch.main(["tick"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "behind the staff watch" in out["error"]
+    assert "hive_data.staff" in out["error"]

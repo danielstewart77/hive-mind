@@ -17,12 +17,88 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _DEFAULT_ALERT_FILE = "/usr/src/app/data/alerts.log"
 
 
-def _telegram_direct(message: str) -> tuple[bool, str]:
-    """Send via Telegram Bot API directly."""
+def _owner_chat_id(client=None) -> str:
+    """The person this mind's own Telegram bot answers, or empty for nobody.
+
+    A notification belongs to the owner of the mind that raised it (story
+    2.1.15), and the one Telegram account that is theirs on this bot is its
+    claim: a claim links the sender to the mind's owner, and the bot answers
+    nobody else. A configured `TELEGRAM_OWNER_CHAT_ID` is a guess made when
+    the install was set up — on a second user's mind copied from the
+    operator's, it is the operator's chat.
+
+    So the claim decides. An unclaimed bot is nobody, and so is a gateway
+    that refuses to say: a refused credential or a mind id the credential
+    does not hold is not evidence the configured chat is right, and
+    delivering a second person's reminder to the operator is a disclosure
+    and a reminder they never get. The configured chat is used only when
+    the claim cannot be asked at all — no gateway named, the gateway down,
+    or one that predates the claim routes — the same fallback the surfaces
+    themselves keep.
+    """
     from core.secrets import get_credential
 
-    token = get_credential("TELEGRAM_BOT_TOKEN")
-    chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
+    configured = get_credential("TELEGRAM_OWNER_CHAT_ID") or ""
+    base = (os.getenv("COMMS_URL") or "").rstrip("/")
+    mind_id = os.getenv("MIND_ID") or ""
+    if not base or not mind_id:
+        return configured
+    try:
+        import httpx
+    except ImportError:
+        return configured
+    # The credential the mind itself presents to comms, resolved the way
+    # `mind_server.comms_credential` resolves it.
+    token = (os.getenv("COMMS_BEARER_TOKEN") or "").strip() or (
+        os.getenv("COMMS_ADMIN_BEARER_TOKEN") or "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = f"{base}/broker/minds/{mind_id}/surface-claim"
+    try:
+        getter = client.get if client is not None else httpx.get
+        response = getter(url, params={"surface": "telegram"},
+                          headers=headers, timeout=5)
+    except httpx.HTTPError:
+        return configured
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if response.status_code == 404 and body == {"detail": "Not Found"}:
+        # FastAPI's own answer for a path it has no route for: a gateway
+        # from before claims existed. A refused claim says "No such claim".
+        return configured
+    if response.status_code != 200 or not isinstance(body, dict):
+        return ""
+    return str(body.get("claimed_ref") or "")
+
+
+def _bot_token() -> str:
+    """This mind's own Telegram bot token, by the rule the surfaces read.
+
+    The claim names a person on this mind's own bot, and Telegram refuses a
+    bot writing to someone who never started it, so the message has to go
+    out through that bot: `TELEGRAM_BOT_TOKEN_KEYRING_KEY` in a container,
+    `TELEGRAM_BOT_TOKEN` elsewhere.
+    """
+    try:
+        from hive_surfaces import token_store
+
+        token = token_store.resolve_token("telegram")
+        if token:
+            return token
+    except Exception:  # noqa: BLE001 - a host without the surfaces package
+        pass
+    from core.secrets import get_credential
+
+    return get_credential("TELEGRAM_BOT_TOKEN") or ""
+
+
+def _telegram_direct(message: str) -> tuple[bool, str]:
+    """Send via Telegram Bot API directly, to this mind's own person."""
+    from core.secrets import get_credential
+
+    token = _bot_token()
+    chat_id = _owner_chat_id()
 
     if not token or not chat_id:
         return False, "TELEGRAM_BOT_TOKEN or TELEGRAM_OWNER_CHAT_ID not set"
@@ -165,8 +241,8 @@ def cmd_voice(args: argparse.Namespace) -> int:
     from core.secrets import get_credential
     import httpx
 
-    token = get_credential("TELEGRAM_BOT_TOKEN")
-    chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
+    token = _bot_token()
+    chat_id = _owner_chat_id()
     voice_url = _voice_server_url(os.getenv("MIND_ID", "default"))
 
     if not token or not chat_id:

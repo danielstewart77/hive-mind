@@ -44,7 +44,7 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
-from minds.harness import chat_surface
+from minds.harness import chat_surface, role_guard
 from minds import (
     context_overflow,
     failed_turn,
@@ -436,8 +436,33 @@ def _terminal_argv(model: str, thread_id: str | None, effort: str | None = None)
     return cmd
 
 
+def _role_guard(env: dict[str, str], timeout: float = 10.0) -> tuple[list[str], dict[str, str]]:
+    """The config overrides and environment that put the role guard on a
+    codex process (feature 10.18, story 10.18.6).
+
+    Written for every spawn, managed or not. Raised when the gateway cannot
+    say what the mind may use: a mind that cannot be held to its roles is
+    not run.
+    """
+    return role_guard.prepare_codex(
+        CODEX_HOME, env.get("MIND_ID") or MIND_ID,
+        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout)
+
+
+def _pane_role_guard() -> tuple[list[str], dict[str, str]]:
+    # Short: a pane opens inside the attach handler, on the event loop.
+    return _role_guard({**os.environ, **{k: str(v) for k, v in RUNTIME_ENV.items()}},
+                       timeout=3.0)
+
+
+def _with_role_args(argv: list[str], role_args: list[str]) -> list[str]:
+    """`codex` with the guard's overrides ahead of any subcommand."""
+    return argv[:1] + role_args + argv[1:]
+
+
 def _pane_env(
-    client_ref: str | None, surface: str | None, surface_id: str | None
+    client_ref: str | None, surface: str | None, surface_id: str | None,
+    session_id: str = "",
 ) -> dict[str, str]:
     """Environment the pane needs that the tmux server can't have inherited.
 
@@ -449,6 +474,8 @@ def _pane_env(
     """
     env = {k: str(v) for k, v in RUNTIME_ENV.items()}
     env["CODEX_HOME"] = str(CODEX_HOME)
+    if session_id:
+        env["HIVE_SESSION_ID"] = session_id
     # A pty spawn is the web terminal by definition — no gateway derivation
     # needed. Per-turn hooks read this to tell the model which surface a turn
     # arrived on.
@@ -507,7 +534,14 @@ def _spawn_pty(
     if not home_declared():
         raise PtyUnavailable("no codex home declared for this mind")
     thread_id = _resumable_thread(session_id, harness_sid)
-    pane_env = {**_pane_env(client_ref, surface, surface_id), **(extra_env or {})}
+    pane_env = {**_pane_env(client_ref, surface, surface_id, session_id), **(extra_env or {})}
+
+    # A live pane already runs under the guard; only a pane being started
+    # asks the gateway, so a reattach never waits on it.
+    role_args: list[str] = []
+    if not TERMINALS.alive(session_id):
+        role_args, role_env = _pane_role_guard()
+        pane_env.update(role_env)
 
     fresh = not TERMINALS.alive(session_id) and not thread_id
     before = _existing_rollout_paths() if fresh else set()
@@ -519,7 +553,7 @@ def _spawn_pty(
     TERMINALS.start(
         session_id,
         seeded_pane_command(
-            _terminal_argv(model, thread_id, effort),
+            _with_role_args(_terminal_argv(model, thread_id, effort), role_args),
             system_prompt,
             # Keyed by the conversation, not the session: a rotation and a
             # fresh attach on one session would otherwise write and delete a
@@ -577,6 +611,12 @@ def _rotate_pty(
                     session_id)
         return False
 
+    try:
+        role_args, role_env = _pane_role_guard()
+    except RuntimeError as exc:
+        log.warning("Not rotating terminal %s: %s", session_id, exc)
+        return False
+
     THREADS.pop(session_id, None)
     before = _existing_rollout_paths()
 
@@ -585,14 +625,14 @@ def _rotate_pty(
     # that happening to coincide.
     seed = user_prompt or system_prompt
     argv = seeded_pane_command(
-        _terminal_argv(model, None, effort),
+        _with_role_args(_terminal_argv(model, None, effort), role_args),
         seed,
         CODEX_HOME / "rotation-seeds" / f"{session_id}-{new_conversation_id}.txt",
         as_user_turn=bool(user_prompt),
     )
     TERMINALS.respawn(
         session_id, argv,
-        env_overrides=_pane_env(client_ref, surface, surface_id),
+        env_overrides={**_pane_env(client_ref, surface, surface_id, session_id), **role_env},
     )
     _watch_for_new_thread_in_background(session_id, before)
     log.info("Rotated the conversation in terminal %s (seed=%d chars)",
@@ -639,7 +679,15 @@ def _rotation_check_command() -> list[str] | None:
         config = tomllib.loads((CODEX_HOME / "config.toml").read_text())
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    return failed_turn.rotation_check_command((config.get("hooks") or {}).get("Stop"))
+    native_script = Path(__file__).resolve().with_name("rotation_hooks.py")
+    legacy_scripts = [CODEX_HOME / "hooks" / "rotation_check.py"]
+    canonical = MIND_DIR / ".codex" / "hooks" / "rotation_check.py"
+    if canonical != legacy_scripts[0]:
+        legacy_scripts.append(canonical)
+    return failed_turn.rotation_check_command(
+        (config.get("hooks") or {}).get("Stop"), native_script=native_script,
+        copied_scripts=legacy_scripts,
+    )
 
 
 async def _run_rotation_check(
@@ -678,6 +726,14 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     env["CODEX_HOME"] = str(CODEX_HOME)
+    # The gateway's own row id for this conversation. A mind's `/end-session`
+    # skill deletes that row, and until this was set no harness exported
+    # anything it could resolve: claude and codex each export their own
+    # conversation id and the skill matched it against the live list, and dsh
+    # exports neither, so ending a session was simply impossible on a dsh
+    # mind. The id is handed to this mind on every spawn — there is nothing to
+    # look up and nothing to guess.
+    env["HIVE_SESSION_ID"] = sid
     # Per-spawn metadata for the rotation_check Stop hook. The hook reads
     # these to attribute the rotation summary to the right (mind_id,
     # client_ref) row in NS's session_memory table. Empty values stay
@@ -694,6 +750,19 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     if state.get("surface_label"):
         env["HIVE_SURFACE"] = state["surface_label"]
     env.update(state.get("conversation_env") or {})
+    # Feature 10.18: the role guard on every tool call. Each turn is a codex
+    # process of its own, so each turn is started on what the roles say now.
+    try:
+        role_args, role_env = await asyncio.to_thread(_role_guard, env)
+    except RuntimeError as exc:
+        log.warning("%s session %s: turn not started: %s", NAME, sid, exc)
+        yield {"type": "result", "is_error": True, "errors": [str(exc)]}
+        return
+    # Ahead of the trailing `resume <thread> -`, where codex's other
+    # overrides sit.
+    at = len(cmd) - (3 if thread_id else 1)
+    cmd[at:at] = role_args
+    env.update(role_env)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
