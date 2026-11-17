@@ -388,7 +388,7 @@ def test_the_minds_own_turn_over_the_threshold_is_still_reported_and_armed(
 def test_a_turn_whose_log_cannot_be_read_is_judged_as_the_minds(
         mind, service, monkeypatch, tmp_path, where):
     seen, _ = service
-    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    _save_rotation_policy(mind, 10)
     rotation_check = importlib.import_module("rotation_check")
 
     assessed = rotation_check.assess({
@@ -403,7 +403,7 @@ def test_a_turn_whose_log_cannot_be_read_is_judged_as_the_minds(
 def test_a_goal_round_rotates_only_for_the_minds_own_turn(
         mind, service, monkeypatch, tmp_path, capsys, header, answers):
     import io
-    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "100")
+    _save_rotation_policy(mind, 10)
     monkeypatch.setenv("HIVE_GOAL_RUN", "1")
     rotation_check = importlib.import_module("rotation_check")
     event = {"session_id": "s-1", "context": _OVER,
