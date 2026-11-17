@@ -39,6 +39,19 @@ def test_error_feed_is_bounded_recent_and_redacts_credentials(module, monkeypatc
     assert module.recent_errors()['errors'][0]['message'] == '[REDACTED] postgresql://user:[REDACTED]@host/db'
 
 
+@pytest.mark.parametrize('module', [mind_logging, nervous_logging])
+def test_a_very_long_error_is_cut_before_it_is_scrubbed_and_shows_no_part_of_a_credential(module, monkeypatch):
+    monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'a-fake-test-credential')
+    # One unbroken run, the shape of a dumped blob: scrubbing all of it took
+    # 6.7 seconds on the logging thread before the cut was moved first.
+    message = 'x' * 4090 + 'a-fake-test-credential' + 'deadbeef' * 12_500
+    started = time.perf_counter()
+    module.HiveJsonFormatter().format(logging.LogRecord('mind', logging.ERROR, '', 0, message, (), None))
+    elapsed = time.perf_counter() - started
+    assert module.recent_errors()['errors'][0]['message'] == 'x' * 4090 + '[REDAC'
+    assert elapsed < 1.0
+
+
 def test_mind_error_feed_requires_admin_and_returns_terminal_exception(monkeypatch):
     from starlette.testclient import TestClient
 
