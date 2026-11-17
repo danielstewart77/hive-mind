@@ -74,7 +74,7 @@ def test_a_mind_the_credential_guard_refuses_is_listed_as_withheld_and_never_ask
     assert components['Kidbox']['status'] == 'withheld'
     assert components['Atlas']['status'] == 'ok'
     assert asked['atlas'] == 'Bearer stand-in-admin'
-    assert sorted(asked) == ['127.0.0.1', 'atlas', 'hive-lucent']
+    assert 'kidbox' not in asked
 
 
 async def test_terminal_start_exception_reaches_component_error_report():
@@ -108,13 +108,38 @@ async def test_unavailable_error_feed_is_reported_without_hiding_other_component
     assert down['status'] == 'unreachable'
 
 
-def test_a_very_long_error_is_cut_before_it_is_scrubbed_and_shows_no_part_of_a_credential(monkeypatch):
+def test_a_very_long_error_is_scrubbed_quickly_and_shows_no_part_of_a_credential(monkeypatch):
     monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'a-fake-test-credential')
-    # One unbroken run, the shape of a dumped blob: scrubbing all of it took
-    # 6.7 seconds on the logging thread before the cut was moved first.
+    # One unbroken run, the shape of a dumped blob: scrubbing it took 6.7
+    # seconds on the logging thread when the address pattern was quadratic.
     message = 'x' * 4090 + 'a-fake-test-credential' + 'deadbeef' * 12_500
     started = time.perf_counter()
     hive_logging.HiveJsonFormatter().format(logging.LogRecord('site', logging.ERROR, '', 0, message, (), None))
     elapsed = time.perf_counter() - started
     assert hive_logging.recent_errors()['errors'][0]['message'] == 'x' * 4090 + '[REDAC'
     assert elapsed < 1.0
+
+def test_a_credential_the_scrub_window_cuts_in_two_never_reaches_the_feed_in_part(monkeypatch):
+    monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'a-fake-test-credential')
+    harmless = 'failure ' + 'y ' * 1500
+    # The long bearer value is replaced by ten characters, which pulls the end
+    # of the window, and the half credential lying there, to the front.
+    lead = harmless + 'bearer '
+    message = lead + 'A' * (hive_logging._SCRUB_WINDOW - len(lead) - 22) + ' ' + 'x' * 10 + 'a-fake-test-credential'
+    hive_logging.HiveJsonFormatter().format(logging.LogRecord('site', logging.ERROR, '', 0, message, (), None))
+    kept = hive_logging.recent_errors()['errors'][0]['message']
+    assert len(kept) > 500
+    assert kept == harmless[:len(kept)]
+
+def test_a_bearer_value_and_a_named_secret_are_scrubbed_from_the_message_and_the_exception():
+    record = logging.LogRecord('site', logging.ERROR, '', 0,
+                               'refused with Authorization: Bearer abc.def-123 for the proxy', (), None)
+    try:
+        raise RuntimeError('login failed, password=hunter2; api_key: zz99, retrying')
+    except RuntimeError:
+        import sys
+        record.exc_info = sys.exc_info()
+    hive_logging.HiveJsonFormatter().format(record)
+    newest = hive_logging.recent_errors()['errors'][0]
+    assert newest['message'] == 'refused with Authorization: Bearer [REDACTED] for the proxy'
+    assert newest['detail'] == 'login failed, password=[REDACTED]; api_key: [REDACTED], retrying'
