@@ -12,6 +12,23 @@ call goes to `$COMMS_URL` with
 Never the broker: it ends a callee's session after each wake, which orphans
 the task.
 
+## What this skill needs from the install
+
+It is written for a chief of staff running in a hive container, and it
+works only where these are true. None of them arrives with the skill:
+
+- `/opt/venv/bin/python3` is the container's interpreter and
+  `$HIVE_PROJECT_DIR` the hive-mind checkout, with `hive_data` importable
+  (the `mind-ledger` image target) and `HIVE_DATABASE_URL` naming a login
+  that reaches the `staff` schema.
+- `$COMMS_URL` and `$COMMS_ADMIN_BEARER_TOKEN` are in the environment: the
+  live-session feed and the message route are admin routes.
+- `$MIND_NAME` is this mind's folder name under `minds/`, and
+  `data/turns/` under it is writable.
+- `board` is the board tool as `/backlog` describes it, with its token.
+- The watch (`tools/staff_watch`) runs beside the mind, or nothing wakes it
+  when a session stops.
+
 ## You orchestrate; sub-agents execute
 
 Every step below that talks to something outside this conversation is handed
