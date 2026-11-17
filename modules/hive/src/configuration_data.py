@@ -252,6 +252,20 @@ def _lucent_variable(name: str) -> str:
     )
 
 
+#: The rotation threshold a newly created Mind starts with: the percentage of
+#: its conversation model's context window at which a conversation is handed
+#: over. A runtime.yaml with no line means 100, which is no early rotation at
+#: all, so a new Mind is always written one. Daniel, 2026-11-17: thirty "for
+#: now" — this is the console's one copy of the figure. The others, which
+#: change with it: the hive installer's constant of the same name (hive-mind,
+#: installer/steps.py), minds/example/runtime.yaml in hive-mind and in
+#: hive-edge-minds, the variable of the same name in hive-edge-minds
+#: setup.sh, and the create-mind and add-mind skills in the hivemind plugin.
+#: Two documents show the line as well: docs/multi-mind-architecture.md in
+#: hive-mind and README.md in hive-edge-minds.
+NEW_MIND_ROTATION_THRESHOLD_PERCENT = 30
+
+
 def scaffold_internal_mind(
     name: str,
     *,
@@ -301,6 +315,9 @@ def scaffold_internal_mind(
         "harness": harness,
         "provider": provider,
         "default_model": default_model,
+        # Written, never left to the default: a file with no line rotates at
+        # the whole window.
+        "rotation_threshold_percent": NEW_MIND_ROTATION_THRESHOLD_PERCENT,
         "runtime_config_dir": config_dir,
         "resume_policy": "provider-local",
         "prompt_files": ["prompts/common.md", "prompts/harness.md"],

@@ -134,6 +134,16 @@ def _create(client, **overrides):
     return client.post("/api/minds", json=body)
 
 
+def test_a_created_mind_starts_with_a_rotation_threshold_of_thirty_percent(client):
+    """A runtime.yaml with no line rotates at the whole window, so a Mind made
+    here is written one — a bare whole number, which is all its reader takes."""
+    assert _create(client).status_code == 200
+
+    runtime = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())
+    assert type(runtime["rotation_threshold_percent"]) is int
+    assert runtime["rotation_threshold_percent"] == 30
+
+
 @pytest.mark.parametrize("harness,provider,model", _PAIRS)
 def test_every_pair_scaffolds_a_runnable_mind(client, harness, provider, model):
     response = _create(client, harness=harness, provider=provider)
