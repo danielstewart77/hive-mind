@@ -1,6 +1,7 @@
 name: General
-model: null
+model: claude-sonnet-5-5
 tools:
+  - shell
   - files
 skills:
   - always-remember

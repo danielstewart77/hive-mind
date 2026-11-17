@@ -440,6 +440,7 @@ TABLE.add(
     "GET /downloads/{filename}",
     "POST /api/voices/sample",
     # roles: defining one, and the three repo choices
+    "GET /api/roles/catalog",
     "POST /api/roles",
     "PUT /api/roles/{role_id}",
     "DELETE /api/roles/{role_id}",

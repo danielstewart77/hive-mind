@@ -4112,6 +4112,52 @@ async def api_roles(user: dict = Depends(require_auth)):
     return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS)}
 
 
+#: How long one Mind is waited on for each of its two lists. A Mind that is
+#: off must not hold the editor shut.
+_CATALOG_DEADLINE = 5.0
+
+
+async def _mind_report(mind: dict) -> dict:
+    """One Mind's skills and hooks listings, each `None` when it did not answer."""
+    url = str(mind.get("gateway_url") or "")
+
+    async def within(call) -> dict | None:
+        try:
+            return await asyncio.wait_for(call, _CATALOG_DEADLINE)
+        except (HTTPException, asyncio.TimeoutError):
+            return None
+
+    skills, hooks = await asyncio.gather(
+        within(mind_skills.fetch_skills(url)),
+        within(mind_files.fetch_tree(url, "hooks")))
+    return {"mind": str(mind.get("name") or ""), "skills": skills, "hooks": hooks}
+
+
+@app.get("/api/roles/catalog")
+async def api_roles_catalog(user: dict = Depends(require_auth)):
+    """What a role can be given: every model, skill and hook that exists.
+
+    The editor ticks from this and types none of it. Models are the proxy's
+    list; skills and hooks are what the registered Minds report, asked all
+    at once.
+    """
+    del user
+    reports = await asyncio.gather(*(_mind_report(m) for m in await _broker_minds_safe()))
+    body = roles_data.catalog(list(reports), await skill_submissions.community_names())
+    try:
+        listing = await _proxy_json("/v1/models")
+        seen: set[str] = set()
+        models = []
+        for row in listing.get("data", []):
+            if isinstance(row, dict) and row.get("id") and row["id"] not in seen:
+                seen.add(row["id"])
+                models.append({"id": row["id"], "provider": str(row.get("provider") or "other")})
+        body.update(models=models, models_error=None)
+    except Exception as exc:  # the proxy being down must not shut the editor
+        body.update(models=[], models_error=str(exc) or type(exc).__name__)
+    return body
+
+
 @app.post("/api/roles")
 async def api_create_role(body: dict, user: dict = Depends(require_auth)):
     if not isinstance(body, dict):
@@ -4242,7 +4288,9 @@ async def api_retry_skill_submission(submission_id: int, request: Request,
 
 async def _mind_id_for(name: str) -> str:
     mind = await _mind_row(name)
-    mind_id = str(mind.get("mind_id") or "").strip()
+    # The registry files a Mind's id under `id`; `mind_id` is the gateway's
+    # own name for the same value.
+    mind_id = str(mind.get("mind_id") or mind.get("id") or "").strip()
     if not mind_id:
         raise HTTPException(status_code=404, detail="That Mind has no id in the registry")
     return mind_id
