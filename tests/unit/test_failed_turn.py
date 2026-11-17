@@ -229,3 +229,32 @@ def test_adapter_selectors_reject_custom_or_fire_and_skip_malformed_entries(
     assert dsh_cli._rotation_check_command() == [
         sys.executable, str(dsh_home / "hooks" / "rotation_check.py"),
     ]
+
+
+@pytest.mark.parametrize("layout", ["beside the hook file", "in the declared home"])
+def test_dsh_adapter_selects_a_check_registered_as_a_shell_wrapper(
+    layout, tmp_path, monkeypatch,
+):
+    """An install older than the generated hooks registers its check as
+    `bash <hooks dir>/rotation_check.sh`; a failed turn still reaches it."""
+    from minds.harness import dsh_cli
+
+    declared_home = tmp_path / "declared"
+    declared_home.mkdir()
+    if layout == "beside the hook file":
+        hooks_dir = tmp_path / "mind hooks"
+        config = hooks_dir / "hooks.json"
+    else:
+        hooks_dir = declared_home / "hooks"
+        config = declared_home / "hooks.json"
+    hooks_dir.mkdir()
+    wrapper = shlex.join(["bash", str(hooks_dir / "rotation_check.sh")])
+    config.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "bash /somewhere/else/rotation_check.sh"},
+        {"type": "command", "command": wrapper},
+    ]}]}}))
+    monkeypatch.setattr(dsh_cli, "DSH_HOME", declared_home)
+    monkeypatch.setattr(dsh_cli, "MIND_DIR", tmp_path / "minds" / "probe")
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(config))
+
+    assert dsh_cli._rotation_check_command() == ["bash", str(hooks_dir / "rotation_check.sh")]
