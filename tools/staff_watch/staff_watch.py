@@ -12,6 +12,10 @@ overlapping all reach the same answer.
 
 It always records what it sees. It only sometimes wakes the mind:
 
+A turn shorter than the gap between two passes is never seen producing
+output. The feed's record of when each idle conversation last finished is
+what catches it: a finish later than the stop on the row is a new stop.
+
 * A task whose status says Daniel is not waiting on it - `on hold` overnight,
   `with Daniel` because he took it himself, `done` - is recorded and pings
   nobody. Anything else is woken, including a status added later, because
@@ -157,6 +161,23 @@ def _stalled(entry: dict, now: float) -> bool:
     return last is not None and (now - last) > STALLED
 
 
+def _ended_at(entry: dict | None) -> float:
+    """When an idle conversation last finished a turn, as the feed has it.
+
+    Two clocks, the later of them. `last_active` moves with every event of a
+    turn the gateway relays. `context.observed_at` is written by the mind's
+    own Stop hook, so it also moves for a turn the mind took by itself - one
+    started by a background job finishing - which the gateway never relays.
+    A conversation absent from the feed, or carrying neither, has not been
+    seen to finish anything.
+    """
+    if not entry:
+        return 0.0
+    context = entry.get("context")
+    observed = context.get("observed_at") if isinstance(context, dict) else None
+    return max(float(entry.get("last_active") or 0.0), float(observed or 0.0))
+
+
 def decide(live: dict, tasks: list[dict], mind_id: str,
            now: float) -> dict[str, Any]:
     """What this pass should write and whether it should wake the mind.
@@ -164,7 +185,8 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
     Pure: every argument is data and the answer is data, so the rules are
     decided in one place and the writes happen in another.
 
-    `running` and `stopped` are task ids to record. `pending` is every task
+    `running` and `stopped` are task ids to record, and `restopped` is a
+    stop to record over one already there. `pending` is every task
     owed a wake, read from the rows by `staff.wake_pending` and ordered
     oldest stop first; `wake` is that list minus the quiet statuses, and is
     empty while the mind is mid-turn.
@@ -176,6 +198,7 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
 
     running: list[str] = []
     stopped: list[str] = []
+    restopped: list[str] = []
     for task in tasks:
         sessions = [str(s) for s in (task.get("sessions") or ())]
         if not sessions or task.get("status") == "done":
@@ -186,13 +209,20 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
             running.append(task["id"])
         elif task.get("stopped_at") is None:
             stopped.append(task["id"])
+        elif any(_ended_at(idle.get(session)) > task["stopped_at"]
+                 for session in sessions):
+            # A turn that began and ended between two passes was never seen
+            # producing output, so nothing cleared the stop it already had
+            # and the row reads as old news. The feed's own record of when
+            # the conversation last finished says otherwise.
+            restopped.append(task["id"])
 
     # The rows as they will stand once this pass's writes land, so the wake
     # covers a stop recorded in the same pass that reports it.
     settled = []
     for task in tasks:
         row = dict(task)
-        if row["id"] in stopped:
+        if row["id"] in stopped or row["id"] in restopped:
             row["stopped_at"] = now
         elif row["id"] in running:
             row["stopped_at"] = None
@@ -202,7 +232,8 @@ def decide(live: dict, tasks: list[dict], mind_id: str,
                      key=lambda row: row["stopped_at"])
     wake = [] if mid_turn else [row for row in pending
                                 if row.get("status") not in QUIET]
-    return {"running": running, "stopped": stopped, "mid_turn": mid_turn,
+    return {"running": running, "stopped": stopped, "restopped": restopped,
+            "mid_turn": mid_turn,
             "pending": [row["id"] for row in pending], "wake": wake}
 
 
@@ -404,6 +435,11 @@ async def tick(now: float | None = None) -> dict[str, Any]:
         await staff.note_running(task_id)
     for task_id in plan["stopped"]:
         await staff.note_stopped(task_id, now=moment)
+    for task_id in plan["restopped"]:
+        # The ledger keeps the first stop it is given, so the old one is
+        # cleared as a turn seen running would have cleared it.
+        await staff.note_running(task_id)
+        await staff.note_stopped(task_id, now=moment)
 
     woken: list[str] = []
     if plan["wake"]:
@@ -414,7 +450,8 @@ async def tick(now: float | None = None) -> dict[str, Any]:
                 await staff.note_woken(row["id"], now=moment)
                 woken.append(row["id"])
         plan["target"] = session_id
-    return {"at": moment, "recorded_stopped": plan["stopped"],
+    return {"at": moment,
+            "recorded_stopped": plan["stopped"] + plan["restopped"],
             "recorded_running": plan["running"], "mid_turn": plan["mid_turn"],
             "pending": plan["pending"], "woken": woken,
             "target": plan.get("target"),
