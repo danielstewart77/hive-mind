@@ -982,7 +982,15 @@ def _rotation_check_command() -> list[str] | None:
     except (OSError, ValueError):
         return None
     hooks = config.get("hooks") if isinstance(config, dict) else None
-    return failed_turn.rotation_check_command((hooks or {}).get("Stop"))
+    config_parent = Path(path).parent
+    copied_scripts = [
+        DSH_HOME / "hooks" / "rotation_check.py",
+        MIND_DIR / ".dsh" / "hooks" / "rotation_check.py",
+        config_parent / "hooks" / "rotation_check.py",
+    ]
+    return failed_turn.rotation_check_command(
+        (hooks or {}).get("Stop"), copied_scripts=copied_scripts,
+    )
 
 
 async def _check_failed_turn(state: dict, conversation_id: str, env: dict[str, str],

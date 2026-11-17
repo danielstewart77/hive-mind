@@ -642,7 +642,15 @@ def _rotation_check_command() -> list[str] | None:
         config = tomllib.loads((CODEX_HOME / "config.toml").read_text())
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    return failed_turn.rotation_check_command((config.get("hooks") or {}).get("Stop"))
+    native_script = Path(__file__).resolve().with_name("rotation_hooks.py")
+    legacy_scripts = [CODEX_HOME / "hooks" / "rotation_check.py"]
+    canonical = MIND_DIR / ".codex" / "hooks" / "rotation_check.py"
+    if canonical != legacy_scripts[0]:
+        legacy_scripts.append(canonical)
+    return failed_turn.rotation_check_command(
+        (config.get("hooks") or {}).get("Stop"), native_script=native_script,
+        copied_scripts=legacy_scripts,
+    )
 
 
 async def _run_rotation_check(

@@ -26,6 +26,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from minds import models_api, rotation_marker_api, rotation_policy
+from minds.harness.hook_commands import managed_python_command
 
 
 def _runtime_path(explicit: str | None = None) -> Path:
@@ -41,30 +42,10 @@ def _command(python: str, app_root: Path, action: str, harness: str,
     return " ".join(shlex.quote(value) for value in values)
 
 
-def _is_python_launcher(argument: str) -> bool:
-    name = Path(argument).name.lower().removesuffix(".exe")
-    if name in {"py", "python", "python3"}:
-        return True
-    if not name.startswith("python3."):
-        return False
-    return all(part.isdigit() for part in name.removeprefix("python3.").split("."))
-
-
 def _is_rotation(command: object, script_path: Path) -> bool:
-    if not isinstance(command, str) or not command:
-        return False
-    try:
-        arguments = shlex.split(command)
-    except ValueError:
-        return False
-    if (len(arguments) < 3 or not _is_python_launcher(arguments[0])
-            or arguments[2] not in ("check", "fire")):
-        return False
-    managed_path = Path(script_path).resolve()
-    try:
-        return Path(arguments[1]).resolve() == managed_path
-    except (OSError, ValueError):
-        return False
+    return managed_python_command(
+        command, script_path=script_path, actions=("check", "fire"),
+    ) is not None
 
 
 def _claude_settings(text: str) -> dict:

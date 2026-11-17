@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from minds import failed_turn
+from minds import failed_turn, runtime_api
 from minds.harness import dsh_hooks, rotation_hooks
 
 
@@ -189,7 +190,10 @@ def test_native_hook_install_preserves_user_settings_and_replaces_only_managed_e
     else:
         saved = tomllib.loads(config_path.read_text())
         assert saved["model_provider"] == "local"
-        assert failed_turn.rotation_check_command(saved["hooks"]["Stop"]) is not None
+        assert failed_turn.rotation_check_command(
+            saved["hooks"]["Stop"],
+            native_script=app_root / "minds/harness/rotation_hooks.py",
+        ) is not None
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
@@ -272,6 +276,198 @@ def test_native_hook_install_does_not_create_an_undeclared_home(tmp_path):
 
     assert result["installed"] is False
     assert not home.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_kind", ["same_name", "python_wrapper", "direct_wrapper"])
+async def test_codex_failed_turn_uses_managed_check_from_mixed_config(
+    custom_kind, tmp_path, service, monkeypatch,
+):
+    """FR-01 / AC-06,08: recovery reaches the generated live-policy check."""
+    from minds.harness import codex_cli
+
+    service_url, requests = service
+    app_root = Path(__file__).resolve().parents[2]
+    mind_dir = tmp_path / "minds" / "probe"
+    home = mind_dir / ".codex"
+    runtime_path = mind_dir / "runtime.yaml"
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    marker = tmp_path / "custom-ran"
+    home.mkdir(parents=True)
+    runtime_path.write_text(
+        "name: probe\nmind_id: mind-probe\nharness: codex\n"
+        "rotation_threshold_percent: 75\n"
+    )
+    rotation_hooks.write_harness_hooks(
+        "codex", home, runtime_path=runtime_path, python=sys.executable, app_root=app_root,
+    )
+    custom_script = tmp_path / "rotation_check.py"
+    custom_script.write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['CUSTOM_MARKER']).write_text('custom')\n"
+    )
+    custom_script.chmod(0o755)
+    native = app_root / "minds" / "harness" / "rotation_hooks.py"
+    custom = {
+        "same_name": f"{sys.executable} {custom_script} --report",
+        "python_wrapper": shlex.join([sys.executable, str(custom_script), str(native), "check"]),
+        "direct_wrapper": shlex.join([str(custom_script), str(native), "check"]),
+    }[custom_kind]
+    config_path = home / "config.toml"
+    boundary = "[[hooks.UserPromptSubmit]]"
+    config_path.write_text(config_path.read_text().replace(
+        boundary,
+        "[[hooks.Stop.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(custom)}\n\n"
+        + boundary,
+        1,
+    ))
+    rotation_hooks.write_harness_hooks(
+        "codex", home, runtime_path=runtime_path, python=sys.executable, app_root=app_root,
+    )
+    rollout = home / "sessions" / f"rollout-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("\n".join(json.dumps(entry) for entry in [
+        {"type": "turn_context", "payload": {"model": "model-a"}},
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "last_token_usage": {"input_tokens": 60_000, "output_tokens": 0,
+                                 "total_tokens": 60_000},
+        }}},
+    ]) + "\n")
+    monkeypatch.setattr(codex_cli, "CODEX_HOME", home)
+    monkeypatch.setattr(codex_cli, "MIND_DIR", mind_dir)
+    monkeypatch.setattr(codex_cli, "PROJECT_DIR", app_root)
+    env = os.environ.copy()
+    env.update({
+        "HIVE_MIND_APP_ROOT": str(app_root), "HIVE_RUNTIME_PATH": str(runtime_path),
+        "HIVE_HARNESS": "codex", "HIVE_MODEL": "model-a",
+        "HIVE_MODEL_CONTEXT_WINDOW": "100000", "HIVE_ROTATION_THRESHOLD_TOKENS": "75000",
+        "COMMS_URL": service_url, "COMMS_BEARER_TOKEN": "test-comms",
+        "SURFACE": "terminal", "HIVE_SURFACE": "terminal", "CLIENT_REF": "pane-1",
+        "AUTO_REMEMBER_LOG_DIR": str(mind_dir / "data" / "auto-remember"),
+        "CUSTOM_MARKER": str(marker), "HIVE_GOAL_RUN": "0",
+    })
+
+    await codex_cli._run_rotation_check(
+        {"model": "model-a"}, "session-1", thread_id, env, "TURN_FAILED",
+    )
+    reports = [body for _, path, body in requests if path.endswith("/sessions/context")]
+    assert reports[-1]["threshold"] == 75_000
+    assert reports[-1]["tokens"] == 60_000
+    assert not marker.exists()
+    assert not [request for request in requests if request[1].endswith("/arm-rotation")]
+
+    runtime_api.update_settings(runtime_path, {"rotation_threshold_percent": 40})
+    await codex_cli._run_rotation_check(
+        {"model": "model-a"}, "session-1", thread_id, env, "TURN_FAILED",
+    )
+
+    reports = [body for _, path, body in requests if path.endswith("/sessions/context")]
+    assert reports[-1]["threshold"] == 40_000
+    arms = [body for _, path, body in requests if path.endswith("/arm-rotation")]
+    assert arms[-1]["conversation_id"] == thread_id
+    staged = mind_dir / "data" / "auto-remember" / f"rotation-staged-{thread_id}.json"
+    assert json.loads(staged.read_text())["state"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_kind", ["same_name", "python_wrapper", "direct_wrapper"])
+async def test_dsh_failed_turn_uses_managed_check_from_mixed_config(
+    custom_kind, tmp_path, service, monkeypatch,
+):
+    """FR-01 / AC-06,08: dsh recovery uses its installed owned check."""
+    from minds.harness import dsh_cli
+
+    service_url, requests = service
+    app_root = Path(__file__).resolve().parents[2]
+    mind_dir = tmp_path / "minds" / "probe"
+    home = mind_dir / ".dsh"
+    runtime_path = mind_dir / "runtime.yaml"
+    conversation_id = "conversation-1"
+    marker = tmp_path / "custom-ran"
+    runtime_path.parent.mkdir(parents=True)
+    runtime_path.write_text(
+        "name: probe\nmind_id: mind-probe\nharness: dsh\n"
+        "rotation_threshold_percent: 75\n"
+    )
+    report = dsh_hooks.write_hooks(
+        "probe", mind_dir.parent, container_minds_dir=str(mind_dir.parent),
+        python=sys.executable, home=home, container_hooks_dir=str(home / "hooks"),
+    )
+    config_path = Path(report["hooks_config"])
+    custom_script = tmp_path / "rotation_check.py"
+    custom_script.write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['CUSTOM_MARKER']).write_text('custom')\n"
+    )
+    custom_script.chmod(0o755)
+    managed = home / "hooks" / "rotation_check.py"
+    custom = {
+        "same_name": f"{sys.executable} {custom_script} --report",
+        "python_wrapper": shlex.join([sys.executable, str(custom_script), str(managed)]),
+        "direct_wrapper": shlex.join([str(custom_script), str(managed)]),
+    }[custom_kind]
+    config = json.loads(config_path.read_text())
+    config["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": custom})
+    config_path.write_text(json.dumps(config))
+    dsh_hooks.write_hooks(
+        "probe", mind_dir.parent, container_minds_dir=str(mind_dir.parent),
+        python=sys.executable, home=home, container_hooks_dir=str(home / "hooks"),
+    )
+    monkeypatch.setattr(dsh_cli, "DSH_HOME", home)
+    monkeypatch.setattr(dsh_cli, "MIND_DIR", mind_dir)
+    monkeypatch.setattr(dsh_cli, "SPAWN_DIR", app_root)
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(config_path))
+    transcript_path = (
+        home / "sessions" / dsh_cli._project_key(dsh_cli._spawn_cwd())
+        / dsh_cli._encode_segment(conversation_id) / "session.jsonl"
+    )
+    transcript_path.parent.mkdir(parents=True)
+    transcript_path.write_text("\n".join(json.dumps(entry) for entry in [
+        {"type": "session", "sessionId": conversation_id},
+        {"type": "context", "context": {"tokens": 60_000, "kind": "usage",
+                                              "model": "model-a", "window": 100_000}},
+        {"type": "turn_start"},
+    ]) + "\n")
+    env = os.environ.copy()
+    env.update({
+        "HIVE_MIND_APP_ROOT": str(app_root), "HIVE_RUNTIME_PATH": str(runtime_path),
+        "HIVE_HARNESS": "dsh", "HIVE_MODEL": "model-a",
+        "HIVE_MODEL_CONTEXT_WINDOW": "100000", "HIVE_ROTATION_THRESHOLD_TOKENS": "75000",
+        "COMMS_URL": service_url, "COMMS_BEARER_TOKEN": "test-comms",
+        "SURFACE": "terminal", "HIVE_SURFACE": "terminal", "CLIENT_REF": "pane-1",
+        "AUTO_REMEMBER_LOG_DIR": str(mind_dir / "data" / "auto-remember"),
+        "CUSTOM_MARKER": str(marker), "HIVE_GOAL_RUN": "0",
+    })
+
+    async def wait_for(path_suffix: str) -> list[dict]:
+        for _ in range(100):
+            matched = [body for _, path, body in requests if path.endswith(path_suffix)]
+            if matched:
+                return matched
+            await asyncio.sleep(0.05)
+        pytest.fail(f"no generated dsh request for {path_suffix}: {requests!r}")
+
+    await dsh_cli._check_failed_turn(
+        {"model": "model-a"}, conversation_id, env, "TURN_TIMEOUT",
+    )
+    reports = await wait_for("/sessions/context")
+    assert reports[-1]["threshold"] == 75_000
+    assert reports[-1]["tokens"] == 60_000
+    assert not marker.exists()
+    assert not [request for request in requests if request[1].endswith("/arm-rotation")]
+
+    runtime_api.update_settings(runtime_path, {"rotation_threshold_percent": 40})
+    await dsh_cli._check_failed_turn(
+        {"model": "model-a"}, conversation_id, env, "TURN_TIMEOUT",
+    )
+    arms = await wait_for("/arm-rotation")
+    reports = [body for _, path, body in requests if path.endswith("/sessions/context")]
+    assert reports[-1]["threshold"] == 40_000
+    assert arms[-1]["conversation_id"] == conversation_id
+    staged = mind_dir / "data" / "auto-remember" / f"rotation-staged-{conversation_id}.json"
+    assert json.loads(staged.read_text())["state"] == "ready"
 
 
 def _event(harness: str, transcript: Path) -> dict:
