@@ -81,7 +81,10 @@ FAMILIES = {
               "apply_patch", "view_image"},
     "web": {"web_fetch", "web_search", "WebFetch", "WebSearch"},
     "sub-minds": {"subagent", "list_agents", "send_message", "interrupt_agent",
-                  "Task", "Agent", "SendMessage", "TaskStop", "Workflow"},
+                  "Task", "Agent", "SendMessage", "TaskStop", "Workflow",
+                  # Codex's, which arrive under a `collaboration` prefix too.
+                  "spawn_agent", "send_input", "wait_agent", "close_agent",
+                  "resume_agent"},
 }
 
 #: Tool-name prefixes a family owns: Codex's sub-agent tools are all
@@ -110,6 +113,10 @@ FETCH_TIMEOUT = 2.0
 DENY = 2
 
 GUARD = Path(__file__).resolve()
+
+
+class NotStarted(RuntimeError):
+    """A mind that cannot be held to its roles is not run; the message says why."""
 
 
 # ------------------------------------------------------------------ naming
@@ -177,7 +184,7 @@ def _fetch(mind: str, url: str, token: str, timeout: float) -> dict | None:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            return {"managed": False}
+            return {"managed": False, "unregistered": True}
         return None
     except (OSError, ValueError):
         return None
@@ -250,6 +257,11 @@ def current(env: dict[str, str] | None = None) -> dict:
     saved = read_grants(path) or {}
     fresh = fetch(env.get("MIND_ID") or env.get("MIND_NAME", ""),
                   env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""))
+    if fresh is not None and fresh.get("unregistered") and saved.get("managed"):
+        # The gateway knew this mind as managed when the process was started
+        # and a managed mind stays managed, so a "never heard of it" now is a
+        # credential or an id gone wrong inside this process, not an answer.
+        return saved
     if fresh is not None:
         # The delegate tool names are the adapter's to record: they come from
         # the agents overlay this process was started with.
@@ -321,16 +333,26 @@ def effective_hooks(source: dict | None, python: str = "python3") -> dict:
     return config
 
 
-def guard_hooks(python: str = "python3") -> dict[str, dict]:
+def guard_hooks(python: str = "python3", checked: bool = False) -> dict[str, dict]:
     """The guard's hook group per event, in the shape every harness reads.
 
     PreToolUse on every tool; UserPromptSubmit too, because a typed `/name`
     loads a skill without any tool call, so the skill grant is checked on
     the prompt as well.
+
+    ``checked`` is for Claude and Codex, which run a hook through a shell
+    and let a tool run on any exit but 2. A terminal pane keeps its command
+    for as long as it lives, so an interpreter or a guard file that has
+    since gone would otherwise exit 127 and wave every tool through; the
+    command refuses instead.
     """
     def group(command: str) -> dict:
-        return {"hooks": [{"type": "command", "timeout": 10,
-                           "command": f"{python} {shlex.quote(str(GUARD))} {command}"}]}
+        run = f"{shlex.quote(python)} {shlex.quote(str(GUARD))} {command}"
+        if checked:
+            run = (f"[ -x {shlex.quote(python)} ] && [ -r {shlex.quote(str(GUARD))} ] || "
+                   f"{{ echo 'The role guard cannot run, so this is refused.' >&2; exit {DENY}; }}; "
+                   f"exec {run}")
+        return {"hooks": [{"type": "command", "timeout": 10, "command": run}]}
     return {"PreToolUse": group("guard"), "UserPromptSubmit": group("prompt")}
 
 
@@ -372,14 +394,23 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
         # One kind of failure for every caller: a hooks file that will not
         # parse or a home that cannot be written is a mind that is not run,
         # said out loud, not a turn that ends in silence.
-        raise RuntimeError(f"the role guard's files could not be written: {exc}") from exc
+        raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
 
 
 def _fetch_for_spawn(mind: str, url: str, token: str, timeout: float) -> dict:
     grants = fetch(mind, url, token, timeout=timeout)
     if grants is None:
-        raise RuntimeError("the gateway did not say what this mind's roles allow, so it is not started")
+        raise NotStarted("the gateway did not say what this mind's roles allow, so it is not started")
     return grants
+
+
+def _who(mind: str, url: str) -> dict[str, str]:
+    """Who the guard asks about, and where, on the guard's own environment.
+
+    A terminal pane inherits from a tmux server that may predate both, and
+    a guard asking about the wrong mind is told "unmanaged".
+    """
+    return {"MIND_ID": mind, "COMMS_URL": url}
 
 
 def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token: str,
@@ -400,11 +431,12 @@ def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token
         write_grants(grants_file, grants)
         settings = state_dir / "role-settings.json"
         write_grants(settings, {"hooks": {event: [group] for event, group
-                                          in guard_hooks(python).items()}})
+                                          in guard_hooks(python, checked=True).items()}})
     except OSError as exc:
-        raise RuntimeError(f"the role guard's files could not be written: {exc}") from exc
+        raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
     return (["--settings", str(settings)],
-            {"HIVE_ROLE_GRANTS_FILE": str(grants_file), "HIVE_SKILLS_DIR": str(skills_dir)})
+            {"HIVE_ROLE_GRANTS_FILE": str(grants_file), "HIVE_SKILLS_DIR": str(skills_dir),
+             **_who(mind, url)})
 
 
 def toml_inline(value) -> str:
@@ -414,7 +446,11 @@ def toml_inline(value) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        return json.dumps(value)
+        # Not ASCII-escaped: JSON writes a character outside the basic plane
+        # as a surrogate pair, which TOML refuses.
+        return json.dumps(value, ensure_ascii=False)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
     if isinstance(value, list):
         return "[" + ", ".join(toml_inline(v) for v in value) + "]"
     if isinstance(value, dict):
@@ -444,21 +480,24 @@ def prepare_codex(codex_home: Path, mind: str, url: str, token: str,
         grants_file = codex_home / "role-grants.json"
         write_grants(grants_file, grants)
     except OSError as exc:
-        raise RuntimeError(f"the role guard's files could not be written: {exc}") from exc
+        raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
     try:
         config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
     except OSError:
         config = {}
     except tomllib.TOMLDecodeError as exc:
         # Codex would refuse the same file; said here, with the reason.
-        raise RuntimeError(f"the mind's codex config.toml does not parse: {exc}") from exc
+        raise NotStarted(f"the mind's codex config.toml does not parse: {exc}") from exc
     hooks = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
     own = hooks.get("PreToolUse") if isinstance(hooks.get("PreToolUse"), list) else []
-    groups = [guard_hooks(python)["PreToolUse"], *own]
-    args = ["-c", f"hooks.PreToolUse={toml_inline(groups)}"]
+    groups = [guard_hooks(python, checked=True)["PreToolUse"], *own]
+    try:
+        args = ["-c", f"hooks.PreToolUse={toml_inline(groups)}"]
+    except ValueError as exc:
+        raise NotStarted(f"the mind's codex hooks could not be carried over: {exc}") from exc
     if grants.get("managed") and "web" not in (grants.get("tools") or []):
         args += ["-c", 'web_search="disabled"']
-    return args, {"HIVE_ROLE_GRANTS_FILE": str(grants_file)}
+    return args, {"HIVE_ROLE_GRANTS_FILE": str(grants_file), **_who(mind, url)}
 
 
 def _write_spawn_files(dsh_home: Path, source_hooks: str, grants: dict,

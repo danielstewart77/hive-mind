@@ -208,3 +208,127 @@ def test_a_codex_terminal_pane_is_started_under_the_guard(monkeypatch, codex_hom
 
     assert _hook(guard, "Bash", env) == role_guard.DENY
     assert _hook(guard, "apply_patch", env) == 0
+
+
+# ── rotation, refusal and reattach on a pane ──────────────────────────────
+
+def _rotate(monkeypatch, harness):
+    """Rotate a live pane with tmux faked out; return what it was respawned on."""
+    respawned = {}
+    monkeypatch.setattr(harness.TERMINALS, "alive", lambda sid: True)
+    monkeypatch.setattr(harness.TERMINALS, "respawn",
+                        lambda sid, argv, **kw: respawned.update(argv=argv, env=kw["env_overrides"]))
+    rotated = harness._rotate_pty(session_id="p1", new_conversation_id="conv-10", model="opus")
+    return rotated, respawned
+
+
+@pytest.mark.parametrize("name,refused,allowed", [
+    ("claude", "WebFetch", "Bash"), ("codex", "apply_patch", "Bash")])
+def test_a_rotated_pane_is_still_under_the_guard(monkeypatch, claude_home, codex_home,
+                                                 name, refused, allowed):
+    _says(monkeypatch, _managed("shell"))
+    harness = {"claude": claude, "codex": codex}[name]
+
+    rotated, respawned = _rotate(monkeypatch, harness)
+    program = _pane_program(respawned["argv"])
+    guard = _claude_guard(program) if name == "claude" else _codex_guard(program)
+    env = {"PATH": "/usr/bin:/bin", **respawned["env"]}
+
+    assert rotated is True
+    assert _hook(guard, refused, env) == role_guard.DENY
+    assert _hook(guard, allowed, env) == 0
+
+
+@pytest.mark.parametrize("name", ["claude", "codex"])
+def test_a_pane_is_not_rotated_onto_a_process_nobody_can_hold_to_its_roles(
+        monkeypatch, claude_home, codex_home, name):
+    _says(monkeypatch, None)
+
+    rotated, respawned = _rotate(monkeypatch, {"claude": claude, "codex": codex}[name])
+
+    assert rotated is False and respawned == {}
+
+
+@pytest.mark.parametrize("name", ["claude", "codex"])
+def test_a_pane_the_gateway_cannot_answer_for_is_not_started_and_says_why(
+        monkeypatch, claude_home, codex_home, name):
+    _says(monkeypatch, None)
+    harness = {"claude": claude, "codex": codex}[name]
+    started = []
+    monkeypatch.setattr(harness.TERMINALS, "alive", lambda sid: False)
+    monkeypatch.setattr(harness.TERMINALS, "start", lambda *a, **k: started.append(a))
+
+    with pytest.raises(role_guard.NotStarted, match="not started"):
+        harness._spawn_pty(session_id="p1", model="opus", conversation_id="conv-9",
+                           cols=80, rows=24)
+
+    assert started == []
+
+
+@pytest.mark.parametrize("name", ["claude", "codex"])
+def test_reattaching_to_a_live_pane_does_not_wait_on_the_gateway(
+        monkeypatch, claude_home, codex_home, name):
+    asked = []
+    monkeypatch.setattr(role_guard, "fetch", lambda *a, **k: asked.append(a))
+    harness = {"claude": claude, "codex": codex}[name]
+    monkeypatch.setattr(harness.TERMINALS, "alive", lambda sid: True)
+    monkeypatch.setattr(harness.TERMINALS, "start", lambda *a, **k: None)
+    monkeypatch.setattr(harness.TERMINALS, "attach",
+                        lambda sid, **kw: (types.SimpleNamespace(pid=1, poll=lambda: None), -1))
+    if name == "codex":
+        monkeypatch.setattr(codex, "_resumable_thread", lambda *a, **k: "t1")
+
+    proc, _ = harness._spawn_pty(session_id="p1", model="opus", conversation_id="conv-9",
+                                 cols=80, rows=24)
+
+    assert proc.pid == 1 and asked == []
+
+
+# ── what the adapters ask the gateway, and when ───────────────────────────
+
+async def test_each_codex_turn_is_started_on_what_the_roles_say_now(monkeypatch, codex_home):
+    started: list = []
+    _says(monkeypatch, _managed("shell"))
+    await _codex_turn(monkeypatch, started)
+    _says(monkeypatch, _managed("shell", "web"))
+    await _codex_turn(monkeypatch, started)
+
+    assert 'web_search="disabled"' in started[0][0]
+    assert 'web_search="disabled"' not in started[1][0]
+
+
+async def test_a_resumed_codex_turn_keeps_its_thread_and_its_guard(monkeypatch, codex_home):
+    _says(monkeypatch, _managed("shell"))
+    started: list = []
+
+    async def fake_exec(*cmd, **kwargs):
+        started.append((list(cmd), kwargs["env"]))
+        return _Proc()
+
+    monkeypatch.setattr(codex.asyncio, "create_subprocess_exec", fake_exec)
+    codex.SESSIONS["s1"] = {"system_prompt": "system", "thread_id": "t1", "model": "gpt-5"}
+    [event async for event in codex._run_codex_turn("s1", "hello", None)]
+    argv, env = started[0]
+
+    assert argv[-3:] == ["resume", "t1", "-"]
+    assert _hook(_codex_guard(argv[:-3]), "apply_patch", env) == role_guard.DENY
+
+
+@pytest.mark.parametrize("name", ["claude", "codex"])
+def test_the_gateway_is_asked_about_this_mind(monkeypatch, claude_home, codex_home, name):
+    asked = []
+
+    def fetch(mind, url, token, timeout=0):
+        asked.append((mind, url, token))
+        return {"managed": False}
+
+    monkeypatch.setattr(role_guard, "fetch", fetch)
+    harness = {"claude": claude, "codex": codex}[name]
+    env = {"COMMS_URL": "http://gateway", "COMMS_BEARER_TOKEN": "secret"}
+
+    _, extra = harness._role_guard(env)
+
+    assert asked == [(harness.MIND_ID, "http://gateway", "secret")]
+    assert extra["MIND_ID"] == harness.MIND_ID
+    if name == "claude":
+        assert extra["HIVE_SKILLS_DIR"] == str(claude_home / "skills")
