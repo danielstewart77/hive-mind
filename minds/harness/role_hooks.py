@@ -307,7 +307,18 @@ class _CodexHooks:
         text = self.source
         if text and not text.endswith("\n"):
             text += "\n"
-        self.source = text + ("\n" if text else "") + block
+        candidate = text + ("\n" if text else "") + block
+        before = self.entries()
+        try:
+            after = _CodexHooks(candidate).entries()
+        except HooksFileError as exc:
+            raise HooksFileError(
+                f"a {event} hook cannot be appended to this Codex "
+                f"configuration: {exc}") from exc
+        if sorted(after, key=repr) != sorted(before + [(event, command, timeout)], key=repr):
+            raise HooksFileError(
+                f"appending a {event} hook would change more than that entry")
+        self.source = candidate
 
     def text(self) -> str:
         return self.source
@@ -383,17 +394,23 @@ def _write_whole(target: Path, content: str | bytes, *, mode: int | None = None,
     survives — given the old file's mode, read back by *check*, then renamed.
     """
     target = Path(os.path.realpath(target))
+    try:
+        old = target.stat()
+    except FileNotFoundError:
+        old = None
     if mode is None:
-        try:
-            mode = target.stat().st_mode & 0o7777
-        except FileNotFoundError:
-            mode = 0o644
+        mode = old.st_mode & 0o7777 if old is not None else 0o644
     data = content.encode() if isinstance(content, str) else content
     fd, staging = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
         os.chmod(staging, mode)
+        # Run as root over a file the mind owns, the file stays the mind's;
+        # a new file takes its directory's owner.
+        keep = old if old is not None else target.parent.stat()
+        if os.geteuid() == 0 and (keep.st_uid, keep.st_gid) != (0, 0):
+            os.chown(staging, keep.st_uid, keep.st_gid)
         if check is not None:
             check(Path(staging))
         os.replace(staging, target)
@@ -434,9 +451,14 @@ def install(harness: str, home: Path, names: list[str], *,
         raise ValueError(f"unknown harness {harness!r}")
     if not os.path.isabs(python):
         raise ValueError(f"the interpreter must be an absolute path: {python!r}")
-    home = Path(home)
-    path = hooks_file_for(harness, home, hooks_file)
+    # Absolute, because the registered commands are run from wherever the
+    # harness happens to be.
+    home = Path(os.path.abspath(home))
+    path = Path(os.path.abspath(hooks_file_for(harness, home, hooks_file)))
     report: dict = {"harness": harness, "home": str(home), "hooks_file": str(path),
+                    # Where the installed hooks will take the mind's folder to
+                    # be unless HIVE_MIND_DIR says otherwise.
+                    "mind_dir": str(home.resolve().parent),
                     "hooks": {}, "hooks_file_written": False}
     wanted: list[Hook] = []
     for name in dict.fromkeys(names):
@@ -450,7 +472,11 @@ def install(harness: str, home: Path, names: list[str], *,
         return report
 
     home.mkdir(parents=True, exist_ok=True)
-    with open(home / ".role-hooks.lock", "w") as lock:
+    # Beside the hooks file itself, so two homes that share one exclude each
+    # other.
+    real = Path(os.path.realpath(path))
+    real.parent.mkdir(parents=True, exist_ok=True)
+    with open(real.parent / f".{real.name}.role-hooks.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             text = path.read_text() if path.exists() else ""
@@ -487,6 +513,12 @@ def install(harness: str, home: Path, names: list[str], *,
                         outcome.update(
                             status="hand_copy_kept",
                             reason="registered more than once for one event")
+                    elif not set(events) <= set(hook.events):
+                        stray = sorted(set(events) - set(hook.events))
+                        outcome.update(
+                            status="hand_copy_kept",
+                            reason="registered for an event the tracked hook "
+                                   f"does not run on: {', '.join(stray)}")
                     else:
                         if on_difference is not None:
                             on_difference(hook.name, found)
@@ -508,15 +540,30 @@ def install(harness: str, home: Path, names: list[str], *,
                 report["hooks"][hook.name] = outcome
                 continue
 
+            own_events = [entry[0] for entry in ours]
+            if len(set(own_events)) != len(own_events):
+                # Not this installer's doing, and not its to guess which one
+                # the operator meant to keep.
+                report["hooks"][hook.name] = {
+                    "status": "registered_twice",
+                    "reason": "the tracked hook is already registered more than "
+                              "once for one event; nothing of it was changed"}
+                continue
             changed = added = False
-            for event, command, timeout in ours:
-                if (command, timeout) != (tracked, hook.timeout):
-                    hooks.rewrite(event, command, tracked, hook.timeout)
-                    changed = True
-            for event in hook.events:
-                if event not in [entry[0] for entry in ours]:
-                    hooks.add(event, tracked, hook.timeout)
-                    added = True
+            before = hooks.text()
+            try:
+                for event, command, timeout in ours:
+                    if (command, timeout) != (tracked, hook.timeout):
+                        hooks.rewrite(event, command, tracked, hook.timeout)
+                        changed = True
+                for event in hook.events:
+                    if event not in own_events:
+                        hooks.add(event, tracked, hook.timeout)
+                        added = True
+            except HooksFileError as exc:
+                hooks = _open(harness, before)
+                report["hooks"][hook.name] = {"status": "failed", "reason": str(exc)}
+                continue
             expected += [(event, tracked, hook.timeout)
                          for event in {*hook.events, *(entry[0] for entry in ours)}]
             to_copy.append(hook)
@@ -606,6 +653,10 @@ def main(argv: list[str] | None = None) -> int:
     hooks_file = args.hooks_file
     if hooks_file is None and args.harness == "dsh" and os.environ.get("DSH_HOOKS_CONFIG"):
         hooks_file = Path(os.environ["DSH_HOOKS_CONFIG"])
+    if hooks_file is not None and hooks_file.name == "hooks.effective.json":
+        print(json.dumps({"error": f"{hooks_file} is generated at every spawn; "
+                                   "name the hooks file it is generated from"}))
+        return 2
     if args.hooks is not None:
         names = [name.strip() for name in args.hooks.split(",") if name.strip()]
     else:
