@@ -45,6 +45,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from minds import runtime_api
+from minds.harness import role_guard
 
 log = logging.getLogger("hive-mind.minds.pty")
 
@@ -1138,6 +1139,11 @@ def install_pty_attach(
             )
         except PtyUnavailable as exc:
             log.info("attach-pty refused for %s session %s: %s", mind_name, session_id, exc)
+            await websocket.close(code=1008, reason=str(exc)[:120])
+            return
+        except role_guard.NotStarted as exc:
+            # Said to whoever opened the terminal, not only to the log.
+            log.warning("attach-pty refused for %s session %s: %s", mind_name, session_id, exc)
             await websocket.close(code=1008, reason=str(exc)[:120])
             return
         except Exception:

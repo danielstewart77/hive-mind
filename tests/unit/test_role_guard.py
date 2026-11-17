@@ -385,3 +385,94 @@ def test_a_claude_or_codex_spawn_the_gateway_cannot_answer_for_is_refused(gatewa
             role_guard.prepare_claude(tmp_path, tmp_path / "skills", "m", gateway.url, "t")
         else:
             role_guard.prepare_codex(tmp_path, "m", gateway.url, "t")
+
+
+#: Every Claude and Codex tool name a family owns, written out here from the
+#: harnesses themselves, not read back from the guard's own table.
+EVERY_NAME = {
+    "shell": ["Bash", "BashOutput", "KillShell", "Monitor", "PowerShell", "TaskOutput",
+              "exec_command", "write_stdin", "shell", "shell_command", "local_shell",
+              "unified_exec", "js_repl"],
+    "files": ["Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS",
+              "apply_patch", "view_image"],
+    "web": ["WebFetch", "WebSearch", "mcp__codex_apps__search_service__web_run"],
+    "sub-minds": ["Task", "Agent", "SendMessage", "TaskStop", "Workflow",
+                  "spawn_agent", "send_input", "wait_agent", "close_agent", "resume_agent",
+                  "collaborationspawn_agent", "collaborationwait_agent"],
+}
+
+
+@pytest.mark.parametrize("family,name", [(f, n) for f, names in EVERY_NAME.items() for n in names])
+def test_every_claude_and_codex_tool_is_held_to_its_family(family, name):
+    others = [f for f in EVERY_NAME if f != family]
+
+    assert role_guard.tool_refusal(_managed(tools=others), name, {}) is not None
+    assert role_guard.tool_refusal(_managed(tools=[family]), name, {}) is None
+
+
+def test_a_gateway_that_no_longer_knows_a_managed_mind_does_not_unmanage_it(gateway, tmp_path):
+    grants_file = tmp_path / "role-grants.json"
+    role_guard.write_grants(grants_file, _managed(tools=["files"]))
+    gateway.status = 404
+    env = _env(gateway, tmp_path, grants_file)
+
+    assert _tool(env, "Bash").returncode == role_guard.DENY
+    assert _tool(env, "Read").returncode == 0
+
+
+def test_a_claude_guard_asks_about_its_own_mind_whatever_the_pane_inherited(gateway, tmp_path):
+    gateway.grants = _managed(tools=["files"])
+    args, extra = role_guard.prepare_claude(tmp_path / "cfg", tmp_path / "cfg" / "skills",
+                                            "mind-1", gateway.url, "t", python=sys.executable)
+    settings = json.loads(Path(args[1]).read_text())
+    command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    # A pane's environment: nothing of the mind's but what the spawn handed it.
+    env = {"PATH": "/usr/bin:/bin", "COMMS_BEARER_TOKEN": "t", "MIND_ID": "somebody-else",
+           **extra}
+
+    before = _run_hook(command, {"tool_name": "Bash", "tool_input": {}}, env).returncode
+    gateway.grants = _managed(tools=["files", "shell"])
+    after = _run_hook(command, {"tool_name": "Bash", "tool_input": {}}, env).returncode
+
+    assert (before, after) == (role_guard.DENY, 0)
+    assert gateway.asked[-1] == "/minds/mind-1/grants"
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_guard_whose_interpreter_has_gone_refuses_the_tool(gateway, tmp_path, harness):
+    gone = str(tmp_path / "venv" / "bin" / "python")
+    if harness == "claude":
+        args, extra = role_guard.prepare_claude(tmp_path, tmp_path / "skills", "m",
+                                                gateway.url, "t", python=gone)
+        command = json.loads(Path(args[1]).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    else:
+        args, extra = role_guard.prepare_codex(tmp_path, "m", gateway.url, "t", python=gone)
+        command = _codex_overrides(args)["hooks.PreToolUse"][0]["hooks"][0]["command"]
+
+    done = _run_hook(command, {"tool_name": "Read", "tool_input": {}},
+                     {**_env(gateway, tmp_path), **extra})
+
+    assert done.returncode == role_guard.DENY and "cannot run" in done.stderr
+
+
+def test_a_codex_hook_of_the_minds_own_survives_being_carried_over_whatever_it_says(gateway, tmp_path):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    own = 'bash -c "echo \\U0001F600 caf\\u00e9 \'x\'"'
+    (home / "config.toml").write_text(
+        '[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\n'
+        f'type = "command"\ntimeout = 5\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+    expected = __import__("tomllib").loads((home / "config.toml").read_text(encoding="utf-8"))
+
+    args, _ = role_guard.prepare_codex(home, "m", gateway.url, "t")
+
+    assert _codex_overrides(args)["hooks.PreToolUse"][1:] == expected["hooks"]["PreToolUse"]
+
+
+def test_a_codex_config_that_does_not_parse_refuses_the_spawn_and_says_so(gateway, tmp_path):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    (home / "config.toml").write_text("[[hooks.PreToolUse\n")
+
+    with pytest.raises(role_guard.NotStarted, match="config.toml"):
+        role_guard.prepare_codex(home, "m", gateway.url, "t")
