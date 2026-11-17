@@ -769,7 +769,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         // HTTP API. A Mind that is down answers nothing, and the editor says
         // so rather than offering an edit that could not be written.
         const editor = document.getElementById("mind-editor"); editor.dataset.mindName = mind.name; editor.hidden = false;
-        let down = false;
+        let down = false, downReason = "";
         try {
             const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
             populateModelPicker(configuration.models || [], configuration.configuration.default_model || cfg.default_model || mind.model || "", configuration.configuration.provider || cfg.provider || "");
@@ -784,7 +784,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             // model, voice, settings, skills and files are the Mind's own
             // account of itself, so none of them can be read: one notice
             // says so, instead of every panel failing separately.
-            down = error.status === 502;
+            down = error.status === 502; downReason = error.message;
             document.getElementById("mind-model-form").hidden = true;
             paintSummary("mind-model-summary", [["Model", "Could not be read"], ["Reason", error.message]]);
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
@@ -793,7 +793,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         if (down) {
             editor.hidden = true;
             const notice = document.getElementById("mind-down");
-            document.getElementById("mind-down-text").textContent = mind.name + " is not answering at " + (mind.gateway_url || cfg.gateway_url || "its registered address") + ": it is stopped or cannot be reached. Its model, voice, settings, surface token, skills, skill and hook files and soul are read from the Mind itself, so they are not shown until it runs. Nothing has been removed. Its roles are held by the console and are below.";
+            document.getElementById("mind-down-text").textContent = mind.name + " is not answering at " + (mind.gateway_url || cfg.gateway_url || "its registered address") + ": it is stopped or cannot be reached. Its model, voice, settings, surface token, skills, skill and hook files and soul are read from the Mind itself, so they are not shown until it runs. Nothing has been removed. Its roles are held by the console and are below. What the console was told: " + downReason;
             notice.hidden = false;
         }
         if (!down) { await renderVoice(mind.name);

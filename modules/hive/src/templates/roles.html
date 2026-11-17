@@ -106,7 +106,8 @@ window.addEventListener("DOMContentLoaded", async function () {
         const unseen = Array.from(chosen[kind]).filter(function (n) { return !known.has(n); }).sort();
         const showCommunity = document.getElementById("role-community").checked;
         const listed = rows.filter(function (r) { return !r.community || showCommunity || chosen[kind].has(r.name); });
-        const missing = silent.length ? "not reported by the Minds that answered" : "not on any Mind";
+        const asked = catalog.minds_asked || 0;
+        const missing = asked - silent.length <= 0 ? "could not be checked: no Mind answered" : silent.length ? "not reported by the Minds that answered" : "not on any Mind";
         const cells = function (name, rest) {
             return '<tr><td><input type="checkbox" data-grant="' + kind + '" value="' + h.escapeHtml(name) + '" aria-label="' + h.escapeHtml(name) + '"' + (chosen[kind].has(name) ? " checked" : "") + '></td><td>' + h.escapeHtml(name) + rest + '</td></tr>';
         };
@@ -115,8 +116,10 @@ window.addEventListener("DOMContentLoaded", async function () {
             const minds = h.escapeHtml((r.minds || []).join(", ") || "none");
             return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.repo ? "present" : "absent") : "") + '</td><td>' + minds);
         }).concat(unseen.map(function (name) { return cells(name, '</td><td colspan="' + span + '">' + missing); }));
-        document.getElementById("role-" + kind).innerHTML = body.join("") || '<tr><td colspan="' + (span + 2) + '">No Mind reported any.</td></tr>';
+        document.getElementById("role-" + kind).innerHTML = body.join("") || '<tr><td colspan="' + (span + 2) + '">' + (asked - silent.length > 0 ? "No Mind reported any." : "No Mind answered.") + '</td></tr>';
         const notes = [];
+        if (!asked) notes.push("No Mind could be asked.");
+        if (kind === "skills" && catalog.community_unread) notes.push("Which skills are community submissions could not be read, so none is marked.");
         if (silent.length) notes.push("Did not answer, so what only they have is not listed: " + silent.join(", ") + ".");
         const left = rows.length - listed.length;
         if (left) notes.push(left + (left === 1 ? " community submission is" : " community submissions are") + " left out.");
@@ -154,7 +157,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             formStatus.textContent = "";
         } catch (error) {
             if (editing !== role) return;
-            catalog = {models: [], models_error: error.message, skills: [], hooks: [], skills_unanswered: [], hooks_unanswered: []};
+            catalog = {models: [], models_error: error.message, skills: [], hooks: [], skills_unanswered: [], hooks_unanswered: [], minds_asked: 0};
             formStatus.textContent = "What exists could not be read: " + error.message + ". Only what this role already grants is shown.";
         }
         paintModel(current);

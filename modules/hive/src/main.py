@@ -4117,19 +4117,25 @@ async def api_roles(user: dict = Depends(require_auth)):
 _CATALOG_DEADLINE = 5.0
 
 
+async def _within(call):
+    """What `call` answered inside the deadline, or `None`.
+
+    Any failure at all: a Mind that answers with a page instead of a list,
+    or a GitHub that hangs, costs its own part of the catalog and nothing
+    else.
+    """
+    try:
+        return await asyncio.wait_for(call, _CATALOG_DEADLINE)
+    except Exception:
+        return None
+
+
 async def _mind_report(mind: dict) -> dict:
     """One Mind's skills and hooks listings, each `None` when it did not answer."""
     url = str(mind.get("gateway_url") or "")
-
-    async def within(call) -> dict | None:
-        try:
-            return await asyncio.wait_for(call, _CATALOG_DEADLINE)
-        except (HTTPException, asyncio.TimeoutError):
-            return None
-
     skills, hooks = await asyncio.gather(
-        within(mind_skills.fetch_skills(url)),
-        within(mind_files.fetch_tree(url, "hooks")))
+        _within(mind_skills.fetch_skills(url)),
+        _within(mind_files.fetch_tree(url, "hooks")))
     return {"mind": str(mind.get("name") or ""), "skills": skills, "hooks": hooks}
 
 
@@ -4138,23 +4144,27 @@ async def api_roles_catalog(user: dict = Depends(require_auth)):
     """What a role can be given: every model, skill and hook that exists.
 
     The editor ticks from this and types none of it. Models are the proxy's
-    list; skills and hooks are what the registered Minds report, asked all
-    at once.
+    list; skills and hooks are what the registered Minds report. Everything
+    is asked at once, and each part that does not answer is said to be
+    missing rather than passed off as empty.
     """
     del user
-    reports = await asyncio.gather(*(_mind_report(m) for m in await _broker_minds_safe()))
-    body = roles_data.catalog(list(reports), await skill_submissions.community_names())
-    try:
-        listing = await _proxy_json("/v1/models")
-        seen: set[str] = set()
-        models = []
-        for row in listing.get("data", []):
-            if isinstance(row, dict) and row.get("id") and row["id"] not in seen:
-                seen.add(row["id"])
-                models.append({"id": row["id"], "provider": str(row.get("provider") or "other")})
-        body.update(models=models, models_error=None)
-    except Exception as exc:  # the proxy being down must not shut the editor
-        body.update(models=[], models_error=str(exc) or type(exc).__name__)
+    minds = await _broker_minds_safe()
+    community, listing, *reports = await asyncio.gather(
+        _within(skill_submissions.community_names()),
+        _within(_proxy_json("/v1/models")),
+        *(_mind_report(m) for m in minds))
+    body = roles_data.catalog(list(reports), community or set())
+    body["minds_asked"] = len(minds)
+    body["community_unread"] = community is None
+    seen: set[str] = set()
+    models = []
+    for row in (listing or {}).get("data", []) if isinstance(listing, dict) else []:
+        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] not in seen:
+            seen.add(row["id"])
+            models.append({"id": row["id"], "provider": str(row.get("provider") or "other")})
+    body.update(models=models,
+                models_error=None if models else "the proxy did not answer with a model list")
     return body
 
 

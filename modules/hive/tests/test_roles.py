@@ -391,6 +391,7 @@ def test_the_role_editors_skill_list_labels_a_community_submission(repo, monkeyp
     assert labelled == {"changed": False, "memory": False, "owners-own": False, "weather": True}
     assert next(s for s in body["skills"] if s["name"] == "weather")["minds"] == ["stash"]
     assert body["skills_unanswered"] == ["ada"]
+    assert body["hooks_unanswered"] == ["ada", "stash"]
 
 
 def test_a_community_submission_closed_without_merging_is_not_hidden(repo, monkeypatch, mind_listing):
