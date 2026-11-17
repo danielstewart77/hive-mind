@@ -137,6 +137,15 @@ def hive_tools_host_path() -> str:
     return os.getenv("HIVE_TOOLS_DIR") or DEFAULT_HIVE_TOOLS_HOST_DIR
 
 
+def _git_marker(marker: Path) -> bool:
+    if marker.is_dir():
+        return True
+    try:
+        return marker.is_file() and marker.read_text(errors="replace").startswith("gitdir:")
+    except OSError:
+        return False
+
+
 def has_checkout(path: Path) -> bool:
     """Whether a *finished* clone lives here.
 
@@ -150,8 +159,11 @@ def has_checkout(path: Path) -> bool:
     Requiring real checked-out content alongside it costs nothing, is true of a
     repository the operator cloned by hand, and is false for every partial
     state above.
+
+    A module of hive-mind's manifest is a checkout too: git gives a submodule
+    a one-line `.git` *file* naming where its history lives, not a folder.
     """
-    if not path.is_dir() or not (path / ".git").is_dir():
+    if not path.is_dir() or not _git_marker(path / ".git"):
         return False
     try:
         return any(

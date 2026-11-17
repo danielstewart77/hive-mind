@@ -19,9 +19,8 @@
                 <div class="form-grid">
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
-                    <div class="field" id="mind-ollama-field"><label for="mind-ollama-url">Ollama URL</label><input id="mind-ollama-url" name="ollama_url" type="url" value="{{ default_ollama_url }}" placeholder="http://host.docker.internal:8899"><small>Defaults to the inference proxy, so the Mind is metered.</small></div>
-                    <div class="field" id="mind-ollama-key-field"><label for="mind-ollama-key">Proxy key</label><input id="mind-ollama-key" name="ollama_api_key" type="text" placeholder="hmp-…"><small>Only if the endpoint authenticates. Bare Ollama needs none.</small></div>
                 </div>
+                <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
             </form>
@@ -48,7 +47,7 @@ window.addEventListener("DOMContentLoaded", function () {
     let created = null;
     const options = {{ install_options | tojson }};
     const defaultModels = {};
-    options.providers.forEach(function (item) { defaultModels[item.value] = item.default_model; });
+    options.providers.forEach(function (item) { defaultModels[item.value] = item.internal_default_model || item.default_model; });
     const providersFor = {};
     options.harnesses.forEach(function (item) { providersFor[item.value] = item.providers; });
     const providerLabels = {anthropic: "Anthropic", openai: "OpenAI", ollama: "Ollama (local)"};
@@ -68,8 +67,6 @@ window.addEventListener("DOMContentLoaded", function () {
     function onProviderChange() {
         const provider = form.elements.provider.value, isOllama = provider === "ollama";
         form.elements.default_model.value = defaultModels[provider] || "";
-        document.getElementById("mind-ollama-field").hidden = !isOllama;
-        document.getElementById("mind-ollama-key-field").hidden = !isOllama;
     }
 
     form.addEventListener("change", function (event) {
@@ -88,6 +85,18 @@ window.addEventListener("DOMContentLoaded", function () {
         } catch (error) { status.textContent = error.message; }
     });
 
+    (async function () { try {
+        const roles = ((await h.requestJson("/api/roles")).roles || []).filter(function (r) { return r.id !== null; });
+        const box = document.getElementById("mind-roles");
+        box.innerHTML = roles.map(function (r) {
+            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-model="' + h.escapeHtml(r.model || "") + '"' + (r.general ? ' data-general="true"' : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind; tick it alone to manage this Mind by general only)" : "") + '</label>';
+        }).join("");
+        box.addEventListener("change", function (event) {
+            const model = event.target.dataset && event.target.dataset.model;
+            if (event.target.checked && model) form.elements.default_model.value = model;
+        });
+    } catch (error) { document.getElementById("mind-roles").textContent = "Roles could not be read: " + error.message; } })();
+
     form.addEventListener("submit", async function (event) {
         event.preventDefault();
         const errorBox = document.getElementById("mind-error");
@@ -99,14 +108,30 @@ window.addEventListener("DOMContentLoaded", function () {
             harness: selectedHarness(),
             provider: form.elements.provider.value,
             default_model: form.elements.default_model.value,
-            ollama_url: form.elements.ollama_url.value,
-            ollama_api_key: form.elements.ollama_api_key.value
+            role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
+            roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
         };
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
             created = data.registration;
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
-            document.getElementById("mind-commands").innerHTML = (data.commands || []).map(function (step, index) { const id = "mind-command-" + index; return '<div><p class="command-label">' + h.escapeHtml(step.name) + '</p><div class="code-wrap"><pre class="code-panel" id="' + id + '">' + h.escapeHtml(step.command) + '</pre><button class="icon-button" type="button" data-copy="#' + id + '" aria-label="Copy command"><i data-lucide="copy"></i></button></div></div>'; }).join("");
+            // The console starts the container itself now, so what used to
+            // be a command to paste is an account of what happened. Each
+            // step is reported on its own: one of them failing is a
+            // different state from all of them failing, and a success panel
+            // that hides a refusal sends the operator to talk to a mind
+            // that is not there.
+            const steps = [
+                ["Listed in the stack", data.include_error],
+                [data.start_operation ? "Start waiting on your approval in Hive Tools" : "Started", data.start_error],
+                ["Its node in the graph", data.soul_seed_error],
+                ["Registered with the gateway", data.registration_error]
+            ];
+            document.getElementById("mind-commands").innerHTML = steps.map(function (step) {
+                return step[1]
+                    ? '<div class="error-state">' + h.escapeHtml(step[0]) + ' failed: ' + h.escapeHtml(step[1]) + '</div>'
+                    : '<div><p class="command-label">' + h.escapeHtml(step[0]) + '</p></div>';
+            }).join("");
             // A mind whose credentials did not land boots authenticating to
             // nothing and fails from detached hooks, in silence. Saying it on
             // the success screen is the only place the operator will look.

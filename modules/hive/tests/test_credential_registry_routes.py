@@ -356,7 +356,7 @@ class TestTheRelayItself:
         import mind_runtime
 
         monkeypatch.setattr(
-            mind_runtime, "admin_headers", lambda: {"Authorization": "Bearer a"}
+            mind_runtime, "admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
         )
         original = httpx.AsyncClient
 

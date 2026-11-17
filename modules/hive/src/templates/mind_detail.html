@@ -10,12 +10,14 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         {% if current_user.is_admin %}<section class="surface" id="mind-owner" hidden><div class="surface-header"><div><h2>Owner</h2><p>The user this Mind belongs to. They see it, and everything downstream of it, on their own console.</p></div></div><form class="surface-body overview-stack" id="mind-owner-form"><div class="field"><label for="mind-owner-user">Owner</label><select id="mind-owner-user" name="owner" required></select></div><div class="form-actions"><button class="button" type="submit">Move to this owner</button></div><small id="mind-owner-status"></small></form></section>{% endif %}
+        <section class="surface" id="mind-image" data-editable hidden><div class="surface-header"><div><h2>Picture</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-image-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-image-form"><p>The face this Mind is drawn with on the Chief of Staff chart. Until one is set it wears its initial letter. Uploading replaces whatever is there &mdash; there is only ever one picture.</p><div class="field"><label for="mind-image-file">Picture</label><input type="file" id="mind-image-file" name="file" accept="image/png,image/jpeg,image/webp,image/gif" required><small>A PNG, JPEG, WEBP or GIF. An SVG is refused: served from this origin it would run script. The format is read from the file itself, so renaming it does not help.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-image-upload">Upload picture</button></div><small id="mind-image-status"></small></form></div></section>
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
         <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-engine">Engine</label><select id="mind-voice-engine" name="voice_engine" required></select><small id="mind-voice-engine-help"></small></div><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form><form class="surface-body overview-stack" id="mind-clip-form" hidden><div class="field"><label for="mind-clip-file">Add a reference clip</label><input type="file" id="mind-clip-file" name="file" accept="audio/wav,.wav" required><small>A clean WAV recording. Added beside this Mind&#39;s existing clips; select it above to speak in it.</small></div><div class="form-actions"><button class="button button-quiet" type="submit" id="mind-clip-upload">Upload clip</button></div><small id="mind-clip-status"></small></form></div></section>
         <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
         <section class="surface" id="mind-mounts" data-editable hidden><div class="surface-header"><div><h2>Project folders</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-mounts-summary"></dl><div data-editor hidden><div class="surface-body overview-stack"><p>Saving writes this Mind&#39;s compose fragment and then recreates its container. Recreating ends every process the Mind had running inside it, including a harness turn in flight.</p><table class="data-table" id="mind-mounts-table"><thead><tr><th>Folder</th><th>Inside the Mind</th><th>Access</th></tr></thead><tbody id="mind-mounts-rows"></tbody></table><div class="field"><label for="mind-mounts-root">Root</label><select id="mind-mounts-root"></select></div><div class="field"><label for="mind-mounts-browse">Folder</label><select id="mind-mounts-browse"></select><small id="mind-mounts-here"></small></div><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-up">Up one level</button><button class="button button-quiet" type="button" id="mind-mounts-mount">Mount here</button><button class="button button-quiet" type="button" id="mind-mounts-newfolder">Add folder</button></div><div class="field" id="mind-mounts-new-field" hidden><label for="mind-mounts-new">New folder name</label><input id="mind-mounts-new" type="text" spellcheck="false" placeholder="name"><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-create">Create and mount</button></div></div><div class="form-actions"><button class="button" type="button" id="mind-mounts-save">Save and recreate</button></div><small id="mind-mounts-status"></small><div id="mind-mounts-infrastructure"></div></div></div></section>
         <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
-        <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
+        <section class="surface" id="mind-roles" hidden><div class="surface-header"><div><h2>Roles</h2><p>The roles this Mind holds. Under role management it may use exactly what they grant together, and a change to any of them reaches it at once. The general role is held by every Mind under role management.</p></div></div><div class="surface-body overview-stack"><div id="mind-roles-status"></div><div id="mind-roles-list"></div><dl class="detail-grid" id="mind-roles-grants"></dl><div class="form-actions"><button class="button" type="button" id="mind-roles-save">Save roles</button></div></div></section>
+        <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span><label class="checkbox-row"><input type="checkbox" id="mind-skills-community"> Show community submissions</label></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
         <section class="surface" id="mind-files" data-editable hidden><div class="surface-header"><div><h2>Skill and hook files</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-files-summary"></dl><div data-editor hidden><div class="surface-header"><div><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></div></section>
         <section class="surface" id="mind-soul" data-editable hidden><div class="surface-header"><div><h2>Soul</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-soul-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-soul-form"><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form></div><div class="surface-body" id="mind-soul-history"></div></section>
     </div>
@@ -265,21 +267,40 @@ window.addEventListener("DOMContentLoaded", async function () {
     // because a default displayed as a value reads as a decision somebody
     // made.
     let settingsState = null;
+    let settingsRequest = 0;
+    let settingsSaving = false;
+    let settingsSummaryRefreshPending = false;
 
     function settingsSummary(state) {
         if (state.unreachable) return [["Settings", "Could not be read"], ["Reason", state.detail || "This Mind did not answer"]];
-        const rows = (state.settings || []).map(function (entry) {
+        const rows = (state.settings || []).filter(function (entry) {
+            return entry.key !== "rotation_threshold_percent";
+        }).map(function (entry) {
             return [entry.label, entry.present ? String(entry.value) : "Not set"];
         });
-        // The window belongs to the model and is read from the proxy, so it
-        // is reported here and editable nowhere.
-        rows.push(["Context window", state.context_window ? String(state.context_window) + " tokens" : "Not reported"]);
+        const percentage = state.rotation_threshold_percent;
+        const invalid = state.rotation_policy_error === "invalid_runtime_policy";
+        rows.push(["Rotation threshold", invalid ? "Saved value is invalid" :
+            (percentage === null || percentage === undefined ? "Unavailable" :
+                String(percentage) + "%" + ((state.settings || []).some(function (entry) {
+                    return entry.key === "rotation_threshold_percent" && !entry.present;
+                }) ? " (default)" : ""))]);
+        rows.push(["Context window", state.context_window !== null && state.context_window !== undefined
+            ? Number(state.context_window).toLocaleString() + " tokens" : "Unavailable for this model"]);
+        rows.push(["Token threshold", state.rotation_threshold_tokens !== null &&
+            state.rotation_threshold_tokens !== undefined
+            ? Number(state.rotation_threshold_tokens).toLocaleString() + " tokens"
+            : "Cannot be calculated without a known context window"]);
         return rows;
     }
 
     function settingsControl(entry) {
         const id = "mind-setting-" + entry.key;
-        const value = entry.present ? entry.value : "";
+        const value = entry.present ? entry.value :
+            (entry.key === "rotation_threshold_percent" && settingsState &&
+                settingsState.rotation_threshold_percent !== null &&
+                settingsState.rotation_threshold_percent !== undefined
+                ? settingsState.rotation_threshold_percent : "");
         let control;
         // A setting the Mind has no line for gets an explicit "Not set" entry,
         // selected. Without one a browser selects the first option of every
@@ -310,7 +331,19 @@ window.addEventListener("DOMContentLoaded", async function () {
             control + '<small>' + h.escapeHtml(entry.help || "") + '</small></div>';
     }
 
+    function paintSettings(state) {
+        settingsState = state;
+        paintSummary("mind-settings-summary", settingsSummary(state));
+        const form = document.getElementById("mind-settings-form");
+        if (state.unreachable) { form.hidden = true; return; }
+        form.hidden = false;
+        document.getElementById("mind-settings-fields").innerHTML =
+            (state.settings || []).map(settingsControl).join("");
+    }
+
     async function renderSettings(name) {
+        if (settingsSaving) return;
+        const request = ++settingsRequest;
         const section = document.getElementById("mind-settings");
         section.dataset.mindName = name;
         section.hidden = false;
@@ -320,13 +353,26 @@ window.addEventListener("DOMContentLoaded", async function () {
         } catch (error) {
             state = {unreachable: true, detail: error.message};
         }
-        settingsState = state;
+        if (request !== settingsRequest || settingsSaving) return;
+        paintSettings(state);
+    }
+
+    async function refreshSettingsSummary(name) {
+        if (settingsSaving) {
+            settingsSummaryRefreshPending = true;
+            return;
+        }
+        const section = document.getElementById("mind-settings");
+        if (section.dataset.mindName !== name) return;
+        const request = ++settingsRequest;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/settings");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        if (request !== settingsRequest || settingsSaving || section.dataset.mindName !== name) return;
         paintSummary("mind-settings-summary", settingsSummary(state));
-        const form = document.getElementById("mind-settings-form");
-        if (state.unreachable) { form.hidden = true; return; }
-        form.hidden = false;
-        document.getElementById("mind-settings-fields").innerHTML =
-            (state.settings || []).map(settingsControl).join("");
     }
 
 
@@ -511,6 +557,8 @@ window.addEventListener("DOMContentLoaded", async function () {
     // A provider added to the proxy therefore appears here with no change on
     // this side, and nothing is offered that the proxy would refuse.
     let modelRows = [];
+    let configurationRequest = 0;
+    let configurationSaving = false;
 
     // Declared here, not beside the file-browser code below: the page-load
     // block runs before those statements, and a `let` read from inside its
@@ -528,16 +576,19 @@ window.addEventListener("DOMContentLoaded", async function () {
     // whatever sorts first: silently swapping it means an operator who opened
     // this page for an unrelated reason and pressed Save rewrites the Mind's
     // model without ever seeing the change.
-    // The rotation threshold belongs to the model: a percentage of its
-    // window, written on the proxy's row for it.
+    // Each model row comes from the Mind and carries that Mind's saved
+    // percentage beside the proxy-owned capacity.
     function rotationNote(row) {
         return row && row.rotation_threshold_percent ? " — rotates at " + row.rotation_threshold_percent + "%" : "";
     }
 
     function rotationThreshold(row) {
-        if (!row || !row.rotation_threshold_percent) return "Not reported by the proxy";
-        return row.rotation_threshold_percent + "% of the window" +
-            (row.context_window ? " (" + Math.floor(row.context_window * row.rotation_threshold_percent / 100).toLocaleString() + " tokens)" : "");
+        if (!row || row.rotation_threshold_percent === null ||
+            row.rotation_threshold_percent === undefined) return "Saved percentage unavailable";
+        if (row.context_window === null || row.context_window === undefined)
+            return row.rotation_threshold_percent + "% — token threshold unavailable for this model";
+        return row.rotation_threshold_percent + "% (" +
+            Math.floor(row.context_window * row.rotation_threshold_percent / 100).toLocaleString() + " tokens)";
     }
 
     function renderModelOptions(provider, preferred) {
@@ -584,6 +635,31 @@ window.addEventListener("DOMContentLoaded", async function () {
             status.textContent = "This Mind is set to " + currentModel + ", which its provider no longer offers. It stays selected until you pick something else.";
         }
         providerSelect.onchange = function () { renderModelOptions(providerSelect.value, ""); };
+    }
+
+    function paintModelConfiguration(configuration, fallbackModel, fallbackProvider) {
+        const runtime = configuration.configuration || {};
+        const currentModel = runtime.default_model || fallbackModel || "";
+        populateModelPicker(configuration.models || [], currentModel,
+            runtime.provider || fallbackProvider || "");
+        const row = (configuration.models || []).find(function (item) {
+            return item.name === currentModel;
+        });
+        paintSummary("mind-model-summary", [
+            ["Model", currentModel || "Unknown"],
+            ["Provider", runtime.provider || fallbackProvider || "Not reported"],
+            ["Rotation threshold", rotationThreshold(row)]
+        ]);
+    }
+
+    async function refreshModelConfiguration(name, fallbackModel, fallbackProvider) {
+        const request = ++configurationRequest;
+        const configuration = await h.requestJson(
+            "/api/minds/" + encodeURIComponent(name) + "/configuration"
+        );
+        if (request !== configurationRequest) return null;
+        paintModelConfiguration(configuration, fallbackModel, fallbackProvider);
+        return configuration;
     }
 
     document.getElementById("mind-files").addEventListener("click", function (event) {
@@ -654,6 +730,39 @@ window.addEventListener("DOMContentLoaded", async function () {
         }
     });
 
+    // Roles (feature 10.18). General is always held and cannot be unticked;
+    // saving puts a Mind under role management, which it then stays under.
+    async function renderRoles(name) {
+        const section = document.getElementById("mind-roles");
+        const status = document.getElementById("mind-roles-status");
+        section.dataset.mindName = name; section.hidden = false;
+        let all, held;
+        try {
+            all = (await h.requestJson("/api/roles")).roles || [];
+            held = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/roles");
+        } catch (error) { status.textContent = "Cannot read roles: " + error.message; return; }
+        const grants = held.grants || {};
+        const holding = new Set((held.roles || []).map(function (r) { return r.id; }));
+        status.textContent = grants.managed ? "" : "Not under role management: this Mind runs as it always has. Saving roles puts it under role management.";
+        document.getElementById("mind-roles-list").innerHTML = all.filter(function (r) { return r.id !== null; }).map(function (r) {
+            const on = r.general ? grants.managed : holding.has(r.id);
+            return '<label class="checkbox-row"><input type="checkbox" data-role-id="' + r.id + '"' + (on ? " checked" : "") + (r.general ? " disabled" : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (every managed Mind)" : "") + '</label>';
+        }).join("");
+        const grid = grants.managed ? [["Skills", (grants.skills || []).join(", ") || "none"], ["Hooks", (grants.hooks || []).join(", ") || "none"], ["Models", (grants.models || []).join(", ") || "none"], ["Built-in tools", (grants.tools || []).join(", ") || "none"]] : [];
+        document.getElementById("mind-roles-grants").innerHTML = grid.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+    }
+    document.getElementById("mind-roles-save").addEventListener("click", async function () {
+        const section = document.getElementById("mind-roles");
+        const ids = Array.from(section.querySelectorAll("input[data-role-id]:checked:not([disabled])")).map(function (i) { return Number(i.dataset.roleId); });
+        const status = document.getElementById("mind-roles-status");
+        this.disabled = true;
+        try {
+            await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/roles", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({role_ids: ids})});
+            await renderRoles(section.dataset.mindName);
+        } catch (error) { status.textContent = error.message; }
+        finally { this.disabled = false; }
+    });
+
     async function renderSkills(name) {
         const section = document.getElementById("mind-skills");
         const status = document.getElementById("mind-skills-status");
@@ -662,22 +771,25 @@ window.addEventListener("DOMContentLoaded", async function () {
         status.textContent = "Loading skills…"; table.hidden = true;
         let payload;
         try {
-            payload = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/skills");
+            const community = document.getElementById("mind-skills-community").checked ? "?community=1" : "";
+            payload = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/skills" + community);
         } catch (error) {
             status.textContent = "Cannot reach this Mind to read its skills: " + error.message;
             return;
         }
         document.getElementById("mind-skills-harness").textContent = (payload.harness || "") + " skills";
         const rows = payload.skills || [];
-        if (!rows.length) { status.textContent = "This Mind has no skills on either side."; return; }
-        status.textContent = "";
+        const left = payload.community_hidden || 0;
+        const leftNote = left ? left + (left === 1 ? " community submission is" : " community submissions are") + " left out; tick Show community submissions to list them." : "";
+        if (!rows.length) { status.textContent = leftNote || "This Mind has no skills on either side."; return; }
+        status.textContent = leftNote;
         table.hidden = false;
         document.getElementById("mind-skills-rows").innerHTML = rows.map(function (row) {
             const state = SKILL_STATES[row.state] || {label: row.state, actions: []};
             const buttons = state.actions.map(function (action) {
                 return '<button class="button button-quiet" type="button" data-skill="' + h.escapeHtml(row.name) + '" data-action="' + action + '">' + ACTION_LABELS[action] + "</button>";
             }).join(" ");
-            return '<tr><td>' + h.escapeHtml(row.name) + '</td><td>' + (row.repo !== null && row.repo !== undefined ? "present" : "absent") +
+            return '<tr><td>' + h.escapeHtml(row.name) + (row.community ? ' <span class="status-pill"><span></span>Community submission</span>' : '') + '</td><td>' + (row.repo !== null && row.repo !== undefined ? "present" : "absent") +
                 '</td><td>' + h.escapeHtml(state.label) + '</td><td class="row-actions">' + buttons +
                 '</td></tr><tr class="skill-diff" data-diff-for="' + h.escapeHtml(row.name) + '" hidden><td colspan="4"><pre class="code-panel"></pre></td></tr>';
         }).join("");
@@ -727,25 +839,23 @@ window.addEventListener("DOMContentLoaded", async function () {
         // so rather than offering an edit that could not be written.
         const editor = document.getElementById("mind-editor"); editor.dataset.mindName = mind.name; editor.hidden = false;
         try {
-            const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
-            populateModelPicker(configuration.models || [], configuration.configuration.default_model || cfg.default_model || mind.model || "", configuration.configuration.provider || cfg.provider || "");
-            const currentModel = configuration.configuration.default_model || cfg.default_model || mind.model || "";
-            paintSummary("mind-model-summary", [
-                ["Model", currentModel || "Unknown"],
-                ["Provider", configuration.configuration.provider || cfg.provider || "Not reported"],
-                ["Rotation threshold", rotationThreshold((configuration.models || []).find(function (row) { return row.name === currentModel; }))]
-            ]);
+            await refreshModelConfiguration(
+                mind.name, cfg.default_model || mind.model || "", cfg.provider || ""
+            );
         } catch (error) {
             document.getElementById("mind-model-form").hidden = true;
             paintSummary("mind-model-summary", [["Model", "Could not be read"], ["Reason", error.message]]);
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
+        renderImage(mind.id, mind.name);
         await renderVoice(mind.name);
         await renderSettings(mind.name);
         {% if current_user.is_admin %}await renderMounts(mind.name);
         await renderOwner(mind);{% endif %}
         await renderSurfaceToken(mind.name);
+        await renderRoles(mind.name);
         await renderSkills(mind.name);
+        document.getElementById("mind-skills-community").addEventListener("change", function () { renderSkills(mind.name); });
         const filesSection = document.getElementById("mind-files");
         filesSection.dataset.mindName = mind.name;
         filesSection.hidden = false;
@@ -978,6 +1088,58 @@ window.addEventListener("DOMContentLoaded", async function () {
     });
 
 
+    // The Mind's picture. Keyed by `mind.id` rather than by its name, because
+    // the file outlives a rename and a name does not — the registry rewrites
+    // `name` on an upsert and keeps `mind_id`. The summary shows the picture
+    // itself, since "is one set" is a question a thumbnail answers and a
+    // label cannot: the route answers with the generated initial letter when
+    // there is no file, so an image always loads and the preview is what
+    // distinguishes the two.
+    function renderImage(mindId, mindName) {
+        const section = document.getElementById("mind-image");
+        section.hidden = false;
+        if (!mindId) {
+            // The registry reported this Mind without an id, which the
+            // Overview above renders as "Not reported". The picture is keyed
+            // by that id, so there is nothing to upload against — said out
+            // loud, because a section that simply did not appear is one
+            // Daniel would read as the feature being missing.
+            document.getElementById("mind-image-summary").innerHTML =
+                '<div class="detail-item"><dt>Picture</dt><dd>Cannot be set: ' +
+                'this Mind has no id in the registry, and a picture is keyed ' +
+                'by it. Re-register the Mind and this appears.</dd></div>';
+            section.querySelector("[data-edit-toggle]").hidden = true;
+            return;
+        }
+        section.dataset.mindId = mindId;
+        section.querySelector("[data-edit-toggle]").hidden = false;
+        const url = "/api/minds/" + encodeURIComponent(mindId) + "/image?v=" + Date.now();
+        document.getElementById("mind-image-summary").innerHTML =
+            '<div class="detail-item"><dt>Picture</dt><dd>' +
+            '<img src="' + h.escapeHtml(url) + '" alt="' +
+            h.escapeHtml((mindName || "this Mind") + " picture") +
+            '" style="width:64px;height:64px;border-radius:50%;object-fit:cover;' +
+            'background:#0b1220;border:1px solid var(--console-line-strong)"></dd></div>' +
+            '<div class="detail-item"><dt>Drawn on</dt><dd>The Chief of Staff chart</dd></div>';
+    }
+
+    document.getElementById("mind-image-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-image"), status = document.getElementById("mind-image-status");
+        const file = document.getElementById("mind-image-file");
+        if (!file.files || !file.files.length) { status.textContent = "Choose an image first."; return; }
+        const body = new FormData();
+        body.append("file", file.files[0]);
+        status.textContent = "Uploading…";
+        try {
+            await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindId) + "/image", {method: "POST", body: body});
+            status.textContent = "Saved. The chart shows it on this Mind's cards.";
+            file.value = "";
+            renderImage(section.dataset.mindId, document.getElementById("mind-title").textContent);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+
     // The mount control's own events, delegated: the rows and the browser are
     // both repainted from state, so a listener per button would be rebound on
     // every repaint.
@@ -1071,6 +1233,7 @@ window.addEventListener("DOMContentLoaded", async function () {
     document.getElementById("mind-settings-form").addEventListener("submit", async function (event) {
         event.preventDefault();
         const section = document.getElementById("mind-settings"), status = document.getElementById("mind-settings-status");
+        if (settingsSaving) return;
         // Only what the operator actually changed. A form that resent every
         // field would write values nobody touched back over an edit made
         // elsewhere since this page was opened.
@@ -1092,18 +1255,32 @@ window.addEventListener("DOMContentLoaded", async function () {
             }
             if (entry.kind === "number") {
                 const now = Number(raw);
+                if (entry.key === "rotation_threshold_percent" && !entry.present &&
+                    now === settingsState.rotation_threshold_percent) return;
                 if (!entry.present || Number(entry.value) !== now) changed[entry.key] = now;
                 return;
             }
             if (!entry.present || String(entry.value) !== raw) changed[entry.key] = raw;
         });
         if (!Object.keys(changed).length) { status.textContent = "Nothing changed."; return; }
+        settingsSaving = true;
+        const request = ++settingsRequest;
+        const saveButton = document.getElementById("mind-settings-save");
+        saveButton.disabled = true;
         status.textContent = "Saving…";
         try {
-            await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({settings: changed})});
+            const saved = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({settings: changed})});
             status.textContent = "Saved to this Mind's runtime.yaml.";
-            await renderSettings(section.dataset.mindName);
+            if (request === settingsRequest) paintSettings(saved);
         } catch (error) { status.textContent = error.message; }
+        finally {
+            settingsSaving = false;
+            saveButton.disabled = false;
+            if (settingsSummaryRefreshPending) {
+                settingsSummaryRefreshPending = false;
+                await refreshSettingsSummary(section.dataset.mindName);
+            }
+        }
     });
 
     document.getElementById("mind-token-form").addEventListener("submit", async function (event) {
@@ -1126,6 +1303,11 @@ window.addEventListener("DOMContentLoaded", async function () {
     document.getElementById("mind-model-form").addEventListener("submit", async function (event) {
         event.preventDefault();
         const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status");
+        if (configurationSaving) return;
+        configurationSaving = true;
+        const request = ++configurationRequest;
+        const saveButton = document.getElementById("mind-model-save");
+        saveButton.disabled = true;
         status.textContent = "Saving…";
         try {
             // No restart is offered here. The broker row the gateway reads at
@@ -1135,8 +1317,25 @@ window.addEventListener("DOMContentLoaded", async function () {
             // Offering a restart anyway read as one being needed, and bouncing
             // a container kills every conversation it is holding.
             const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value, provider: event.target.elements.provider.value})});
-            status.textContent = "Saved. The next session this Mind is asked for starts on " + (data.configuration.default_model || "the new model") + ".";
+            if (request !== configurationRequest) return;
+            const savedConfiguration = data.configuration || {};
+            const mindName = editor.dataset.mindName;
+            const savedModel = savedConfiguration.default_model || "";
+            const savedProvider = event.target.elements.provider.value;
+            status.textContent = "Saved. The next session this Mind is asked for starts on " + (savedModel || "the new model") + ".";
+            // The PATCH response is already the Mind's confirmed saved state.
+            // Paint it immediately so a slow catalog refresh cannot leave the
+            // visible model and threshold summary describing the old choice.
+            paintModelConfiguration({configuration: savedConfiguration, models: modelRows}, savedModel, savedProvider);
+            await Promise.all([
+                refreshModelConfiguration(mindName, savedModel, savedProvider),
+                refreshSettingsSummary(mindName),
+            ]);
         } catch (error) { status.textContent = error.message; }
+        finally {
+            configurationSaving = false;
+            saveButton.disabled = false;
+        }
     });
 });
 </script>

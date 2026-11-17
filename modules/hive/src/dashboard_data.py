@@ -223,7 +223,7 @@ def resolve_threshold(
     not is drawn at the model's percentage of the window; without both of
     those it stays unknown rather than guessed.
     """
-    if reported:
+    if reported is not None:
         return reported
     return window * percent // 100 if window and percent else None
 
@@ -267,7 +267,7 @@ def context_reading(context: dict) -> dict:
     # are tested for truth, not for None: a rotation point of zero is a
     # misconfiguration, and a mark drawn hard at the left edge claims this
     # conversation rotates immediately — the one reading worse than no mark.
-    mark_fraction = threshold / window if threshold and window else None
+    mark_fraction = threshold / window if threshold is not None and window else None
 
     # Which measurement the bar is drawn against. The window is the wanted
     # answer, but it comes from a proxy catalog that is legitimately absent
@@ -275,7 +275,8 @@ def context_reading(context: dict) -> dict:
     # been told about. Falling through to the rotation point keeps a bar
     # that means something instead of hatching a conversation at 95% of
     # rotation as though nobody had measured it.
-    if fraction_of_window := _fraction(window):
+    fraction_of_window = _fraction(window)
+    if fraction_of_window is not None:
         bar_fraction, bar_basis = fraction_of_window, "window"
     elif fraction_of_threshold is not None:
         bar_fraction, bar_basis = fraction_of_threshold, "threshold"
@@ -285,7 +286,7 @@ def context_reading(context: dict) -> dict:
     # Past the line however the line was found. With no rotation point
     # reported at all, overflowing the window is the only "too full" there
     # is, and a bar that can never turn red is a bar that cannot warn.
-    if threshold:
+    if threshold is not None:
         over = tokens is not None and tokens >= threshold
     else:
         over = bool(fraction_of_window and fraction_of_window > 1.0)
@@ -303,7 +304,7 @@ def context_reading(context: dict) -> dict:
         # the dropped [1m] pin. Clamped to the edge it reads as "rotates
         # right at the end", which is reassuring and wrong, so it is
         # flagged rather than quietly squared away.
-        "mark_beyond_window": bool(mark_fraction and mark_fraction > 1.0),
+        "mark_beyond_window": bool(mark_fraction is not None and mark_fraction > 1.0),
         "bar_fraction": bar_fraction,
         "bar_basis": bar_basis,
         "over": over,

@@ -1,0 +1,12 @@
+name: Planner
+model: claude-opus-5-5
+tools:
+  - files
+  - sub-minds
+  - web
+skills:
+  - backlog
+  - brainstorm
+  - design-spec
+  - plan-feature
+hooks: []

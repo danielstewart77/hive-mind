@@ -6,6 +6,7 @@ self-contained; the auth db and secret are shared with the terminal site.
 
 import asyncio
 import base64
+import hashlib
 import ipaddress
 import json
 import logging
@@ -27,6 +28,7 @@ from fastapi import (
     FastAPI,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     WebSocket,
@@ -36,6 +38,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import auth
 import features
@@ -50,15 +53,20 @@ import holder_credentials
 import chief_of_staff
 import kanban_data
 import mind_files
+import mind_images
 import mind_mounts
 import mind_runtime
 import mind_skills
 import mind_soul
 import mind_symbols
+import roles_data
 import route_access
+import skill_submissions
 import sentinel_review
 import sso
 import store
+from hive_data import core
+from hive_data.errors import HiveDataError, ValueRefused
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
@@ -75,6 +83,7 @@ from capability_install import (
     inference_proxy_status,
 )
 from config import BASE_DIR
+import configuration_data as configuration_data_module
 from configuration_data import (
     DEFAULT_OLLAMA_BASE_URL,
     OWNER_RE,
@@ -83,6 +92,7 @@ from configuration_data import (
     get_edge_mind_metadata,
     internal_mind_exists,
     local_runtime_configuration,
+    mind_session_token,
     normalize_endpoint,
     scaffold_internal_mind,
     set_capability_endpoint,
@@ -126,6 +136,17 @@ async def lifespan(app: FastAPI):
     log_event(log, "store.opened", component="hive-control-plane",
               engine="postgres")
     await seed_first_user()
+    # The ready-made roles, once per hive (story 10.18.3). A failure is
+    # logged and the console still starts: the roles page then says what the
+    # repo holds and offers each as "take the repo copy".
+    try:
+        # A task of its own: the store refuses a unit of work opened inside
+        # this lifespan's generator, and the seed is one.
+        seeded = await asyncio.create_task(roles_data.seed())
+        log_event(log, "roles.seed", component="hive-control-plane", **seeded)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "roles.seed_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
     log_event(log, "service.started", component="hive-control-plane")
@@ -737,9 +758,24 @@ async def minds_page(request: Request):
     return await _console_page(request, "minds.html")
 
 
+@app.get("/roles", response_class=HTMLResponse)
+async def roles_page(request: Request):
+    return await _console_page(request, "roles.html")
+
+
+@app.get("/skills/submit", response_class=HTMLResponse)
+async def skill_submit_page(request: Request):
+    return await _console_page(request, "skill_submit.html")
+
+
 @app.get("/bots", response_class=HTMLResponse)
 async def bots_page(request: Request):
     return await _console_page(request, "bots.html")
+
+
+@app.get("/usage", response_class=HTMLResponse)
+async def usage_page(request: Request):
+    return await _console_page(request, "usage.html")
 
 
 # Registered before /minds/{mind_id}: FastAPI matches in declaration order,
@@ -850,12 +886,16 @@ _KANBAN_CREATE_FIELDS = {
     "epics": {"title"},
     "features": {"epic_id", "title"},
     "stories": {"title", "feature_id", "epic_id", "status"},
+    # A task may name no parent at all (story 3.7.4), so only its title is
+    # required.
+    "tasks": {"title", "parent_id", "status"},
 }
 _KANBAN_METADATA_FIELDS = {"description", "requirements", "acceptance_criteria", "qa_tests"}
 _KANBAN_UPDATE_FIELDS = {
-    "epics": {"title", "before_id", "type", "parent_id"} | _KANBAN_METADATA_FIELDS,
-    "features": {"epic_id", "title", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "epics": {"title", "status", "before_id", "type", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "features": {"epic_id", "title", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
     "stories": {"title", "feature_id", "epic_id", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "tasks": {"title", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
 }
 
 
@@ -900,6 +940,14 @@ async def api_kanban_data(
     return await _kanban_call(kanban_data.get_data)
 
 
+@app.get("/api/kanban/board")
+async def api_kanban_board(user: dict = Depends(require_auth)):
+    """The board and every row's order number, from one read, for the page
+    that draws one in the order of the other."""
+    del user
+    return await _kanban_call(kanban_data.get_board)
+
+
 @app.get("/api/kanban/numbers")
 async def api_kanban_numbers(
         user: dict = Depends(require_admin_or_route_bearer)):
@@ -907,9 +955,9 @@ async def api_kanban_numbers(
     return await _kanban_call(kanban_data.backlog_numbers)
 
 
-_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story"}
-_PLURAL = {"epic": "epics", "feature": "features", "story": "stories"}
-_SINGULAR = {"epics": "epic", "features": "feature", "stories": "story"}
+_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story", "tasks": "task"}
+_PLURAL = {"epic": "epics", "feature": "features", "story": "stories", "task": "tasks"}
+_SINGULAR = {"epics": "epic", "features": "feature", "stories": "story", "tasks": "task"}
 
 
 @app.get("/api/kanban/{kind}/{record_id}/descendants")
@@ -931,18 +979,20 @@ async def api_kanban_descendants(
 @app.post("/api/kanban/epics")
 @app.post("/api/kanban/features")
 @app.post("/api/kanban/stories")
+@app.post("/api/kanban/tasks")
 async def api_kanban_create(
         request: Request,
         user: dict = Depends(require_admin_or_route_bearer)):
     del user
     kind = request.url.path.rsplit("/", 1)[-1]
     fields = _KANBAN_CREATE_FIELDS[kind]
-    required = {"title"} if kind == "stories" else fields
+    required = {"title"} if kind in ("stories", "tasks") else fields
     body = await _kanban_body(request, fields, required)
     if kind == "stories" and ((body.get("feature_id") is None) == (body.get("epic_id") is None)):
         raise HTTPException(status_code=400, detail="story requires exactly one of feature_id or epic_id")
-    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return await _kanban_call(getattr(kanban_data, f"create_{entity}"), **body)
+    if kind == "tasks" and body.get("parent_id") == "":
+        body["parent_id"] = None
+    return await _kanban_call(getattr(kanban_data, f"create_{_SINGULAR[kind]}"), **body)
 
 
 @app.patch("/api/kanban/{kind}/{record_id}")
@@ -987,6 +1037,132 @@ async def api_kanban_delete(kind: str, record_id: str, user: dict = Depends(requ
     return await _kanban_call(getattr(kanban_data, f"delete_{_SINGULAR[actual]}"), record_id)
 
 
+# ── the files a work item carries ──────────────────────────────────────
+#
+# Keyed by the item's id alone, under `/items/` rather than the kind-named
+# collections above: the kind is never looked up, so a kind the board gains
+# later carries attachments with no change here. See `kanban_data`.
+
+
+def _attachment_disposition(disposition: str, filename: str) -> str:
+    """A Content-Disposition header for any file name.
+
+    Headers are Latin-1. A name in another script - or a macOS screenshot's,
+    which carries a narrow no-break space before "PM" - written into the
+    header as it stands fails every download of a file that was kept. So the
+    plain `filename` is an ASCII stand-in and the real name travels in the
+    RFC 5987 form every current browser reads first.
+    """
+    fallback = "".join(
+        c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in filename
+    ) or "attachment"
+    quoted = urllib.parse.quote(filename, safe="")
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"
+
+
+@app.get("/api/kanban/items/{record_id}/attachments")
+async def api_kanban_attachments(
+        record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """This item's attachments, oldest first, without their bytes."""
+    del user
+    return await _kanban_call(kanban_data.list_attachments, record_id)
+
+
+#: What a multipart body may carry beyond the file itself: the boundaries,
+#: the part headers and the file's name. Generous, because a refusal on this
+#: margin would be a file under the cap refused for its envelope.
+_ATTACHMENT_ENVELOPE_BYTES = 64 * 1024
+
+
+@app.post("/api/kanban/items/{record_id}/attachments")
+async def api_kanban_attachment_upload(
+        record_id: str, request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """Keep a file against this item, and answer with what was kept.
+
+    Anything but a 200 means the file was not kept, and says why: an empty
+    file, one over the cap, an item that is not there, or a store that
+    refused the write.
+
+    The form is parsed here rather than declared as an `UploadFile`
+    parameter, because a declared one is parsed - the whole body spooled to
+    disk - before this runs. A body whose declared length is already past
+    the cap is refused unread. One sent without a length (chunked) is still
+    spooled by the parser before the cap refuses it, as a mind's picture is;
+    a browser's upload always declares one.
+    """
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > (
+            kanban_data.MAX_ATTACHMENT_BYTES + _ATTACHMENT_ENVELOPE_BYTES):
+        raise HTTPException(
+            status_code=413,
+            detail=(f"That file is over the {kanban_data.MAX_ATTACHMENT_BYTES}-byte "
+                    "limit. It was not kept."),
+        )
+    try:
+        form = await request.form(max_files=1, max_fields=8)
+    except Exception as exc:  # starlette raises its own parse errors
+        raise HTTPException(
+            status_code=400, detail=f"The upload could not be read: {exc}"
+        ) from exc
+    try:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(
+                status_code=400, detail="No file was sent: the form field is `file`.")
+        data = await file.read(kanban_data.MAX_ATTACHMENT_BYTES + 1)
+        filename = file.filename
+    finally:
+        # The spooled part is a temporary file; closed here rather than left
+        # to whenever the request object is collected.
+        await form.close()
+    try:
+        kept = await _kanban_call(
+            kanban_data.add_attachment, record_id, filename, data)
+    except HiveDataError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The file was not kept: the board's store refused it ({exc})",
+        ) from exc
+    log_event(
+        log, "kanban.attachment.added", **_actor_fields(user),
+        item_id=record_id, attachment_id=kept["id"],
+        size_bytes=kept["size_bytes"], content_type=kept["content_type"],
+    )
+    return kept
+
+
+@app.get("/api/kanban/items/{record_id}/attachments/{attachment_id}")
+async def api_kanban_attachment(
+        record_id: str, attachment_id: int,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """One attachment's bytes, as the type its own bytes decided.
+
+    An image is shown in place; anything else is only ever a download, so a
+    kept HTML or SVG file never runs as a page on the console's origin.
+    Immutable for a year: an attachment is never altered once kept, and its
+    id is never reused.
+    """
+    del user
+    if not 1 <= attachment_id < 2**63:
+        # No row's id: the column is a bigint, and the driver refuses a
+        # larger one as an error rather than as nothing found.
+        raise HTTPException(status_code=404, detail=f"Attachment not found: {attachment_id}")
+    kept = await _kanban_call(kanban_data.get_attachment, record_id, attachment_id)
+    disposition = "inline" if kept["is_image"] else "attachment"
+    return Response(
+        content=kept["content"],
+        media_type=kept["content_type"],
+        headers={
+            "Content-Disposition": _attachment_disposition(disposition, kept["filename"]),
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
+
+
 @app.get("/api/minds/install-options")
 async def api_mind_install_options(user: dict = Depends(require_auth)):
     """Valid harness/provider/role/deployment combinations, for the install
@@ -1021,7 +1197,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     default_model = str(
-        body.get("default_model") or _PROVIDER_DEFAULT_MODELS[provider]
+        body.get("default_model") or _INTERNAL_MIND_DEFAULT_MODELS[provider]
     ).strip()
     mind_id = str(body.get("mind_id") or uuid.uuid4())
     try:
@@ -1031,6 +1207,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
 
     if await _mind_name_is_taken(name):
         raise HTTPException(status_code=409, detail="That Mind name is already taken")
+    if await asyncio.to_thread(configuration_data_module.name_is_a_host_already, name):
+        raise HTTPException(
+            status_code=409,
+            detail="That name is already an address on the hive's network",
+        )
     held_by = await holder_credentials.name_held_by_something_else(name)
     if held_by:
         raise HTTPException(
@@ -1042,17 +1223,33 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             ),
         )
 
-    ollama_base_url = ""
-    if provider == "ollama":
-        ollama_base_url = str(
-            body.get("ollama_url")
-            or await get_capability_endpoint("ollama")
-            or os.getenv("OLLAMA_URL")
-            or DEFAULT_OLLAMA_BASE_URL
-        )
-        ollama_base_url = normalize_endpoint(ollama_base_url)
+    # Every mind created here talks to the inference proxy with its own key
+    # (story 2.1.9, DECIDED 2026-11-15 by Daniel), so an Ollama mind's base is
+    # the proxy, never a bare daemon: there its calls go unmetered and its
+    # proxy key is sent to a host that is not the proxy.
+    ollama_base_url = DEFAULT_OLLAMA_BASE_URL if provider == "ollama" else ""
+
+    # Created from a role (story 10.18.2): the roles are checked before
+    # anything is written, and held before the Mind's first turn.
+    role_ids = body.get("role_ids") or []
+    if not isinstance(role_ids, list) or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in role_ids):
+        raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    # General alone is a choice too: managed, holding only what every
+    # managed Mind holds.
+    managed = bool(role_ids) or body.get("roles_managed") is True
+    if role_ids:
+        known = {r["id"] for r in await store.roles_list()}
+        unknown = [i for i in role_ids if i not in known]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"No such role: {unknown[0]}")
 
     owner = await _new_mind_owner(body, user)
+    # Held before the scaffold is written, so a Mind never exists unmanaged
+    # behind a failed assignment; a scaffold that then fails leaves only a
+    # management record for an id nothing uses.
+    if managed:
+        await store.set_mind_roles(mind_id, role_ids)
     try:
         written = scaffold_internal_mind(
             name,
@@ -1063,7 +1260,6 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             owner=owner,
             description=str(body.get("description") or ""),
             ollama_base_url=ollama_base_url,
-            ollama_api_key=str(body.get("ollama_api_key") or ""),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1082,17 +1278,92 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     minted, credential_error = await holder_credentials.provision_mind(
         name, mind_id, owner
     )
+    registration_error = None
+    try:
+        await _register_scaffolded_mind(name, {"owner": owner}, user)
+    except Exception as exc:  # noqa: BLE001 - reported; the button retries
+        # Not fatal: the scaffold stands and the Register button retries.
+        registration_error = str(getattr(exc, "detail", "") or exc)
+
+    # The fragment the scaffold just wrote is invisible to `docker compose`
+    # until the stack file lists it, so this is part of creating a mind
+    # rather than a step after it. Non-fatal and reported for the same
+    # reason minting is: the scaffold stands and the mind is recoverable.
+    include_error = None
+    try:
+        configuration_data_module.include_mind_in_stack(name)
+    except (OSError, ValueError) as exc:
+        include_error = str(exc)
+
+    # Started here, not handed back as a shell line. The approval for
+    # touching this host's containers is the admin's click in Hive Tools,
+    # which is a record of who started what; a command pasted into a
+    # terminal is neither (story 2.1.9, decided 2026-11-15).
+    start = {"started": False, "error": None, "operation_id": None}
+    if include_error is None:
+        try:
+            up = await _hive_tools_request(
+                "POST", "/docker/up",
+                params={"path": mind_mounts.hive_mind_project_path(), "service": name},
+                timeout=310.0,
+            )
+            operation = up.get("hitl_request_id")
+            if operation:
+                # Recorded before it is reported, so the pending approval has
+                # a requester. Any failure here is this step's failure, not
+                # the create's: the container request is already in flight.
+                try:
+                    await console_access.record_operation_from(up, user)
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    start["error"] = (
+                        f"started, waiting on approval, but recording who "
+                        f"asked failed: {exc}")
+                start["operation_id"] = str(operation)
+            elif up.get("error") or up.get("status") == "error":
+                # Hive Tools answers 2xx with the compose failure in the body
+                # — a broken fragment, a build that did not finish, an
+                # unknown service. Reading that as started sends the operator
+                # to talk to a container that does not exist.
+                start["error"] = str(
+                    up.get("error") or up.get("stderr") or "the start failed")
+            else:
+                start["started"] = True
+        except (HTTPException, OSError, ValueError) as exc:
+            start["error"] = str(getattr(exc, "detail", "") or exc)
+
+    # The Mind's own node, written as the Mind. A mind with no node is a
+    # mind whose first memory write has nothing to hang from, and seeding it
+    # with the console's credential would record every mind in the hive as
+    # something the console created.
+    soul_seed_error = None
+    try:
+        location = holder_credentials.locate(
+            holder_credentials.SERVICES["lucent"], name)
+        credential = (
+            holder_credentials._loaded_value(location) if location else None)
+        if not credential:
+            raise ValueError(
+                "this Mind holds no memory-store credential, so its node "
+                "cannot be written as itself")
+        await mind_soul.seed_mind_node(name, mind_id, owner, credential)
+    except Exception as exc:  # noqa: BLE001 - reported; setup-personality retries
+        soul_seed_error = str(getattr(exc, "detail", "") or exc)
 
     log_event(
         log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
         mind_id=mind_id, harness=harness, provider=provider,
         credentials=[m["service"] for m in minted], credential_error=credential_error,
+        include_error=include_error, started=start["started"],
+        start_operation=start["operation_id"], start_error=start["error"],
+        soul_seed_error=soul_seed_error,
     )
     return {
         "mind_id": mind_id,
+        "roles": role_ids,
         "written": written,
         "credentials": minted,
         "credential_error": credential_error,
+        "registration_error": registration_error,
         "registration": {
             "name": name,
             "mind_id": mind_id,
@@ -1101,18 +1372,18 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             "provider": provider,
             "owner": owner,
         },
-        "commands": [
-            {
-                "name": "Build and start the Mind",
-                "command": (
-                    "cd $HIVE_MIND_DIR && /generate-compose && "
-                    f"docker compose up -d --build {shlex.quote(name)}"
-                ),
-            }
-        ],
+        "include_error": include_error,
+        "started": start["started"],
+        "start_operation": start["operation_id"],
+        "start_error": start["error"],
+        "soul_seed_error": soul_seed_error,
         # The soul is authored in conversation, not here — see setup-personality.
         "next_step": (
             f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
+            if start["started"] else
+            f"{name} is waiting on your approval in Hive Tools to start."
+            if start["operation_id"] else
+            f"{name} is scaffolded but not running yet."
         ),
     }
 
@@ -1158,17 +1429,14 @@ def _registered_mind(minds: list[dict], mind_id: str) -> dict | None:
     return next((m for m in minds if mind_id and str(m.get("id") or "") == mind_id), None)
 
 
-@app.post("/api/minds/{name}/register")
-async def api_register_mind(
-    name: str, request: Request, user: dict = Depends(require_auth)
-):
-    """Register a scaffolded Mind with the broker once its container is up."""
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Request body must be an object")
-    normalized = name.strip().lower()
-    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
-        raise HTTPException(status_code=400, detail="Invalid Mind name")
+async def _register_scaffolded_mind(normalized: str, body: dict, user: dict) -> dict:
+    """Register a mind scaffolded here with the gateway; returns comms' answer.
+
+    Done at creation as well as from the button: a mind created here holds
+    no gateway admin credential and cannot register itself, so a create
+    whose page was closed before the click would leave a mind the gateway
+    never learns the session credential of.
+    """
     try:
         configuration = local_runtime_configuration(normalized)
     except ValueError as exc:
@@ -1185,6 +1453,12 @@ async def api_register_mind(
     owner = _registration_owner(existing, body, user, configuration.get("owner"))
     if owner:
         registration["owner"] = owner
+    # A mind scaffolded here holds no gateway admin credential and cannot
+    # register itself, so the credential the gateway is to present to it
+    # travels with this registration or not at all.
+    session_token = mind_session_token(normalized)
+    if session_token:
+        registration["session_token"] = session_token
     # POST /broker/minds is an admin route on comms; the service token gets 401.
     broker_result = await _gateway_request(
         "POST", "/broker/minds", json_body=registration, admin=True
@@ -1193,6 +1467,21 @@ async def api_register_mind(
         log, "mind.registered", **_actor_fields(user), mind_name=normalized,
         mind_id=str(configuration.get("mind_id") or ""),
     )
+    return broker_result
+
+
+@app.post("/api/minds/{name}/register")
+async def api_register_mind(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Register a scaffolded Mind with the broker once its container is up."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    normalized = name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    broker_result = await _register_scaffolded_mind(normalized, body, user)
     return {"registered": True, "broker": broker_result}
 
 
@@ -1294,8 +1583,7 @@ async def _fetch_provider_limits() -> dict:
 
 
 async def _fetch_model_catalog() -> dict:
-    """Deployment name to declared context window and rotation threshold
-    percentage, from the model map.
+    """Deployment name to published context window, from the model map.
 
     The proxy owns that map, so this is a relay rather than a table the
     console keeps — a second copy would disagree the first time somebody
@@ -1308,9 +1596,6 @@ async def _fetch_model_catalog() -> dict:
     ]
     return {
         "catalog": {row["id"]: row.get("context_window") for row in rows},
-        "percents": {
-            row["id"]: dashboard_data.threshold_percent(row) for row in rows
-        },
     }
 
 
@@ -1334,7 +1619,7 @@ async def _probe_mind_host(mind: dict) -> dict:
     # unreachable because of one unset variable on this box, which is the
     # exact conflation `host_status_for` exists to prevent.
     try:
-        headers = mind_runtime.admin_headers()
+        headers = await mind_runtime.admin_headers(gateway)
     except HTTPException as exc:
         return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
                 "reading": None, "error": str(exc.detail)}
@@ -1424,7 +1709,6 @@ async def api_dashboard(user: dict = Depends(require_auth)):
         return_exceptions=True,
     )
     windows = catalog.get("catalog", {}) if isinstance(catalog, dict) else {}
-    percents = catalog.get("percents", {}) if isinstance(catalog, dict) else {}
     sessions = live.get("sessions", []) if isinstance(live, dict) else []
     # Every open conversation that is not producing, read from the gateway's
     # table: how close one is to its rotation point matters most before
@@ -1435,11 +1719,11 @@ async def api_dashboard(user: dict = Depends(require_auth)):
         context["window"] = dashboard_data.resolve_window(
             context.get("window"), dashboard_data.window_for(session.get("model"), windows)
         )
-        # The rotation point is a property of the model: its percentage is
-        # on the proxy's row, and fills in a threshold no mind reported.
-        context["threshold_percent"] = percents.get(session.get("model"))
+        # A conversation's threshold comes from the mind or gateway report.
+        # A proxy-wide model percentage belongs to no specific mind/session.
         context["threshold"] = dashboard_data.resolve_threshold(
-            context.get("threshold"), context["window"], context["threshold_percent"]
+            context.get("threshold"), context["window"],
+            context.get("threshold_percent"),
         )
         session["context"] = dashboard_data.context_reading(context)
     registry = await _broker_minds_safe()
@@ -1638,6 +1922,13 @@ _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-5.4",
     "ollama": "qwen3:8b",
 }
+# A container mind created here calls the inference proxy (story 2.1.9), so
+# it starts on a model the proxy serves; `gpt-5.4` and `qwen3:8b` are not.
+_INTERNAL_MIND_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-5",
+    "openai": "gpt-5.6-terra",
+    "ollama": "gpt-oss:20b-32k",
+}
 _EDGE_MIND_SURFACES = {"telegram", "discord"}
 
 
@@ -1657,7 +1948,13 @@ def _mind_install_options() -> dict:
             for harness, providers in sorted(_HARNESS_PROVIDERS.items())
         ],
         "providers": [
-            {"value": provider, "default_model": _PROVIDER_DEFAULT_MODELS[provider]}
+            {
+                "value": provider,
+                "default_model": _PROVIDER_DEFAULT_MODELS[provider],
+                # What the container-mind form starts on: a model the proxy
+                # serves, since that is what such a mind calls.
+                "internal_default_model": _INTERNAL_MIND_DEFAULT_MODELS[provider],
+            }
             for provider in sorted(_MIND_PROVIDERS)
         ],
         "roles": sorted(_EDGE_MIND_ROLES),
@@ -2156,15 +2453,19 @@ async def chief_of_staff_page(request: Request):
 
 
 @app.get("/api/chief-of-staff")
-async def api_chief_of_staff(user: dict = Depends(require_auth)):
+async def api_chief_of_staff(
+        days: int = Query(chief_of_staff.DEFAULT_WINDOW_DAYS, ge=1,
+                          le=chief_of_staff.MAX_WINDOW_DAYS),
+        user: dict = Depends(require_auth)):
     """The live tree, the barrel and the bubbles, in one answer.
 
     One call rather than three, so the tree, what has finished and what is
     waiting on Daniel can never be drawn from different moments and disagree
-    about the same task.
+    about the same task. `days` is the barrel's window: what finished longer
+    ago than that is left out of the answer (feature 6.11).
     """
     del user
-    return await chief_of_staff.get_tree()
+    return await chief_of_staff.get_tree(window_days=days)
 
 
 @app.get("/graph/data")
@@ -2635,7 +2936,13 @@ async def canvas_render_svg(request: Request, slide: int | None = None):
 
 @app.post("/canvas/submit")
 async def canvas_submit(request: Request):
-    """Daniel's 'I'm done drawing' poke. Fires a Skippy turn via the broker."""
+    """The signed-in person's "I'm done drawing" poke, to a mind of theirs.
+
+    Story 2.1.19: the drawer is whoever is signed in and the turn goes to
+    their own mind, never a fixed one. The body may name the mind; otherwise
+    it is this console's default mind when the drawer owns it, or their only
+    mind. An admin may name any mind, as everywhere else.
+    """
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -2643,11 +2950,36 @@ async def canvas_submit(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    note = (body or {}).get("note", "") if isinstance(body, dict) else ""
+    body = body if isinstance(body, dict) else {}
+    note = str(body.get("note", "") or "")
+    asked = str(body.get("mind", "") or "").strip()
     element_count = len(_canvas_elements)
     snapshot = str(request.base_url).rstrip("/") + "/canvas/render.svg"
+    who = design_delivery.person_label(user.get("username", ""))
+
+    minds = await route_access.registered_minds()
+    if minds is None:
+        raise HTTPException(status_code=502, detail="could not read the mind registry")
+    own = [m for m in minds if route_access.owner_of(m) == user.get("username")]
+    if asked:
+        target = route_access.find_mind(minds, asked)
+        if target is None or not (user.get("is_admin") or target in own):
+            raise HTTPException(status_code=404, detail=f"no mind of yours named {asked!r}")
+    else:
+        # The page sends no choice yet, so a drawer with several minds and
+        # none of them this console's default gets the first by name rather
+        # than a refusal they have no control to answer.
+        default = route_access.find_mind(own, os.getenv("MIND_NAME", "skippy"))
+        ordered = sorted(own, key=lambda m: str(m.get("name") or ""))
+        target = default or (ordered[0] if ordered else None)
+        if target is None:
+            raise HTTPException(
+                status_code=400, detail="you have no mind to send the drawing to")
+    target_name = str(target.get("name") or "")
+    mind_id = str(target.get("id") or "")
+
     content = (
-        "Daniel finished a drawing pass on the hive whiteboard and wants you "
+        f"{who} finished a drawing pass on the hive whiteboard and wants you "
         f"to look. The board currently has {element_count} element(s). Fetch "
         f"the snapshot with `curl -H \"Authorization: Bearer $CANVAS_PUSH_TOKEN\" "
         f"{snapshot}` — the bearer you draw with (CANVAS_PUSH_TOKEN, or "
@@ -2655,27 +2987,12 @@ async def canvas_submit(request: Request):
         "refuses. Rasterize it and respond on Telegram with what you see."
     )
     if note:
-        content += f" Daniel's note: {note}"
+        content += f" {who}'s note: {note}"
 
-    target_name = os.getenv("MIND_NAME", "skippy")
     headers = _gateway_headers()
     headers["Content-Type"] = "application/json"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # The broker keys minds on their UUID (mind_id), not the display
-            # name, so resolve the id from the registry before dispatching.
-            minds_resp = await client.get(
-                f"{_gateway_base_url()}/broker/minds", headers=headers
-            )
-            minds_resp.raise_for_status()
-            minds = minds_resp.json()
-            mind_id = next(
-                (m.get("id") for m in minds if m.get("name") == target_name), None
-            )
-            if not mind_id:
-                raise HTTPException(
-                    status_code=502, detail=f"mind '{target_name}' not registered in broker"
-                )
             payload = {
                 "conversation_id": str(uuid.uuid4()),
                 "from_mind": "canvas",
@@ -2688,7 +3005,8 @@ async def canvas_submit(request: Request):
             )
             resp.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"could not reach Skippy: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"could not reach {target_name}: {exc}") from exc
     log_event(
         log, "canvas.review.dispatched", **_actor_fields(user),
         mind_name=target_name, element_count=element_count, note_chars=len(note),
@@ -2860,6 +3178,26 @@ async def _bot_row(mind: dict, surface: str) -> dict:
     return row
 
 
+@app.get("/api/usage")
+async def api_usage(days: int = 30, user: dict = Depends(require_auth)):
+    """What the signed-in user's minds cost over the last `days` days; to an
+    admin, every person's and the hive's own services' (story 2.1.17)."""
+    import usage_data
+
+    days = max(1, min(int(days), 365))
+    try:
+        rows = await usage_data.proxy_usage(days)
+    except usage_data.UsageUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    minds = await route_access.registered_minds()
+    if minds is None:
+        raise HTTPException(
+            status_code=503,
+            detail="the hive's registry could not be read, so usage cannot be "
+                   "put under the people it belongs to")
+    return {"days": days, **usage_data.usage_by_person(rows, minds, user)}
+
+
 @app.get("/api/bots")
 async def api_bots(user: dict = Depends(require_auth)):
     """Every bot registered against a Mind the signed-in user owns.
@@ -2956,6 +3294,21 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
         for row in await mind_runtime.fetch_models(gateway_url)
         if isinstance(row, dict) and row.get("name")
     ]
+    default_model = configuration.get("default_model")
+    selected_model = next((row for row in models if row["name"] == default_model), None)
+    selected_window = dashboard_data.window_of(selected_model or {})
+    selected_percent = dashboard_data.threshold_percent(selected_model or {})
+    configuration.update({
+        "context_window": selected_window,
+        "rotation_threshold_percent": selected_percent,
+        "rotation_threshold_tokens": (
+            selected_window * selected_percent // 100
+            if selected_window is not None and selected_percent is not None else None
+        ),
+        "rotation_threshold_status": (
+            "known" if selected_window is not None else "unavailable"
+        ),
+    })
     return {
         "configuration": {
             "name": configuration.get("name") or name,
@@ -3579,11 +3932,132 @@ async def api_mind_voice_clip_upload(
     }
 
 
-@app.get("/api/minds/{name}/skills")
-async def api_mind_skills(name: str, user: dict = Depends(require_auth)):
-    """Every skill this Mind knows, repo side against installed side."""
+# ── a mind's face ──────────────────────────────────────────────────────
+#
+# Keyed by `mind_id` rather than by the short name every other per-mind
+# route uses, and that is deliberate: a name is a display label the registry
+# rewrites on a rename, so a name-keyed picture is one that goes missing the
+# first time a mind is renamed and is inherited by a stranger the first time
+# a name is reused. See `mind_images`.
+
+
+#: One in-flight upload per mind. A double-click on "Upload picture" is two
+#: concurrent calls, and without this they interleave: both stage, both
+#: rename, and the file on disk can be a hybrid of two photos that neither
+#: request has any way to notice — both answered `{"ok": true}`. The console
+#: runs a single worker, so a lock in the process is the whole boundary.
+_IMAGE_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _image_lock(mind_id: str) -> asyncio.Lock:
+    lock = _IMAGE_WRITE_LOCKS.get(mind_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _IMAGE_WRITE_LOCKS[mind_id] = lock
+    return lock
+
+
+async def _mind_by_id(mind_id: str) -> dict:
+    """The registry row this id names, or a 404.
+
+    Checked before anything touches the filesystem, so an upload for a mind
+    that does not exist is refused rather than leaving a file nothing will
+    ever serve.
+    """
+    for row in await core.list_minds():
+        if row.get("mind_id") == mind_id:
+            return row
+    raise HTTPException(status_code=404, detail=f"No such mind: {mind_id}")
+
+
+@app.get("/api/minds/{mind_id}/image")
+async def api_mind_image(mind_id: str, v: str = "",
+                         user: dict = Depends(require_auth)):
+    """This Mind's picture, or the letter it wears until it has one.
+
+    One URL either way. The fallback is generated here rather than drawn by
+    the page because the page is a Cytoscape canvas that can only be handed
+    an image, and because a second implementation of "what if there is no
+    file" is a second thing to get wrong.
+
+    `no-cache` rather than a long life: the URL is fixed per mind, so a
+    browser left to its own heuristics will keep showing a replaced face for
+    hours. The caller also carries a version, so the usual answer here is a
+    304 rather than the bytes.
+    """
     del user
-    return await mind_skills.fetch_skills(await _mind_gateway_url(name))
+    row = await _mind_by_id(mind_id)
+    # A caller that named a version gets a long life, because the version is
+    # part of the URL and a replacement changes it — so there is nothing to
+    # go stale. A caller that named none must revalidate, because its URL
+    # would otherwise serve a replaced picture for as long as the browser
+    # felt like it. `FileResponse` answers no conditional request of its own,
+    # so "revalidate" here really does mean the whole body again; that is the
+    # price of not naming a version, and the chart always names one.
+    headers = {
+        "Cache-Control": ("public, max-age=31536000, immutable" if v
+                          else "no-cache"),
+        "X-Content-Type-Options": "nosniff",
+    }
+    stored = mind_images.stored_image(mind_id)
+    if stored is not None:
+        return FileResponse(stored,
+                            media_type=mind_images.content_type(stored),
+                            headers=headers)
+    letter = mind_images.initial_svg(mind_id, row.get("name") or "")
+    # An ETag so a revalidation can be answered 304 instead of re-sending the
+    # body and re-reading the registry. This branch is the common one: a mind
+    # with no picture is every mind's starting state.
+    headers["ETag"] = '"%s"' % hashlib.sha256(letter).hexdigest()[:32]
+    return Response(content=letter, media_type="image/svg+xml",
+                    headers=headers)
+
+
+@app.post("/api/minds/{mind_id}/image")
+async def api_mind_image_upload(
+    mind_id: str, file: UploadFile, user: dict = Depends(require_auth)
+):
+    """Set or replace this Mind's picture.
+
+    A replacement, unlike a voice clip: there is only ever one picture and
+    Daniel's requirement is that he uploads or replaces it. What the file
+    actually is comes from its own bytes — the browser's content type is
+    caller-supplied and decides nothing.
+    """
+    row = await _mind_by_id(mind_id)
+    data = await file.read()
+    # The write and the version read are one operation. Reading the version
+    # afterwards, outside the lock, is how a second upload's reply reports
+    # the first upload's file — the page then says "Saved" and shows a
+    # different picture than the one just chosen.
+    async with _image_lock(mind_id):
+        try:
+            target = await run_in_threadpool(
+                mind_images.save_image, mind_id, data)
+        except mind_images.ImageRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        version = mind_images.image_version(mind_id)
+    log_event(
+        log, "mind.image.uploaded", **_actor_fields(user),
+        mind_id=mind_id, mind_name=row.get("name") or "",
+        size_bytes=len(data), path=str(target),
+    )
+    return {"ok": True, "mind_id": mind_id,
+            "image_version": version, "size_bytes": len(data)}
+
+
+@app.get("/api/minds/{name}/skills")
+async def api_mind_skills(name: str, community: int = 0,
+                          user: dict = Depends(require_auth)):
+    """Every skill this Mind knows, repo side against installed side.
+
+    Community submissions are left out unless `community=1` asks for them,
+    and labelled when they are listed (story 10.18.9). How many were left
+    out is part of the answer, so the page can say so.
+    """
+    del user
+    payload = await mind_skills.fetch_skills(await _mind_gateway_url(name))
+    return await skill_submissions.filter_skills(payload, include_community=bool(community))
 
 
 @app.get("/api/minds/{name}/skills/{skill}/diff")
@@ -3609,6 +4083,15 @@ async def api_mind_skill_write_back(
     name: str, skill: str, user: dict = Depends(require_auth)
 ):
     """Copy this Mind's version into its repo checkout. Nothing is committed."""
+    # A Mind in this hive's own stack writes back into the hive's own
+    # checkout, which is the hive's skills. Anybody but the owner hands the
+    # hive a skill only as a pull request (story 10.18.8).
+    if not user.get("is_admin") and await asyncio.to_thread(
+            (configuration_data_module.HIVE_MIND_MINDS_DIR / route_access.normalize_mind_name(name)).is_dir):
+        raise HTTPException(
+            status_code=403,
+            detail="This Mind's repo is the hive's own. Submit the skill as a "
+                   "pull request from the Submit a skill page instead.")
     result = await mind_skills.write_back(await _mind_gateway_url(name), skill)
     log_event(
         log, "mind.skill.written_back", **_actor_fields(user), mind_name=name, skill=skill
@@ -3625,6 +4108,185 @@ async def api_mind_skill_remove(
         log, "mind.skill.removed", **_actor_fields(user), mind_name=name, skill=skill
     )
     return result
+
+
+# ── roles (feature 10.18) ─────────────────────────────────────────────
+
+
+def _role_id(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="No such role") from exc
+
+
+@app.get("/api/roles")
+async def api_roles(user: dict = Depends(require_auth)):
+    """Every role, each marked tracked, local, differs, repo only or unreadable."""
+    del user
+    return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS)}
+
+
+@app.post("/api/roles")
+async def api_create_role(body: dict, user: dict = Depends(require_auth)):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="A role needs a name")
+    grants = roles_data.grants_from(body)
+    try:
+        role_id = await store.create_role(name, **grants)
+    except roles_data.store_conflict() as exc:
+        raise HTTPException(status_code=409,
+                            detail=f"A role called {name.strip()!r} already exists") from exc
+    except (ValueError, ValueRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(log, "role.created", **_actor_fields(user), role_id=role_id, name=name)
+    return {"ok": True, "id": role_id}
+
+
+@app.put("/api/roles/{role_id}")
+async def api_update_role(role_id: str, body: dict, user: dict = Depends(require_auth)):
+    rid = _role_id(role_id)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    fields = roles_data.grants_from(body)
+    if "name" in body:
+        if not isinstance(body["name"], str) or not body["name"].strip():
+            raise HTTPException(status_code=400, detail="A role needs a name")
+        fields["name"] = body["name"]
+    try:
+        changed = await store.update_role(rid, **fields)
+    except roles_data.store_conflict() as exc:
+        raise HTTPException(status_code=409,
+                            detail=f"A role called {str(body.get('name')).strip()!r} already exists") from exc
+    except (ValueError, ValueRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not changed:
+        raise HTTPException(status_code=404, detail="No such role")
+    log_event(log, "role.updated", **_actor_fields(user), role_id=rid,
+              fields=sorted(fields))
+    return {"ok": True}
+
+
+@app.delete("/api/roles/{role_id}")
+async def api_delete_role(role_id: str, user: dict = Depends(require_auth)):
+    rid = _role_id(role_id)
+    role = await store.role(rid)
+    if role is None:
+        raise HTTPException(status_code=404, detail="No such role")
+    if role["slug"] == roles_data.GENERAL:
+        raise HTTPException(
+            status_code=409,
+            detail="The general role cannot be deleted: every agent under role "
+                   "management holds it. It can be edited.")
+    await store.delete_role(rid)
+    log_event(log, "role.deleted", **_actor_fields(user), role_id=rid, slug=role["slug"])
+    return {"ok": True}
+
+
+@app.post("/api/roles/{role_id}/keep")
+async def api_keep_role(role_id: str, user: dict = Depends(require_auth)):
+    result = await roles_data.keep_yours(_role_id(role_id))
+    log_event(log, "role.kept", **_actor_fields(user), role_id=role_id)
+    return result
+
+
+@app.post("/api/roles/{role_id}/promote")
+async def api_promote_role(role_id: str, user: dict = Depends(require_auth)):
+    result = await roles_data.promote(_role_id(role_id))
+    log_event(log, "role.promoted", **_actor_fields(user), role_id=role_id)
+    return result
+
+
+@app.post("/api/roles/repo/{slug}/take")
+async def api_take_repo_role(slug: str, user: dict = Depends(require_auth)):
+    result = await roles_data.take_repo(slug)
+    log_event(log, "role.taken_from_repo", **_actor_fields(user), slug=slug)
+    return result
+
+
+# ── skill submissions (stories 10.18.8 and 10.18.9) ───────────────────
+
+
+async def _uploaded_files(request: Request) -> list[tuple[str, bytes]]:
+    """The skill folder's files, each with its path inside the folder.
+
+    The browser sends `paths` beside `files`, one per file and in the same
+    order, because an upload's own filename is only the last segment.
+    """
+    form = await request.form()
+    files = [f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)]
+    paths = [str(p) for p in form.getlist("paths")]
+    if len(paths) != len(files):
+        raise HTTPException(status_code=400, detail="Every file needs its path inside the folder")
+    out = []
+    for path, upload in zip(paths, files):
+        out.append((path, await upload.read(skill_submissions.MAX_BYTES + 1)))
+    return out
+
+
+@app.get("/api/skill-submissions")
+async def api_skill_submissions(user: dict = Depends(require_auth)):
+    """What has been submitted. A person sees their own; an admin, all."""
+    await skill_submissions.refresh()
+    rows = await store.skill_submissions()
+    if not user.get("is_admin"):
+        rows = [r for r in rows if r["submitted_by"] == str(user.get("username") or "").lower()]
+    return {"submissions": rows, "repository": skill_submissions.REPOSITORY}
+
+
+@app.post("/api/skill-submissions")
+async def api_submit_skill(request: Request, user: dict = Depends(require_auth)):
+    """Open a pull request adding a skill folder. Nothing else is written."""
+    result = await skill_submissions.submit(user, await _uploaded_files(request))
+    log_event(log, "skill.submitted", **_actor_fields(user), skill=result["skill"],
+              pr_number=result["pr_number"])
+    return result
+
+
+@app.post("/api/skill-submissions/{submission_id}/retry")
+async def api_retry_skill_submission(submission_id: int, request: Request,
+                                     user: dict = Depends(require_auth)):
+    result = await skill_submissions.retry(submission_id, user, await _uploaded_files(request))
+    log_event(log, "skill.submission_retried", **_actor_fields(user),
+              submission_id=submission_id, pr_number=result["pr_number"])
+    return result
+
+
+async def _mind_id_for(name: str) -> str:
+    mind = await _mind_row(name)
+    mind_id = str(mind.get("mind_id") or "").strip()
+    if not mind_id:
+        raise HTTPException(status_code=404, detail="That Mind has no id in the registry")
+    return mind_id
+
+
+@app.get("/api/minds/{name}/roles")
+async def api_mind_roles(name: str, user: dict = Depends(require_auth)):
+    """The roles a Mind holds and what their union grants it, read now."""
+    del user
+    mind_id = await _mind_id_for(name)
+    return {"grants": await store.grants_for(mind_id),
+            "roles": [{"id": r["id"], "slug": r["slug"], "name": r["name"]}
+                      for r in await store.roles_of(mind_id)]}
+
+
+@app.put("/api/minds/{name}/roles")
+async def api_set_mind_roles(name: str, body: dict, user: dict = Depends(require_auth)):
+    """Give a Mind these roles beside general, and put it under role management."""
+    ids = body.get("role_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    known = {r["id"] for r in await store.roles_list()}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"No such role: {missing[0]}")
+    mind_id = await _mind_id_for(name)
+    await store.set_mind_roles(mind_id, ids)
+    log_event(log, "mind.roles.set", **_actor_fields(user), mind_name=name, role_ids=ids)
+    return {"ok": True, "grants": await store.grants_for(mind_id)}
 
 
 @app.get("/api/minds/{name}/files/{tree}")
@@ -3954,13 +4616,15 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
                 "Restart it on its host to activate the new model."
             ),
         )
+    try:
+        project_path = mind_mounts.hive_mind_project_path()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = await _hive_tools_request(
         "POST",
         "/docker/restart",
         params={
-            "path": os.getenv(
-                "HIVE_MIND_PROJECT_PATH", "/home/daniel/Storage/Dev/hive_mind"
-            ),
+            "path": project_path,
             "service": name,
         },
     )

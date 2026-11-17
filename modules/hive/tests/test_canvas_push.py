@@ -158,6 +158,7 @@ def test_canvas_render_svg_escapes_text(tmp_path, monkeypatch):
 
 
 SKIPPY_ID = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
+ARNOLD_ID = "9f3c1a77-0000-4000-8000-0000000000aa"
 
 
 class _FakeResp:
@@ -186,7 +187,11 @@ class _FakeClient:
         return False
 
     async def get(self, url, headers=None):
-        return _FakeResp([{"name": "skippy", "id": SKIPPY_ID}, {"name": "bob", "id": "other"}])
+        return _FakeResp([
+            {"name": "skippy", "id": SKIPPY_ID, "owner": "daniel"},
+            {"name": "bob", "id": "other", "owner": "daniel"},
+            {"name": "arnold", "id": ARNOLD_ID, "owner": "sloan"},
+        ])
 
     async def post(self, url, json=None, headers=None):
         _FakeClient.last = {"url": url, "json": json, "headers": headers}
@@ -236,3 +241,53 @@ def test_canvas_submit_dispatches_broker_message(tmp_path, monkeypatch):
     assert "render.svg" in sent["json"]["content"]
     assert "look at the capture flow" in sent["json"]["content"]
     assert sent["headers"]["Authorization"] == "Bearer house-token"
+
+
+def test_a_second_users_canvas_submit_reaches_their_own_mind_and_names_them(tmp_path, monkeypatch):
+    """Story 2.1.19: the drawer is whoever is signed in, and the drawing goes
+    to a mind of theirs - not to Skippy because the console was set up by
+    Daniel."""
+    import auth
+    import route_access
+
+    client = _authed_submit_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(route_access.httpx, "AsyncClient", _FakeClient)
+    # A second admin: the canvas is an admin page until story 2.1.18.
+    sloan = run(auth.create_user("sloan", "secret-pass", is_admin=True, replace=True))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(sloan)))
+
+    response = client.post("/canvas/submit", json={"note": "my castle"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatched_to"] == "arnold"
+    sent = _FakeClient.last["json"]
+    assert sent["to_mind"] == ARNOLD_ID
+    assert "Sloan finished a drawing pass" in sent["content"]
+    assert "Daniel" not in sent["content"]
+
+
+def test_a_second_user_naming_a_mind_that_is_not_theirs_is_refused(tmp_path, monkeypatch):
+    import auth
+
+    client = _authed_submit_client(tmp_path, monkeypatch)
+    # The page is admin-only until story 2.1.18, so the gate is passed with an
+    # admin cookie and the handler is shown a non-admin: what decides is the
+    # canvas's own rule that a named mind must be the drawer's.
+    sloan = run(auth.create_user("sloan", "secret-pass", is_admin=True, replace=True))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(sloan)))
+    monkeypatch.setattr(main_mod, "get_current_user_from_request",
+                        lambda request: _as_coroutine({"username": "sloan", "is_admin": False}))
+    _FakeClient.last = None
+
+    response = client.post("/canvas/submit", json={"mind": "skippy"})
+
+    assert response.status_code == 404
+    assert _FakeClient.last is None
+
+
+async def _resolved(value):
+    return value
+
+
+def _as_coroutine(value):
+    return _resolved(value)

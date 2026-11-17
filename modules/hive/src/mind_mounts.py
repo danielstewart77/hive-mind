@@ -259,6 +259,25 @@ class ComposeTarget:
     env_file: Path
 
 
+def hive_mind_project_path() -> str:
+    """Where the hive_mind checkout is on the host, as hive-tools names it.
+
+    Configured, or derived from the host's Dev root this console already
+    mounts. Never a person's home written in here (story 2.1.19): the
+    console belongs to every user of this hive, and a default naming one of
+    them is wrong on every install but his.
+    """
+    configured = os.getenv("HIVE_MIND_PROJECT_PATH", "").strip()
+    if configured:
+        return configured
+    root = os.getenv("HOST_DEV_DIR", "").strip()
+    if not root:
+        raise ValueError(
+            "neither HIVE_MIND_PROJECT_PATH nor HOST_DEV_DIR is set, so the "
+            "console cannot say where the hive_mind checkout is")
+    return os.path.join(root, "hive_mind")
+
+
 def compose_target(name: str) -> ComposeTarget:
     """This Mind's compose file, as this console can reach it.
 
@@ -301,9 +320,7 @@ def compose_target(name: str) -> ComposeTarget:
         / name
         / "container"
         / "compose.yaml",
-        project_path=os.getenv(
-            "HIVE_MIND_PROJECT_PATH", "/home/daniel/Storage/Dev/hive_mind"
-        ),
+        project_path=hive_mind_project_path(),
         service=name,
         env_file=Path("/env_hive_mind/.env"),
     )
