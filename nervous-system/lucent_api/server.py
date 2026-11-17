@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from lucent_api import holder_access
 from lucent_api.auth import require_admin_bearer
 
+import hive_logging
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 
 log = configure_logging("lucent-api")
@@ -64,6 +65,21 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     install_fastapi_logging(app, log, "lucent-api")
+
+    # hive_logging.py is copied into this service's image while this file is
+    # mounted from the checkout. A pull therefore brings this route before a
+    # rebuild brings the feed, and the service must still start: the feed is
+    # looked up when asked for, and an image without it answers 404, which the
+    # console shows as a component to update.
+    @app.get("/diagnostics/errors", dependencies=[Depends(require_admin_bearer)])
+    async def diagnostic_errors():
+        feed = getattr(hive_logging, "recent_errors", None)
+        if feed is None:
+            return JSONResponse(
+                {"detail": "This image was built before the error feed; rebuild it"},
+                status_code=404,
+            )
+        return feed()
 
     @app.get("/health")
     async def health() -> JSONResponse:

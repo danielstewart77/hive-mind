@@ -45,7 +45,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from core.hive_logging import configure_logging, install_fastapi_logging, log_event
+from core.hive_logging import configure_logging, install_fastapi_logging, log_event, recent_errors
 from minds import (
     files_api,
     github_token_api,
@@ -475,6 +475,14 @@ async def _startup() -> None:
     await skills_api.check_at_start(log, MIND_ID)
     log.info("%s ready (mind_id=%s, harnesses=%s, default=%s)",
              NAME, MIND_ID, ",".join(ADAPTERS), default_harness())
+
+
+@app.get("/diagnostics/errors")
+async def diagnostic_errors(request: Request):
+    denied = runtime_api.authorize_admin(request)
+    if denied is not None:
+        return denied
+    return recent_errors()
 
 
 @app.get("/health")
