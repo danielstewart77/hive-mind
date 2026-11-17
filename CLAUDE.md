@@ -104,8 +104,10 @@ returns plain text: the summary in front (at most half the budget, keeping its
 tail), prose and tool calls whole, each tool result cut to its first lines and
 marked `[trimmed]`, newest first into the byte budget, which the output never
 exceeds. The gateway sets that budget the way a model handover sets its own:
-the room is the new model's rotation threshold (the percentage from its own
-row; half its window where nobody knows it) at four bytes a token, less the
+the room is the rotation threshold the conversation would have on the new
+model (that model's window at the mind's own percentage, the
+`rotation_threshold_percent` line of its `runtime.yaml`; half the window
+where the threshold is not known) at four bytes a token, less the
 new harness's own overhead — its system prompt, tools and project
 instructions — and less the composed prompt, which is trimmed (session
 memory, then recent memory; the soul never) to at most half the room. The
@@ -294,8 +296,9 @@ only thing that knows, and `PATCH /runtime` writes it in the same write as the
 model. A model the proxy declares no window for cannot be saved — the route
 refuses with 409 and writes nothing — and no request body may name the field:
 a window taken off a request is a number nobody measured. Nothing sizes a
-rotation from it; a conversation's threshold comes from the window and
-percentage the proxy declares for the model it was spawned on.
+rotation from it; a conversation's threshold comes from the window the proxy
+declares for the model it was spawned on and the mind's own
+`rotation_threshold_percent`, which is 100 when the line is absent.
 
 A write reads the document back before it replaces the file, and compares each
 value against what was asked for. One-line substitution cannot express every
