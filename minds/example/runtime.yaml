@@ -33,3 +33,18 @@ startup:
 
 transport:
   type: cli_stream_json
+
+# The rotation threshold. A file with no line means 100, which is no early
+# rotation at all, so a new mind starts with one: thirty, Daniel 2026-11-17,
+# "for now". The mind's Settings card on the console changes it. The figure
+# for new minds is also written in, and changes together with:
+#   NEW_MIND_ROTATION_THRESHOLD_PERCENT in installer/steps.py (this repo)
+#   NEW_MIND_ROTATION_THRESHOLD_PERCENT in hive, src/configuration_data.py
+#   NEW_MIND_ROTATION_THRESHOLD_PERCENT in hive-edge-minds setup.sh, and
+#     that repo's minds/example/runtime.yaml and README.md
+#   docs/multi-mind-architecture.md (this repo)
+#   the create-mind and add-mind skills in the hivemind plugin
+#
+# Percentage of the conversation model's context window at which
+# the next safe check may begin the existing handover.
+rotation_threshold_percent: 30

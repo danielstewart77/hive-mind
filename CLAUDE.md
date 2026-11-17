@@ -104,8 +104,10 @@ returns plain text: the summary in front (at most half the budget, keeping its
 tail), prose and tool calls whole, each tool result cut to its first lines and
 marked `[trimmed]`, newest first into the byte budget, which the output never
 exceeds. The gateway sets that budget the way a model handover sets its own:
-the room is the new model's rotation threshold (the percentage from its own
-row; half its window where nobody knows it) at four bytes a token, less the
+the room is the rotation threshold the conversation would have on the new
+model (that model's window at the mind's own percentage, the
+`rotation_threshold_percent` line of its `runtime.yaml`; half the window
+where the threshold is not known) at four bytes a token, less the
 new harness's own overhead — its system prompt, tools and project
 instructions — and less the composed prompt, which is trimmed (session
 memory, then recent memory; the soul never) to at most half the room. The
@@ -149,13 +151,19 @@ next attach to open the new harness on.
 
 Each process a conversation runs in is told its own model's window
 (`HIVE_MODEL_CONTEXT_WINDOW`) and rotation threshold
-(`HIVE_ROTATION_THRESHOLD_TOKENS`, the window times the model's
-`rotation_threshold_percent`), both read off the proxy's row for that
-conversation's harness and model. The percentage is the model's, never the
-mind's: no mind's file carries one. A model the proxy declares no window for
-gets neither variable, and one with a window and no percentage gets no
-threshold; a lookup missing either is not remembered, so the next spawn asks
-again. A dsh turn runs under that window,
+(`HIVE_ROTATION_THRESHOLD_TOKENS`, the window times the mind's
+`rotation_threshold_percent`). The window is the model's, read off the
+proxy's row for that conversation's harness and model. The percentage is the
+mind's, never the model's (Daniel, 2026-11-17): a line in the mind's
+`runtime.yaml`, set from its Settings card on the console
+(`minds/rotation_policy.py`), 100 when the file has no line, so every mind
+that should rotate early carries one; a percentage a proxy row still names is
+read by nothing. A model the proxy declares no window for gets neither
+variable, and a mind whose line is not a whole number from 1 to 100 gets a
+window and no threshold; a window lookup that failed is not remembered, so
+the next spawn asks again. A mind installed before the generated hooks keeps
+its own rotation check, which reads the threshold its process was spawned
+with, so a changed percentage reaches it at its next conversation. A dsh turn runs under that window,
 or — with none composed for it — under the
 window the proxy lists for its model, asked per turn; a model with no window
 is refused rather than run behind a guessed one. The rotation hook takes the
@@ -288,8 +296,9 @@ only thing that knows, and `PATCH /runtime` writes it in the same write as the
 model. A model the proxy declares no window for cannot be saved — the route
 refuses with 409 and writes nothing — and no request body may name the field:
 a window taken off a request is a number nobody measured. Nothing sizes a
-rotation from it; a conversation's threshold comes from the window and
-percentage the proxy declares for the model it was spawned on.
+rotation from it; a conversation's threshold comes from the window the proxy
+declares for the model it was spawned on and the mind's own
+`rotation_threshold_percent`, which is 100 when the line is absent.
 
 A write reads the document back before it replaces the file, and compares each
 value against what was asked for. One-line substitution cannot express every

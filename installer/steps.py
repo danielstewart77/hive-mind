@@ -748,6 +748,19 @@ def choose_model(ctx: Ctx):
 
 
 # ---- 18. the mind -----------------------------------------------------------
+#: The rotation threshold an installed mind starts with: the percentage of its
+#: conversation model's context window at which a conversation is handed over.
+#: A runtime.yaml with no line means 100, which is no early rotation at all,
+#: so a new mind is always written one. Daniel, 2026-11-17: thirty "for now" —
+#: this is the installer's one copy of the figure. The others, which change
+#: with it: the line in minds/example/runtime.yaml here and in
+#: hive-edge-minds, the console's constant of the same name (hive,
+#: src/configuration_data.py), the variable of the same name in
+#: hive-edge-minds setup.sh, and the create-mind and add-mind skills in the
+#: hivemind plugin. Two documents show the line as well:
+#: docs/multi-mind-architecture.md here and README.md in hive-edge-minds.
+NEW_MIND_ROTATION_THRESHOLD_PERCENT = 30
+
 RUNTIME = """\
 # Written by the hive installer. The mind's own configuration from here on:
 # edit it on the console. Identity and soul live in the knowledge graph.
@@ -763,6 +776,10 @@ provider: {provider}
 default_model: {model}
 runtime_config_dir: {runtime_config_dir}
 resume_policy: always
+
+# Percentage of the conversation model's context window at which
+# the next safe check may begin the existing handover.
+rotation_threshold_percent: {rotation_threshold_percent}
 
 dsh_profile: {dsh_profile}
 dsh_bin: {dsh_bin}
@@ -795,7 +812,9 @@ def create_mind(ctx: Ctx):
         app_mind = f"{compose.APP}/minds/{name}"
         runtime.write_text(RUNTIME.format(name=name, mind_id=a["mind_id"],
                                           owner=collisions.username(a["admin_username"]),
-                                          model=a["model"], **dsh.runtime_keys(app_mind)))
+                                          model=a["model"],
+                                          rotation_threshold_percent=NEW_MIND_ROTATION_THRESHOLD_PERCENT,
+                                          **dsh.runtime_keys(app_mind)))
         note = "runtime.yaml written"
     elif _file_model(runtime) != a["model"]:
         # The file's model is no longer offered and another was chosen.
