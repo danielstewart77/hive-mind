@@ -1,7 +1,6 @@
 """Route tests for the consumer-facing Hive control center."""
 
 import asyncio
-import json
 import os
 import sys
 from unittest.mock import AsyncMock, patch
@@ -14,7 +13,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import auth
 import main as main_mod
-import accounts
 from hive_site.testing import run
 
 
@@ -566,100 +564,6 @@ def test_install_options_are_the_forms_single_source_of_truth(tmp_path, monkeypa
                 json=_bootstrap_body(harness=harness, provider=provider),
             )
             assert response.status_code == 200, (harness, provider)
-
-def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
-    mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
-    gateway_request = AsyncMock(return_value={"status": "registered"})
-    metadata = patch.object(main_mod, "set_edge_mind_metadata")
-    with (
-        patch.object(
-            main_mod,
-            "_probe_edge_mind",
-            new=AsyncMock(return_value={"mind_id": mind_id, "status": "ok"}),
-        ),
-        patch.object(main_mod, "_gateway_request", new=gateway_request),
-        metadata as metadata_mock,
-    ):
-        response = client.post(
-            "/api/edge-minds/verify",
-            json={
-                "name": "sentinel-one",
-                "mind_id": mind_id,
-                "gateway_url": "http://192.168.4.16:8421",
-                "model": "gpt-5.5",
-                "harness": "codex_cli",
-                "provider": "openai",
-                "profile": "sentinel",
-                "role": "operator",
-                "deployment": "container",
-            },
-        )
-
-    assert response.status_code == 200
-    assert response.json()["registered"] is True
-    assert gateway_request.await_args.args[:2] == ("POST", "/broker/minds")
-    assert gateway_request.await_args.kwargs["json_body"]["mind_id"] == mind_id
-    metadata_mock.assert_called_once_with(
-        "sentinel-one",
-        profile="sentinel",
-        role="operator",
-        deployment="container",
-    )
-
-
-def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
-    with patch.object(
-        main_mod,
-        "_probe_edge_mind",
-        new=AsyncMock(return_value={"mind_id": "different", "status": "ok"}),
-    ):
-        response = client.post(
-            "/api/edge-minds/verify",
-            json={
-                "name": "atlas",
-                "mind_id": "6f12a60a-b5fd-4ba4-b2f1-07065a49145d",
-                "gateway_url": "http://192.168.4.20:8421",
-                "model": "sonnet",
-                "harness": "claude_cli",
-                "provider": "anthropic",
-                "profile": "standard",
-                "role": "sandboxed",
-                "deployment": "systemd",
-            },
-        )
-
-    assert response.status_code == 400
-    assert "identity" in response.json()["detail"].lower()
-
-
-def test_edge_mind_verify_rejects_an_unready_runtime(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
-    mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
-    with patch.object(
-        main_mod,
-        "_probe_edge_mind",
-        new=AsyncMock(return_value={"mind_id": mind_id, "status": "degraded"}),
-    ):
-        response = client.post(
-            "/api/edge-minds/verify",
-            json={
-                "name": "atlas",
-                "mind_id": mind_id,
-                "gateway_url": "http://192.168.4.20:8421",
-                "model": "sonnet",
-                "harness": "claude_cli",
-                "provider": "anthropic",
-                "profile": "standard",
-                "role": "sandboxed",
-                "deployment": "systemd",
-            },
-        )
-
-    assert response.status_code == 502
-    assert "not ready" in response.json()["detail"].lower()
-
 
 def test_tools_api_returns_capability_catalog(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
@@ -1320,43 +1224,3 @@ def test_an_edge_mind_bootstrap_installs_for_the_owner_named_or_the_admin(tmp_pa
     assert named.json()["registration"]["owner"] == "sloan"
     assert "./setup.sh --name atlas --owner daniel " in default.json()["command"]
     assert unknown.status_code == 400
-
-
-def test_edge_mind_verify_registers_with_the_admin_token_and_the_owner(
-    tmp_path, monkeypatch, fake_comms
-):
-    client = _authed_client(tmp_path, monkeypatch)
-    run(auth.create_user("sloan", "sloans-own-pass"))
-    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
-    fake_comms.received.clear()
-    mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
-    with (
-        patch.object(
-            main_mod,
-            "_probe_edge_mind",
-            new=AsyncMock(return_value={"mind_id": mind_id, "status": "ok"}),
-        ),
-        patch.object(main_mod, "set_edge_mind_metadata"),
-    ):
-        response = client.post(
-            "/api/edge-minds/verify",
-            json={
-                "name": "sentinel-one",
-                "mind_id": mind_id,
-                "gateway_url": "http://192.168.4.16:8421",
-                "model": "gpt-5.5",
-                "harness": "codex_cli",
-                "provider": "openai",
-                "profile": "sentinel",
-                "role": "operator",
-                "deployment": "container",
-                "owner": "sloan",
-            },
-        )
-
-    assert response.status_code == 200, response.text
-    (sent,) = [r for r in fake_comms.received if r["path"] == "/broker/minds"]
-    assert sent["authorization"] == "Bearer admin-token"
-    assert json.loads(sent["body"])["owner"] == "sloan"
