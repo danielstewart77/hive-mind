@@ -1,5 +1,6 @@
 """P1: saved navigation choices; P2: real failures reach the errors page."""
 import logging
+import time
 
 import httpx
 
@@ -36,6 +37,7 @@ def test_feature_choices_belong_to_the_signed_in_account(builtin_console):
 
 def test_hive_errors_endpoint_reports_a_mind_failure(builtin_console, monkeypatch):
     client = builtin_console.admin()
+    monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'stand-in-admin')
     original_client = httpx.AsyncClient
     feed = {'started_at': '2026-11-13T18:00:00Z', 'errors': [
         {'message': 'Failed to open terminal', 'detail': 'no context window for gpt-5.6-sol'}]}
@@ -50,6 +52,29 @@ def test_hive_errors_endpoint_reports_a_mind_failure(builtin_console, monkeypatc
     atlas = next(c for c in result.json()['components'] if c['name'] == 'Atlas')
     assert atlas['errors'][0]['detail'] == 'no context window for gpt-5.6-sol'
     assert client.get('/hive-errors').status_code == 200
+
+
+def test_a_mind_the_credential_guard_refuses_is_listed_as_withheld_and_never_asked(builtin_console, monkeypatch):
+    client = builtin_console.admin()
+    monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'stand-in-admin')
+    original_client = httpx.AsyncClient
+    asked = {}
+    def transport(request):
+        if request.url.path == '/broker/minds':
+            return httpx.Response(200, json=[
+                {'id': 'kid-id', 'name': 'Kidbox', 'owner': 'sloan',
+                 'gateway_url': 'http://kidbox:8433', 'admin_credential_allowed': False},
+                {'id': 'atlas-id', 'name': 'Atlas', 'owner': 'daniel',
+                 'gateway_url': 'http://atlas:8420', 'admin_credential_allowed': True}])
+        asked[request.url.host] = request.headers.get('authorization')
+        return httpx.Response(200, json={'errors': []})
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(
+        **kwargs, transport=httpx.MockTransport(transport)))
+    components = {c['name']: c for c in client.get('/api/hive-errors').json()['components']}
+    assert components['Kidbox']['status'] == 'withheld'
+    assert components['Atlas']['status'] == 'ok'
+    assert asked['atlas'] == 'Bearer stand-in-admin'
+    assert sorted(asked) == ['127.0.0.1', 'atlas', 'hive-lucent']
 
 
 async def test_terminal_start_exception_reaches_component_error_report():
@@ -81,3 +106,15 @@ async def test_unavailable_error_feed_is_reported_without_hiding_other_component
         down = await hive_errors.probe(client, 'Down mind', 'http://down', {})
     assert old['status'] == 'unsupported'
     assert down['status'] == 'unreachable'
+
+
+def test_a_very_long_error_is_cut_before_it_is_scrubbed_and_shows_no_part_of_a_credential(monkeypatch):
+    monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'a-fake-test-credential')
+    # One unbroken run, the shape of a dumped blob: scrubbing all of it took
+    # 6.7 seconds on the logging thread before the cut was moved first.
+    message = 'x' * 4090 + 'a-fake-test-credential' + 'deadbeef' * 12_500
+    started = time.perf_counter()
+    hive_logging.HiveJsonFormatter().format(logging.LogRecord('site', logging.ERROR, '', 0, message, (), None))
+    elapsed = time.perf_counter() - started
+    assert hive_logging.recent_errors()['errors'][0]['message'] == 'x' * 4090 + '[REDAC'
+    assert elapsed < 1.0

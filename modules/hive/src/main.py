@@ -5869,6 +5869,7 @@ async def hive_errors_page(request: Request):
 async def api_hive_errors(user: dict = Depends(require_auth)):
     del user
     targets = []
+    withheld = []
     for name, url, token in [
         ("Hive Comms", _gateway_base_url(), os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")),
         ("Lucent", _lucent_base_url(), os.getenv("LUCENT_ADMIN_BEARER_TOKEN", "")),
@@ -5884,8 +5885,16 @@ async def api_hive_errors(user: dict = Depends(require_auth)):
             raise ValueError("Invalid mind registry")
         for mind in minds:
             if isinstance(mind, dict) and mind.get("gateway_url"):
-                targets.append({"name": mind.get("name") or "Mind", "url": mind["gateway_url"],
-                                "headers": {"Authorization": "Bearer " + os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")}})
+                name = mind.get("name") or "Mind"
+                # The admin credential goes only where `admin_headers` sends
+                # it. A mind it refuses is listed as withheld and never asked.
+                try:
+                    headers = await mind_runtime.admin_headers(mind["gateway_url"])
+                except HTTPException as refused:
+                    withheld.append({"name": name, "status": "withheld", "errors": [],
+                                     "detail": str(refused.detail)})
+                    continue
+                targets.append({"name": name, "url": mind["gateway_url"], "headers": headers})
     except Exception:
         minds = None
     for name, variable in [("Voice (Chatterbox)", "CHATTERBOX_VOICE_URL"), ("Voice (Kokoro)", "KOKORO_VOICE_URL"),
@@ -5893,6 +5902,7 @@ async def api_hive_errors(user: dict = Depends(require_auth)):
         if os.getenv(variable):
             targets.append({"name": name, "url": os.environ[variable], "headers": {}, "feed": False})
     report = await hive_errors.collect(targets, recent_errors())
+    report["components"].extend(withheld)
     try:
         await store.get_auth_setting('diagnostics.health')
         report['components'].append({'name': 'PostgreSQL', 'status': 'health-only', 'errors': [],
