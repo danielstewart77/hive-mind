@@ -62,9 +62,16 @@ def _settings_body(percent: int, window: int | None):
 
 
 def _use_mind_transport(monkeypatch, handler):
+    async def transport(request):
+        if request.url.host == "hive-comms":
+            assert (request.method, request.url.path) == ("GET", "/broker/minds")
+            assert request.headers["authorization"] == "Bearer rotation-admin-token"
+            return httpx.Response(200, json=[], request=request)
+        return await handler(request)
+
     def client_factory(*args, **kwargs):
         return _REAL_ASYNC_CLIENT(
-            *args, transport=httpx.MockTransport(handler), **kwargs
+            *args, transport=httpx.MockTransport(transport), **kwargs
         )
 
     monkeypatch.setattr(mind_runtime.httpx, "AsyncClient", client_factory)
