@@ -107,18 +107,31 @@ def test_switching_a_managed_dsh_conversation_to_a_model_no_role_names_is_refuse
     _run(scenario())
 
 
-def test_an_unmanaged_or_non_dsh_conversation_keeps_the_model_it_names(comms_db):
+def test_an_unmanaged_conversation_keeps_the_model_it_names(comms_db):
     async def scenario():
         mgr = await make_manager()
         unmanaged = await _mind()
-        claude = await _mind(harness="claude_cli")
-        await roles.set_mind_roles(claude, [await _role("claude-opus-5-5")])
         await seed_session("s5", mind_id=unmanaged, harness="dsh", model="gpt-6.1-terra")
-        await seed_session("s6", mind_id=claude, harness="claude", model="claude-haiku-5-5",
-                           surface_id="124")
 
         assert await mgr.role_model(await mgr._get_row("s5")) == "gpt-6.1-terra"
-        assert await mgr.role_model(await mgr._get_row("s6")) == "claude-haiku-5-5"
+        await close_manager(mgr)
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("harness", ["claude_cli", "codex_cli"])
+def test_a_managed_claude_or_codex_conversation_runs_only_on_a_model_its_roles_name(comms_db, harness):
+    async def scenario():
+        mgr = await make_manager()
+        mind = await _mind(harness=harness)
+        await roles.set_mind_roles(mind, [await _role("gpt-6.1-terra")])
+        await seed_session("s6", mind_id=mind, harness=harness.split("_")[0],
+                           model="claude-haiku-5-5", surface_id="124")
+        row = await mgr._get_row("s6")
+
+        assert await mgr.role_model(row) == "gpt-6.1-terra"
+        with pytest.raises(ValueError, match="roles allow"):
+            await mgr.role_model(row, wanted="claude-haiku-5-5")
         await close_manager(mgr)
 
     _run(scenario())
