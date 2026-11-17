@@ -1,6 +1,7 @@
 name: Chief of Staff
-model: claude-haiku-5-5
+model: claude-fable-5-2
 tools:
+  - shell
   - files
   - sub-minds
   - web
@@ -8,4 +9,10 @@ skills:
   - backlog
   - brainstorm
   - plan-feature
-hooks: []
+  - take-a-task
+  - tend-the-ledger
+hooks:
+  - auto_remember
+  - contextual_retrieval
+  - rotation_check
+  - rotation_fire
