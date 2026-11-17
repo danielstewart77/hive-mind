@@ -1,8 +1,11 @@
-"""Per-holder rotation: one value, one holder, one file.
+"""Per-holder credentials: where a holder's value is read from, and the rows
+the page is built from.
 
-The behaviour these guard is the one whose absence took the hive down for four
-hours: a rotation that writes one value into five files, and a mint that lands
-while the write it was for does not.
+No test here calls rotation, minting or provisioning: that code's job is to write into the
+running hive, and a test that wraps it performs the write (see "Code whose
+job is to write into production" in the code skill's test-standard.md;
+Daniel, 2026-11-17). Those tests were deleted, not redirected, and the
+behaviour is unprotected until he has agreed how it can be tested safely.
 """
 
 import asyncio
@@ -26,10 +29,6 @@ def _run(coro):
 def _write_env(path, **kv):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(f"{k}={v}" for k, v in kv.items()) + "\n")
-
-
-def _value(path, key):
-    return credentials_data._read_env_value(path, key)
 
 
 @pytest.fixture()
@@ -164,245 +163,6 @@ def test_a_rows_restart_target_is_the_one_that_reads_its_file(hive, service):
     assert by_holder["ada"]["restart_target"] != by_holder["skippy"]["restart_target"]
 
 
-# --- rotation ------------------------------------------------------------
-
-
-def test_rotating_one_holder_leaves_every_other_holders_value_alone(hive, service):
-    _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    assert _value(hive["shared"], "COMMS_TOKEN_ADA") != "ada-old"
-    assert _value(hive["shared"], "COMMS_TOKEN_BILBY_BOT") == "bilby-bot-old"
-    assert _value(hive["shared"], "LUCENT_TOKEN_ADA") == "ada-lucent-old"
-    assert _value(hive["own"], "COMMS_BEARER_TOKEN") == "skippy-old"
-
-
-def test_the_value_minted_is_the_value_written(hive, service):
-    """Minting A and writing B passes every other assertion here and leaves
-    the holder refused on its next request."""
-    _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    mint = next(call for call in service["sent"] if call.get("token"))
-    assert mint["token"] == _value(hive["shared"], "COMMS_TOKEN_ADA")
-
-
-def test_a_rotation_keeps_the_role_the_service_reports(hive, service):
-    """Re-minting without the role retypes the holder, and comms infers
-    `person` for anything it cannot find a mind row for — which is refused
-    every machinery route the holder exists to call."""
-    _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "bilby-bot"))
-
-    mint = next(call for call in service["sent"] if call.get("token"))
-    assert mint["role"] == "service"
-
-
-def test_a_refused_mint_changes_no_file(hive, service):
-    service["state"]["status"] = 400
-
-    with pytest.raises(holder_credentials.MintRefused):
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
-
-
-def test_a_mint_the_file_will_not_take_puts_the_old_value_back(hive, service, monkeypatch):
-    """The lethal order. The mint has already replaced the holder's digest, so
-    a failed write leaves it with no working value anywhere — the previous one
-    is only recoverable because it was read before the mint."""
-    def refuse(path, key, value, label):
-        return {"file": label, "path": str(path), "env_key": key,
-                "written": False, "reason": "read-only mount"}
-
-    monkeypatch.setattr(credentials_data, "_write_location", refuse)
-
-    with pytest.raises(holder_credentials.Stranded) as raised:
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    assert raised.value.restored is True
-    tokens = [call["token"] for call in service["sent"] if call.get("token")]
-    assert tokens[-1] == "ada-old"
-
-
-def test_a_write_that_does_not_read_back_is_treated_as_a_failed_write(
-    hive, service, monkeypatch
-):
-    """A folded line, a duplicate key lower down, a filesystem that reported a
-    write it dropped: the file is what the holder presents, so the file is
-    what is believed."""
-    def claim_success(path, key, value, label):
-        return {"file": label, "path": str(path), "env_key": key,
-                "written": True, "reason": None}
-
-    monkeypatch.setattr(credentials_data, "_write_location", claim_success)
-
-    with pytest.raises(holder_credentials.Stranded):
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
-
-
-def test_a_holder_with_nowhere_to_read_is_never_minted(hive, service):
-    """Minting with nowhere to put the value is how a holder is killed: the
-    service stops accepting what that box still presents."""
-    with pytest.raises(holder_credentials.MintRefused):
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "hex"))
-
-    assert [call for call in service["sent"] if call.get("token")] == []
-
-
-def test_minting_needs_the_services_admin_credential(hive, service, monkeypatch):
-    monkeypatch.delenv("LUCENT_ADMIN_BEARER_TOKEN", raising=False)
-
-    with pytest.raises(holder_credentials.MintRefused) as raised:
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["lucent"], "ada"))
-
-    assert "LUCENT_ADMIN_BEARER_TOKEN" in str(raised.value)
-
-
-# --- a new mind ----------------------------------------------------------
-
-
-def test_a_new_minds_credentials_are_minted_as_a_mind_under_its_uuid(hive, service):
-    """Minted before the broker row exists, so the role cannot be inferred;
-    and the memory store keys a mind's rows by the uuid its hooks send."""
-    minted, failed = _run(
-        holder_credentials.provision_mind("quokka", "uuid-1234", "daniel")
-    )
-
-    mints = [call for call in service["sent"] if call.get("token")]
-    assert failed is None
-    assert [call["role"] for call in mints] == ["mind", "mind", "mind"]
-    assert [call.get("mind_id") for call in mints] == [None, "uuid-1234", None]
-    assert {entry["service"] for entry in minted} == {"comms", "lucent", "proxy"}
-
-
-def test_one_service_refusing_still_reports_the_credential_that_landed(hive, service):
-    """A mind holding a gateway credential and no memory-store one
-    authenticates, answers, and silently remembers nothing. Reported as the
-    two facts it is, rather than as "nothing was issued"."""
-    service["state"]["refuse"]["hive-lucent"] = 400
-
-    minted, failed = _run(
-        holder_credentials.provision_mind("quokka", "uuid-1234", "daniel")
-    )
-
-    assert [entry["service"] for entry in minted] == ["comms", "proxy"]
-    assert "memory store" in failed
-
-
-def test_a_new_minds_variables_are_added_to_the_shared_file(hive, service):
-    _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel"))
-
-    assert _value(hive["shared"], "COMMS_TOKEN_QUOKKA")
-    assert _value(hive["shared"], "LUCENT_TOKEN_QUOKKA")
-    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA")
-    assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
-
-
-def test_a_new_mind_is_given_its_own_proxy_key_and_holds_the_one_the_proxy_took(hive, service):
-    """Story 2.1.9, DECIDED 2026-11-15 by Daniel: one proxy key per mind,
-    issued when the mind is created, so its usage is its own. The value the
-    proxy was handed for this mind is the value written where the mind reads
-    it, asked for with the console's own proxy key."""
-    minted, failed = _run(holder_credentials.provision_mind("quokka", "uuid-1234", "sloan"))
-
-    assert failed is None
-    to_proxy = [call for call in service["sent"]
-                if call.get("token") and call["url"].startswith("http://proxy.invalid:8899/")]
-    assert [call["url"] for call in to_proxy] == ["http://proxy.invalid:8899/credentials/quokka"]
-    assert to_proxy[0]["bearer"] == "Bearer proxy-minting-key-for-tests"  # secret-guard: allow - invented fixture
-    assert to_proxy[0]["role"] == "mind"
-    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA") == to_proxy[0]["token"]
-    others = [call["token"] for call in service["sent"] if call.get("token") and call is not to_proxy[0]]
-    assert to_proxy[0]["token"] not in others
-
-
-def test_adding_a_variable_never_lands_on_the_last_line(hive, service):
-    """A `.env` whose final line has no newline would otherwise take the new
-    key onto the end of it, destroying whichever variable was last."""
-    hive["shared"].write_text("COMMS_TOKEN_ADA=ada-old\nLAST_ONE=matters")  # secret-guard: allow — invented fixture
-
-    _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel"))
-
-    assert _value(hive["shared"], "LAST_ONE") == "matters"
-    assert _value(hive["shared"], "COMMS_TOKEN_QUOKKA")
-
-
-# --- what a rotation must not be confused with ---------------------------
-
-
-def test_two_rotations_of_one_holder_do_not_interleave(hive, service):
-    """A reentrant thread lock is no lock here: every request runs on one
-    event-loop thread, so the second coroutine takes it during the first
-    one's await and the file and the service's table end up disagreeing —
-    both reporting success."""
-    order: list[str] = []
-    real_put = holder_credentials._put
-
-    async def watched(*args, **kwargs):
-        order.append("mint")
-        await asyncio.sleep(0)
-        return await real_put(*args, **kwargs)
-
-    holder_credentials._put = watched
-    try:
-        real_write = credentials_data._write_location
-
-        def watched_write(*args, **kwargs):
-            order.append("write")
-            return real_write(*args, **kwargs)
-
-        original = credentials_data._write_location
-        credentials_data._write_location = watched_write
-        try:
-            async def both():
-                await asyncio.gather(
-                    holder_credentials.mint(
-                        holder_credentials.SERVICES["comms"], "ada", "daniel", role="mind"
-                    ),
-                    holder_credentials.mint(
-                        holder_credentials.SERVICES["comms"], "bob", "daniel", role="mind",
-                        location=holder_credentials.Location(
-                            "hive_mind", "COMMS_TOKEN_BILBY_BOT"
-                        ),
-                    ),
-                )
-
-            asyncio.run(both())
-        finally:
-            credentials_data._write_location = original
-    finally:
-        holder_credentials._put = real_put
-
-    assert order == ["mint", "write", "mint", "write"]
-
-
-def test_a_mint_that_is_never_answered_is_not_reported_as_refused(hive, service):
-    """A read timeout on a PUT most often means the request landed. Reported
-    as a refusal the operator retries; reported as stranded they go looking
-    for a value that was never written."""
-    service["state"]["raise_on_put"] = httpx.ReadTimeout
-
-    with pytest.raises(holder_credentials.MintUncertain):
-        _run(
-            holder_credentials.mint(
-                holder_credentials.SERVICES["comms"], "ada", "daniel", role="mind"
-            )
-        )
-
-    assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
-
-
-def test_a_redirect_is_not_a_mint(hive, service):
-    """A 3xx is what a reverse proxy or an http-to-https hop gives, and httpx
-    does not follow one on a PUT — so the service never saw the value."""
-    service["state"]["status"] = 307
-
-    with pytest.raises(holder_credentials.MintRefused):
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
-
-
 def test_an_unreadable_shared_file_is_not_reported_as_nowhere_to_read(hive, service):
     """Fourteen holders read that one file. Reported as "nowhere", every one
     of them loses its rotate control and is offered revocation in the same
@@ -442,26 +202,6 @@ def test_a_holder_with_its_own_file_is_read_from_that_file(hive, service):
     assert (found.file, found.env_key) == ("skippy", "COMMS_BEARER_TOKEN")
 
 
-def test_a_quoted_previous_value_is_reinstated_as_the_holder_presents_it(
-    hive, service, monkeypatch
-):
-    """Quoting is legal in a `.env`. Re-minting the raw text hands the holder
-    a value it will never present, under a message saying it was recovered."""
-    hive["shared"].write_text('COMMS_TOKEN_ADA="ada-old"\n')
-
-    def refuse(path, key, value, label):
-        return {"file": label, "path": str(path), "env_key": key,
-                "written": False, "reason": "read-only mount"}
-
-    monkeypatch.setattr(credentials_data, "_write_location", refuse)
-
-    with pytest.raises(holder_credentials.Stranded):
-        _run(holder_credentials.rotate(holder_credentials.SERVICES["comms"], "ada"))
-
-    tokens = [call["token"] for call in service["sent"] if call.get("token")]
-    assert tokens[-1] == "ada-old"
-
-
 def test_a_name_another_holder_already_has_is_named_as_taken(hive, service):
     """`scheduler` and `spark-to-bloom` hold credentials and are nobody's
     mind. Minting over one replaces a running app's value and retypes it."""
@@ -470,25 +210,3 @@ def test_a_name_another_holder_already_has_is_named_as_taken(hive, service):
 
     assert taken == holder_credentials.SERVICES["comms"].label
     assert free is None
-
-
-def test_a_mind_whose_proxy_mint_failed_at_creation_can_be_given_its_key_later(hive, service):
-    """The proxy down while a mind is created leaves it a variable and no
-    client. Its row is still on the page, and rotating it issues the key."""
-    service["state"]["refuse"]["proxy.invalid"] = 503
-    minted, failed = _run(holder_credentials.provision_mind("quokka", "uuid-1234", "sloan"))
-    assert "inference proxy" in failed
-    assert not _value(hive["shared"], "PROXY_TOKEN_QUOKKA")
-    proxy = holder_credentials.SERVICES["proxy"]
-    service["state"]["holders"] = []
-
-    rows = _run(holder_credentials.holder_rows(proxy))
-    assert [(r["holder"], r["rotatable"]) for r in rows] == [("quokka", True)]
-
-    del service["state"]["refuse"]["proxy.invalid"]
-    _run(holder_credentials.rotate(proxy, "quokka"))
-
-    last = [call for call in service["sent"] if call.get("token")][-1]
-    assert last["url"] == "http://proxy.invalid:8899/credentials/quokka"
-    assert last["role"] == "mind"
-    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA") == last["token"]
