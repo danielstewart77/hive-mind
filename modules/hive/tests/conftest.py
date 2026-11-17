@@ -14,6 +14,59 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 
+# The suite connects to nothing but this machine and its own scratch database.
+#
+# Every service the console calls falls back to its address on the hive's own
+# network. On a bare host those names do not resolve, so a test that creates a
+# mind without asking for the fake gateway simply fails to register it. Inside
+# a container on that network they do resolve and the container's credentials
+# are real: on 2026-11-17 a run there registered atlas, bilby-two and borealis
+# on the live broker. Every connection that is not to loopback or to the
+# scratch database's own server is therefore refused, before anything imports
+# the code under test, so a run in a container sees the network a run on a
+# host sees. The fakes all listen on loopback and are unaffected.
+import ipaddress  # noqa: E402
+import socket  # noqa: E402
+from urllib.parse import urlsplit  # noqa: E402
+
+
+def _scratch_database_addresses() -> set[str]:
+    try:
+        host = urlsplit(os.environ.get("HIVE_DATA_TEST_ADMIN_DSN", "")).hostname
+        return {info[4][0] for info in socket.getaddrinfo(host, None)} if host else set()
+    except (ValueError, OSError):
+        return set()
+
+
+_SCRATCH_DATABASE = _scratch_database_addresses()
+
+
+def _refuse_unless_local(address) -> None:
+    if not isinstance(address, tuple) or not address:
+        return  # a unix socket: this machine by construction
+    host = str(address[0])
+    try:
+        local = ipaddress.ip_address(host.split("%")[0]).is_loopback
+    except ValueError:
+        local = host == "localhost"
+    if not local and host not in _SCRATCH_DATABASE:
+        raise ConnectionRefusedError(
+            f"the console suite connects to no live service: {host}"
+        )
+
+
+class _LocalOnlySocket(socket.socket):
+    def connect(self, address):
+        _refuse_unless_local(address)
+        return super().connect(address)
+
+    def connect_ex(self, address):
+        _refuse_unless_local(address)
+        return super().connect_ex(address)
+
+
+socket.socket = _LocalOnlySocket
+
 from hive_site import testing  # noqa: E402
 
 
