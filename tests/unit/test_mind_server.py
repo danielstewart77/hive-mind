@@ -16,7 +16,9 @@ import pty
 import shutil
 import struct
 import subprocess
+import sys
 import termios
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +28,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from minds import mind_server, models_api, pty_attach, runtime_api
-from minds.harness import claude_cli, codex_cli, dsh_cli
+from minds.harness import claude_cli, codex_cli, dsh_cli, rotation_hooks
 
 SESSION = {"Authorization": "Bearer test-mind-session-token"}  # secret-guard: allow
 ADMIN_TOKEN = "test-admin-token"  # secret-guard: allow
@@ -759,13 +761,12 @@ def test_a_default_harness_without_a_model_it_offers_is_refused_and_nothing_writ
 def test_a_conversations_rotation_threshold_is_its_own_models_share_of_its_window(
     homes, proxy, monkeypatch, tmp_path,
 ):
-    """Both the window and the share of it belong to the model, and both come
-    off the proxy's row for the conversation's own model — not the default
-    model's, and not the mind's."""
+    """Capacity follows the measured model while the saved percentage is mind-local."""
     runtime = tmp_path / "runtime.yaml"
     runtime.write_text(
         "name: example\nmind_id: example\nharness: claude_cli\n"
         "default_model: claude-sonnet-5\nmodel_context_window: 200000\n"
+        "rotation_threshold_percent: 40\n"
     )
     monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
     proxy({"claude": [{"id": "claude-sonnet-5", "context_window": 200_000,
@@ -784,20 +785,31 @@ def test_a_conversations_rotation_threshold_is_its_own_models_share_of_its_windo
 
     env = spawner.calls[0]["env"]
     assert env["HIVE_MODEL_CONTEXT_WINDOW"] == str(1_000_000)
-    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 15 // 100)
+    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 40 // 100)
+    assert env["HIVE_MODEL"] == "claude-opus-5"
+    assert env["HIVE_HARNESS"] == "claude"
+    assert env["HIVE_RUNTIME_PATH"] == str(runtime.resolve())
 
 
-async def test_a_share_declared_after_a_spawn_is_picked_up_by_the_next(proxy):
-    """A row missing its share is not remembered for the TTL: the operator who
-    fills it in a minute later is not ignored for ten."""
-    fake = proxy({"dsh": [{"id": "qwen", "context_window": 131_072}]})
+async def test_a_saved_percentage_change_bypasses_the_capacity_cache(
+    proxy, tmp_path, monkeypatch,
+):
+    runtime = tmp_path / "runtime.yaml"
+    runtime.write_text(
+        "name: example\nmind_id: example\nharness: dsh_cli\n"
+        "default_model: qwen\nrotation_threshold_percent: 75\n"
+    )
+    monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
+    fake = proxy({"dsh": [{"id": "qwen", "context_window": 131_072,
+                            "rotation_threshold_percent": 20}]})
 
-    await mind_server.conversation_env("dsh", "qwen")
-    fake.listings["dsh"] = [{"id": "qwen", "context_window": 131_072,
-                             "rotation_threshold_percent": 50}]
+    first = await mind_server.conversation_env("dsh", "qwen")
+    runtime_api.update_settings(runtime, {"rotation_threshold_percent": 40})
     second = await mind_server.conversation_env("dsh", "qwen")
 
-    assert second["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 50 // 100)
+    assert first["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 75 // 100)
+    assert second["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 40 // 100)
+    assert len(fake.seen) == 1
 
 
 def test_a_dsh_pane_is_sized_by_its_models_own_window(
@@ -1061,9 +1073,17 @@ def equipped(homes, monkeypatch, tmp_path):
     (homes["claude"] / ".credentials.json").write_text("{}")
     (homes["codex"] / "config.toml").write_text(
         '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "auto_remember.sh"\n'
-        '[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "rotation_check.sh"\n'
         '[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
         'type = "command"\ncommand = "surface_inject.sh"\n')
+    runtime_path = homes["codex"] / "runtime.yaml"
+    runtime_path.write_text(
+        "name: example\nmind_id: example\nharness: codex\n"
+        "default_model: gpt-5\nrotation_threshold_percent: 75\n"
+    )
+    rotation_hooks.write_harness_hooks(
+        "codex", homes["codex"], runtime_path=runtime_path,
+        python=sys.executable, app_root=Path(__file__).resolve().parents[2],
+    )
     (homes["codex"] / "auth.json").write_text("{}")
     # dsh's hooks resolve under DSH_HOME, the way its adapter resolves it.
     (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
@@ -1261,6 +1281,97 @@ def test_startup_runs_the_skills_start_check_and_survives_its_failure(homes, mon
         assert client.get("/health").status_code == 200
 
     assert ran == ["ran"]
+
+
+def test_startup_refreshes_managed_rotation_hooks_in_provisioned_homes(homes):
+    claude = homes["claude"]
+    codex = homes["codex"]
+    dsh = homes["dsh"]
+    (claude / "settings.json").write_text(json.dumps({"operator": "preserved"}))
+    (codex / "config.toml").write_text('model_provider = "local"\n')
+    (dsh / "hooks.json").write_text(json.dumps({
+        "custom": "preserved", "hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "operator-stop"},
+        ]}]},
+    }))
+
+    mind_server._install_rotation_hooks()
+
+    claude_hooks = json.loads((claude / "settings.json").read_text())["hooks"]
+    claude_stop = " ".join(mind_server._hook_commands({"hooks": claude_hooks})["Stop"])
+    codex_config = tomllib.loads((codex / "config.toml").read_text())
+    codex_stop = " ".join(mind_server._hook_commands(codex_config)["Stop"])
+    dsh_config = json.loads((dsh / "hooks.json").read_text())
+    dsh_stop = " ".join(mind_server._hook_commands(dsh_config)["Stop"])
+
+    assert "operator" in json.loads((claude / "settings.json").read_text())
+    assert "rotation_hooks.py check" in claude_stop
+    assert tomllib.loads((codex / "config.toml").read_text())["model_provider"] == "local"
+    assert "rotation_hooks.py check" in codex_stop
+    assert dsh_config["custom"] == "preserved"
+    assert "operator-stop" in dsh_stop and "rotation_check.py" in dsh_stop
+
+
+def test_startup_leaves_a_home_that_runs_its_own_rotation_check_untouched(homes):
+    """A mind installed before the generated hooks keeps the check it has:
+    no second check beside it, and none of its copied scripts replaced."""
+    claude, codex, dsh = homes["claude"], homes["codex"], homes["dsh"]
+    (claude / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command",
+         "command": f"python3 {claude}/hooks/rotation_check.py"},
+    ]}]}}))
+    (codex / "config.toml").write_text(
+        "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\n"
+        'type = "command"\n'
+        f'command = "python3 {codex}/hooks/rotation_check.py"\n'
+    )
+    (dsh / "hooks").mkdir(exist_ok=True)
+    (dsh / "hooks" / "rotation_check.py").write_text("# this mind's own copy\n")
+    (dsh / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": f"bash {dsh}/hooks/rotation_check.sh"},
+    ]}]}}))
+    before = {path: path.read_bytes() for path in (
+        claude / "settings.json", codex / "config.toml", dsh / "hooks.json",
+        dsh / "hooks" / "rotation_check.py",
+    )}
+
+    mind_server._install_rotation_hooks()
+
+    assert {path: path.read_bytes() for path in before} == before
+    assert sorted(item.name for item in (dsh / "hooks").iterdir()) == ["rotation_check.py"]
+
+
+def test_startup_writes_nothing_into_a_dsh_home_whose_hook_file_is_elsewhere(
+    homes, monkeypatch, tmp_path,
+):
+    """dsh reads the file the environment names; a second hook file and a
+    folder of scripts written into its home would be run by nothing."""
+    dsh = homes["dsh"]
+    elsewhere = tmp_path / "mind hooks" / "hooks.json"
+    elsewhere.parent.mkdir()
+    elsewhere.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": f"bash {elsewhere.parent}/rotation_check.sh"},
+    ]}]}}))
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(elsewhere))
+    listing = sorted(item.name for item in dsh.iterdir())
+    named = elsewhere.read_bytes()
+
+    mind_server._install_rotation_hooks()
+
+    assert sorted(item.name for item in dsh.iterdir()) == listing
+    assert elsewhere.read_bytes() == named
+
+
+def test_startup_does_not_create_missing_codex_or_dsh_homes(homes, monkeypatch):
+    codex_home = homes["codex"].parent / "codex-not-provisioned"
+    dsh_home = homes["dsh"].parent / "dsh-not-provisioned"
+    monkeypatch.setattr(codex_cli, "CODEX_HOME", codex_home)
+    monkeypatch.setattr(dsh_cli, "DSH_HOME", dsh_home)
+
+    mind_server._install_rotation_hooks()
+
+    assert not codex_home.exists()
+    assert not dsh_home.exists()
 
 
 def test_an_unmeasured_models_window_is_omitted_not_zero(homes, proxy, monkeypatch):
@@ -1473,7 +1584,12 @@ def test_a_failed_codex_turn_runs_the_minds_rotation_check(
     client.post("/sessions/f1/message", headers=SESSION, json={"content": "one"})
 
     _, checks = _codex_turns_and_checks(spawner)
-    assert [c["argv"] for c in checks] == [["rotation_check.sh"]]
+    assert [c["argv"] for c in checks] == [[
+        sys.executable, str(Path(__file__).resolve().parents[2] / "minds/harness/rotation_hooks.py"),
+        "check", "--harness", "codex", "--runtime",
+        str(equipped["codex"] / "runtime.yaml"), "--app-root",
+        str(Path(__file__).resolve().parents[2]),
+    ]]
     payload = json.loads(checks[0]["proc"].stdin_bytes)
     assert (payload["hook_event_name"], payload["session_id"], payload["stop_reason"]) == (
         "Stop", "thread-f", "error")

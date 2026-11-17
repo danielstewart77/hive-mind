@@ -33,14 +33,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, os.environ.get("HIVE_MIND_APP_ROOT", "/usr/src/app"))
 
-import dsh_transcript  # noqa: E402
-import hive_mind_env as hive  # noqa: E402
+import dsh_transcript
+import hive_mind_env as hive
+
+from minds import rotation_policy
 
 NAME = "rotation_check"
 
@@ -121,23 +127,52 @@ def measure(event: dict, entries: list[dict]) -> dict:
     return {"tokens": None, "kind": "none", "model": model, "window": window}
 
 
-def threshold() -> int | None:
-    try:
-        value = int(os.environ.get("HIVE_ROTATION_THRESHOLD_TOKENS") or 0)
-    except ValueError:
+def _runtime_path() -> Path:
+    return Path(os.environ.get("HIVE_RUNTIME_PATH") or (hive.MIND_DIR / "runtime.yaml"))
+
+
+def _positive_capacity(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
-    return value if value > 0 else None
+    return value
+
+
+def _proxy_window(model: str) -> int | None:
+    """Look up an unspawned model through this mind's credential-filtered listing."""
+    root, key = hive.proxy()
+    if not root or not key or not model:
+        return None
+    url = f"{root}/v1/models?{urllib.parse.urlencode({'harness': 'dsh'})}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=6) as response:
+            payload = json.loads(response.read().decode())
+    except Exception:  # noqa: BLE001 — unknown capacity disables proactive rotation
+        return None
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("id") == model:
+            return _positive_capacity(row.get("context_window"))
+    return None
 
 
 def _window(measured: dict) -> int | None:
-    for raw in (measured.get("window"), os.environ.get("HIVE_MODEL_CONTEXT_WINDOW")):
+    # A dsh context event is the strongest evidence: its harness has already
+    # measured this model. Spawn metadata is usable only for that same model.
+    actual = _positive_capacity(measured.get("window"))
+    if actual is not None:
+        return actual
+    model = str(measured.get("model") or "")
+    spawned_model = os.environ.get("HIVE_MODEL", "")
+    spawned_harness = os.environ.get("HIVE_HARNESS", "")
+    if model and model == spawned_model and spawned_harness in ("", "dsh"):
         try:
-            value = int(raw or 0)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return None
+            raw = os.environ.get("HIVE_MODEL_CONTEXT_WINDOW")
+            if raw and re.fullmatch(r"[0-9]+", raw):
+                return _positive_capacity(int(raw))
+        except ValueError:
+            pass
+    return _proxy_window(model)
 
 
 def _entries(event: dict) -> list[dict]:
@@ -195,8 +230,14 @@ def assess(event: dict) -> dict | None:
         return None
     entries = _entries(event)
     measured = measure(event, entries)
-    limit = threshold()
+    policy = rotation_policy.read_policy(_runtime_path())
+    percentage = policy["percentage"] if policy["status"] == "ok" else None
     window = _window(measured)
+    limit = rotation_policy.effective_threshold(window, percentage)
+    if policy["status"] != "ok":
+        reason = policy.get("reason") or "invalid_value"
+        hive.log(NAME, f"invalid_runtime_policy code=invalid_runtime_policy "
+                       f"reason={reason} sid={conversation_id}")
     client_type = os.environ.get("SURFACE", "")
     client_ref = os.environ.get("CLIENT_REF", "")
     comms_url, bearer = hive.comms()
@@ -204,13 +245,13 @@ def assess(event: dict) -> dict | None:
         report = {
             "client_type": client_type, "client_ref": client_ref,
             "conversation_id": conversation_id, "kind": measured["kind"],
-            "tokens": int(measured["tokens"] or 0),
+            "tokens": measured["tokens"],
             "model": measured["model"] or None,
             "surface": os.environ.get("HIVE_SURFACE") or None,
         }
         if window:
             report["window"] = window
-        if limit:
+        if limit is not None:
             report["threshold"] = limit
         try:
             hive.request("POST", f"{comms_url}/sessions/context", bearer, report)
@@ -218,7 +259,7 @@ def assess(event: dict) -> dict | None:
             hive.log(NAME, f"context report failed sid={conversation_id}: {exc}")
     overflowed = event.get("error_code") == hive.CONTEXT_WINDOW_EXCEEDED
     rotate = bool(
-        not overflowed and limit and measured["tokens"] is not None
+        not overflowed and limit is not None and measured["tokens"] is not None
         and (event.get("force") or measured["tokens"] >= limit)
     )
     return {"conversation_id": conversation_id, "measured": measured,
