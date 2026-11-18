@@ -130,7 +130,29 @@ def write_profile(mind: str, minds_dir: Path, dsh_root: str = DEFAULT_DSH_ROOT) 
     directory = profile_dir(mind, minds_dir)
     directory.mkdir(parents=True, exist_ok=True)
     _write_once(directory / "package.json", _manifest())
-    _write_once(directory / "cordis.patch.yml", _PATCH_LAYER)
+    patch = _PATCH_LAYER
+    runtime_path = Path(minds_dir) / mind / "runtime.yaml"
+    if runtime_path.is_file():
+        import yaml
+        runtime = yaml.safe_load(runtime_path.read_text()) or {}
+        connection = runtime.get("provider_connection") or {}
+        if connection and connection.get("kind") != "proxy":
+            kind = connection.get("kind")
+            api = connection.get("api_format")
+            route = kind if kind in {"openai", "anthropic"} else "hive-provider"
+            protocol = "anthropic-messages" if api == "anthropic" else "openai-responses" if kind == "openai" else "openai-completions"
+            declaration = {"displayName": connection.get("name", "Mind provider"),
+                           "api": protocol, "baseURL": "__ENDPOINT__",
+                           "apiKeyEnv": "__KEYREF__"}
+            # The declaration names a reference, never a literal token.
+            # Native provider routes retain pi-ai's installed model metadata.
+            if route == "hive-provider":
+                declaration["defaultContextWindow"] = "__WINDOW__"
+            patch = yaml.safe_dump([
+                {"id": "llm-pi-ai", "config": {"providers": {route: declaration}}},
+                {"id": "agent-default-model", "config": {"provider": route, "model": "__MODEL__"}},
+            ], sort_keys=False).replace("__ENDPOINT__", "!!js process.env.DSH_PROXY_BASE_URL").replace("__WINDOW__", "!!js Number(process.env.DSH_MODEL_CONTEXT_WINDOW) || undefined").replace("__MODEL__", "!!js process.env.DSH_MODEL").replace("__KEYREF__", "!!js process.env.HIVE_PROVIDER_TOKEN && 'HIVE_PROVIDER_TOKEN' || undefined")
+    _write_once(directory / "cordis.patch.yml", patch)
     _write_once(directory / "cordis.yml", _ROOT_CONFIG)
     links = {}
     for package, path in LINKS.items():

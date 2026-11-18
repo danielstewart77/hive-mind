@@ -119,20 +119,28 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
     policy = read_policy(runtime)
     percentage = policy["percentage"] if policy["status"] == "ok" else None
     env = _mind_env(path)
+    connection = runtime.get("provider_connection") or {}
+    direct_rows = None
+    if connection and connection.get("kind") != "proxy":
+        from minds import provider_catalog
+        direct_rows = await provider_catalog.fetch(connection, env)
     base_url = _first_env(_BASE_URL_VARS, env)
     key = _first_env(_KEY_VARS, env)
-    if not base_url or not key:
+    if direct_rows is None and (not base_url or not key):
         return []
     family = _harness_family(str(harness or runtime.get("harness") or ""))
     url = f"{_proxy_root(base_url)}{_LISTING_PATH}?harness={family}"
     try:
-        async with aiohttp.ClientSession(
-            headers={"Authorization": f"Bearer {key}"}
-        ) as session:
-            async with session.get(url, timeout=_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return []
-                payload = await resp.json()
+        if direct_rows is not None:
+            payload = {"data": direct_rows}
+        else:
+            async with aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {key}"}
+            ) as session:
+                async with session.get(url, timeout=_TIMEOUT) as resp:
+                    if resp.status != 200:
+                        return []
+                    payload = await resp.json()
     except Exception:
         return []
 

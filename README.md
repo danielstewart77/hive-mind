@@ -124,3 +124,9 @@ Skills are per-mind and live in each mind's `.claude` folder (`minds/<name>/.cla
 ## License
 
 This is free and unencumbered software released into the public domain. See [https://unlicense.org](https://unlicense.org).
+
+## Configured inference connections
+
+A Mind’s runtime.yaml can contain a provider_connection snapshot with kind, api_format, and base_url. The Hive website owns the named connection and supplies HIVE_PROVIDER_TOKEN from that Mind’s own credential. Direct model discovery uses the selected endpoint; native OpenAI and Anthropic model sizing comes from the installed DSH catalog, and Ollama sizing comes from its model metadata. Custom providers must publish context_window metadata for DSH to size the request safely.
+
+The DSH profile generator reads the snapshot using the runtime’s PyYAML dependency and selects the corresponding API protocol. Tokens remain environment references in generated profiles. Unauthenticated custom endpoints require the DSH keyless-provider fix; a missing named credential still fails.

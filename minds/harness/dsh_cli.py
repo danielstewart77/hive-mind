@@ -578,7 +578,7 @@ DEFAULT_PERMISSION_MODE = "danger-full-access"
 PROXY_KEY_ENV = "HIVE_PROXY_KEY"
 
 #: The env names a mind's own block may carry its proxy credential under.
-_PROXY_KEY_SOURCES = ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
+_PROXY_KEY_SOURCES = ("HIVE_PROVIDER_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
 
 #: And its endpoint.
 _PROXY_URL_SOURCES = ("DSH_PROXY_BASE_URL", "OLLAMA_BASE_URL", "OPENAI_BASE_URL",
@@ -717,6 +717,7 @@ def _model_env(model: str, window: str | int | None) -> dict[str, str]:
     key = _first_env(_PROXY_KEY_SOURCES)
     if key:
         env[PROXY_KEY_ENV] = key
+        env["HIVE_PROVIDER_TOKEN"] = key
     # Not optional either. The profile's one provider route lists no models, so
     # this number is what sizes the request, and it is the window of the model
     # this conversation is on right now. The mind's own file names none: one
@@ -725,6 +726,11 @@ def _model_env(model: str, window: str | int | None) -> dict[str, str]:
     # run: guessing one is how a conversation overflows without ever rotating.
     declared = _declared(window)
     if not declared:
+        connection = RUNTIME.get("provider_connection") or {}
+        if connection.get("kind") in {"openai", "anthropic"}:
+            # Direct native routes use their installed pi-ai model catalog;
+            # they are not dependent on proxy-only metadata extensions.
+            return env
         raise RuntimeError(
             f"the inference proxy declares no context window for {model}; "
             "a model without one cannot be run"
