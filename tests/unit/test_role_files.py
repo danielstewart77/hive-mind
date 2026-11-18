@@ -22,7 +22,9 @@ import json
 import os
 import shlex
 import subprocess
+import time
 import tomllib
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,7 @@ import pytest
 import minds.harness.claude_cli as claude
 import minds.harness.codex_cli as codex
 import minds.harness.dsh_cli as dsh
+from core import hive_logging
 from core.hive_logging import recent_errors
 from minds import skill_reference, skills_api
 from minds.harness import role_files, role_guard
@@ -62,8 +65,10 @@ def mind(monkeypatch, tmp_path):
     monkeypatch.setattr(claude, "CONFIG_DIR", homes["claude"])
     monkeypatch.setattr(codex, "CODEX_HOME", homes["codex"])
     monkeypatch.setattr(dsh, "DSH_HOME", homes["dsh"])
-    # What this process has already said belongs to whichever test ran last.
+    # What this process has already said, and its error feed, belong to
+    # whichever test ran last: each test reads only its own mind's lines.
     monkeypatch.setattr(role_files, "_SAID", {})
+    monkeypatch.setattr(hive_logging, "_ERRORS", deque(maxlen=100))
     return homes
 
 
@@ -95,8 +100,10 @@ def _prepare(harness: str) -> dict[str, str]:
     return env
 
 
-def _said() -> list[str]:
-    return [error["message"] for error in recent_errors()["errors"]]
+def _said(harness: str) -> list[str]:
+    """The lines in the mind's error feed about this harness."""
+    return [error["message"] for error in recent_errors()["errors"]
+            if f"({harness})" in error["message"]]
 
 
 def _start(harness: str, homes: dict) -> tuple[dict[str, str], dict[str, str]]:
@@ -157,10 +164,13 @@ def test_a_granted_hook_or_skill_that_cannot_be_put_in_place_is_named_in_the_err
 
     commands, _env = _start(harness, mind)
 
-    said = [error["message"] for error in recent_errors()["errors"]]
-    assert any(f"hook {hook} is granted by a role" in line for line in said)
-    assert any("hook rotation_check is granted by a role" in line for line in said)
-    assert any(f"skill {skill} is granted by a role" in line for line in said)
+    said = _said(harness)
+    assert any(f"hook {hook} is granted by a role, but the repository does not track it"
+               in line for line in said)
+    assert any("hook rotation_check is granted by a role and is not installed from here"
+               in line for line in said)
+    assert any(f"skill {skill} is granted by a role and is not there to use" in line
+               for line in said)
     # And the conversation starts with what could be put in place.
     assert "surface_inject" in commands
 
@@ -174,9 +184,8 @@ def test_a_tracked_hook_whose_files_cannot_be_written_is_named_in_the_error_feed
 
     _start(harness, mind)
 
-    said = [error["message"] for error in recent_errors()["errors"]]
-    assert any("skill_render_check" in line and "not installed" in line and f"({harness})" in line
-               for line in said)
+    assert any("skill_render_check" in line and "not installed" in line
+               for line in _said(harness))
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -197,7 +206,7 @@ def test_a_tracked_hook_found_registered_twice_is_named_in_the_error_feed(
     _prepare(harness)
 
     assert any("hook time_inject is granted by a role and was not installed" in line
-               and "more than once" in line for line in _said())
+               and "more than once" in line for line in _said(harness))
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -213,7 +222,7 @@ def test_a_hooks_file_that_cannot_be_read_is_named_in_the_error_feed(
         _prepare(harness)
 
     assert any("prose_reminder" in line and "not installed" in line and str(hooks_file) in line
-               for line in _said())
+               for line in _said(harness))
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -229,8 +238,8 @@ def test_an_installed_hook_the_mind_replaced_with_a_link_of_its_own_is_named_in_
 
     _prepare(harness)
 
-    assert any("time_inject.sh" in line and "is a link the mind made" in line
-               for line in _said())
+    assert any("time_inject.sh under this mind's role-hooks folder is a link" in line
+               for line in _said(harness))
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -245,7 +254,7 @@ def test_a_granted_skill_whose_name_no_harness_would_load_is_named_in_the_error_
 
     _prepare(harness)
 
-    assert any("skill group/inner is granted by a role" in line for line in _said())
+    assert any("skill group/inner is granted by a role" in line for line in _said(harness))
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -257,7 +266,7 @@ def test_grants_that_are_not_lists_of_names_are_named_in_the_error_feed(
     commands, _env = _start(harness, mind)
 
     assert any("the hooks this mind's roles grant came from the gateway as str" in line
-               for line in _said())
+               for line in _said(harness))
     # Not taken letter by letter either: nothing was registered.
     assert "time_inject" not in commands
 
@@ -273,16 +282,55 @@ def test_a_conversation_that_starts_before_its_files_are_in_place_says_so(
         try:
             # A terminal pane's timeout, shortened: the wait for files is a
             # third of it.
+            began = time.monotonic()
             if harness == "dsh":
                 dsh._role_hooks_env({}, timeout=0.3)
             else:
                 (claude if harness == "claude" else codex)._role_guard({}, timeout=0.3)
-            said = _said()
+            waited = time.monotonic() - began
+            said = _said(harness)
         finally:
             fcntl.flock(held, fcntl.LOCK_UN)
-    for worker, _out in list(role_files._RUNNING.values()):
+    for worker, _began in list(role_files._RUNNING.values()):
         worker.join(10)
 
-    assert any(f"({harness})" in line and "started without waiting" in line for line in said)
+    assert any("started without waiting" in line for line in said)
+    # A third of the caller's timeout, not the longest wait there is.
+    assert waited < role_files.DEADLINE / 2
     # And what was waiting is in place once the lock is let go.
     assert (mind[harness] / "role-hooks" / "time_inject.sh").is_file()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_granted_hook_registered_to_run_a_script_that_is_not_there_is_named_in_the_error_feed(
+        monkeypatch, mind, tmp_path, harness):
+    # The mind registers the hook itself, at a script that has since gone.
+    gone = tmp_path / "gone" / "time_inject.sh"
+    name, text = OWN[harness]
+    (mind[harness] / name).write_text(
+        text.replace("Stop", "UserPromptSubmit").replace("/own/my_own.sh", str(gone)))
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+
+    _prepare(harness)
+
+    assert any(f"hook time_inject is granted by a role and is registered to run {gone}"
+               in line for line in _said(harness))
+
+
+def test_a_dsh_mind_whose_hooks_file_is_named_by_its_environment_gets_its_hooks_there(
+        monkeypatch, mind, tmp_path):
+    """As Stash's is: the file dsh is handed is made from the one the
+    environment names, so that is where a granted hook has to arrive."""
+    named = tmp_path / "minds" / "probe" / "hooks" / "hooks.json"
+    named.parent.mkdir()
+    named.write_text(OWN["dsh"][1])
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(named))
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+
+    commands, env = _start("dsh", mind)
+
+    told = subprocess.run(
+        commands["time_inject"], shell=True, input="{}", text=True, capture_output=True,
+        timeout=30, env={"PATH": os.environ["PATH"], **env, "COMMS_URL": "",
+                         "HIVE_MIND_TZ": "America/Chicago"}).stdout
+    assert "Current date and time" in told
