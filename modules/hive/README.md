@@ -72,6 +72,10 @@ The supplied key may already be in use. Hive accepts a key the proxy accepts
 and shows a warning when it matches an existing local proxy credential.
 It uses that key for the new Mind without changing other Minds' keys.
 
+An existing local Mind's detail page also accepts a pasted proxy key. Saving
+checks and stores the key without returning it; restart the Mind afterward
+to load the new value into its container.
+
 Build the DSH tree through the Hive installer before creating a DSH Mind.
 Its generated container mounts that tree read-only at `/opt/dsh` from
 `HOST_DSH_DIR`, defaulting to `${HOST_PROJECT_DIR}/dsh`. Each Mind has its

@@ -74,6 +74,31 @@ def body(key, harness="codex_cli", provider="openai"):
             "default_model": "fixture-model", "proxy_key": key}
 
 
+def test_existing_mind_can_save_a_reused_proxy_key_without_exposing_it(creation, caplog):
+    client, minds, env, _, _ = creation
+    (minds / "existing/runtime.yaml").write_text("name: existing\nowner: daniel\nremote: false\n")
+    env.write_text(env.read_text() + f"PROXY_TOKEN_OTHER={KEY}\n")
+    response = client.put("/api/minds/existing/proxy-key", json={"proxy_key": KEY})
+    assert response.status_code == 200, response.text
+    assert response.json()["saved"] is True
+    assert response.json()["restart_required"] is True
+    assert response.json()["warning"]
+    assert credentials_data._read_env_value(env, "PROXY_TOKEN_EXISTING") == KEY
+    assert credentials_data._read_env_value(env, "PROXY_TOKEN_OTHER") == KEY
+    assert KEY not in response.text and KEY not in caplog.text
+
+
+def test_rejected_key_leaves_an_existing_minds_key_unchanged(creation):
+    client, minds, env, _, state = creation
+    (minds / "existing/runtime.yaml").write_text("name: existing\nowner: daniel\nremote: false\n")
+    env.write_text(env.read_text() + "PROXY_TOKEN_EXISTING=previous-key\n")
+    before = env.read_text()
+    state["proxy_status"] = 401
+    response = client.put("/api/minds/existing/proxy-key", json={"proxy_key": KEY})
+    assert response.status_code == 400
+    assert env.read_text() == before
+
+
 @pytest.mark.parametrize("harness,provider", [
     ("codex_cli", "openai"), ("claude_cli", "anthropic"),
     ("dsh", "openai"), ("dsh", "anthropic"), ("dsh", "ollama"),
