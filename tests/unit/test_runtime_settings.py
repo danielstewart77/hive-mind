@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from minds import runtime_api, runtime_settings
+from minds import rotation_policy, runtime_api, runtime_settings
 
 DSH_RUNTIME = """\
 # Cypher's runtime configuration.
@@ -232,6 +232,78 @@ def client(dsh_file, monkeypatch):
         app, path=dsh_file, mind_id="mind-1", log=logging.getLogger("test")
     )
     return TestClient(app, raise_server_exceptions=False)
+
+
+def _admin_less(dsh_file, monkeypatch, **held):
+    """A mind's settings routes as a mind made from the console has them: no
+    admin token of any kind in its environment, only what `held` gives it."""
+    for variable in ("MIND_ADMIN_TOKEN", "COMMS_ADMIN_BEARER_TOKEN", "COMMS_BEARER_TOKEN"):
+        monkeypatch.delenv(variable, raising=False)
+    for variable, value in held.items():
+        monkeypatch.setenv(variable, value)
+    app = FastAPI()
+    runtime_api.install_runtime_routes(
+        app, path=dsh_file, mind_id="mind-1", log=logging.getLogger("test")
+    )
+    return TestClient(app, raise_server_exceptions=False)
+
+
+class TestAMindThatHoldsNoAdminToken:
+    """Daniel, 2026-11-17: "No such thing as lockdown ... we can always change
+    settings in a settings page." A mind made from the console holds no admin
+    credential; the console sends it its own key, and it saves what it is
+    sent."""
+
+    def test_it_saves_a_setting_sent_with_its_own_key_and_that_is_the_value_it_reads(
+        self, dsh_file, monkeypatch
+    ):
+        client = _admin_less(dsh_file, monkeypatch, COMMS_BEARER_TOKEN="this-minds-own-key")  # secret-guard: allow
+
+        response = client.patch(
+            "/runtime/settings",
+            json={"settings": {"rotation_threshold_percent": 30}},
+            headers={"Authorization": "Bearer this-minds-own-key"},  # secret-guard: allow
+        )
+
+        assert response.status_code == 200, response.text
+        assert runtime_api.load_runtime(dsh_file)["rotation_threshold_percent"] == 30
+        # What the rotation check reads before every turn.
+        assert rotation_policy.read_policy(dsh_file)["percentage"] == 30
+        shown = client.get(
+            "/runtime/settings", headers={"Authorization": "Bearer this-minds-own-key"}  # secret-guard: allow
+        ).json()
+        assert shown["rotation_threshold_percent"] == 30
+
+    def test_its_model_list_answers_to_the_same_key_as_its_settings(
+        self, dsh_file, monkeypatch
+    ):
+        """The Settings card asks for the models with the bearer it saves
+        with; a card that can save and cannot list has an empty picker."""
+        from starlette.requests import Request
+
+        _admin_less(dsh_file, monkeypatch, COMMS_BEARER_TOKEN="this-minds-own-key")  # secret-guard: allow
+        runtime_api._token_cache.clear()
+
+        def asked_with(bearer):
+            return runtime_api.authorize_gateway(
+                Request({"type": "http", "path": "/models", "headers": [
+                    (b"authorization", f"Bearer {bearer}".encode())]}),
+                dsh_file.parent)
+
+        assert asked_with("this-minds-own-key") is None  # secret-guard: allow
+        assert asked_with("another-minds-key").status_code == 401  # secret-guard: allow
+
+    def test_it_refuses_any_other_key_and_saves_nothing(self, dsh_file, monkeypatch):
+        client = _admin_less(dsh_file, monkeypatch, COMMS_BEARER_TOKEN="this-minds-own-key")  # secret-guard: allow
+
+        refused = client.patch(
+            "/runtime/settings",
+            json={"settings": {"rotation_threshold_percent": 30}},
+            headers={"Authorization": "Bearer another-minds-key"},  # secret-guard: allow
+        )
+
+        assert refused.status_code == 401
+        assert "rotation_threshold_percent" not in runtime_api.load_runtime(dsh_file)
 
 
 class TestRoutes:

@@ -709,15 +709,35 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
     session credential still answers them. Configuration writes keep
     `authorize_admin`.
     """
-    admin = admin_token()
+    # The console's credential, whichever this mind takes: a mind made from
+    # the console holds no admin token and is sent its own key, and its
+    # model list is asked for with the same bearer as its settings.
+    admin = _console_credential()
     if admin and any(tokens_match(t, admin) for t in presented_bearers(request)):
         return None
     return authorize_session(request, mind_dir)
 
 
+def _console_credential() -> str:
+    """What the console is expected to present: the admin token where this
+    mind holds one, otherwise this mind's own key. Never both."""
+    return admin_token() or os.environ.get("COMMS_BEARER_TOKEN", "").strip()
+
+
 def authorize_admin(request: Request) -> JSONResponse | None:
-    """Guard a config-write route. None means the caller may proceed."""
-    expected = admin_token()
+    """Guard a config-write route. None means the caller may proceed.
+
+    A mind that holds an admin token accepts that and nothing else here: not
+    its session credential, which every chat turn carries. A mind that holds
+    none - one made from the console, which is given no credential that
+    opens anybody else's conversations (DECIDED 2026-11-15, Daniel) - accepts
+    its own key, the one it was issued when it was made and presents to the
+    gateway. The console holds that key for it and sends it once the person
+    signed in has been allowed by their account. Nothing new is issued for
+    this (Daniel, 2026-11-18: "A mind has a key and that is it"). A mind with
+    neither refuses rather than opens.
+    """
+    expected = _console_credential()
     if not expected:
         return JSONResponse(
             {"error": "no admin token configured on this mind"}, status_code=503
@@ -753,7 +773,7 @@ async def register_with_broker(path: Path, *, mind_name: str, mind_id: str, log)
     # by which the gateway learns this mind's credential, that mind is
     # unreachable — which is why the line below is an error rather than the
     # note it used to be.
-    # A mind created locked down holds no admin credential and registers
+    # A mind made from the console holds no admin credential and registers
     # itself with its own, which the gateway accepts for its own row.
     token = (
         os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
