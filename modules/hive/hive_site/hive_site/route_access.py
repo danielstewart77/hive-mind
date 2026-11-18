@@ -328,11 +328,26 @@ def _wants_page(route: BaseRoute, method: str) -> bool:
     )
 
 
-def _refusal(why: str, page: bool) -> Response:
+#: The parameters of an owner rule that name a mind.
+MIND_PARAMS = frozenset({"name", "mind_id"})
+NO_SUCH_MIND = "No such mind."
+
+
+def _refusal(why: str, page: bool, mind: bool = False) -> Response:
+    """`mind`: the refusal is of a mind to somebody who neither owns it nor
+    is an admin. They are answered as though it were not there (Daniel,
+    2026-11-17: "If this mind is not owned by me, I can't see the mind at
+    all"), and a mind that really is not there is answered the same, so the
+    answer tells them nothing about which it was."""
+    headers = {REFUSAL_HEADER: why}
+    if mind:
+        if page:
+            return HTMLResponse(
+                f"<h1>Not found</h1><p>{NO_SUCH_MIND}</p>", 404, headers=headers)
+        return JSONResponse({"detail": NO_SUCH_MIND}, 404, headers=headers)
     message = (
         "This needs an admin." if why == ADMIN else "That mind is not yours."
     )
-    headers = {REFUSAL_HEADER: why}
     if page:
         return HTMLResponse(f"<h1>Not allowed</h1><p>{message}</p>", 403, headers=headers)
     return JSONResponse({"detail": message}, 403, headers=headers)
@@ -545,5 +560,5 @@ class AccessMiddleware:
         param = rule.param or ""
         owner = await self.table.resolvers[param](str(params.get(param, "")))
         if owner is None or owner != user.get("username"):
-            return _refusal(OWNER, page)
+            return _refusal(OWNER, page, mind=param in MIND_PARAMS)
         return None

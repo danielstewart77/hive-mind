@@ -37,8 +37,8 @@ async def admin_headers(target_url: str) -> dict[str, str]:
     if await configuration_data.withholds_admin_credential(target_url):
         raise HTTPException(
             status_code=503,
-            detail="this mind was created locked down and is not sent the hive's "
-            "admin credential",
+            detail="this mind is not sent the hive's admin credential, so its "
+            "settings cannot be read or changed from here",
         )
     token = os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")
     if not token:

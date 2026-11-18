@@ -377,9 +377,11 @@ def scaffold_internal_mind(
         "prompt_files": ["prompts/common.md", "prompts/harness.md"],
         "startup": {"skip_host_credentials": False, "sync_repo_config": True},
         "transport": {"type": shape["transport"]},
-        # Created locked down: the console sends this mind no admin
-        # credential, and its folder, runtime.yaml and compose file are
-        # root's. Read by the console, never by the mind.
+        # Held back from the hive's admin credential, with its folder,
+        # runtime.yaml and compose file root's, until the gateway has said
+        # whose it is: `open_mind_to_its_owner` takes this line and all of
+        # that away for a mind of the person that credential is kept for.
+        # Read by the console, never by the mind.
         "locked_down": True,
     }
     if is_dsh:
@@ -835,6 +837,78 @@ def _mind_uid() -> int:
         return int(raw) if raw else DEFAULT_MIND_UID
     except ValueError as exc:
         raise ValueError(f"HIVE_MIND_UID is not a uid: {raw!r}") from exc
+
+
+#: The variable, in the stack's env file and in a mind's container, that
+#: holds the hive's admin credential.
+ADMIN_CREDENTIAL_VARIABLE = "COMMS_ADMIN_BEARER_TOKEN"
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Write `path` whole or not at all: a fragment the stack file already
+    lists is read by every `docker compose` on this host, and one caught half
+    written fails the whole stack."""
+    scratch = path.with_name(f".{path.name}.new")
+    try:
+        scratch.write_text(text)
+        os.replace(scratch, path)
+    finally:
+        scratch.unlink(missing_ok=True)
+
+
+def open_mind_to_its_owner(name: str) -> None:
+    """Make a mind scaffolded here an ordinary mind of its owner's.
+
+    Daniel, 2026-11-17: "No such thing as lockdown." And 2026-11-18: "Rip
+    that code out." For a mind whose owner is the person the hive's admin
+    credential is kept for, nothing of the lock is left: no `locked_down`
+    line, the credential in its container as every older mind of theirs has
+    it - which is what lets its Settings card reach it - and its own folder
+    its own to write, so the setting it is sent is one it can save. Its
+    compose folder and the session credential the console registered stay
+    read-only inside it: what it is started with is not its to rewrite.
+
+    Only for such a mind, and the caller is who knows: the gateway marks it
+    (`admin_credential_allowed`). A mind made for anyone else is left as
+    `scaffold_internal_mind` wrote it, because that credential opens every
+    person's conversations (DECIDED 2026-11-15, Daniel: a mind not owned by
+    him never reaches his credentials).
+
+    Before its container exists, never after: this console writes as root,
+    and from here on the folder belongs to the mind.
+    """
+    if not _MIND_NAME_RE.fullmatch(name or ""):
+        raise ValueError("Invalid Mind name")
+    mind_dir = HIVE_MIND_MINDS_CONFIG_DIR / name
+    runtime_path = mind_dir / "runtime.yaml"
+    compose_path = mind_dir / "container" / "compose.yaml"
+    for written in (mind_dir, runtime_path, compose_path):
+        if os.path.islink(written):
+            raise ValueError(f"minds/{name} is not as this console wrote it")
+    runtime = yaml.safe_load(runtime_path.read_text())
+    compose = yaml.safe_load(compose_path.read_text())
+    service = compose["services"][name]
+    own = f"/usr/src/app/minds/{name}"
+    host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
+
+    runtime.pop("locked_down", None)
+    held = f"{ADMIN_CREDENTIAL_VARIABLE}="
+    service["environment"] = [
+        line for line in service["environment"] if not line.startswith(held)
+    ] + [f"{held}${{{ADMIN_CREDENTIAL_VARIABLE}}}"]
+    service["volumes"] = [
+        # The folder, not runtime.yaml alone: the mind saves a setting by
+        # writing a new file beside the old one and putting it in its place.
+        f"{host}:{own}:rw",
+        f"{host}/container:{own}/container:ro",
+        f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
+    ] + [spec for spec in service["volumes"] if not spec.startswith(f"{host}/")]
+
+    _replace_file(compose_path, yaml.safe_dump(compose, sort_keys=False))
+    _replace_file(runtime_path, yaml.safe_dump(runtime, sort_keys=False))
+    uid = _mind_uid()
+    os.chown(runtime_path, uid, uid)
+    os.chown(mind_dir, uid, uid)
 
 
 def is_locked_down(name: str) -> bool:
