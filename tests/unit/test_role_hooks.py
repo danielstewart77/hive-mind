@@ -13,6 +13,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -44,10 +45,10 @@ def _registered(harness: str, home: Path) -> list[tuple[str, str, int | None]]:
             for group in groups for item in group["hooks"]]
 
 
-def _run(command: str, **environ: str) -> str:
+def _run(command: str, payload: dict | None = None, **environ: str) -> str:
     """Run a registered command the way a harness does: through a shell,
-    with an empty payload, in an environment that names nothing."""
-    done = subprocess.run(command, shell=True, input="{}", text=True,
+    with its payload on stdin, in an environment that names nothing."""
+    done = subprocess.run(command, shell=True, input=json.dumps(payload or {}), text=True,
                           capture_output=True, timeout=30,
                           env={"PATH": os.environ["PATH"], **environ})
     return done.stdout
@@ -80,6 +81,48 @@ def test_a_mind_ends_with_every_named_hook_installed_and_registered(tmp_path, ha
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_an_installed_hook_has_the_files_and_arguments_it_runs_with(tmp_path, harness):
+    """Registered is not enough: each hook that needs a file beside it, or
+    is told its harness, does its work when its harness starts it."""
+    home = _home(tmp_path, harness)
+    state = tmp_path / "state"
+    role_hooks.install(harness, home, GENERAL, python=sys.executable)
+    command = {role_guard.hook_name(entry[1]): entry[1]
+               for entry in _registered(harness, home)}
+
+    # The prose reminder names the operator through a file beside it.
+    spoken = json.loads(_run(command["prose_reminder"], HIVE_SURFACE="telegram"))
+    assert "read aloud by TTS to the operator," in (
+        spoken["hookSpecificOutput"]["additionalContext"])
+
+    # The background snapshot records through a module beside it.
+    _run(command["bg_snapshot"],
+         {"session_id": "abc", "background_tasks": [{"id": "1", "status": "running"}]},
+         HIVE_SURFACE="terminal", AUTO_REMEMBER_LOG_DIR=str(state))
+    recorded = json.loads((state / "bgtasks-abc.json").read_text())
+    assert "running" in json.dumps(recorded)
+
+    # The capture hook is told its own harness and this repository, and
+    # reads the conversation its payload names.
+    assert shlex.split(command["training_capture"])[2:] == [
+        "--harness", harness, "--app-root", str(role_hooks.APP_ROOT)]
+    assert shlex.split(command["skill_telemetry"])[2:] == [
+        "--harness", harness, "--app-root", str(role_hooks.APP_ROOT)]
+    assert shlex.split(command["skill_render_check"])[2:] == [
+        sys.executable, str(role_hooks.APP_ROOT)]
+    transcript = tmp_path / "conversation.jsonl"
+    transcript.write_text("")
+    _run(command["training_capture"],
+         {"session_id": "s-1", "transcript_path": str(transcript)},
+         AUTO_REMEMBER_LOG_DIR=str(state), HOME=str(tmp_path))
+    log = state / "training_capture.log"
+    deadline = time.monotonic() + 20
+    while not log.exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert "session=s-1 wrote=False" in log.read_text()
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
 def test_installing_again_brings_a_changed_hook_up_to_the_repository(tmp_path, harness):
     home = _home(tmp_path, harness)
     role_hooks.install(harness, home, ["time_inject"], python=sys.executable)
@@ -104,9 +147,10 @@ def test_installing_again_brings_a_changed_hook_up_to_the_repository(tmp_path, h
     assert "Current date and time" in _run(registered[0][1])
 
 
-def _hand_copy(home: Path, harness: str) -> tuple[Path, str]:
-    """A mind that keeps its own time hook, registered by hand."""
-    hand = home / "hooks" / "time_inject.sh"
+def _hand_copy(home: Path, harness: str, *, script: str = "time_inject.sh",
+               event: str = "UserPromptSubmit") -> tuple[Path, str]:
+    """A mind that keeps its own copy of a hook, registered by hand."""
+    hand = home / "hooks" / script
     hand.parent.mkdir()
     hand.write_text("#!/usr/bin/env bash\n"
                     "TZ=Mars/Olympus_Mons date  # the hand copy's own clock\n")
@@ -114,11 +158,11 @@ def _hand_copy(home: Path, harness: str) -> tuple[Path, str]:
     hooks_file = role_hooks.hooks_file_for(harness, home)
     if harness == "codex":
         hooks_file.write_text(
-            'model = "x"\n\n[[hooks.UserPromptSubmit]]\n'
-            '[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\n'
+            f'model = "x"\n\n[[hooks.{event}]]\n'
+            f'[[hooks.{event}.hooks]]\ntype = "command"\n'
             f"command = {json.dumps(command)}\n")
     else:
-        hooks_file.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+        hooks_file.write_text(json.dumps({"hooks": {event: [
             {"hooks": [{"type": "command", "command": command}]}]}}, indent=2))
     return hooks_file, command
 
@@ -166,3 +210,47 @@ def test_a_hand_copys_difference_is_reported_before_it_is_replaced(tmp_path, har
     assert "Current date and time" in _run(registered[0][1])
     # The hand file is not deleted: it is only no longer what runs.
     assert (home / "hooks" / "time_inject.sh").is_file()
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_hand_copy_under_its_other_name_is_not_registered_beside(tmp_path, harness):
+    """Claude and Codex minds keep the telemetry hook as a wrapper with a
+    longer name. It is the same hook, so it is a hand copy, not a gap."""
+    home = _home(tmp_path, harness)
+    hooks_file, command = _hand_copy(home, harness, script="skill_telemetry_capture.sh",
+                                     event="Stop")
+    before = hooks_file.read_text()
+
+    report = role_hooks.install(harness, home, ["skill_telemetry"], python=sys.executable)
+
+    assert report["hooks"]["skill_telemetry"]["status"] == "hand_copy_kept"
+    assert hooks_file.read_text() == before
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_replacing_a_hand_copy_registers_every_event_the_hook_runs_on(tmp_path, harness):
+    home = _home(tmp_path, harness)
+    _hand_copy(home, harness, script="bg_snapshot.sh", event="Stop")
+    (home / "hooks" / "bg_snapshot.py").write_text("# the hand copy's own body\n")
+
+    role_hooks.install(harness, home, ["bg_snapshot"], python=sys.executable, replace=True)
+
+    registered = _registered(harness, home)
+    assert sorted(event for event, _, _ in registered) == ["Stop", "SubagentStop"]
+    assert {role_hooks._is_ours(command, role_hooks.CATALOGUE["bg_snapshot"], home)
+            for _, command, _ in registered} == {True}
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_a_hand_copy_on_an_event_the_hook_does_not_run_on_is_not_replaced(tmp_path, harness):
+    """Rewriting it where it stands would leave a prompt hook running on
+    Stop, reported as replaced."""
+    home = _home(tmp_path, harness)
+    hooks_file, _command = _hand_copy(home, harness, event="Stop")
+    before = hooks_file.read_text()
+
+    report = role_hooks.install(harness, home, ["time_inject"], python=sys.executable,
+                                replace=True)
+
+    assert report["hooks"]["time_inject"]["status"] == "hand_copy_kept"
+    assert hooks_file.read_text() == before
