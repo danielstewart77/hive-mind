@@ -224,6 +224,7 @@ TABLE.add(
     Rule(OWNER, param="name"),
     "GET /api/minds/{name}/configuration",
     "PATCH /api/minds/{name}/configuration",
+    "PUT /api/minds/{name}/proxy-key",
     "GET /api/minds/{name}/settings",
     "PATCH /api/minds/{name}/settings",
     "GET /api/minds/{name}/voice",

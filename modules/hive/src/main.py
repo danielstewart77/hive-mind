@@ -3812,6 +3812,29 @@ async def api_mind_voice_update(
     }
 
 
+@app.put("/api/minds/{name}/proxy-key")
+async def api_mind_proxy_key_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    try:
+        configuration = local_runtime_configuration(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    try:
+        key, warning = await holder_credentials.validate_mind_proxy_key(body.get("proxy_key"))
+        if key is None:
+            raise holder_credentials.MintRefused("Paste the proxy key this Mind should use")
+        await holder_credentials.store_mind_proxy_key(
+            name, str(configuration.get("owner") or user["username"]), key,
+        )
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"saved": True, "restart_required": True, "warning": warning}
+
+
 @app.patch("/api/minds/{name}/configuration")
 async def api_mind_configuration_update(
     name: str, request: Request, user: dict = Depends(require_auth)
