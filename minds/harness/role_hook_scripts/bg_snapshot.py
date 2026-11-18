@@ -42,10 +42,13 @@ def main() -> None:
         return
     if os.environ.get("HIVE_SURFACE") != "terminal":
         return
+    if not isinstance(event, dict):
+        return
     conversation_id = event.get("session_id") or ""
     if not conversation_id:
         return
-    state.record_background_tasks(conversation_id, event.get("background_tasks") or [])
+    tasks = event.get("background_tasks")
+    state.record_background_tasks(conversation_id, tasks if isinstance(tasks, list) else [])
     state.sweep_dead_state()
 
 
