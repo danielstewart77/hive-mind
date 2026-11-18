@@ -334,6 +334,7 @@ def scaffold_internal_mind(
 
     own = f"/usr/src/app/minds/{name}"
     host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
+    proxy_base_url = (os.getenv("INFERENCE_PROXY_URL") or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
     compose: dict[str, Any] = {
         "services": {
             name: {
@@ -385,13 +386,13 @@ def scaffold_internal_mind(
                     # mind's own key, minted when it was created, so every
                     # call is metered to it (story 2.1.9) - never a host
                     # login, and never another mind's key.
-                    f"INFERENCE_PROXY_URL={DEFAULT_OLLAMA_BASE_URL}",
-                    f"ANTHROPIC_BASE_URL={DEFAULT_OLLAMA_BASE_URL}",
+                    f"INFERENCE_PROXY_URL={proxy_base_url}",
+                    f"ANTHROPIC_BASE_URL={proxy_base_url}",
                     f"ANTHROPIC_AUTH_TOKEN=${{{_proxy_variable(name)}}}",
                     "ANTHROPIC_API_KEY=",
-                    f"OPENAI_BASE_URL={DEFAULT_OLLAMA_BASE_URL}/v1",
+                    f"OPENAI_BASE_URL={proxy_base_url}/v1",
                     f"OPENAI_API_KEY=${{{_proxy_variable(name)}}}",
-                    f"DSH_PROXY_BASE_URL={DEFAULT_OLLAMA_BASE_URL}/v1",
+                    f"DSH_PROXY_BASE_URL={proxy_base_url}/v1",
                     f"DSH_API_KEY=${{{_proxy_variable(name)}}}",
                     "GATEWAY_URL=http://server:8420",
                     "SPECS_DIR=/usr/src/app/specs/data-classes",

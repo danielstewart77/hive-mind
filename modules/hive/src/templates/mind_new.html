@@ -20,6 +20,7 @@
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
                 </div>
+                <div class="field is-full"><label for="mind-proxy-key">Proxy key (optional)</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>Paste a key issued for this new Mind. Leave it empty to have Hive issue a key automatically.</small></div>
                 <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
@@ -108,11 +109,13 @@ window.addEventListener("DOMContentLoaded", function () {
             harness: selectedHarness(),
             provider: form.elements.provider.value,
             default_model: form.elements.default_model.value,
+            proxy_key: form.elements.proxy_key.value,
             role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
             roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
         };
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            form.elements.proxy_key.value = "";
             created = data.registration;
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
             // The console starts the container itself now, so what used to

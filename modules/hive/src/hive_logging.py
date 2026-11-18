@@ -16,7 +16,7 @@ from threading import RLock
 from typing import Any
 
 _context: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("hive_log_context", default=None)
-_SENSITIVE = re.compile(r"(^|_)(authorization|cookie|credential|password|private_key|secret|token)(_|$)", re.IGNORECASE)
+_SENSITIVE = re.compile(r"(^|_)(authorization|cookie|credential|password|private_key|proxy_key|api_key|secret|token)(_|$)", re.IGNORECASE)
 
 
 def _safe(value: Any, key: str = "", depth: int = 0) -> Any:

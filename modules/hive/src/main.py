@@ -1196,6 +1196,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        proxy_key = await holder_credentials.validate_mind_proxy_key(name, body.pop("proxy_key", None))
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
     default_model = str(
         body.get("default_model") or _INTERNAL_MIND_DEFAULT_MODELS[provider]
     ).strip()
@@ -1227,7 +1232,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     # (story 2.1.9, DECIDED 2026-11-15 by Daniel), so an Ollama mind's base is
     # the proxy, never a bare daemon: there its calls go unmetered and its
     # proxy key is sent to a host that is not the proxy.
-    ollama_base_url = DEFAULT_OLLAMA_BASE_URL if provider == "ollama" else ""
+    ollama_base_url = holder_credentials.SERVICES["proxy"].url() if provider == "ollama" else ""
 
     # Created from a role (story 10.18.2): the roles are checked before
     # anything is written, and held before the Mind's first turn.
@@ -1276,7 +1281,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     # fails in silence from detached hooks — and reported per service, because
     # one of the two landing is a different state from neither.
     minted, credential_error = await holder_credentials.provision_mind(
-        name, mind_id, owner
+        name, mind_id, owner, proxy_key=proxy_key,
     )
     registration_error = None
     try:
