@@ -595,10 +595,9 @@ def install(harness: str, home: Path, names: list[str], *,
             mode = 0o755 if name.endswith((".py", ".sh")) else 0o644
             data = source.read_bytes()
             target = directory / name
-            if target.is_symlink() and Path(os.path.realpath(target)).parent != Path(
-                    os.path.realpath(directory)):
-                # A link the mind made to a file of its own elsewhere:
-                # writing would go through it and replace that file.
+            if target.is_symlink():
+                # A link is the mind's doing, wherever it leads: writing
+                # would go through it and replace the file at its far end.
                 report.setdefault("links_kept", []).append(name)
                 continue
             try:
