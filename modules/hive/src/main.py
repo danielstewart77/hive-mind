@@ -1341,6 +1341,17 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         creation.mark("gateway")
         await _register_scaffolded_mind(name, {"owner": owner}, user)
 
+        # Now that the gateway holds it, the gateway says whose it is. A
+        # mind of the person the admin credential is kept for is no
+        # different from any other mind of theirs (Daniel, 2026-11-18: "Rip
+        # that code out"). Not knowing fails the creation: a mind left held
+        # back by a registry that could not be read is a Settings card that
+        # refuses with nothing its owner can do about it.
+        step = "Opening it to its owner"
+        if await _admin_credential_is_kept_for(mind_id):
+            await asyncio.to_thread(
+                configuration_data_module.open_mind_to_its_owner, name)
+
         # The Mind's own node, written as the Mind. A mind with no node is a
         # mind whose first memory write has nothing to hang from, and seeding
         # it with the console's credential would record every mind in the
@@ -1447,6 +1458,48 @@ async def _gateway_mind_id_named(name: str) -> str:
 
 class _CreationStepFailed(Exception):
     """A step of creating a Mind that answered with a failure, not an error."""
+
+
+async def _admin_credential_is_kept_for(mind_id: str) -> bool:
+    """Whether the gateway marks this just-registered mind as one the hive's
+    admin credential may be given to, and there is one to give it.
+
+    The gateway's own mark on this mind's own row, read back, and nothing
+    worked out here: the console and the gateway hold that credential back
+    from the same minds. Only a plain yes is a yes.
+    """
+    rows = await route_access.registered_minds()
+    if rows is None:
+        raise _CreationStepFailed(
+            "the gateway's registry could not be read, so it is not known "
+            "whether this Mind may hold the hive's admin credential")
+    row = _registered_mind(rows, mind_id)
+    if row is None:
+        raise _CreationStepFailed(
+            "the gateway does not list the Mind it was just asked to register")
+    marked = row.get("admin_credential_allowed")
+    if marked is False:
+        return False
+    if marked is not True:
+        # A gateway that marks no row is one that cannot say, which is not
+        # the same as saying no: left at that, a mind of the owner's own
+        # would be made held back and reported as made.
+        raise _CreationStepFailed(
+            "the gateway does not say whether this Mind may hold the hive's "
+            "admin credential; it has to be brought up to date first")
+    variable = configuration_data_module.ADMIN_CREDENTIAL_VARIABLE
+    path = holder_credentials.ENV_FILES.get(holder_credentials.MIND_ENV_LABEL)
+    try:
+        held = holder_credentials.credentials_data._read_env_value(path, variable) if path else None
+    except Exception as exc:  # noqa: BLE001 - said as the step's failure
+        raise _CreationStepFailed(
+            f"the env file its container is started from could not be read: {exc}"
+        ) from exc
+    if not held:
+        raise _CreationStepFailed(
+            f"the env file its container is started from holds no {variable}, "
+            "so it would start unable to accept a change to its settings")
+    return True
 
 
 async def _start_mind_container(name: str, user: dict) -> dict:

@@ -56,6 +56,10 @@ class _Recorder:
         # until the gateway holds that mind.
         self.as_a_hive = False
         self.registered: list[dict] = []
+        # As the real gateway: the one person whose minds it marks as ones
+        # the hive's admin credential may be given to. None is nobody: every
+        # row is marked, and marked no.
+        self.trusted: str | None = None
         app = FastAPI()
 
         @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -80,9 +84,14 @@ class _Recorder:
                 held = [m["id"] for m in self.registered]
                 if (request.method, path) == ("POST", "broker/minds"):
                     self.registered.append(
-                        {"id": payload["mind_id"], "name": payload["name"]})
+                        {"id": payload["mind_id"], "name": payload["name"],
+                         "owner": payload.get("owner"),
+                         "gateway_url": payload.get("gateway_url")})
                 elif (request.method, path) == ("GET", "broker/minds"):
-                    return JSONResponse(self.registered)
+                    return JSONResponse([
+                        dict(m, admin_credential_allowed=bool(self.trusted)
+                             and m["owner"] == self.trusted)
+                        for m in self.registered])
                 elif request.method == "DELETE" and path.startswith("broker/minds/"):
                     self.registered = [
                         m for m in self.registered if m["name"] != path.split("/")[-1]]
@@ -382,6 +391,40 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
     assert service["build"]["target"] == "locked-mind"
     environment = dict(item.split("=", 1) for item in service["environment"])
     assert environment["KEY_RING"] == f"{own}/data/keyring"
+
+
+def test_a_mind_made_for_the_person_the_admin_credential_is_kept_for_is_not_locked_and_its_settings_card_reaches_it(
+    client,
+):
+    """Daniel, 2026-11-17: "No such thing as lockdown." A mind he makes from
+    the console is a mind like his others: nothing in its runtime file says
+    locked, it holds the credential its Settings card is sent with, its own
+    folder is its own to write, so a setting it is sent is one it can save,
+    and the console sends that credential to it."""
+    import asyncio
+    import mind_runtime
+
+    client.services.trusted = "daniel"
+    with client.env_file.open("a") as env:
+        env.write("COMMS_ADMIN_BEARER_TOKEN=stand-in-gateway-admin\n")  # secret-guard: allow
+
+    assert _create(client).status_code == 200
+
+    runtime = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())
+    assert "locked_down" not in runtime
+    service = yaml.safe_load(
+        (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text()
+    )["services"]["atlas"]
+    environment = dict(item.split("=", 1) for item in service["environment"])
+    assert environment["COMMS_ADMIN_BEARER_TOKEN"] == "${COMMS_ADMIN_BEARER_TOKEN}"
+    host, own = "${HOST_PROJECT_DIR:-.}/minds/atlas", "/usr/src/app/minds/atlas"
+    assert service["volumes"] == [
+        f"{host}:{own}:rw",
+        f"{host}/container:{own}/container:ro",
+        f"{host}/session_token:{own}/session_token:ro",
+    ]
+    assert asyncio.run(mind_runtime.admin_headers(runtime["gateway_url"])) == {
+        "Authorization": "Bearer stand-in-gateway-admin"}  # secret-guard: allow
 
 
 def test_the_console_never_sends_its_admin_credential_to_a_locked_down_mind(client, monkeypatch):

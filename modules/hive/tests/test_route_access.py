@@ -107,7 +107,12 @@ def test_a_non_admin_is_refused_another_users_mind_on_every_owner_scoped_route(p
             assert closed.value.code == route_access.CLOSE_REFUSED, template
             continue
         refused = sloan.request(method, other, json={})
-        assert refused.status_code == 403, (method, template, refused.status_code)
+        # A mind is refused as though it were not there; a session or an
+        # operation, which the asker reached by an id of their own, is not.
+        names_a_mind = console_access.TABLE.rule_for(method, template).param in (
+            "name", "mind_id")
+        assert refused.status_code == (404 if names_a_mind else 403), (
+            method, template, refused.status_code)
         assert refused.headers.get(REFUSED) == "owner", (method, template)
 
         allowed = sloan.request(method, own, json={})
@@ -121,9 +126,28 @@ def test_a_mind_with_no_owner_or_no_registration_is_refused_to_a_non_admin(peopl
 
     for name in ("orphan", "nobody-registered-this"):
         refused = sloan.get(f"/api/minds/{name}/settings")
-        assert refused.status_code == 403
+        assert refused.status_code == 404
         assert refused.headers.get(REFUSED) == "owner"
     assert REFUSED not in admin.get("/api/minds/orphan/settings").headers
+
+
+def test_somebody_who_neither_owns_a_mind_nor_is_an_admin_is_answered_as_though_it_were_not_there(
+    people,
+):
+    """Daniel, 2026-11-17: "If this mind is not owned by me, I can't see the
+    mind at all, much less change its settings." Aiden's mind, asked for by
+    sloan, and a mind nobody ever registered: the same answer, word for word,
+    for the settings and for the page."""
+    admin, sloan = people
+
+    for path in ("/api/minds/{}/settings", "/minds/{}"):
+        anothers = sloan.get(path.format("zack"))
+        nobodys = sloan.get(path.format("nobody-registered-this"))
+        assert anothers.status_code == 404, path
+        assert (nobodys.status_code, nobodys.text, nobodys.headers.get(REFUSED)) == (
+            anothers.status_code, anothers.text, anothers.headers.get(REFUSED)), path
+    assert sloan.get("/api/minds/zack/settings").json() == {"detail": "No such mind."}
+    assert REFUSED not in admin.get("/api/minds/zack/settings").headers
 
 
 @pytest.mark.parametrize(
@@ -311,7 +335,7 @@ def test_an_owner_route_refuses_a_non_admin_while_comms_cannot_say_who_owns_the_
     monkeypatch.setenv("GATEWAY_API_URL", "http://127.0.0.1:9")
 
     refused = sloan.get("/api/minds/arnold/settings")
-    assert refused.status_code == 403
+    assert refused.status_code == 404
     assert refused.headers.get(REFUSED) == "owner"
     assert REFUSED not in admin.get("/api/minds/arnold/settings").headers
 
