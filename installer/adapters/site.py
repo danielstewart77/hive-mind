@@ -55,8 +55,47 @@ def links(console_url: str, terminal_url: str) -> dict[str, str]:
 #: bind-mounted read-write as a single file.
 ENV_FILES = "HIVE_ENV_FILES"
 ENV_FILE_MOUNT = "/env_hive/.env"
+ENV_FILE_LABEL = "nervous_system"
 
 
 def env_files_settings() -> dict[str, str]:
     import json
-    return {ENV_FILES: json.dumps({"nervous_system": ENV_FILE_MOUNT})}
+    return {ENV_FILES: json.dumps({ENV_FILE_LABEL: ENV_FILE_MOUNT})}
+
+
+# ---- the console's Add a Mind page ----------------------------------------
+#: Where the console writes a mind it creates: the install's minds folder,
+#: writable. It reads every mind's runtime.yaml from the read-only mount of
+#: the same folder beside it.
+MINDS_WRITE_MOUNT = "/minds_hive_mind_config"
+#: The list of the minds the console has created, as compose reads it: a file
+#: in the minds folder that the stack file includes. The console adds a line
+#: to it and takes one out; the installer makes it once, empty, and never
+#: writes it again, so running the installer keeps every mind listed there.
+MINDS_STACK = "stack.yaml"
+MINDS_STACK_EMPTY = "include: []\n"
+
+
+def new_mind_settings(*, proxy_url: str, build_context: str,
+                      build_args: dict[str, str], reserved: list[str]) -> dict[str, str]:
+    """What the console's Add a Mind page needs to work on an installed hive.
+
+    Unset, each of these means Daniel's workstation: a separate env file for
+    the minds, a stack file under a Dev folder, a proxy on the host, an image
+    built from GitHub. An installed hive has one `.env`, its own proxy, and
+    the hive-mind checkout the installer cloned.
+    """
+    import json
+    settings = {
+        # A new mind's three keys go into the one .env, under its own names.
+        "HIVE_MIND_ENV_LABEL": ENV_FILE_LABEL,
+        "HIVE_MIND_STACK_COMPOSE": f"{MINDS_WRITE_MOUNT}/{MINDS_STACK}",
+        # Entries in that list are relative to it, and it sits among them.
+        "HIVE_MIND_STACK_MINDS_PREFIX": ".",
+        "HIVE_MIND_PROXY_URL": proxy_url,
+        "HIVE_MIND_BUILD_CONTEXT": build_context,
+        "HIVE_MIND_RESERVED_NAMES": ",".join(reserved),
+    }
+    if build_args:
+        settings["HIVE_MIND_BUILD_ARGS"] = json.dumps(build_args, sort_keys=True)
+    return settings
