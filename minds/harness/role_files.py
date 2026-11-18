@@ -37,6 +37,7 @@ import logging
 import math
 import os
 import shlex
+import stat
 import sys
 import threading
 import time
@@ -61,7 +62,8 @@ LATE = ("all", "deadline")
 #: An earlier pass that never ended, said in its own words.
 STUCK = ("all", "stuck")
 
-#: When each standing problem was last logged, by harness, home and a key
+#: When each standing problem was last logged, on the clock that never
+#: steps back, by harness, home and a key
 #: that does not change from turn to turn. A finished pass keeps only what
 #: it saw for its own home, so a problem that is fixed and comes back is
 #: said again, one home's clean pass says nothing about another's, and the
@@ -127,8 +129,17 @@ def _missing_script(command: str) -> str | None:
             # Only a plain full path can be judged from here: the shell
             # fills in a variable, and a relative path depends on where the
             # harness runs.
-            plain = os.path.isabs(word) and not any(mark in word for mark in "$`*?[{~")
-            return word if plain and not os.path.isfile(word) else None
+            if not os.path.isabs(word) or any(mark in word for mark in "$`*?[{~"):
+                return None
+            try:
+                there = stat.S_ISREG(os.stat(word).st_mode)
+            except (FileNotFoundError, NotADirectoryError):
+                there = False
+            except (OSError, ValueError):
+                # A folder that cannot be looked into, or a path no file
+                # could have, says nothing either way.
+                return None
+            return None if there else word
     return None
 
 
@@ -164,7 +175,8 @@ def _hooks(harness: str, home: Path, names: list[str], hooks_file: Path | None,
         return report["hooks"], problems
     for name, outcome in report["hooks"].items():
         status = outcome.get("status")
-        if status == "failed" and report.get("error"):
+        if (status == "failed" and report.get("error")
+                and outcome.get("reason") in (None, report["error"])):
             continue  # said once above, for every hook it cost
         if status in ("failed", "registered_twice"):
             reason = outcome.get("reason") or status.replace("_", " ")
@@ -264,7 +276,7 @@ def _work(harness: str, home: Path, grants: dict, hooks_file: Path | None,
     out["problems"] = [text for _key, text in problems]
     # Said from here, so a pass that outlived its spawn still names what it
     # found.
-    _say(log, harness, home, problems, time.time(), finished=True)
+    _say(log, harness, home, problems, time.monotonic(), finished=True)
 
 
 def _say(log: logging.Logger | None, harness: str, home: Path, problems: list[Problem],
@@ -306,7 +318,9 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
     if not managed:
         return result
     try:
-        home = Path(os.path.realpath(home))
+        # By its spelling alone: nothing on this thread looks at the disc,
+        # so a mount that hangs holds the pass and not the spawn.
+        home = Path(os.path.abspath(home))
         wait = float(deadline)
         wait = DEADLINE if math.isnan(wait) else min(DEADLINE, max(0.05, wait))
         key = (harness, str(home))
@@ -314,7 +328,6 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
         out: dict = {"hooks": {}, "skills": {}, "problems": []}
         mine = None
         stuck = 0.0
-        another_finished = False
         while mine is None:
             with _RUNNING_LOCK:
                 other, began = _RUNNING.get(key, (None, 0.0))
@@ -336,26 +349,21 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
                 if not waited_on:
                     stuck = time.monotonic() - began
                 break
-            another_finished = True
         if mine is not None:
             mine.join(max(0.0, until - time.monotonic()))
         if stuck:
             text = (f"an earlier install of this mind's hooks and skills has been running "
                     f"for {stuck:.0f} seconds and has not ended; nothing more is installed "
                     "for it until that ends or its server is restarted")
-            _say(log, harness, home, [(STUCK, text)], time.time(), finished=False)
+            _say(log, harness, home, [(STUCK, text)], time.monotonic(), finished=False)
             result["problems"] = [text]
             return result
         if mine is None or mine.is_alive():
             # Left to finish behind the conversation: what it installs is
             # there for the next spawn, and it says itself what it finds.
-            if another_finished:
-                # This spawn spent its wait behind a pass that ended: the
-                # files were looked to a moment ago and nothing is late.
-                return result
             late = ("the hooks and skills this mind's roles grant were not all in place "
                     f"after {wait:g} seconds, and the conversation started without waiting")
-            _say(log, harness, home, [(LATE, late)], time.time(), finished=False)
+            _say(log, harness, home, [(LATE, late)], time.monotonic(), finished=False)
             result["problems"] = [late]
             return result
         result.update(hooks=dict(out["hooks"]), skills=dict(out["skills"]),
@@ -364,6 +372,6 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
         text = (f"the hooks and skills this mind's roles grant were not put in place: "
                 f"{type(exc).__name__}: {exc}")
         result["problems"] = [text]
-        _say(log, harness, Path(str(home)), [(("all", "raised"), text)], time.time(),
+        _say(log, harness, Path(str(home)), [(("all", "raised"), text)], time.monotonic(),
              finished=False)
     return result
