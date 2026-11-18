@@ -388,7 +388,11 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
     hooks at all — guard, memory and rotation together.
     """
     grants = _fetch_for_spawn(mind, url, token, timeout)
-    _hand_over(on_grants, grants)
+    # The adapter answers with the mind's hooks file as it now stands: a mind
+    # that had none may have just been given one.
+    now = _hand_over(on_grants, grants)
+    if isinstance(now, str):
+        source_hooks = now
     try:
         return _write_spawn_files(dsh_home, source_hooks, grants, python)
     except (OSError, ValueError) as exc:
@@ -398,17 +402,18 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
         raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
 
 
-def _hand_over(on_grants, grants: dict) -> None:
+def _hand_over(on_grants, grants: dict):
     """Give the adapter the grants just fetched, before the harness is
     handed its hooks: it is where the files a role names are put in place
-    (`role_files.provision`). Whatever it raises is its own to report and
-    never refuses the spawn."""
+    (`role_files.provision`). Returns what the adapter answered. Whatever it
+    raises is its own to report and never refuses the spawn."""
     if on_grants is None:
-        return
+        return None
     try:
-        on_grants(grants)
+        return on_grants(grants)
     except Exception as exc:  # noqa: BLE001
         _note(f"the files this mind's roles name were not put in place: {exc}")
+        return None
 
 
 def _fetch_for_spawn(mind: str, url: str, token: str, timeout: float) -> dict:

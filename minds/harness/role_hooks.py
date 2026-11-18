@@ -592,8 +592,17 @@ def install(harness: str, home: Path, names: list[str], *,
         directory = home / INSTALL_DIR
         directory.mkdir(parents=True, exist_ok=True)
         for name, source in _files(to_copy, harness).items():
-            _write_whole(directory / name, source.read_bytes(),
-                         mode=0o755 if name.endswith((".py", ".sh")) else 0o644)
+            mode = 0o755 if name.endswith((".py", ".sh")) else 0o644
+            data = source.read_bytes()
+            target = directory / name
+            try:
+                # Run at every spawn of a managed mind: a file that is
+                # already the repository's is not written again.
+                if target.read_bytes() == data and target.stat().st_mode & 0o777 == mode:
+                    continue
+            except OSError:
+                pass
+            _write_whole(target, data, mode=mode)
         report["scripts"] = sorted(_files(to_copy, harness))
 
         encoded = hooks.text()

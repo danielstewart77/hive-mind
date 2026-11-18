@@ -359,8 +359,9 @@ def _role_hooks_env(env: dict[str, str], timeout: float = 10.0) -> dict[str, str
         env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
         # Story 10.18.15: the hooks and skills its roles name arrive here,
         # before the hooks file dsh is handed is written from the mind's own.
-        on_grants=lambda grants: role_files.provision(
-            "dsh", DSH_HOME, grants, hooks_file=Path(source) if source else None, log=log))
+        on_grants=lambda grants: (role_files.provision(
+            "dsh", DSH_HOME, grants, hooks_file=Path(source) if source else None, log=log),
+            hooks_config())[1])
 
 
 def _patch_args() -> list[str]:
