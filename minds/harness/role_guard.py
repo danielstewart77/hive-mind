@@ -378,7 +378,7 @@ def delegate_names(patch_file: Path) -> list[str]:
 
 def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
             python: str = sys.executable or "python3",
-            timeout: float = 10.0) -> dict[str, str]:
+            timeout: float = 10.0, on_grants=None) -> dict[str, str]:
     """Write what a dsh spawn needs and return the environment naming it.
 
     The grants are fetched now and written beside the hooks; a gateway that
@@ -388,6 +388,11 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
     hooks at all — guard, memory and rotation together.
     """
     grants = _fetch_for_spawn(mind, url, token, timeout)
+    # The adapter answers with the mind's hooks file as it now stands: a mind
+    # that had none may have just been given one.
+    now = _hand_over(on_grants, grants)
+    if isinstance(now, str):
+        source_hooks = now
     try:
         return _write_spawn_files(dsh_home, source_hooks, grants, python)
     except (OSError, ValueError) as exc:
@@ -395,6 +400,20 @@ def prepare(dsh_home: Path, source_hooks: str, mind: str, url: str, token: str,
         # parse or a home that cannot be written is a mind that is not run,
         # said out loud, not a turn that ends in silence.
         raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
+
+
+def _hand_over(on_grants, grants: dict):
+    """Give the adapter the grants just fetched, before the harness is
+    handed its hooks: it is where the files a role names are put in place
+    (`role_files.provision`). Returns what the adapter answered. Whatever it
+    raises is its own to report and never refuses the spawn."""
+    if on_grants is None:
+        return None
+    try:
+        return on_grants(grants)
+    except Exception as exc:  # noqa: BLE001
+        _note(f"the files this mind's roles name were not put in place: {exc}")
+        return None
 
 
 def _fetch_for_spawn(mind: str, url: str, token: str, timeout: float) -> dict:
@@ -415,7 +434,7 @@ def _who(mind: str, url: str) -> dict[str, str]:
 
 def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token: str,
                    python: str = sys.executable or "python3",
-                   timeout: float = 10.0) -> tuple[list[str], dict[str, str]]:
+                   timeout: float = 10.0, on_grants=None) -> tuple[list[str], dict[str, str]]:
     """The arguments and environment a Claude process is started with.
 
     The guard rides in a settings file of its own (`--settings`), which
@@ -426,6 +445,7 @@ def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token
     when the gateway cannot say what the mind may use.
     """
     grants = _fetch_for_spawn(mind, url, token, timeout)
+    _hand_over(on_grants, grants)
     try:
         grants_file = state_dir / "role-grants.json"
         write_grants(grants_file, grants)
@@ -461,7 +481,7 @@ def toml_inline(value) -> str:
 
 def prepare_codex(codex_home: Path, mind: str, url: str, token: str,
                   python: str = sys.executable or "python3",
-                  timeout: float = 10.0) -> tuple[list[str], dict[str, str]]:
+                  timeout: float = 10.0, on_grants=None) -> tuple[list[str], dict[str, str]]:
     """The arguments and environment a Codex process is started with.
 
     The guard goes in as a `-c hooks.PreToolUse=...` override, ahead of
@@ -476,6 +496,7 @@ def prepare_codex(codex_home: Path, mind: str, url: str, token: str,
     import tomllib
 
     grants = _fetch_for_spawn(mind, url, token, timeout)
+    _hand_over(on_grants, grants)
     try:
         grants_file = codex_home / "role-grants.json"
         write_grants(grants_file, grants)
