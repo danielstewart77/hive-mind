@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         raw = sys.stdin.read()
         event = json.loads(raw) if raw.strip() else {}
+        if not isinstance(event, dict):
+            event = {}
     except Exception:
         return
     session_id = event.get("session_id") or ""

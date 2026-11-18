@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         raw = sys.stdin.read()
         event = json.loads(raw) if raw.strip() else {}
+        if not isinstance(event, dict):
+            event = {}
     except Exception:
         return
     transcript_path = env.transcript(event, args.harness)

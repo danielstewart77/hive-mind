@@ -43,7 +43,7 @@ def load_env() -> None:
     """Fill unset variables from the mind folder's ``.env``, if it has one."""
     try:
         lines = (MIND_DIR / ".env").read_text().splitlines()
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a byte that is not text
         return
     for line in lines:
         line = line.strip()
