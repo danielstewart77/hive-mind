@@ -3,7 +3,9 @@
 import os
 import sys
 
+import pathlib
 
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -225,6 +227,53 @@ def test_list_voice_clips_refuses_a_mind_name_that_is_a_path(tmp_path, monkeypat
     assert settings_data.list_voice_clips("..") == []
 
 
+def test_save_voice_clip_writes_under_its_own_name(tmp_path, monkeypatch):
+    """An upload adds a candidate rather than replacing the active clip."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    target = settings_data.save_voice_clip("bob", "calm_take_two.wav", _MINIMAL_WAV)
+
+    assert target == tmp_path / "bob" / "calm_take_two.wav"
+    assert target.read_bytes() == _MINIMAL_WAV
+
+
+def test_save_voice_clip_leaves_the_existing_clip_alone(tmp_path, monkeypatch):
+    """The clip currently being spoken must survive an upload beside it."""
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    existing = mind_dir / "voice_ref.wav"
+    existing.write_bytes(_MINIMAL_WAV + b"original")
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    settings_data.save_voice_clip("bob", "second_take.wav", _MINIMAL_WAV)
+
+    assert existing.read_bytes() == _MINIMAL_WAV + b"original"
+
+
+def test_save_voice_clip_refuses_a_name_already_taken(tmp_path, monkeypatch):
+    """An overwrite changes a Mind's voice with no save and no way to see it."""
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    existing = mind_dir / "voice_ref.wav"
+    existing.write_bytes(_MINIMAL_WAV + b"original")
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(settings_data.ClipExists):
+        settings_data.save_voice_clip("bob", "voice_ref.wav", _MINIMAL_WAV)
+
+    assert existing.read_bytes() == _MINIMAL_WAV + b"original"
+
+
+def test_save_voice_clip_leaves_no_staging_file_behind(tmp_path, monkeypatch):
+    """The listing matches on the extension, so a leftover must not be a clip."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+
+    settings_data.save_voice_clip("bob", "take.wav", _MINIMAL_WAV)
+
+    assert [p.name for p in (tmp_path / "bob").iterdir()] == ["take.wav"]
+
+
 def test_list_voice_clips_lists_an_uppercase_extension(tmp_path, monkeypatch):
     """The upload accepts `.WAV`; a listing that missed it would take the file,
     name it in its own success message, and never show it again."""
@@ -250,6 +299,107 @@ def test_list_voice_clips_names_a_recording_it_cannot_offer(tmp_path, monkeypatc
 
     assert clips["calm take.wav"]["unselectable"] is True
     assert "unselectable" not in clips["voice_ref.wav"]
+
+
+def test_save_voice_clip_keeps_an_escaping_filename_inside_the_directory(
+    tmp_path, monkeypatch
+):
+    """The name comes off a browser upload and is joined onto a directory."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    target = settings_data.save_voice_clip(
+        "bob", "../../../../etc/evil.wav", _MINIMAL_WAV
+    )
+
+    assert target == tmp_path / "bob" / "evil.wav"
+    assert target.read_bytes() == _MINIMAL_WAV
+
+
+def test_save_voice_clip_keeps_a_windows_path_inside_the_directory(
+    tmp_path, monkeypatch
+):
+    """A Windows browser sends the whole local path as the filename."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    target = settings_data.save_voice_clip(
+        "bob", r"C:\Users\daniel\Desktop\take.wav", _MINIMAL_WAV
+    )
+
+    assert target == tmp_path / "bob" / "take.wav"
+
+
+def test_save_voice_clip_refuses_a_name_that_is_not_a_wav(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="wav"):
+        settings_data.save_voice_clip("bob", "take.mp3", _MINIMAL_WAV)
+
+
+def test_save_voice_clip_refuses_a_name_the_mind_could_not_select(
+    tmp_path, monkeypatch
+):
+    """A filename this accepted and runtime.yaml refused is an unusable clip."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="clip filename"):
+        settings_data.save_voice_clip("bob", "my take (final).wav", _MINIMAL_WAV)
+
+
+def test_save_voice_clip_rejects_non_wav_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="WAV"):
+        settings_data.save_voice_clip("bob", "take.wav", b"not a wav file at all")
+
+
+def test_save_voice_clip_rejects_unsafe_mind_name(tmp_path, monkeypatch):
+    """The target directory exists, so the guard is what refuses the write."""
+    minds = tmp_path / "minds"
+    minds.mkdir()
+    (tmp_path / "other").mkdir()
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", minds)
+
+    with pytest.raises(ValueError, match="invalid mind name"):
+        settings_data.save_voice_clip("../other", "take.wav", _MINIMAL_WAV)
+
+    assert not (tmp_path / "other" / "take.wav").exists()
+
+
+def test_save_voice_clip_never_leaves_a_half_written_clip_in_place(
+    tmp_path, monkeypatch
+):
+    """The voice server opens these files on every spoken sentence.
+
+    A clip written in place is one chatterbox can read half of — a truncated
+    WAV it refuses, on a path that was fine a moment earlier. The write is
+    staged and renamed, so a failure mid-write leaves no clip at all rather
+    than a broken one.
+    """
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+    real_write = pathlib.Path.write_bytes
+
+    def fail_after_writing(self, data):
+        real_write(self, data[: len(data) // 2])
+        raise OSError("the disk filled up")
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_after_writing)
+
+    with pytest.raises(OSError):
+        settings_data.save_voice_clip("bob", "take.wav", _MINIMAL_WAV)
+
+    monkeypatch.undo()
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+    assert not (tmp_path / "bob" / "take.wav").exists()
+    # And nothing the listing would offer as a recording.
+    assert settings_data.list_voice_clips("bob") == []
+
+
+def test_save_voice_clip_rejects_oversized_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+    monkeypatch.setattr(settings_data, "_WAV_MAX_BYTES", 10)
+
+    with pytest.raises(ValueError, match="too large"):
+        settings_data.save_voice_clip("bob", "take.wav", _MINIMAL_WAV)
 
 
 # ── downloads ──────────────────────────────────────────────────────────
