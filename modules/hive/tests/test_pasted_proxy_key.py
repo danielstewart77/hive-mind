@@ -52,15 +52,6 @@ def creation(tmp_path, monkeypatch, builtin_console):
             # Deliberately echo the fake secret on refusal: product errors
             # must never relay an upstream response body containing a key.
             return httpx.Response(state["proxy_status"], json={"data": [], "detail": KEY})
-        # As the gateway: a mind registered here is listed, and marked. This
-        # one keeps the hive's admin credential for nobody.
-        if (request.method, request.url.path) == ("POST", "/broker/minds"):
-            state.setdefault("registered", []).append(json.loads(request.content))
-        if (request.method, request.url.path) == ("GET", "/broker/minds"):
-            return httpx.Response(200, json=[
-                {"id": m["mind_id"], "name": m["name"], "owner": m.get("owner"),
-                 "admin_credential_allowed": False}
-                for m in state.get("registered", [])])
         if request.method == "GET":
             return httpx.Response(200, json=[])
         if request.url.path == "/docker/up":
