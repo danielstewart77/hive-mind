@@ -922,6 +922,18 @@ a { color: inherit; }
 /* Masked without being a password field — see the comment in settings.html. */
 .credential-token { -webkit-text-security: disc; }
 .button:disabled { opacity: 0.55; cursor: default; pointer-events: none; }
+/* A button whose request is still running: a ring turns until the answer
+   comes, so a long wait reads as work and not as a page that has stopped. */
+.button.is-busy { opacity: 1; }
+.button-spinner {
+    display: inline-block; width: 1em; height: 1em; flex: none;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: button-busy-spin 0.9s linear infinite;
+}
+@keyframes button-busy-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .button-spinner { animation-duration: 2.4s; }
+}
 .credential-set input { max-width: 180px; }
 
 .feature-choice { display: flex; align-items: center; gap: 12px; padding: 10px 0; cursor: pointer; }

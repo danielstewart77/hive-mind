@@ -336,6 +336,7 @@ TABLE.add(
     "GET /api/minds/install-options",
     "POST /api/minds",
     "POST /api/minds/{name}/register",
+    "POST /api/minds/{name}/start",
     "PUT /api/minds/{name}/owner",
     "GET /api/settings/new-mind/check-name",
     "GET /api/outposts",

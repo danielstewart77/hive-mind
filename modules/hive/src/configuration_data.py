@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import os
+import posixpath
 import re
 import secrets
 import shutil
 import socket
 import stat
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -130,6 +133,9 @@ def local_runtime_configuration(name: str) -> dict[str, Any]:
 # The harness-specific half of an internal mind's scaffold. Everything else
 # below is shared; each harness declares its own home and transport.
 _HARNESS_SCAFFOLD = {
+    # dsh, the hive's default harness (Daniel, 2026-11-17). It is not in the
+    # mind image: the built tree is mounted, and the container writes its
+    # profile and hooks into this home before the mind server starts.
     "dsh": {
         "config_dir_var": "DSH_HOME",
         "config_dir_name": ".dsh",
@@ -146,6 +152,14 @@ _HARNESS_SCAFFOLD = {
         "transport": "codex_exec_json",
     },
 }
+
+#: Where a mind's container sees the built dsh tree, and the two files in it
+#: a dsh mind is told about (hive-mind `installer/adapters/dsh.py`).
+DSH_MOUNT = "/opt/dsh"
+DSH_BIN = f"{DSH_MOUNT}/apps/cli/lib/bin.js"
+DSH_READ_LOG_CLI = (
+    f"{DSH_MOUNT}/packages/session/session-persistence-jsonl/lib/read-log-cli.js")
+DSH_PROFILE = "hive"
 
 # The provider switch is entirely this env block — the harness modules read
 # `provider` but branch on these. Base URLs default to the host
@@ -169,6 +183,37 @@ _OLLAMA_ENV = {
 }
 
 DEFAULT_OLLAMA_BASE_URL = "http://host.docker.internal:8899"
+
+
+def mind_proxy_base_url() -> str:
+    """The inference proxy as a mind created here reaches it.
+
+    An installed hive runs its own and names it in `HIVE_MIND_PROXY_URL`.
+    Otherwise the address this console itself is given for the proxy,
+    `INFERENCE_PROXY_URL`, and last this workstation's.
+    """
+    configured = (os.getenv("HIVE_MIND_PROXY_URL", "").strip()
+                  or os.getenv("INFERENCE_PROXY_URL", "").strip()).rstrip("/")
+    if configured.endswith("/v1"):
+        configured = configured[: -len("/v1")]
+    return configured or DEFAULT_OLLAMA_BASE_URL
+
+
+def _mind_build_args() -> dict[str, str]:
+    """Build arguments for a new mind's image: `HIVE_MIND_BUILD_ARGS`, a JSON
+    object. An installed hive behind a web proxy names it here, or the image's
+    package installs cannot reach anything. Parsed before anything is written.
+    """
+    raw = os.getenv("HIVE_MIND_BUILD_ARGS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"HIVE_MIND_BUILD_ARGS is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("HIVE_MIND_BUILD_ARGS must be a JSON object")
+    return {str(key): str(value) for key, value in parsed.items()}
 
 #: What a mind created here is built from: the published hive-mind tree, and
 #: only that. Built from the host checkout instead, the image carries every
@@ -305,8 +350,11 @@ def scaffold_internal_mind(
         # links this console, writing as root, would follow.
         raise ValueError(f"minds/{name} already exists")
     uid = _mind_uid()
+    build_args = _mind_build_args()
+    proxy = mind_proxy_base_url()
 
     shape = _HARNESS_SCAFFOLD[harness]
+    is_dsh = harness == "dsh"
     config_dir = f"/usr/src/app/minds/{name}/{shape['config_dir_name']}"
 
     runtime: dict[str, Any] = {
@@ -325,7 +373,7 @@ def scaffold_internal_mind(
         # the whole window.
         "rotation_threshold_percent": NEW_MIND_ROTATION_THRESHOLD_PERCENT,
         "runtime_config_dir": config_dir,
-        "resume_policy": "provider-local",
+        "resume_policy": "always" if is_dsh else "provider-local",
         "prompt_files": ["prompts/common.md", "prompts/harness.md"],
         "startup": {"skip_host_credentials": False, "sync_repo_config": True},
         "transport": {"type": shape["transport"]},
@@ -334,20 +382,20 @@ def scaffold_internal_mind(
         # root's. Read by the console, never by the mind.
         "locked_down": True,
     }
+    if is_dsh:
+        runtime["dsh_profile"] = DSH_PROFILE
+        runtime["dsh_bin"] = DSH_BIN
+        # Nothing of a host login, and no repo configuration to sync: its
+        # profile and hooks are written by its own container at start.
+        runtime["startup"] = {"skip_host_credentials": True, "sync_repo_config": False}
     if provider == "ollama":
-        base = (ollama_base_url or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
-        runtime["env"] = _OLLAMA_ENV[harness](base, ollama_api_key)
-    if harness == "dsh":
-        runtime.update({
-            "dsh_profile": "hive",
-            "dsh_bin": "/opt/dsh/apps/cli/lib/bin.js",
-            "resume_policy": "always",
-            "startup": {"skip_host_credentials": True, "sync_repo_config": False},
-        })
+        base = (ollama_base_url or proxy).rstrip("/")
+        provider_env = _OLLAMA_ENV[harness](base, ollama_api_key)
+        if provider_env:
+            runtime["env"] = provider_env
 
     own = f"/usr/src/app/minds/{name}"
     host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
-    proxy_base_url = (os.getenv("INFERENCE_PROXY_URL") or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
     compose: dict[str, Any] = {
         "services": {
             name: {
@@ -359,6 +407,7 @@ def scaffold_internal_mind(
                     or DEFAULT_MIND_BUILD_CONTEXT,
                     "dockerfile": "Dockerfile",
                     "target": MIND_BUILD_TARGET,
+                    **({"args": build_args} if build_args else {}),
                 },
                 "container_name": f"hive-mind-{name}",
                 "working_dir": "/usr/src/app",
@@ -399,13 +448,13 @@ def scaffold_internal_mind(
                     # mind's own key, minted when it was created, so every
                     # call is metered to it (story 2.1.9) - never a host
                     # login, and never another mind's key.
-                    f"INFERENCE_PROXY_URL={proxy_base_url}",
-                    f"ANTHROPIC_BASE_URL={proxy_base_url}",
+                    f"INFERENCE_PROXY_URL={proxy}",
+                    f"ANTHROPIC_BASE_URL={proxy}",
                     f"ANTHROPIC_AUTH_TOKEN=${{{_proxy_variable(name)}}}",
                     "ANTHROPIC_API_KEY=",
-                    f"OPENAI_BASE_URL={proxy_base_url}/v1",
+                    f"OPENAI_BASE_URL={proxy}/v1",
                     f"OPENAI_API_KEY=${{{_proxy_variable(name)}}}",
-                    f"DSH_PROXY_BASE_URL={proxy_base_url}/v1",
+                    f"DSH_PROXY_BASE_URL={proxy}/v1",
                     f"DSH_API_KEY=${{{_proxy_variable(name)}}}",
                     "GATEWAY_URL=http://server:8420",
                     "SPECS_DIR=/usr/src/app/specs/data-classes",
@@ -432,7 +481,9 @@ def scaffold_internal_mind(
                 "networks": ["hivemind"],
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
-                "tmpfs": ["/tmp"],
+                # exec for dsh, which Docker's tmpfs default is not: its
+                # loader copies a native addon under /tmp and loads it there.
+                "tmpfs": ["/tmp:exec,mode=1777" if is_dsh else "/tmp"],
                 # The mind server, as every container mind here runs; it
                 # picks the harness from runtime.yaml. The harness modules
                 # have no entry point of their own.
@@ -440,29 +491,36 @@ def scaffold_internal_mind(
             }
         }
     }
-    # No shared codex volume: every codex container on this host can write
-    # it, so a mind holding it could replace the codex binary Daniel's minds
-    # run. The image carries its own codex.
-    if harness == "dsh":
+    if is_dsh:
         service = compose["services"][name]
-        service["environment"].extend([
-            f"DSH_BIN={runtime['dsh_bin']}",
-            "DSH_READ_LOG_CLI=/opt/dsh/packages/session/session-persistence-jsonl/lib/read-log-cli.js",
+        service["environment"] += [
+            f"DSH_BIN={DSH_BIN}",
+            f"DSH_READ_LOG_CLI={DSH_READ_LOG_CLI}",
+            # Where a turn runs: somewhere this mind can write. The image's
+            # code is root's.
+            f"DSH_SPAWN_DIR={own}/data",
+            # What its capture hook classifies with, as its own proxy client.
             f"MIND_PROXY_KEY=${{{_proxy_variable(name)}}}",
-        ])
-        service["volumes"].append("${HOST_DSH_DIR:-${HOST_PROJECT_DIR:-.}/dsh}:/opt/dsh:ro")
-        # DSH's native addon is loaded from /tmp and requires exec there.
-        service["tmpfs"] = ["/tmp:exec,mode=1777"]
-        # Generate the profile and hooks using the image's own runtime code,
-        # as the mind's user, before accepting conversations.
+            "HIVE_CLASSIFIER_MODEL=${HIVE_CLASSIFIER_MODEL:-}",
+        ]
+        # The harness itself, read-only: a mind must not rewrite the tree it
+        # is launched from.
+        service["volumes"].append(
+            f"${{HOST_DSH_DIR:-${{HOST_PROJECT_DIR:-.}}/dsh}}:{DSH_MOUNT}:ro")
+        # Its profile and hooks, written by the image's own code as the
+        # mind's user before it takes a conversation: the console makes minds
+        # and holds none of that code.
         python = "/opt/venv/bin/python3"
         service["command"] = ["sh", "-ec", (
-            f"{python} -m minds.harness.dsh_profile --mind {name} --out /usr/src/app/minds --dsh-root /opt/dsh && "
+            f"{python} -m minds.harness.dsh_profile --mind {name} "
+            f"--out /usr/src/app/minds --dsh-root {DSH_MOUNT} && "
             f"{python} -m minds.harness.dsh_hooks --mind {name} --out /usr/src/app/minds "
             "--container-minds-dir /usr/src/app/minds && "
             f"exec {python} -m minds.mind_server"
         )]
-
+    # No shared codex volume: every codex container on this host can write
+    # it, so a mind holding it could replace the codex binary Daniel's minds
+    # run. The image carries its own codex.
     # The folder is the lock: a second create of the same name, or one racing
     # this, fails here rather than overwriting a runtime.yaml whose mind_id
     # has already been minted credentials. A create that fails part way
@@ -501,6 +559,76 @@ def stack_compose_path() -> Path:
     return Path(root) / "hive_mind" / STACK_COMPOSE_FILENAME
 
 
+def stack_fragment_path(name: str) -> str:
+    """A mind's fragment as the stack file names it: relative to that file.
+
+    The stack file of this workstation sits beside `minds/`. An installed
+    hive's list is a file inside its minds folder, which says so with
+    `HIVE_MIND_STACK_MINDS_PREFIX=.`.
+    """
+    prefix = os.getenv("HIVE_MIND_STACK_MINDS_PREFIX", "").strip() or "minds"
+    return posixpath.normpath(f"{prefix}/{name}/container/compose.yaml")
+
+
+#: One edit of the stack file at a time. The edits run on worker threads,
+#: each reads the file, changes one line and replaces it through the same
+#: neighbour: two at once is one Mind's line lost, or a rename of a file the
+#: other has already moved.
+_STACK_LOCK = threading.Lock()
+
+_EMPTY_INCLUDE_RE = re.compile(r"^include:\s*\[\s*\]\s*$")
+_FRAGMENT_SUFFIX = "/container/compose.yaml"
+
+
+def _stack_entries(lines: list[str]) -> list[int]:
+    """The lines of the stack's include list that name a mind's fragment."""
+    return [i for i, line in enumerate(lines)
+            if line.lstrip().startswith("- path:") and _FRAGMENT_SUFFIX in line]
+
+
+def _install_stack_file(path: Path, rewritten: str, name: str, verb: str) -> None:
+    """Replace the stack file with `rewritten`, or leave it exactly as it is.
+
+    The highest-consequence failure here is a file that no longer parses:
+    `docker compose` then refuses every subcommand for every service in it,
+    so one mind would take the whole running stack down, and that file is
+    generated and gitignored — there is no diff to notice it by and no
+    checkout to recover with. So the result is parsed before it is installed,
+    and a file that would not load is not installed at all.
+    """
+    try:
+        loaded = yaml.safe_load(rewritten)
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"{verb} {name} would leave {path} unparseable, so it was "
+            f"left alone: {exc}") from exc
+    # A list, not merely the key: `include:` with nothing under it loads as
+    # null, which compose refuses.
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("include"), list):
+        raise ValueError(
+            f"{verb} {name} would lose the include list of {path}, so it "
+            "was left alone")
+    # Written whole, through a neighbour and a rename, so a failure part way
+    # cannot leave the running stack's definition truncated.
+    scratch = path.with_name(path.name + ".console-new")
+    try:
+        scratch.write_text(rewritten)
+        stat = path.stat()
+        os.chmod(scratch, stat.st_mode & 0o7777)
+        try:
+            # This console runs as root and the stack file is in the
+            # operator's own checkout. A new inode owned by root is a file
+            # he can no longer edit, and neither can the skill that
+            # generates it.
+            os.chown(scratch, stat.st_uid, stat.st_gid)
+        except (OSError, AttributeError):
+            pass
+        os.replace(scratch, path)
+    except BaseException:
+        scratch.unlink(missing_ok=True)
+        raise
+
+
 def include_mind_in_stack(name: str) -> bool:
     """Add this mind's compose fragment to the stack's ``include:`` list.
 
@@ -526,7 +654,12 @@ def include_mind_in_stack(name: str) -> bool:
     """
     if not _MIND_NAME_RE.fullmatch(name):
         raise ValueError("Invalid Mind name")
-    fragment = f"minds/{name}/container/compose.yaml"
+    with _STACK_LOCK:
+        return _include_mind_in_stack(name)
+
+
+def _include_mind_in_stack(name: str) -> bool:
+    fragment = stack_fragment_path(name)
     # Through a symlink rather than over it: replacing the link with a
     # regular file leaves the real stack file holding the old content, and a
     # compose run from the other location never sees the new mind.
@@ -534,62 +667,165 @@ def include_mind_in_stack(name: str) -> bool:
     text = path.read_text()
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
-    entries = [i for i, line in enumerate(lines)
-               if line.lstrip().startswith("- path:")
-               and "minds/" in line]
-    if not entries:
-        raise ValueError(
-            f"{path} has no minds in its include list, so this console "
-            "cannot tell where a new one goes")
-    if any(fragment in lines[i] for i in entries):
+    entries = _stack_entries(lines)
+    if any(_names_fragment(lines[i], fragment) for i in entries):
         return False
-    last = entries[-1]
-    indent = lines[last][:len(lines[last]) - len(lines[last].lstrip())]
-    deeper = len(indent) + 2
-    after = last + 1
-    while (after < len(lines) and lines[after].strip()
-           and not lines[after].lstrip().startswith("- ")
-           and len(lines[after]) - len(lines[after].lstrip()) >= deeper):
-        after += 1
-    lines.insert(after, f"{indent}- path: {fragment}")
-    # Written whole, through a neighbour and a rename, so a failure part way
-    # cannot leave the running stack's definition truncated.
-    rewritten = newline.join(lines) + newline
-    # The highest-consequence failure in this function is a file that no
-    # longer parses: `docker compose` then refuses every subcommand for
-    # every service in it, so one new mind would take the whole running
-    # stack down, and that file is generated and gitignored — there is no
-    # diff to notice it by and no checkout to recover with. So the result is
-    # parsed before it is installed, and a file that would not load is not
-    # installed at all.
-    try:
-        loaded = yaml.safe_load(rewritten)
-    except yaml.YAMLError as exc:
-        raise ValueError(
-            f"adding {name} to {path} would leave it unparseable, so it was "
-            f"left alone: {exc}") from exc
-    if not isinstance(loaded, dict) or "include" not in loaded:
-        raise ValueError(
-            f"adding {name} to {path} would lose its include list, so it "
-            "was left alone")
-    scratch = path.with_name(path.name + ".console-new")
-    try:
-        scratch.write_text(rewritten)
-        stat = path.stat()
-        os.chmod(scratch, stat.st_mode & 0o7777)
-        try:
-            # This console runs as root and the stack file is in the
-            # operator's own checkout. A new inode owned by root is a file
-            # he can no longer edit, and neither can the skill that
-            # generates it.
-            os.chown(scratch, stat.st_uid, stat.st_gid)
-        except (OSError, AttributeError):
-            pass
-        os.replace(scratch, path)
-    except BaseException:
-        scratch.unlink(missing_ok=True)
-        raise
+    if entries:
+        last = entries[-1]
+        indent = lines[last][:len(lines[last]) - len(lines[last].lstrip())]
+        deeper = len(indent) + 2
+        after = last + 1
+        while (after < len(lines) and lines[after].strip()
+               and not lines[after].lstrip().startswith("- ")
+               and len(lines[after]) - len(lines[after].lstrip()) >= deeper):
+            after += 1
+        lines.insert(after, f"{indent}- path: {fragment}")
+    else:
+        # A list nobody has added to yet, as the installer leaves it:
+        # `include: []`. Anything else with no mind in it is a file this
+        # console cannot tell where a new one goes in.
+        empty = [i for i, line in enumerate(lines) if _EMPTY_INCLUDE_RE.match(line)]
+        if len(empty) != 1:
+            raise ValueError(
+                f"{path} has no minds in its include list, so this console "
+                "cannot tell where a new one goes")
+        lines[empty[0]:empty[0] + 1] = ["include:", f"  - path: {fragment}"]
+    _install_stack_file(path, newline.join(lines) + newline, name, "adding")
     return True
+
+
+def _names_fragment(line: str, fragment: str) -> bool:
+    """Whether this include entry is the one for `fragment`: the path itself,
+    quoted or not, with or without a trailing comment — never a longer path
+    that merely ends the same way."""
+    value = line.lstrip()[len("- path:"):].split(" #", 1)[0].strip().strip("'\"")
+    return posixpath.normpath(value) == fragment
+
+
+def exclude_mind_from_stack(name: str) -> bool:
+    """Take this mind's fragment out of the stack's include list again.
+
+    The undo of `include_mind_in_stack`, for a creation that failed after it:
+    an entry naming a fragment that is about to be deleted is a stack file
+    `docker compose` refuses whole. Returns whether a line was removed. Only
+    a bare entry is removed — one carrying keys of its own (`env_file`,
+    `project_directory`) was not written here and is left for a person.
+    """
+    if not _MIND_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid Mind name")
+    with _STACK_LOCK:
+        return _exclude_mind_from_stack(name)
+
+
+def _exclude_mind_from_stack(name: str) -> bool:
+    fragment = stack_fragment_path(name)
+    path = stack_compose_path().resolve()
+    text = path.read_text()
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    entries = _stack_entries(lines)
+    mine = [i for i in entries if _names_fragment(lines[i], fragment)]
+    if not mine:
+        return False
+    index = mine[0]
+    indent = len(lines[index]) - len(lines[index].lstrip())
+    following = lines[index + 1] if index + 1 < len(lines) else ""
+    if (following.strip() and not following.lstrip().startswith("- ")
+            and len(following) - len(following.lstrip()) >= indent + 2):
+        raise ValueError(
+            f"the entry for {name} in {path} carries settings of its own, so "
+            "it was left alone")
+    del lines[index]
+    if len(entries) == 1 and not any(
+            line.lstrip().startswith("- ") and
+            len(line) - len(line.lstrip()) == indent for line in lines):
+        # It was the only entry: `include:` with nothing under it is null,
+        # which compose refuses. Back to the empty list it started as.
+        heads = [i for i, line in enumerate(lines) if line.rstrip() == "include:"]
+        if len(heads) == 1:
+            lines[heads[0]] = "include: []"
+    _install_stack_file(path, newline.join(lines) + newline, name, "removing")
+    return True
+
+
+def remove_internal_mind(name: str, mind_id: str) -> bool:
+    """Delete the folder `scaffold_internal_mind` wrote for this mind.
+
+    For a creation that failed after the scaffold, and only for that folder:
+    it is deleted when its runtime.yaml carries this mind's id, or when it is
+    the bare start of a scaffold that never got as far as writing one. Any
+    other folder of that name is somebody else's — a tracked one (`harness`,
+    `example`), or a mind that was already there — and is left alone, as is
+    a link: this console deletes as root. Returns whether one was deleted.
+    """
+    if not _MIND_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid Mind name")
+    mind_dir = HIVE_MIND_MINDS_CONFIG_DIR / name
+    if mind_dir.is_symlink() or not mind_dir.is_dir():
+        return False
+    runtime = mind_dir / "runtime.yaml"
+    if runtime.is_file() and not runtime.is_symlink():
+        try:
+            loaded = yaml.safe_load(runtime.read_text()) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError(
+                f"minds/{name} could not be read to tell whose it is, so it "
+                f"was left alone: {exc}") from exc
+        ours = isinstance(loaded, dict) and str(loaded.get("mind_id") or "") == mind_id
+    else:
+        # The scaffold makes `container/` first and writes runtime.yaml next.
+        names = sorted(entry.name for entry in mind_dir.iterdir())
+        container = mind_dir / "container"
+        ours = names == [] or (
+            names == ["container"] and container.is_dir()
+            and not container.is_symlink() and not any(container.iterdir()))
+    if not ours:
+        # Nothing of this creation's is there to take back: the scaffold
+        # refused, because the folder was already somebody's.
+        return False
+    shutil.rmtree(mind_dir)
+    return True
+
+
+def new_mind_obstacle(name: str, harness: str) -> str | None:
+    """Why a Mind cannot be created on this hive as it stands, or None.
+
+    Asked before anything is written, about the things a new Mind's compose
+    file is written against and cannot do without. Each of them missing is a
+    Mind that every step reports made and that then comes up reading empty
+    folders Docker created for it, or holding no harness.
+    """
+    import credentials_data
+    import holder_credentials
+
+    lowered = (name or "").strip().lower()
+    reserved = {item.strip().lower() for item in
+                os.getenv("HIVE_MIND_RESERVED_NAMES", "").split(",") if item.strip()}
+    if lowered in reserved:
+        return f"{lowered} is a name this hive's own services use"
+    label = holder_credentials.MIND_ENV_LABEL
+    path = credentials_data.ENV_FILES.get(label)
+    if path is None:
+        return (f"this console was given no {label} env file (HIVE_ENV_FILES), "
+                "so a new Mind's keys have nowhere to go")
+    stack = stack_compose_path()
+    if not stack.is_file():
+        return (f"the stack file {stack} is not there, so a new Mind cannot "
+                "be listed in the stack")
+    # Not HOST_DSH_DIR: a dsh mind's fragment falls back to the dsh folder
+    # under HOST_PROJECT_DIR when that is unset.
+    try:
+        value = credentials_data._read_env_value(path, "HOST_PROJECT_DIR")
+    except credentials_data.Unreadable:
+        return f"{path} could not be read"
+    if not value:
+        return (f"{path} sets no HOST_PROJECT_DIR, which a new Mind's compose file "
+                "is written with. On an installed hive, run the installer once more")
+    if not HIVE_MIND_MINDS_CONFIG_DIR.is_dir():
+        return (f"{HIVE_MIND_MINDS_CONFIG_DIR} is not mounted, so a new Mind's "
+                "folder has nowhere to be written. On an installed hive, run "
+                "the installer once more")
+    return None
 
 
 def _mind_uid() -> int:

@@ -52,6 +52,7 @@ import design_graph
 import holder_credentials
 import chief_of_staff
 import kanban_data
+import mind_creation
 import mind_files
 import mind_images
 import mind_mounts
@@ -139,6 +140,12 @@ async def lifespan(app: FastAPI):
     # The ready-made roles, once per hive (story 10.18.3). A failure is
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
+    # A creation this console was stopped in the middle of is taken back
+    # now: the request that would have finished or undone it is gone. Never
+    # fatal — what could not be taken back stays recorded for the next start.
+    # Beside the start, not before it: each step may wait on a service that
+    # is still coming up, and the console must be answering meanwhile.
+    sweeping = asyncio.create_task(_sweep_interrupted_creations())
     try:
         # A task of its own: the store refuses a unit of work opened inside
         # this lifespan's generator, and the seed is one.
@@ -161,6 +168,13 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log_event(log, "service.stopped", component="hive-control-plane")
+        # Before the store closes: what it had not taken back stays recorded
+        # for the next start.
+        sweeping.cancel()
+        try:
+            await sweeping
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - cancelled, or reported
+            pass
         # The delivery tasks go before the store does, and are waited for.
         # Left to the loop's own cancellation they are cancelled *after* the
         # store is closed, and `deliver_notice`'s own handler — the one that
@@ -1228,11 +1242,30 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             ),
         )
 
+    # A mind's id is what its roles, its memory and its gateway row are keyed
+    # by: one the gateway already knows is another mind's, and assigning
+    # roles to it would replace that mind's.
+    if body.get("mind_id"):
+        # An id the request brought, not one made here a moment ago: asked of
+        # the gateway itself, which must answer. A listing that failed reads
+        # as "no such mind", and would wave through another mind's id.
+        known = await _gateway_json("/broker/minds")
+        if _registered_mind(
+                [m for m in known if isinstance(m, dict)] if isinstance(known, list) else [],
+                mind_id):
+            raise HTTPException(status_code=409, detail="That Mind ID is already in use")
+    obstacle = await asyncio.to_thread(
+        configuration_data_module.new_mind_obstacle, name, harness)
+    if obstacle:
+        raise HTTPException(
+            status_code=409, detail=f"{name} was not made, and nothing was written: {obstacle}.")
+
     # Every mind created here talks to the inference proxy with its own key
     # (story 2.1.9, DECIDED 2026-11-15 by Daniel), so an Ollama mind's base is
     # the proxy, never a bare daemon: there its calls go unmetered and its
     # proxy key is sent to a host that is not the proxy.
-    ollama_base_url = holder_credentials.SERVICES["proxy"].url() if provider == "ollama" else ""
+    ollama_base_url = (
+        configuration_data_module.mind_proxy_base_url() if provider == "ollama" else "")
 
     # Created from a role (story 10.18.2): the roles are checked before
     # anything is written, and held before the Mind's first turn.
@@ -1250,12 +1283,27 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             raise HTTPException(status_code=400, detail=f"No such role: {unknown[0]}")
 
     owner = await _new_mind_owner(body, user)
-    # Held before the scaffold is written, so a Mind never exists unmanaged
-    # behind a failed assignment; a scaffold that then fails leaves only a
-    # management record for an id nothing uses.
-    if managed:
-        await store.set_mind_roles(mind_id, role_ids)
+
+    # From here on something is written, and creating a Mind is all or
+    # nothing (Daniel, 2026-11-17): a step that fails takes back everything
+    # the steps before it wrote, and the page is told the Mind was not made
+    # and which step failed. It used to report each failure and leave the
+    # rest standing, which is how a page came to print "Started" under three
+    # refusals for a mind that existed nowhere it could run. See
+    # mind_creation.py for the record each step is taken under.
+    creation = mind_creation.Creation(name, mind_id, owner)
     try:
+        creation.begin()
+    except mind_creation.InProgress as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{name} was not made, and nothing was written: this console "
+                   f"could not open its record of the creation ({exc}).") from exc
+    step = "Writing its folder"
+    try:
+        creation.mark("folder")
         written = scaffold_internal_mind(
             name,
             mind_id=mind_id,
@@ -1266,110 +1314,102 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             description=str(body.get("description") or ""),
             ollama_base_url=ollama_base_url,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Could not write the Mind scaffold: {exc}"
-        ) from exc
 
-    # Minted here rather than left for a shell. The generated compose file
-    # reads this mind's own variables, so without this the container comes up
-    # holding nothing and is refused by both services on its first call.
-    # Not fatal: the scaffold is written and the mind is recoverable from the
-    # credentials page. Reported, because a mind that boots with no credential
-    # fails in silence from detached hooks — and reported per service, because
-    # one of the two landing is a different state from neither.
-    minted, credential_error = await holder_credentials.provision_mind(
-        name, mind_id, owner, proxy_key=proxy_key,
-    )
-    registration_error = None
-    try:
-        await _register_scaffolded_mind(name, {"owner": owner}, user)
-    except Exception as exc:  # noqa: BLE001 - reported; the button retries
-        # Not fatal: the scaffold stands and the Register button retries.
-        registration_error = str(getattr(exc, "detail", "") or exc)
+        # The generated compose file reads this mind's own variables, so
+        # without these the container comes up holding nothing and is
+        # refused by every service on its first call.
+        step = "Issuing its credentials"
+        creation.mark("credentials")
+        minted, credential_error = await holder_credentials.provision_mind(
+            name, mind_id, owner, proxy_key=proxy_key,
+        )
+        if credential_error:
+            raise _CreationStepFailed(credential_error)
 
-    # The fragment the scaffold just wrote is invisible to `docker compose`
-    # until the stack file lists it, so this is part of creating a mind
-    # rather than a step after it. Non-fatal and reported for the same
-    # reason minting is: the scaffold stands and the mind is recoverable.
-    include_error = None
-    try:
-        configuration_data_module.include_mind_in_stack(name)
-    except (OSError, ValueError) as exc:
-        include_error = str(exc)
+        # The fragment the scaffold wrote is invisible to `docker compose`
+        # until the stack file lists it. Recorded whether or not a line was
+        # added: one already there for this name points at the fragment just
+        # written, and left behind a failed creation it names a file that is
+        # gone — which `docker compose` refuses the whole stack for.
+        step = "Listing it in the stack"
+        creation.mark("stack")
+        await asyncio.to_thread(configuration_data_module.include_mind_in_stack, name)
 
-    # Started here, not handed back as a shell line. The approval for
-    # touching this host's containers is the admin's click in Hive Tools,
-    # which is a record of who started what; a command pasted into a
-    # terminal is neither (story 2.1.9, decided 2026-11-15).
-    start = {"started": False, "error": None, "operation_id": None}
-    if include_error is None:
-        try:
-            up = await _hive_tools_request(
-                "POST", "/docker/up",
-                params={"path": mind_mounts.hive_mind_project_path(), "service": name},
-                timeout=310.0,
-            )
-            operation = up.get("hitl_request_id")
-            if operation:
-                # Recorded before it is reported, so the pending approval has
-                # a requester. Any failure here is this step's failure, not
-                # the create's: the container request is already in flight.
-                try:
-                    await console_access.record_operation_from(up, user)
-                except Exception as exc:  # noqa: BLE001 - reported below
-                    start["error"] = (
-                        f"started, waiting on approval, but recording who "
-                        f"asked failed: {exc}")
-                start["operation_id"] = str(operation)
-            elif up.get("error") or up.get("status") == "error":
-                # Hive Tools answers 2xx with the compose failure in the body
-                # — a broken fragment, a build that did not finish, an
-                # unknown service. Reading that as started sends the operator
-                # to talk to a container that does not exist.
-                start["error"] = str(
-                    up.get("error") or up.get("stderr") or "the start failed")
-            else:
-                start["started"] = True
-        except (HTTPException, OSError, ValueError) as exc:
-            start["error"] = str(getattr(exc, "detail", "") or exc)
-
-    # The Mind's own node, written as the Mind. A mind with no node is a
-    # mind whose first memory write has nothing to hang from, and seeding it
-    # with the console's credential would record every mind in the hive as
-    # something the console created.
-    soul_seed_error = None
-    try:
+        # The Mind's own node, written as the Mind. A mind with no node is a
+        # mind whose first memory write has nothing to hang from, and seeding
+        # it with the console's credential would record every mind in the
+        # hive as something the console created.
+        step = "Its node in the graph"
         location = holder_credentials.locate(
             holder_credentials.SERVICES["lucent"], name)
         credential = (
             holder_credentials._loaded_value(location) if location else None)
         if not credential:
-            raise ValueError(
+            raise _CreationStepFailed(
                 "this Mind holds no memory-store credential, so its node "
                 "cannot be written as itself")
-        await mind_soul.seed_mind_node(name, mind_id, owner, credential)
-    except Exception as exc:  # noqa: BLE001 - reported; setup-personality retries
-        soul_seed_error = str(getattr(exc, "detail", "") or exc)
+        try:
+            await mind_soul.seed_mind_node(name, mind_id, owner, credential)
+        except HTTPException:
+            # Refused: it wrote nothing, and taking back a node of this name
+            # would delete one this creation never made.
+            raise
+        except Exception:
+            # No answer is not a refusal. The write may have landed, so it
+            # is recorded and the undo asks for the node to be deleted.
+            creation.mark("node")
+            raise
+        creation.mark("node")
 
+        # A mind created here holds no gateway admin credential and cannot
+        # register itself, so this is the only registration it ever gets.
+        step = "Registering it with the gateway"
+        creation.mark("gateway")
+        await _register_scaffolded_mind(name, {"owner": owner}, user)
+
+        # Last, and still before its container is asked for: a Mind never
+        # takes a turn unmanaged, and no step can fail after this one. Role
+        # management is never taken off a mind id once put on, so held any
+        # earlier a failed creation would leave an id managed for good.
+        if managed:
+            step = "Its role assignment"
+            creation.mark("roles")
+            await store.set_mind_roles(mind_id, role_ids)
+    except Exception as exc:  # noqa: BLE001 - every failure unmakes the mind
+        why = str(getattr(exc, "detail", "") or exc) or type(exc).__name__
+        leftovers = await mind_creation.unmake(creation, _deregister_mind)
+        log_event(
+            log, "mind.create.failed", **_actor_fields(user), mind_name=name,
+            mind_id=mind_id, harness=harness, provider=provider, step=step,
+            reason=why[:500], left_behind=leftovers,
+        )
+        detail = f"{name} was not made. {step} failed: {why.rstrip('.')}. " + (
+            "Left behind, and to be removed by hand: " + "; ".join(leftovers) + "."
+            if leftovers else "Everything written for it has been removed.")
+        # A refusal of what was asked for is the asker's to fix; anything
+        # else is a service behind this console that did not do its part,
+        # and never that service's own status: a 401 from the memory store
+        # passed on would read, to the page, as this session having ended.
+        raise HTTPException(
+            status_code=400 if isinstance(exc, ValueError) else 502, detail=detail,
+        ) from exc
+
+    # Made. The record is closed before the container is asked for: from
+    # here nothing is taken back, whatever the start does.
+    creation.close()
+    start = await _start_mind_container(name, user)
     log_event(
         log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
         mind_id=mind_id, harness=harness, provider=provider,
-        credentials=[m["service"] for m in minted], credential_error=credential_error,
-        include_error=include_error, started=start["started"],
+        credentials=[m["service"] for m in minted], started=start["started"],
         start_operation=start["operation_id"], start_error=start["error"],
-        soul_seed_error=soul_seed_error,
     )
     return {
         "mind_id": mind_id,
         "roles": role_ids,
         "written": written,
         "credentials": minted,
-        "credential_error": credential_error,
         "proxy_key_warning": proxy_key_warning,
-        "registration_error": registration_error,
         "registration": {
             "name": name,
             "mind_id": mind_id,
@@ -1378,20 +1418,143 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             "provider": provider,
             "owner": owner,
         },
-        "include_error": include_error,
+        **_start_report(name, start),
+    }
+
+
+async def _sweep_interrupted_creations() -> None:
+    try:
+        for swept in await mind_creation.sweep(_deregister_mind, _gateway_mind_id_named):
+            log_event(log, "mind.create.swept", component="hive-control-plane",
+                      level=logging.WARNING, **swept)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "mind.create.sweep_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
+
+
+async def _gateway_mind_id_named(name: str) -> str:
+    """The id of the mind the gateway holds under this name, or "" for none.
+    Raises when the gateway does not answer: that is not "none"."""
+    minds = await _gateway_json("/broker/minds")
+    if not isinstance(minds, list):
+        raise HTTPException(status_code=502, detail="the gateway's mind listing was not a list")
+    for mind in minds:
+        if isinstance(mind, dict) and str(mind.get("name") or "").lower() == name:
+            return str(mind.get("id") or "")
+    return ""
+
+
+class _CreationStepFailed(Exception):
+    """A step of creating a Mind that answered with a failure, not an error."""
+
+
+async def _start_mind_container(name: str, user: dict) -> dict:
+    """Ask Hive Tools to build and start a Mind's container; say what came of it.
+
+    One of three things, and never an exception: started, waiting on an
+    admin's approval in Hive Tools, or not started and why. Asked for here
+    rather than handed back as a shell line — the approval for touching this
+    host's containers is the admin's click in Hive Tools, which is a record
+    of who started what (story 2.1.9, decided 2026-11-15).
+
+    It is not part of making the Mind, and a start that fails unmakes
+    nothing: see mind_creation.py.
+    """
+    start = {"started": False, "error": None, "operation_id": None}
+    try:
+        up = await _hive_tools_request(
+            "POST", "/docker/up",
+            params={"path": mind_mounts.hive_mind_project_path(), "service": name},
+            timeout=310.0,
+        )
+        operation = up.get("hitl_request_id")
+        if operation:
+            start["operation_id"] = str(operation)
+            # Recorded so the pending approval has a requester. Failing at
+            # that is said; the request is already in flight.
+            try:
+                await console_access.record_operation_from(up, user)
+            except Exception as exc:  # noqa: BLE001 - reported below
+                start["error"] = (
+                    f"the start is waiting on approval, but recording who "
+                    f"asked failed: {exc}")
+        elif up.get("error") or up.get("status") == "error":
+            # Hive Tools answers 2xx with the compose failure in the body —
+            # a broken fragment, a build that did not finish, an unknown
+            # service. Reading that as started sends the operator to talk to
+            # a container that does not exist.
+            start["error"] = str(
+                up.get("error") or up.get("stderr") or "the start failed")
+        else:
+            start["started"] = True
+    except Exception as exc:  # noqa: BLE001 - reported; the Mind is made
+        start["error"] = str(getattr(exc, "detail", "") or exc) or type(exc).__name__
+    return start
+
+
+def _start_report(name: str, start: dict) -> dict:
+    """The start, as the page is told it."""
+    waiting = bool(start["operation_id"])
+    return {
         "started": start["started"],
         "start_operation": start["operation_id"],
         "start_error": start["error"],
-        "soul_seed_error": soul_seed_error,
         # The soul is authored in conversation, not here — see setup-personality.
         "next_step": (
             f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
             if start["started"] else
-            f"{name} is waiting on your approval in Hive Tools to start."
-            if start["operation_id"] else
-            f"{name} is scaffolded but not running yet."
+            f"{name} is made, and starts once you approve it in Hive Tools. An "
+            "approval left for more than a few minutes lapses: start it again here."
+            if waiting else
+            f"{name} is made but is not running: its container did not start. "
+            "Building its image the first time can take longer than the wait "
+            "allows, so try starting it again before anything else."
         ),
     }
+
+
+async def _deregister_mind(name: str, mind_id: str) -> None:
+    """Take a mind a failed creation registered back out of the gateway.
+
+    Only the row carrying this mind's id. A name the gateway holds under
+    another id is another mind, and one it does not hold was never
+    registered — the registration is what failed.
+    """
+    minds = await _gateway_json("/broker/minds")
+    rows = [m for m in minds if isinstance(m, dict)] if isinstance(minds, list) else []
+    if not _registered_mind(rows, mind_id):
+        return
+    try:
+        await _gateway_request("DELETE", f"/broker/minds/{name}", admin=True)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+
+@app.post("/api/minds/{name}/start")
+async def api_start_mind(name: str, user: dict = Depends(require_auth)):
+    """Start, again, the container of a Mind made on this host.
+
+    For a Mind whose first start did not happen — the image build outlasted
+    the wait, or the approval lapsed. The same request creation makes.
+    """
+    normalized = name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    if not internal_mind_exists(normalized):
+        raise HTTPException(status_code=404, detail="No Mind of that name was made here")
+    if mind_creation.is_open(normalized):
+        # Half made: started now it would come up without its keys, and a
+        # step that then failed would delete its folder under it.
+        raise HTTPException(
+            status_code=409, detail=f"{normalized} is still being made, or being taken back")
+    start = await _start_mind_container(normalized, user)
+    log_event(
+        log, "mind.start.requested", **_actor_fields(user), mind_name=normalized,
+        started=start["started"], start_operation=start["operation_id"],
+        start_error=start["error"],
+    )
+    return _start_report(normalized, start)
 
 
 async def _new_mind_owner(body: dict, user: dict) -> str:
@@ -1922,6 +2085,8 @@ _HARNESS_PROVIDERS = {
     "claude_cli": ("anthropic", "ollama"),
     "codex_cli": ("openai", "ollama"),
 }
+# A container mind may also run dsh, the hive's default harness (Daniel,
+# 2026-11-17), which reaches every provider through the inference proxy.
 _INTERNAL_HARNESS_PROVIDERS = {
     "dsh": ("openai", "anthropic", "ollama"),
     **_HARNESS_PROVIDERS,

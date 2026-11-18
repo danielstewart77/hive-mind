@@ -83,6 +83,13 @@ PROBE_ACCEPTED = frozenset({200, 404})
 PROBE_TIMEOUT_S = 8.0
 
 
+#: The env file a mind created here has its three values written into, by
+#: its label in `HIVE_ENV_FILES`. This workstation keeps the containerised
+#: minds' variables in a file of their own; an installed hive has one `.env`
+#: for everything and names its label in `HIVE_MIND_ENV_LABEL`.
+MIND_ENV_LABEL = os.environ.get("HIVE_MIND_ENV_LABEL", "").strip() or "hive_mind"
+
+
 @dataclass(frozen=True)
 class Service:
     """A service that keys credentials per holder, and how to reach it.
@@ -167,7 +174,7 @@ SERVICES: dict[str, Service] = {
         prefix="PROXY",
         own_files={},
         wants_mind_id=False,
-        admin_file="hive_mind",
+        admin_file=MIND_ENV_LABEL,
     ),
 }
 
@@ -550,7 +557,7 @@ async def rotate(service: Service, holder: str) -> dict[str, Any]:
 
 def _proxy_variables() -> list[str]:
     """Holders a `PROXY_TOKEN_<NAME>` in the shared mind file is for."""
-    path = ENV_FILES.get("hive_mind")
+    path = ENV_FILES.get(MIND_ENV_LABEL)
     if path is None:
         return []
     try:
@@ -628,13 +635,17 @@ def _ensure_key(path: Path, key: str) -> None:
     """
     if not path.is_file():
         raise MintRefused(f"no file at {path} to write {key} into")
-    text = credentials_data._read_text(path)
-    if credentials_data._read_env_value(path, key) is not None:
-        return
-    updated = text if text.endswith("\n") or not text else text + "\n"
-    credentials_data._write_file_in_place(
-        path, updated + f"{key}=\n", "hive_mind", key, text
-    )
+    # Read and written under the one lock every writer of these files takes:
+    # two Minds made at once, or one beside a rotation, each read the file
+    # and write it whole.
+    with credentials_data._WRITE_LOCK:
+        text = credentials_data._read_text(path)
+        if credentials_data._read_env_value(path, key) is not None:
+            return
+        updated = text if text.endswith("\n") or not text else text + "\n"
+        credentials_data._write_file_in_place(
+            path, updated + f"{key}=\n", MIND_ENV_LABEL, key, text
+        )
 
 
 async def name_held_by_something_else(name: str) -> str | None:
@@ -655,10 +666,13 @@ async def name_held_by_something_else(name: str) -> str | None:
         for row in rows:
             if str(row.get("holder", "")).lower() != name.strip().lower():
                 continue
-            if service.key == "proxy" and row.get("live") is False:
-                # A proxy client keeps its row and usage after its key is
-                # revoked; nothing is using it, and the proxy itself refuses
-                # a mind taking over an app's or a privileged client.
+            if row.get("live") is False:
+                # Every service keeps a holder's row after its credential is
+                # revoked — a proxy client its usage, the gateway and the
+                # memory store the record of who held what. Nothing is using
+                # a revoked one, so it is not a holder a new Mind would
+                # displace: a creation that failed and was taken back must
+                # not take its name out of use for good.
                 continue
             return service.label
     return None
@@ -687,9 +701,10 @@ async def provision_mind(
     for service in SERVICES.values():
         try:
             key = variable_name(service, name)
-            if "hive_mind" not in ENV_FILES:
-                raise MintRefused("no hive_mind env file is configured (HIVE_ENV_FILES)")
-            _ensure_key(ENV_FILES["hive_mind"], key)
+            if MIND_ENV_LABEL not in ENV_FILES:
+                raise MintRefused(
+                    f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
+            _ensure_key(ENV_FILES[MIND_ENV_LABEL], key)
             if service.key == "proxy" and proxy_key is not None:
                 minted.append(await store_mind_proxy_key(name, owner, proxy_key))
                 continue
@@ -700,7 +715,7 @@ async def provision_mind(
                     owner,
                     role="mind",
                     mind_id=mind_id,
-                    location=Location("hive_mind", key),
+                    location=Location(MIND_ENV_LABEL, key),
                 )
             )
         except Exception as exc:
@@ -728,7 +743,7 @@ async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None
         return None, None
     if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,4096}", value):
         raise MintRefused("Paste only the proxy key, without quotes or embedded whitespace")
-    path = ENV_FILES.get("hive_mind")
+    path = ENV_FILES.get(MIND_ENV_LABEL)
     if path is None or not path.is_file():
         raise MintRefused("This Hive is not configured to store Mind proxy keys yet")
     service = SERVICES["proxy"]
@@ -737,7 +752,7 @@ async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None
         text = credentials_data._read_text(path)
         known = re.findall(r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+|MIND_PROXY_KEY|PROXY_CREDENTIAL_ADMIN_KEY)=", text)
         for key in known:
-            existing = _loaded_value(Location("hive_mind", key))
+            existing = _loaded_value(Location(MIND_ENV_LABEL, key))
             if existing and secrets.compare_digest(existing, value):
                 warning = (
                     "This proxy key is already configured elsewhere in this Hive. "
@@ -764,16 +779,61 @@ async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None
 async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, Any]:
     """Persist an already verified key without minting or rotating it upstream."""
     key = variable_name(SERVICES["proxy"], name)
-    path = ENV_FILES["hive_mind"]
+    path = ENV_FILES[MIND_ENV_LABEL]
     async with _ROTATION_LOCK:
         with credentials_data._WRITE_LOCK:
             _ensure_key(path, key)
-            written = credentials_data._write_location(path, key, value, "hive_mind")
-            if not written["written"] or _loaded_value(Location("hive_mind", key)) != value:
+            written = credentials_data._write_location(path, key, value, MIND_ENV_LABEL)
+            if not written["written"] or _loaded_value(Location(MIND_ENV_LABEL, key)) != value:
                 raise MintRefused("The pasted proxy key could not be saved; creation cannot use it")
     return {"service": "proxy", "holder": name, "username": owner, "role": "mind",
-            "file": "hive_mind", "path": str(path), "env_key": key,
-            "restart_target": RESTART_BY_FILE["hive_mind"]}
+            "file": MIND_ENV_LABEL, "path": str(path), "env_key": key,
+            "restart_target": RESTART_BY_FILE.get(MIND_ENV_LABEL, RESTART_BY_FILE["hive_mind"])}
+
+
+async def unprovision_mind(name: str) -> list[str]:
+    """Undo `provision_mind` for a mind whose creation failed: each service
+    stops accepting the value it issued, and the mind's three lines leave the
+    shared env file. Returns what could not be undone, in words; empty is all
+    of it.
+
+    Each service and each line on its own, as minting is: one failing must
+    not leave the others live. A service that never had this holder is not a
+    failure — the mint may have been what failed.
+    """
+    failures: list[str] = []
+    holder = name.strip().lower()
+    for service in SERVICES.values():
+        key = variable_name(service, holder)
+        try:
+            # A service this console holds no admin credential for is one it
+            # cannot have issued anything at: the value there, if any, was
+            # pasted in, and is its owner's to keep.
+            response = (await _request(service, "DELETE", f"/credentials/{holder}")
+                        if service.admin_token() else None)
+            if (response is not None and response.status_code >= 400
+                    and response.status_code != 404):
+                failures.append(
+                    f"{service.label} still accepts {holder}'s credential "
+                    f"(it answered {response.status_code} to the revocation)")
+        except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
+            failures.append(
+                f"{service.label} could not be asked to revoke {holder}'s "
+                f"credential ({exc})")
+        path = ENV_FILES.get(MIND_ENV_LABEL)
+        if path is None:
+            continue
+        try:
+            with credentials_data._WRITE_LOCK:
+                text = credentials_data._read_text(path)
+                kept = [line for line in text.splitlines(keepends=True)
+                        if not line.startswith(f"{key}=")]
+                if len(kept) != len(text.splitlines(keepends=True)):
+                    credentials_data._write_file_in_place(
+                        path, "".join(kept), MIND_ENV_LABEL, key, text)
+        except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
+            failures.append(f"the line {key} is still in {path} ({exc})")
+    return failures
 
 
 async def check(service: Service, holder: str, role: str = "") -> dict[str, Any]:

@@ -89,6 +89,15 @@ def scratch_database():
 
 
 @pytest.fixture(autouse=True)
+def _mind_creation_records_in_a_folder_the_test_owns(tmp_path, monkeypatch):
+    """The record a creation is made under defaults to `/data`, which inside
+    the console's own container is the live one."""
+    import mind_creation
+
+    monkeypatch.setattr(mind_creation, "CREATION_DIR", tmp_path / "mind-creations")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_hive_db(scratch_database, monkeypatch):
     """Every test on an emptied scratch database, with the store open.
 
