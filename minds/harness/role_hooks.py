@@ -590,16 +590,34 @@ def install(harness: str, home: Path, names: list[str], *,
 
         # Scripts first: a registration never names a file that is not there.
         directory = home / INSTALL_DIR
+
+        def refused(why: str) -> dict:
+            report["error"] = why
+            for hook in to_copy:
+                report["hooks"][hook.name] = {"status": "failed", "reason": why}
+            return report
+
+        if directory.is_symlink():
+            # The whole folder is a link the mind made: every write would
+            # land in the folder at its far end.
+            return refused(f"{directory} is a link the mind made to another folder; "
+                           "nothing was installed through it")
         directory.mkdir(parents=True, exist_ok=True)
         for name, source in _files(to_copy, harness).items():
             mode = 0o755 if name.endswith((".py", ".sh")) else 0o644
             data = source.read_bytes()
             target = directory / name
-            if target.is_symlink() and Path(os.path.realpath(target)).parent != Path(
-                    os.path.realpath(directory)):
-                # A link the mind made to a file of its own elsewhere:
-                # writing would go through it and replace that file.
-                report.setdefault("links_kept", []).append(name)
+            if target.is_symlink():
+                # A link is the mind's doing, wherever it leads: writing
+                # would go through it and replace the file at its far end.
+                # Said unless it already leads to the repository's bytes.
+                # One hook's link never costs the other hooks theirs.
+                try:
+                    same = target.read_bytes() == data
+                except OSError:
+                    same = False
+                if not same:
+                    report.setdefault("links_kept", []).append(name)
                 continue
             try:
                 # Run at every spawn of a managed mind: a file that is
