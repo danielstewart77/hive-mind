@@ -360,7 +360,8 @@ def _role_hooks_env(env: dict[str, str], timeout: float = 10.0) -> dict[str, str
         # Story 10.18.15: the hooks and skills its roles name arrive here,
         # before the hooks file dsh is handed is written from the mind's own.
         on_grants=lambda grants: (role_files.provision(
-            "dsh", DSH_HOME, grants, hooks_file=Path(source) if source else None, log=log),
+            "dsh", DSH_HOME, grants, hooks_file=Path(source) if source else None, log=log,
+            deadline=min(role_files.DEADLINE, timeout / 3)),
             hooks_config())[1])
 
 

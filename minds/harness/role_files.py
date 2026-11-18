@@ -20,11 +20,14 @@ what the installer itself put under ``<home>/role-hooks`` and registered:
 that directory is the repository's, and a change there is how a hook changed
 in the repository reaches the mind (story 10.18.12).
 
-**It never stops a spawn, and never holds one for long.** The work runs
-against a deadline (`DEADLINE`); whatever is not in place when it passes, or
-could not be put in place at all, is returned and logged as an error, which
-is what the mind's error feed (`GET /diagnostics/errors`) carries to the
-console. The conversation starts with what the mind has.
+**It never stops a spawn, and never holds one for long.** The work runs on a
+thread of its own against a deadline (`DEADLINE`, less where the caller is
+on the event loop); whatever is not in place when it passes, or could not be
+put in place at all, is logged as an error, which is what the mind's error
+feed (`GET /diagnostics/errors`) carries to the console. The conversation
+starts with what the mind has. One pass runs per harness home at a time: a
+spawn that finds one still running waits on that one rather than starting
+another, and a pass that outlives its spawn still says what it found.
 """
 
 from __future__ import annotations
@@ -48,12 +51,17 @@ DEADLINE = 5.0
 #: inside that, so it does not fall out of the feed while it stands.
 REPEAT_AFTER = 1800.0
 
-#: When each standing problem was last logged, by a key that does not change
-#: from turn to turn. Only problems seen on the latest pass are kept, so one
-#: that is fixed and comes back is said again, and the table cannot grow
-#: past what one mind's grants can name.
-_SAID: dict[tuple[str, str], float] = {}
+#: When each standing problem was last logged, by harness and a key that
+#: does not change from turn to turn. A finished pass keeps only what it saw
+#: for its own harness, so a problem that is fixed and comes back is said
+#: again, one harness's clean pass says nothing about another's, and the
+#: table cannot grow past what one mind's grants can name.
+_SAID: dict[tuple[str, str, str], float] = {}
 _SAID_LOCK = threading.Lock()
+
+#: The pass running for each (harness, home), so there is never a second.
+_RUNNING: dict[tuple[str, str], tuple[threading.Thread, dict]] = {}
+_RUNNING_LOCK = threading.Lock()
 
 Problem = tuple[tuple[str, str], str]
 
@@ -92,6 +100,11 @@ def _hooks(harness: str, home: Path, names: list[str], hooks_file: Path | None,
                      "every spawn; name the file it is generated from")]
     report = role_hooks.install(harness, home, names, hooks_file=hooks_file, python=python)
     problems: list[Problem] = []
+    for name in report.get("links_kept", []):
+        problems.append((("link", name),
+                         f"{name} under this mind's role-hooks folder is a link the mind "
+                         "made to a file elsewhere; it was left as it is, so the hook runs "
+                         "the mind's file and not the repository's"))
     if report.get("error"):
         problems.append((("hooks", "file"),
                          f"hooks {', '.join(names)} are granted by a role and were not "
@@ -99,13 +112,18 @@ def _hooks(harness: str, home: Path, names: list[str], hooks_file: Path | None,
     registered: set[str] | None = None
     for name, outcome in report["hooks"].items():
         status = outcome.get("status")
-        if status == "unknown":
+        if status in ("unknown", "baseline"):
             if registered is None:
                 registered = _registered_names(harness, Path(report["hooks_file"]))
-            if name not in registered:
+            if name not in registered and status == "unknown":
                 problems.append((("hook", name),
                                  f"hook {name} is granted by a role, but the repository does "
                                  "not track it and this mind registers no hook of that name"))
+            elif name not in registered:
+                # One of the four the harness's own installer puts in place.
+                problems.append((("hook", name),
+                                 f"hook {name} is granted by a role and is not installed from "
+                                 "here, and this mind registers no hook of that name"))
         elif status in ("failed", "registered_twice"):
             reason = outcome.get("reason") or status.replace("_", " ")
             problems.append((("hook", name),
@@ -122,6 +140,7 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
     problems: list[Problem] = []
     for name in names:
         try:
+            skills_api._validate(name)
             h = skills_api.harness_directory(harness)
             copy = skills_api.installed_root(harness) / name
             state = skills_api._pair(h, name).state
@@ -154,42 +173,56 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
 
 
 def _work(harness: str, home: Path, grants: dict, hooks_file: Path | None,
-          python: str, result: dict, problems: list[Problem]) -> None:
-    hooks, shape = _names(grants, "hooks")
-    problems += shape
-    skills, shape = _names(grants, "skills")
-    problems += shape
+          python: str, out: dict, log: logging.Logger | None) -> None:
+    problems: list[Problem] = []
     try:
-        result["hooks"], found = _hooks(harness, home, hooks, hooks_file, python)
-        problems += found
-    except Exception as exc:  # noqa: BLE001 - reported, never raised into a spawn
-        problems.append((("hooks", "raised"),
-                         f"hooks {', '.join(hooks)} are granted by a role and were not "
-                         f"installed: {exc}"))
-    try:
-        result["skills"], found = _skills(harness, skills)
-        problems += found
-    except Exception as exc:  # noqa: BLE001
-        problems.append((("skills", "raised"),
-                         f"skills {', '.join(skills)} are granted by a role and were not "
-                         f"installed: {exc}"))
+        hooks, shape = _names(grants, "hooks")
+        problems += shape
+        skills, shape = _names(grants, "skills")
+        problems += shape
+        try:
+            out["hooks"], found = _hooks(harness, home, hooks, hooks_file, python)
+            problems += found
+        except Exception as exc:  # noqa: BLE001 - reported, never raised into a spawn
+            problems.append((("hooks", "raised"),
+                             f"hooks {', '.join(hooks)} are granted by a role and were not "
+                             f"installed: {exc}"))
+        try:
+            out["skills"], found = _skills(harness, skills)
+            problems += found
+        except Exception as exc:  # noqa: BLE001
+            problems.append((("skills", "raised"),
+                             f"skills {', '.join(skills)} are granted by a role and were not "
+                             f"installed: {exc}"))
+    except BaseException as exc:  # noqa: BLE001 - a thread that dies says why
+        problems.append((("all", "raised"),
+                         f"the hooks and skills this mind's roles grant were not put in "
+                         f"place: {type(exc).__name__}: {exc}"))
+    out["problems"] = [text for _key, text in problems]
+    # Said from here, so a pass that outlived its spawn still names what it
+    # found.
+    _say(log, harness, problems, time.time(), finished=True)
 
 
-def _say(log: logging.Logger | None, problems: list[Problem], now: float) -> None:
+def _say(log: logging.Logger | None, harness: str, problems: list[Problem], now: float,
+         *, finished: bool) -> None:
+    keyed = [((harness, *key), text) for key, text in problems]
     with _SAID_LOCK:
-        due = [(key, text) for key, text in problems
+        due = [(key, text) for key, text in keyed
                if now - _SAID.get(key, float("-inf")) >= REPEAT_AFTER]
-        standing = {key: _SAID.get(key, now) for key, _text in problems}
-        standing.update({key: now for key, _text in due})
-        _SAID.clear()
-        _SAID.update(standing)
+        if finished:
+            # Only a pass that ran to its end knows what no longer stands.
+            seen = {key for key, _text in keyed}
+            for key in [k for k in _SAID if k[0] == harness and k not in seen]:
+                del _SAID[key]
+        _SAID.update({key: now for key, _text in due})
     if log is None:
         return
     for _key, text in due:
         # The sentence is the message: the error feed carries a record's
         # message and nothing of its fields.
-        log_event(log, f"a role's file did not reach this mind: {text}",
-                  level=logging.ERROR, problem=text)
+        log_event(log, f"a role's file did not reach this mind ({harness}): {text}",
+                  level=logging.ERROR, problem=text, harness=harness)
 
 
 def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None = None,
@@ -206,19 +239,32 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
     result: dict = {"managed": managed, "hooks": {}, "skills": {}, "problems": []}
     if not managed:
         return result
-    problems: list[Problem] = []
-    worker = threading.Thread(
-        target=_work, name="role-files", daemon=True,
-        args=(harness, Path(home), grants, hooks_file,
-              python or sys.executable or "/usr/bin/python3", result, problems))
-    worker.start()
-    worker.join(deadline)
-    if worker.is_alive():
-        # Left to finish behind the conversation: what it installs is there
-        # for the next spawn, and this one is not held for it.
-        problems = [(("all", "deadline"),
-                     f"the hooks and skills this mind's roles grant were not all in place "
-                     f"after {deadline:g} seconds, and the conversation started without waiting")]
-    result["problems"] = [text for _key, text in problems]
-    _say(log, problems, time.time())
+    key = (harness, str(home))
+    until = time.monotonic() + deadline
+    mine = False
+    while True:
+        with _RUNNING_LOCK:
+            worker, out = _RUNNING.get(key, (None, {}))
+            if worker is None or not worker.is_alive():
+                if mine:
+                    break  # the pass started for these grants ran to its end
+                out = {"hooks": {}, "skills": {}, "problems": []}
+                worker = threading.Thread(
+                    target=_work, name="role-files", daemon=True,
+                    args=(harness, Path(home), grants, hooks_file,
+                          python or sys.executable or "/usr/bin/python3", out, log))
+                _RUNNING[key] = (worker, out)
+                worker.start()
+                mine = True
+        worker.join(max(0.0, until - time.monotonic()))
+        if worker.is_alive():
+            # Left to finish behind the conversation: what it installs is
+            # there for the next spawn, and it says itself what it finds.
+            late = (f"the hooks and skills this mind's roles grant were not all in place "
+                    f"after {deadline:g} seconds, and the conversation started without waiting")
+            _say(log, harness, [(("all", "deadline"), late)], time.time(), finished=False)
+            result["problems"] = [late]
+            return result
+    result.update(hooks=dict(out["hooks"]), skills=dict(out["skills"]),
+                  problems=list(out["problems"]))
     return result
