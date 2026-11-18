@@ -51,6 +51,11 @@ class _Recorder:
         # (method, path) pairs this service refuses, the rest answered.
         self.refusing: set[tuple[str, str]] = set()
         self.listing = False
+        # As the real gateway and memory store behave together: the minds
+        # registered here are listed, and a mind's node is refused its edge
+        # until the gateway holds that mind.
+        self.as_a_hive = False
+        self.registered: list[dict] = []
         app = FastAPI()
 
         @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -71,6 +76,22 @@ class _Recorder:
             })
             if self.refuse or (request.method, "/" + path) in self.refusing:
                 return JSONResponse({"error": "refused"}, status_code=403)
+            if self.as_a_hive:
+                held = [m["id"] for m in self.registered]
+                if (request.method, path) == ("POST", "broker/minds"):
+                    self.registered.append(
+                        {"id": payload["mind_id"], "name": payload["name"]})
+                elif (request.method, path) == ("GET", "broker/minds"):
+                    return JSONResponse(self.registered)
+                elif request.method == "DELETE" and path.startswith("broker/minds/"):
+                    self.registered = [
+                        m for m in self.registered if m["name"] != path.split("/")[-1]]
+                elif (request.method, path) == ("POST", "graph/upsert") and \
+                        payload["mind_id"] not in held:
+                    return JSONResponse({
+                        "ok": False, "upserted": True, "code": "missing_reference",
+                        "detail": "the node landed and the CREATED_BY edge did not",
+                    }, status_code=409)
             if self.listing and request.method == "GET":
                 return JSONResponse([])
             if self.hitl:
@@ -132,6 +153,7 @@ def client(tmp_path, monkeypatch):
         monkeypatch.delenv(variable, raising=False)
     services = _Recorder()
     services.listing = True
+    services.as_a_hive = True
     with ThreadedServer(services.app) as server:
         for variable in ("GATEWAY_API_URL", "LUCENT_API_URL", "INFERENCE_PROXY_URL",
                          "HIVE_TOOLS_URL"):
@@ -650,9 +672,14 @@ def test_a_creation_that_fails_at_a_step_says_not_made_names_the_step_and_leaves
         revoked = [r for r in sent
                    if (r["method"], r["path"]) == ("DELETE", "/credentials/atlas")]
         assert len(revoked) == 3
-    if refused == ("POST", "/broker/minds"):
-        # Its node was written by then, and is deleted as the mind that
-        # wrote it, before that mind's key is revoked.
+    if refused == ("POST", "/graph/upsert"):
+        # The gateway had the mind by then, and no longer does.
+        assert client.services.registered == []
+        assert [r["path"] for r in sent
+                if r["method"] == "DELETE" and r["path"].startswith("/broker/")
+                ] == ["/broker/minds/atlas"]
+        # A refused node may have landed all the same: it is deleted as the
+        # mind that asked for it, before that mind's key is revoked.
         wrote = [r for r in sent if (r["method"], r["path"]) == ("POST", "/graph/upsert")]
         deleted = [r for r in sent if (r["method"], r["path"]) == ("DELETE", "/graph/nodes")]
         assert len(wrote) == 1 and len(deleted) == 1

@@ -1335,10 +1335,22 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         creation.mark("stack")
         await asyncio.to_thread(configuration_data_module.include_mind_in_stack, name)
 
+        # A mind created here holds no gateway admin credential and cannot
+        # register itself, so this is the only registration it ever gets.
+        step = "Registering it with the gateway"
+        creation.mark("gateway")
+        await _register_scaffolded_mind(name, {"owner": owner}, user)
+
         # The Mind's own node, written as the Mind. A mind with no node is a
         # mind whose first memory write has nothing to hang from, and seeding
         # it with the console's credential would record every mind in the
         # hive as something the console created.
+        #
+        # After the gateway knows the Mind, never before: the node is written
+        # with its edge to its owner, and the memory store refuses an edge
+        # from a mind the gateway has no row for. Asked the other way round,
+        # every creation on a real hive failed here (found by the real-mind
+        # proof, 2026-11-18).
         step = "Its node in the graph"
         location = holder_credentials.locate(
             holder_credentials.SERVICES["lucent"], name)
@@ -1348,24 +1360,13 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             raise _CreationStepFailed(
                 "this Mind holds no memory-store credential, so its node "
                 "cannot be written as itself")
-        try:
-            await mind_soul.seed_mind_node(name, mind_id, owner, credential)
-        except HTTPException:
-            # Refused: it wrote nothing, and taking back a node of this name
-            # would delete one this creation never made.
-            raise
-        except Exception:
-            # No answer is not a refusal. The write may have landed, so it
-            # is recorded and the undo asks for the node to be deleted.
-            creation.mark("node")
-            raise
+        # Recorded before it is asked for. The memory store can refuse the
+        # edge after the node has landed, and no answer at all is not a
+        # refusal either. The undo deletes as this Mind, which can only
+        # delete what this Mind wrote, and a node that is not there is
+        # nothing to take back.
         creation.mark("node")
-
-        # A mind created here holds no gateway admin credential and cannot
-        # register itself, so this is the only registration it ever gets.
-        step = "Registering it with the gateway"
-        creation.mark("gateway")
-        await _register_scaffolded_mind(name, {"owner": owner}, user)
+        await mind_soul.seed_mind_node(name, mind_id, owner, credential)
 
         # Last, and still before its container is asked for: a Mind never
         # takes a turn unmanaged, and no step can fail after this one. Role
