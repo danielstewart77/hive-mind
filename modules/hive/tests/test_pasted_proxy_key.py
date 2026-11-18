@@ -7,6 +7,7 @@ Docker CLI is used only to parse the generated Compose configuration.
 import json
 import logging
 import subprocess
+from html.parser import HTMLParser
 
 import httpx
 import pytest
@@ -73,7 +74,10 @@ def body(key, harness="codex_cli", provider="openai"):
             "default_model": "fixture-model", "proxy_key": key}
 
 
-@pytest.mark.parametrize("harness,provider", [("codex_cli", "openai"), ("claude_cli", "anthropic")])
+@pytest.mark.parametrize("harness,provider", [
+    ("codex_cli", "openai"), ("claude_cli", "anthropic"),
+    ("dsh", "openai"), ("dsh", "anthropic"), ("dsh", "ollama"),
+])
 def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     creation, caplog, harness, provider,
 ):
@@ -93,6 +97,42 @@ def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     assert runtime_env["OPENAI_API_KEY"] == KEY
     assert runtime_env["ANTHROPIC_AUTH_TOKEN"] == KEY
     assert runtime_env["INFERENCE_PROXY_URL"] == "http://proxy.invalid:8899"
+    assert runtime_env["DSH_API_KEY"] == KEY
+    if harness == "dsh":
+        import yaml
+
+        runtime = yaml.safe_load((minds / "pasted-key-fixture/runtime.yaml").read_text())
+        service = json.loads(parsed.stdout)["services"]["pasted-key-fixture"]
+        assert runtime["harness"] == "dsh"
+        assert runtime["transport"]["type"] == "dsh_exec_json"
+        assert runtime["dsh_profile"] == "hive"
+        assert runtime_env["DSH_HOME"] == runtime["runtime_config_dir"]
+        assert runtime_env["DSH_BIN"] == runtime["dsh_bin"]
+        assert service["tmpfs"] == ["/tmp:exec,mode=1777"]
+        tree = next(volume for volume in service["volumes"] if volume["target"] == "/opt/dsh")
+        assert tree["read_only"] is True
+        assert "minds.harness.dsh_profile" in service["command"][-1]
+        assert "minds.harness.dsh_hooks" in service["command"][-1]
+
+
+def test_add_mind_defaults_to_dsh(creation):
+    client, *_ = creation
+
+    class Inputs(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.selected = []
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag == "input" and values.get("name") == "harness" and "checked" in values:
+                self.selected.append(values["value"])
+
+    page = client.get("/minds/new")
+    assert page.status_code == 200
+    inputs = Inputs()
+    inputs.feed(page.text)
+    assert inputs.selected == ["dsh"]
 
 
 @pytest.mark.parametrize("key", ["bad key", "bad\nINJECTED=value", {"key": "bad"}, "x" * 4097])

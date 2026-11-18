@@ -785,7 +785,7 @@ async def new_mind_page(request: Request):
     return await _console_page(
         request,
         "mind_new.html",
-        install_options=_mind_install_options(),
+        install_options=_mind_install_options(internal=True),
         default_ollama_url=await get_capability_endpoint("ollama")
         or os.getenv("OLLAMA_URL", "")
         or DEFAULT_OLLAMA_BASE_URL,
@@ -1184,7 +1184,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(status_code=400, detail="Request body must be an object")
 
     name = str(body.get("name") or "").strip().lower()
-    harness = str(body.get("harness") or "")
+    harness = str(body.get("harness") or "dsh")
     provider = str(body.get("provider") or "")
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
         raise HTTPException(
@@ -1192,7 +1192,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             detail="Name must be 2 to 32 lowercase letters, numbers, or hyphens",
         )
     try:
-        _validate_harness_provider(harness, provider)
+        _validate_harness_provider(harness, provider, internal=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1916,11 +1916,20 @@ _EDGE_MIND_DEPLOYMENTS = {"systemd", "container", "windows-task"}
 # minds/<name>/runtime.yaml. The harness picks the CLI; the provider picks
 # where inference goes. Each CLI speaks one first-party dialect, and ollama is
 # the alternative both share.
-_MIND_HARNESSES = {"claude_cli", "codex_cli"}
 _MIND_PROVIDERS = {"anthropic", "openai", "ollama"}
 _HARNESS_PROVIDERS = {
     "claude_cli": ("anthropic", "ollama"),
     "codex_cli": ("openai", "ollama"),
+}
+_INTERNAL_HARNESS_PROVIDERS = {
+    "dsh": ("openai", "anthropic", "ollama"),
+    **_HARNESS_PROVIDERS,
+}
+_HARNESS_LABELS = {"dsh": "DSH", "claude_cli": "Claude CLI", "codex_cli": "Codex CLI"}
+_HARNESS_DESCRIPTIONS = {
+    "dsh": "Hive's default harness, with persistent conversations and Hive tools.",
+    "claude_cli": "Long-lived stream-json session per conversation.",
+    "codex_cli": "One codex exec subprocess per turn.",
 }
 _PROVIDER_DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-5",
@@ -1937,20 +1946,23 @@ _INTERNAL_MIND_DEFAULT_MODELS = {
 _EDGE_MIND_SURFACES = {"telegram", "discord"}
 
 
-def _mind_install_options() -> dict:
+def _mind_install_options(*, internal: bool = False) -> dict:
     """The one source of truth the install forms render from.
 
     Hardcoding these in the template is how the console drifted out of step
     with setup.sh in the first place.
     """
+    harness_providers = _INTERNAL_HARNESS_PROVIDERS if internal else _HARNESS_PROVIDERS
     return {
+        "default_harness": "dsh" if internal else "claude_cli",
         "harnesses": [
             {
                 "value": harness,
-                "label": "Claude CLI" if harness == "claude_cli" else "Codex CLI",
+                "label": _HARNESS_LABELS[harness],
+                "description": _HARNESS_DESCRIPTIONS[harness],
                 "providers": list(providers),
             }
-            for harness, providers in sorted(_HARNESS_PROVIDERS.items())
+            for harness, providers in harness_providers.items()
         ],
         "providers": [
             {
@@ -1968,13 +1980,14 @@ def _mind_install_options() -> dict:
     }
 
 
-def _validate_harness_provider(harness: str, provider: str) -> None:
-    if harness not in _MIND_HARNESSES:
+def _validate_harness_provider(harness: str, provider: str, *, internal: bool = False) -> None:
+    harness_providers = _INTERNAL_HARNESS_PROVIDERS if internal else _HARNESS_PROVIDERS
+    if harness not in harness_providers:
         raise ValueError("Unknown harness")
     if provider not in _MIND_PROVIDERS:
         raise ValueError("Unknown provider")
-    if provider not in _HARNESS_PROVIDERS[harness]:
-        allowed = " or ".join(_HARNESS_PROVIDERS[harness])
+    if provider not in harness_providers[harness]:
+        allowed = " or ".join(harness_providers[harness])
         raise ValueError(f"{harness} cannot use the {provider} provider (want {allowed})")
 
 

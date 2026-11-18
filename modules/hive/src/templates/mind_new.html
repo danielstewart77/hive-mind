@@ -15,7 +15,7 @@
                     <div class="field"><label for="mind-owner">Owner</label><select id="mind-owner" name="owner"></select><small>The user this Mind belongs to.</small></div>
                     <div class="field"><label for="mind-description">Description</label><input id="mind-description" name="description" type="text" placeholder="What this Mind is for."></div>
                 </div>
-                <div class="field is-full"><label>Harness</label><div class="choice-grid"><label class="choice"><input type="radio" name="harness" value="claude_cli" checked><span class="choice-copy"><strong>Claude CLI</strong><small>Long-lived stream-json session per conversation.</small></span></label><label class="choice"><input type="radio" name="harness" value="codex_cli"><span class="choice-copy"><strong>Codex CLI</strong><small>One <code>codex exec</code> subprocess per turn.</small></span></label></div></div>
+                <div class="field is-full"><label>Harness</label><div class="choice-grid">{% for harness in install_options.harnesses %}<label class="choice"><input type="radio" name="harness" value="{{ harness.value }}"{% if harness.value == install_options.default_harness %} checked{% endif %}><span class="choice-copy"><strong>{{ harness.label }}</strong><small>{{ harness.description }}</small></span></label>{% endfor %}</div></div>
                 <div class="form-grid">
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>

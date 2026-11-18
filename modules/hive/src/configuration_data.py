@@ -128,9 +128,13 @@ def local_runtime_configuration(name: str) -> dict[str, Any]:
 
 
 # The harness-specific half of an internal mind's scaffold. Everything else
-# below is shared: the two shapes differ only in which config-dir variable
-# codex/claude reads, and which harness module the container runs.
+# below is shared; each harness declares its own home and transport.
 _HARNESS_SCAFFOLD = {
+    "dsh": {
+        "config_dir_var": "DSH_HOME",
+        "config_dir_name": ".dsh",
+        "transport": "dsh_exec_json",
+    },
     "claude_cli": {
         "config_dir_var": "CLAUDE_CONFIG_DIR",
         "config_dir_name": ".claude",
@@ -151,6 +155,8 @@ _HARNESS_SCAFFOLD = {
 # the proxy the mind logs in with its own proxy key, which its compose file
 # supplies; a placeholder here would be applied over it at every spawn.
 _OLLAMA_ENV = {
+    # DSH uses the compose environment's proxy endpoint for every provider.
+    "dsh": lambda base, key: {},
     "claude_cli": lambda base, key: {
         "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_BASE_URL": base,
@@ -331,6 +337,13 @@ def scaffold_internal_mind(
     if provider == "ollama":
         base = (ollama_base_url or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
         runtime["env"] = _OLLAMA_ENV[harness](base, ollama_api_key)
+    if harness == "dsh":
+        runtime.update({
+            "dsh_profile": "hive",
+            "dsh_bin": "/opt/dsh/apps/cli/lib/bin.js",
+            "resume_policy": "always",
+            "startup": {"skip_host_credentials": True, "sync_repo_config": False},
+        })
 
     own = f"/usr/src/app/minds/{name}"
     host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
@@ -430,6 +443,25 @@ def scaffold_internal_mind(
     # No shared codex volume: every codex container on this host can write
     # it, so a mind holding it could replace the codex binary Daniel's minds
     # run. The image carries its own codex.
+    if harness == "dsh":
+        service = compose["services"][name]
+        service["environment"].extend([
+            f"DSH_BIN={runtime['dsh_bin']}",
+            "DSH_READ_LOG_CLI=/opt/dsh/packages/session/session-persistence-jsonl/lib/read-log-cli.js",
+            f"MIND_PROXY_KEY=${{{_proxy_variable(name)}}}",
+        ])
+        service["volumes"].append("${HOST_DSH_DIR:-${HOST_PROJECT_DIR:-.}/dsh}:/opt/dsh:ro")
+        # DSH's native addon is loaded from /tmp and requires exec there.
+        service["tmpfs"] = ["/tmp:exec,mode=1777"]
+        # Generate the profile and hooks using the image's own runtime code,
+        # as the mind's user, before accepting conversations.
+        python = "/opt/venv/bin/python3"
+        service["command"] = ["sh", "-ec", (
+            f"{python} -m minds.harness.dsh_profile --mind {name} --out /usr/src/app/minds --dsh-root /opt/dsh && "
+            f"{python} -m minds.harness.dsh_hooks --mind {name} --out /usr/src/app/minds "
+            "--container-minds-dir /usr/src/app/minds && "
+            f"exec {python} -m minds.mind_server"
+        )]
 
     # The folder is the lock: a second create of the same name, or one racing
     # this, fails here rather than overwriting a runtime.yaml whose mind_id
