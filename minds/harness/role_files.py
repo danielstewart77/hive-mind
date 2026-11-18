@@ -135,8 +135,10 @@ def _missing_script(command: str) -> str | None:
                 there = stat.S_ISREG(os.stat(word).st_mode)
             except (FileNotFoundError, NotADirectoryError):
                 there = False
-            except OSError:
-                return None  # a folder that cannot be looked into says nothing
+            except (OSError, ValueError):
+                # A folder that cannot be looked into, or a path no file
+                # could have, says nothing either way.
+                return None
             return None if there else word
     return None
 
@@ -326,7 +328,6 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
         out: dict = {"hooks": {}, "skills": {}, "problems": []}
         mine = None
         stuck = 0.0
-        another_finished = False
         while mine is None:
             with _RUNNING_LOCK:
                 other, began = _RUNNING.get(key, (None, 0.0))
@@ -348,7 +349,6 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
                 if not waited_on:
                     stuck = time.monotonic() - began
                 break
-            another_finished = True
         if mine is not None:
             mine.join(max(0.0, until - time.monotonic()))
         if stuck:
@@ -361,10 +361,6 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
         if mine is None or mine.is_alive():
             # Left to finish behind the conversation: what it installs is
             # there for the next spawn, and it says itself what it finds.
-            if another_finished:
-                # This spawn spent its wait behind a pass that ended: the
-                # files were looked to a moment ago and nothing is late.
-                return result
             late = ("the hooks and skills this mind's roles grant were not all in place "
                     f"after {wait:g} seconds, and the conversation started without waiting")
             _say(log, harness, home, [(LATE, late)], time.monotonic(), finished=False)
