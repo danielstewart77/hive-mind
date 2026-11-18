@@ -264,15 +264,29 @@ class _CodexHooks:
                         found.append((event, item["command"], item.get("timeout")))
         return found
 
+    @staticmethod
+    def _event_of(lines: list[str], index: int) -> str | None:
+        """The event whose table the line at ``index`` sits in."""
+        for line in reversed(lines[:index]):
+            if match := re.match(r"\s*\[\[hooks\.([A-Za-z]+)(?:\.hooks)?\]\]", line):
+                return match.group(1)
+            if line.lstrip().startswith("["):
+                return None
+        return None
+
     def rewrite(self, event: str, old: str, new: str, timeout: int | None) -> None:
         lines = self.source.splitlines(keepends=True)
         at = [index for index, line in enumerate(lines)
               if (match := _COMMAND_LINE.match(line.rstrip("\r\n")))
               and _toml_value(match.group(2)) == old]
+        if len(at) > 1:
+            # One hook on two events is the same command line twice; the
+            # event's own table says which of them this is.
+            at = [index for index in at if self._event_of(lines, index) == event]
         if len(at) != 1:
             raise HooksFileError(
-                f"{len(at)} lines of the Codex configuration run {old!r}; "
-                "one is needed to rewrite it in place")
+                f"{len(at)} lines of the Codex configuration run {old!r} on "
+                f"{event}; one is needed to rewrite it in place")
         index = at[0]
         indent = _COMMAND_LINE.match(lines[index].rstrip("\r\n")).group(1)
         end = "\r\n" if lines[index].endswith("\r\n") else "\n"

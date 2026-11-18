@@ -29,7 +29,8 @@ HOME = {"claude": ".claude", "codex": ".codex", "dsh": ".dsh"}
 
 
 def _home(tmp_path: Path, harness: str) -> Path:
-    home = tmp_path / "minds" / "probe" / HOME[harness]
+    # A space in the path: a registered command is run through a shell.
+    home = tmp_path / "minds" / "probe mind" / HOME[harness]
     home.mkdir(parents=True)
     return home
 
@@ -37,7 +38,10 @@ def _home(tmp_path: Path, harness: str) -> Path:
 def _registered(harness: str, home: Path) -> list[tuple[str, str, int | None]]:
     """Every (event, command, timeout) in the home's hooks file, read with
     the format's own parser rather than the installer's."""
-    path = role_hooks.hooks_file_for(harness, home)
+    # Named here, not asked of the installer: these are the files the three
+    # harnesses read, and a registration anywhere else is never run.
+    path = home / {"claude": "settings.json", "codex": "config.toml",
+                   "dsh": "hooks.json"}[harness]
     data = (tomllib.loads(path.read_text()) if harness == "codex"
             else json.loads(path.read_text()))
     return [(event, item["command"], item.get("timeout"))
@@ -154,7 +158,7 @@ def _hand_copy(home: Path, harness: str, *, script: str = "time_inject.sh",
     hand.parent.mkdir()
     hand.write_text("#!/usr/bin/env bash\n"
                     "TZ=Mars/Olympus_Mons date  # the hand copy's own clock\n")
-    command = f"bash {hand}"
+    command = f"bash {shlex.quote(str(hand))}"
     hooks_file = role_hooks.hooks_file_for(harness, home)
     if harness == "codex":
         hooks_file.write_text(
@@ -253,4 +257,53 @@ def test_a_hand_copy_on_an_event_the_hook_does_not_run_on_is_not_replaced(tmp_pa
                                 replace=True)
 
     assert report["hooks"]["time_inject"]["status"] == "hand_copy_kept"
+    assert hooks_file.read_text() == before
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_installing_again_changes_a_hook_registered_on_two_events(tmp_path, harness):
+    """The background snapshot is one command line on two events; in Codex's
+    file that is the same line twice, and both have to follow the repository."""
+    home = _home(tmp_path, harness)
+    role_hooks.install(harness, home, ["bg_snapshot"], python="/an/old/python3")
+
+    report = role_hooks.install(harness, home, ["bg_snapshot"], python=sys.executable)
+
+    assert report["hooks"]["bg_snapshot"]["status"] == "updated"
+    registered = _registered(harness, home)
+    assert sorted(event for event, _, _ in registered) == ["Stop", "SubagentStop"]
+    assert {shlex.split(command)[0] for _, command, _ in registered} == {sys.executable}
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_installing_again_registers_nothing_a_second_time(tmp_path, harness):
+    home = _home(tmp_path, harness)
+    role_hooks.install(harness, home, GENERAL, python=sys.executable)
+    once = _registered(harness, home)
+
+    role_hooks.install(harness, home, GENERAL, python=sys.executable)
+
+    assert _registered(harness, home) == once
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+def test_a_hook_already_registered_twice_is_reported_and_the_file_left(tmp_path, harness):
+    """Two registrations of the tracked hook on one event are not this
+    installer's doing; it says so and adds no third."""
+    home = _home(tmp_path, harness)
+    role_hooks.install(harness, home, ["time_inject"], python=sys.executable)
+    hooks_file = role_hooks.hooks_file_for(harness, home)
+    if harness == "codex":
+        text = hooks_file.read_text()
+        hooks_file.write_text(text + "\n" + text[text.index("[[hooks.UserPromptSubmit]]"):])
+    else:
+        data = json.loads(hooks_file.read_text())
+        data["hooks"]["UserPromptSubmit"] *= 2
+        hooks_file.write_text(json.dumps(data, indent=2))
+    before = hooks_file.read_text()
+    assert len(_registered(harness, home)) == 2
+
+    report = role_hooks.install(harness, home, ["time_inject"], python=sys.executable)
+
+    assert report["hooks"]["time_inject"]["status"] == "registered_twice"
     assert hooks_file.read_text() == before
