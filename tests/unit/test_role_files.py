@@ -16,6 +16,8 @@ transports and are the only things stood in for.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import shlex
@@ -76,24 +78,38 @@ OWN = {"claude": ("settings.json", json.dumps(
 def _given(monkeypatch, *, hooks, skills):
     """The mind is given a role on the console: this is what the gateway
     then answers when the mind asks what its roles grant."""
-    grants = {"managed": True, "roles": ["general"], "hooks": list(hooks),
-              "skills": list(skills), "models": [], "tools": []}
+    grants = {"managed": True, "roles": ["general"], "hooks": hooks,
+              "skills": skills, "models": [], "tools": []}
     monkeypatch.setattr(role_guard, "fetch", lambda *a, **k: json.loads(json.dumps(grants)))
+
+
+HOOKS_FILE = {"claude": "settings.json", "codex": "config.toml", "dsh": "hooks.json"}
+
+
+def _prepare(harness: str) -> dict[str, str]:
+    """What each adapter calls before it starts a harness process; returns
+    the environment it built for that process."""
+    if harness == "dsh":
+        return dsh._role_hooks_env({})
+    _args, env = (claude if harness == "claude" else codex)._role_guard({})
+    return env
+
+
+def _said() -> list[str]:
+    return [error["message"] for error in recent_errors()["errors"]]
 
 
 def _start(harness: str, homes: dict) -> tuple[dict[str, str], dict[str, str]]:
     """Prepare a harness process the way its adapter does, and return the
     hook commands that process is handed, by hook name, with the environment
     the adapter built for it."""
+    env = _prepare(harness)
     if harness == "dsh":
-        env = dsh._role_hooks_env({})
         handed = json.loads(Path(env["DSH_HOOKS_CONFIG"]).read_text())
     elif harness == "claude":
-        _args, env = claude._role_guard({})
         path = homes["claude"] / "settings.json"
         handed = json.loads(path.read_text()) if path.exists() else {}
     else:
-        _args, env = codex._role_guard({})
         path = homes["codex"] / "config.toml"
         handed = tomllib.loads(path.read_text()) if path.exists() else {}
     commands: dict[str, str] = {}
@@ -161,3 +177,112 @@ def test_a_tracked_hook_whose_files_cannot_be_written_is_named_in_the_error_feed
     said = [error["message"] for error in recent_errors()["errors"]]
     assert any("skill_render_check" in line and "not installed" in line and f"({harness})" in line
                for line in said)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_tracked_hook_found_registered_twice_is_named_in_the_error_feed(
+        monkeypatch, mind, harness):
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+    _prepare(harness)
+    # Somebody's edit leaves the installed hook registered a second time.
+    hooks_file = mind[harness] / HOOKS_FILE[harness]
+    if harness == "codex":
+        text = hooks_file.read_text()
+        hooks_file.write_text(text + "\n" + text[text.index("[[hooks.UserPromptSubmit]]"):])
+    else:
+        data = json.loads(hooks_file.read_text())
+        data["hooks"]["UserPromptSubmit"] *= 2
+        hooks_file.write_text(json.dumps(data, indent=2))
+
+    _prepare(harness)
+
+    assert any("hook time_inject is granted by a role and was not installed" in line
+               and "more than once" in line for line in _said())
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_hooks_file_that_cannot_be_read_is_named_in_the_error_feed(
+        monkeypatch, mind, harness):
+    hooks_file = mind[harness] / HOOKS_FILE[harness]
+    hooks_file.write_text("{ this is neither JSON nor TOML")
+    _given(monkeypatch, hooks=["prose_reminder"], skills=[])
+
+    # dsh and Codex are not started on a hooks file they cannot read; that
+    # refusal is the role guard's own and is said either way.
+    with contextlib.suppress(role_guard.NotStarted):
+        _prepare(harness)
+
+    assert any("prose_reminder" in line and "not installed" in line and str(hooks_file) in line
+               for line in _said())
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_installed_hook_the_mind_replaced_with_a_link_of_its_own_is_named_in_the_error_feed(
+        monkeypatch, mind, tmp_path, harness):
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+    _prepare(harness)
+    own = tmp_path / "the minds own clock.sh"
+    own.write_text("#!/usr/bin/env bash\necho mine\n")
+    installed = mind[harness] / "role-hooks" / "time_inject.sh"
+    installed.unlink()
+    installed.symlink_to(own)
+
+    _prepare(harness)
+
+    assert any("time_inject.sh" in line and "is a link the mind made" in line
+               for line in _said())
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_granted_skill_whose_name_no_harness_would_load_is_named_in_the_error_feed(
+        monkeypatch, mind, harness):
+    # A folder inside a skill folder: there is a SKILL.md at the end of the
+    # name, and no harness loads a skill from there.
+    nested = mind[harness] / "skills" / "group" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text(SKILL_TEXT)
+    _given(monkeypatch, hooks=[], skills=["group/inner"])
+
+    _prepare(harness)
+
+    assert any("skill group/inner is granted by a role" in line for line in _said())
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_grants_that_are_not_lists_of_names_are_named_in_the_error_feed(
+        monkeypatch, mind, harness):
+    # A gateway fault: one name where a list of names belongs.
+    _given(monkeypatch, hooks="time_inject", skills=[])
+
+    commands, _env = _start(harness, mind)
+
+    assert any("the hooks this mind's roles grant came from the gateway as str" in line
+               for line in _said())
+    # Not taken letter by letter either: nothing was registered.
+    assert "time_inject" not in commands
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_conversation_that_starts_before_its_files_are_in_place_says_so(
+        monkeypatch, mind, harness):
+    """The install waits on a lock another process holds; the spawn does not."""
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+    hooks_file = mind[harness] / HOOKS_FILE[harness]
+    with open(hooks_file.parent / f".{hooks_file.name}.role-hooks.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            # A terminal pane's timeout, shortened: the wait for files is a
+            # third of it.
+            if harness == "dsh":
+                dsh._role_hooks_env({}, timeout=0.3)
+            else:
+                (claude if harness == "claude" else codex)._role_guard({}, timeout=0.3)
+            said = _said()
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+    for worker, _out in list(role_files._RUNNING.values()):
+        worker.join(10)
+
+    assert any(f"({harness})" in line and "started without waiting" in line for line in said)
+    # And what was waiting is in place once the lock is let go.
+    assert (mind[harness] / "role-hooks" / "time_inject.sh").is_file()
