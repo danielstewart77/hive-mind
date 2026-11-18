@@ -1,8 +1,11 @@
 FROM python:3.12-slim
 
-# Install Docker CLI (for docker_ops tool)
+# Install Docker CLI (for docker_ops tool), and git beside it: a mind the
+# console creates is built from the published hive-mind tree, a git address,
+# and the builder this CLI falls back to fetches that with the client's own
+# git. Without it every such build stopped at "unable to find 'git'".
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl gnupg && \
+    apt-get install -y --no-install-recommends curl gnupg git && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
     chmod a+r /etc/apt/keyrings/docker.asc && \
