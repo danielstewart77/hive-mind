@@ -610,11 +610,13 @@ def install(harness: str, home: Path, names: list[str], *,
             if target.is_symlink():
                 # A link is the mind's doing, wherever it leads: writing
                 # would go through it and replace the file at its far end.
-                if not target.is_file():
-                    # And one that leads to no file must not be registered.
-                    return refused(f"{target} is a link the mind made that leads to no "
-                                   "file; nothing was registered to run it")
-                if target.read_bytes() != data:
+                # Said unless it already leads to the repository's bytes.
+                # One hook's link never costs the other hooks theirs.
+                try:
+                    same = target.read_bytes() == data
+                except OSError:
+                    same = False
+                if not same:
                     report.setdefault("links_kept", []).append(name)
                 continue
             try:
