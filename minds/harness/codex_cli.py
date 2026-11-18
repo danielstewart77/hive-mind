@@ -449,7 +449,8 @@ def _role_guard(env: dict[str, str], timeout: float = 10.0) -> tuple[list[str], 
         env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
         # Story 10.18.15: the hooks and skills its roles name arrive here,
         # before config.toml is read for the hooks carried into the spawn.
-        on_grants=lambda grants: role_files.provision("codex", CODEX_HOME, grants, log=log))
+        on_grants=lambda grants: role_files.provision("codex", CODEX_HOME, grants, log=log,
+            deadline=min(role_files.DEADLINE, timeout / 3)))
 
 
 def _pane_role_guard() -> tuple[list[str], dict[str, str]]:
