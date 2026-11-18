@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 import tomllib
 from collections import deque
@@ -104,6 +105,23 @@ def _said(harness: str) -> list[str]:
     """The lines in the mind's error feed about this harness."""
     return [error["message"] for error in recent_errors()["errors"]
             if f"({harness})" in error["message"]]
+
+
+class _Clock:
+    """The clock the installer reads, which a test can put forward."""
+
+    def __init__(self):
+        self.ahead = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.ahead
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(role_files, "time", clock)
+    return clock
 
 
 def _start(harness: str, homes: dict) -> tuple[dict[str, str], dict[str, str]]:
@@ -334,3 +352,116 @@ def test_a_dsh_mind_whose_hooks_file_is_named_by_its_environment_gets_its_hooks_
         timeout=30, env={"PATH": os.environ["PATH"], **env, "COMMS_URL": "",
                          "HIVE_MIND_TZ": "America/Chicago"}).stdout
     assert "Current date and time" in told
+
+
+def test_a_dsh_mind_whose_hooks_file_is_the_generated_one_says_its_hooks_were_not_installed(
+        monkeypatch, mind):
+    # The file the role guard writes at every spawn, named as the mind's own.
+    named = mind["dsh"] / "hooks.effective.json"
+    named.write_text(OWN["dsh"][1])
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(named))
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+
+    _prepare("dsh")
+
+    assert any("hooks time_inject are granted by a role and were not installed" in line
+               and f"{named}, which is generated at every spawn" in line
+               for line in _said("dsh"))
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_file_still_missing_half_an_hour_later_is_named_again(
+        monkeypatch, mind, clock, harness):
+    hook = f"untracked_hook_{harness}"
+    _given(monkeypatch, hooks=[hook], skills=[])
+
+    def named() -> int:
+        return sum(f"hook {hook} is granted by a role" in line for line in _said(harness))
+
+    _prepare(harness)
+    clock.ahead += 30 * 60 - 1
+    _prepare(harness)
+    assert named() == 1
+    clock.ahead += 1
+    _prepare(harness)
+    assert named() == 2
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_missing_file_that_was_put_right_and_is_missing_again_is_named_again_at_once(
+        monkeypatch, mind, harness):
+    hook = f"untracked_hook_{harness}"
+    _given(monkeypatch, hooks=[hook], skills=[])
+    _prepare(harness)
+    # The role stops naming it, and then names it again.
+    _given(monkeypatch, hooks=[], skills=[])
+    _prepare(harness)
+    _given(monkeypatch, hooks=[hook], skills=[])
+
+    _prepare(harness)
+
+    assert sum(f"hook {hook} is granted by a role" in line for line in _said(harness)) == 2
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_install_that_has_not_ended_long_after_its_conversation_began_is_named_as_stuck(
+        monkeypatch, mind, clock, harness):
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+    hooks_file = mind[harness] / HOOKS_FILE[harness]
+
+    def prepare():
+        if harness == "dsh":
+            dsh._role_hooks_env({}, timeout=0.3)
+        else:
+            (claude if harness == "claude" else codex)._role_guard({}, timeout=0.3)
+
+    # The install waits on a lock another process holds and never lets go.
+    with open(hooks_file.parent / f".{hooks_file.name}.role-hooks.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            prepare()
+            clock.ahead += role_files.DEADLINE + 1
+            prepare()
+            said = _said(harness)
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+    for worker, _began in list(role_files._RUNNING.values()):
+        worker.join(10)
+
+    assert any("an earlier install of this mind's hooks and skills has been running" in line
+               and "has not ended" in line for line in said)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_install_that_dies_partway_says_what_killed_it(
+        monkeypatch, mind, tmp_path, harness):
+    # The proxy's listing, asked for when a skill that names a model is
+    # installed, ends the thread it is asked on.
+    def gave_up(_harness):
+        raise SystemExit("the proxy client gave up")
+
+    monkeypatch.setattr(skill_reference, "proxy_catalog", lambda *a: gave_up)
+    (tmp_path / "project" / "specs" / "skills" / SKILL / "SKILL.md").write_text(
+        SKILL_TEXT.replace("---\nDo", "harness:\n" + "".join(
+            f"  {h}:\n    model: a-model-to-ask-about\n" for h in HARNESSES) + "---\nDo"))
+    _given(monkeypatch, hooks=[], skills=[SKILL])
+
+    _prepare(harness)
+
+    assert any("the hooks and skills this mind's roles grant were not put in place: "
+               "SystemExit: the proxy client gave up" in line for line in _said(harness))
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_install_that_cannot_be_started_at_all_says_so(monkeypatch, mind, harness):
+    class NoRoom(threading.Thread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    _given(monkeypatch, hooks=["time_inject"], skills=[])
+    monkeypatch.setattr(threading, "Thread", NoRoom)
+
+    _prepare(harness)
+
+    assert any("the hooks and skills this mind's roles grant were not put in place: "
+               "RuntimeError: can't start new thread" in line for line in _said(harness))
