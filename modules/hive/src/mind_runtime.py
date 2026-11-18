@@ -27,14 +27,21 @@ async def admin_headers(target_url: str) -> dict[str, str]:
     """The bearer a Mind accepts on its config-write route, for `target_url`.
 
     The same admin token the gateway uses; Minds accept it (or their own
-    `MIND_ADMIN_TOKEN`, when an install sets one). Never for a mind created
-    locked down: that admin token opens every person's conversations, and
-    such a mind belongs to someone who is not to hold it (DECIDED 2026-11-15,
-    Daniel). It refuses these calls with 503 either way.
+    `MIND_ADMIN_TOKEN`, when an install sets one). Never to a mind that is
+    not to hold it: that admin token opens every person's conversations
+    (DECIDED 2026-11-15, Daniel). A mind this console made holds none and is
+    sent its own key, which it accepts; a mind elsewhere that the gateway
+    marks as not to be sent it is refused with 503.
     """
     import configuration_data
 
     if await configuration_data.withholds_admin_credential(target_url):
+        # A mind this console made is sent its own key instead: the person
+        # asking has already been allowed by their account, and the mind
+        # accepts the one key it holds.
+        own = await configuration_data.own_credential_for(target_url)
+        if own:
+            return {"Authorization": f"Bearer {own}"}
         raise HTTPException(
             status_code=503,
             detail="this mind is not sent the hive's admin credential, so its "

@@ -377,12 +377,6 @@ def scaffold_internal_mind(
         "prompt_files": ["prompts/common.md", "prompts/harness.md"],
         "startup": {"skip_host_credentials": False, "sync_repo_config": True},
         "transport": {"type": shape["transport"]},
-        # Held back from the hive's admin credential, with its folder,
-        # runtime.yaml and compose file root's, until the gateway has said
-        # whose it is: `open_mind_to_its_owner` takes this line and all of
-        # that away for a mind of the person that credential is kept for.
-        # Read by the console, never by the mind.
-        "locked_down": True,
     }
     if is_dsh:
         runtime["dsh_profile"] = DSH_PROFILE
@@ -465,18 +459,18 @@ def scaffold_internal_mind(
                 # Its own folder and nothing else of the host: not the
                 # hive_mind checkout, its .env, the shared keyring, or any
                 # other mind (DECIDED 2026-11-15, Daniel: a mind not owned by
-                # him never reaches his credentials). Of that folder, only
-                # its harness home and data are its to write; its runtime.yaml
-                # and session credential are read-only, and its compose file
-                # is not in the container at all, so it cannot rewrite what
-                # it is started with or what the console registers it as.
+                # him never reaches his credentials). The folder is its own
+                # to write, runtime.yaml included: a mind saves a setting by
+                # writing a new file beside the old one and putting it in
+                # its place, so the folder is mounted and not the file
+                # (Daniel, 2026-11-17: "No such thing as lockdown"). Its
+                # compose folder and its session credential are read-only
+                # inside it: what it is started with, and what the console
+                # registered for it, are not its to rewrite.
                 "volumes": [
-                    f"{host}/runtime.yaml:{own}/runtime.yaml:ro",
+                    f"{host}:{own}:rw",
+                    f"{host}/container:{own}/container:ro",
                     f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
-                    f"{host}/{shape['config_dir_name']}:{config_dir}:rw",
-                    f"{host}/data:{own}/data:rw",
-                    # Its skills: synced here at start and installed into.
-                    f"{host}/reference:{own}/reference:rw",
                 ],
                 "restart": "unless-stopped",
                 "extra_hosts": ["host.docker.internal:host-gateway"],
@@ -535,10 +529,13 @@ def scaffold_internal_mind(
         compose_path = container_dir / "compose.yaml"
         runtime_path.write_text(yaml.safe_dump(runtime, sort_keys=False))
         compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
-        # What the mind writes, and only that, is the mind's.
+        # The folder is the mind's, with its settings file and the folders
+        # it works in. Its compose folder stays this console's.
         for writable in (shape["config_dir_name"], "data", "reference"):
             (mind_dir / writable).mkdir()
             os.chown(mind_dir / writable, uid, uid)
+        os.chown(runtime_path, uid, uid)
+        os.chown(mind_dir, uid, uid)
         token_path = mind_dir / SESSION_TOKEN_FILENAME
         handle = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
         with os.fdopen(handle, "w") as stream:
@@ -844,94 +841,55 @@ def _mind_uid() -> int:
 ADMIN_CREDENTIAL_VARIABLE = "COMMS_ADMIN_BEARER_TOKEN"
 
 
-def _replace_file(path: Path, text: str) -> None:
-    """Write `path` whole or not at all: a fragment the stack file already
-    lists is read by every `docker compose` on this host, and one caught half
-    written fails the whole stack."""
-    scratch = path.with_name(f".{path.name}.new")
-    try:
-        scratch.write_text(text)
-        os.replace(scratch, path)
-    finally:
-        scratch.unlink(missing_ok=True)
+def _own_service(name: str) -> dict | None:
+    """The service this console wrote for a mind it made, or None.
 
-
-def open_mind_to_its_owner(name: str) -> None:
-    """Make a mind scaffolded here an ordinary mind of its owner's.
-
-    Daniel, 2026-11-17: "No such thing as lockdown." And 2026-11-18: "Rip
-    that code out." For a mind whose owner is the person the hive's admin
-    credential is kept for, nothing of the lock is left: no `locked_down`
-    line, the credential in its container as every older mind of theirs has
-    it - which is what lets its Settings card reach it - and its own folder
-    its own to write, so the setting it is sent is one it can save. Its
-    compose folder and the session credential the console registered stay
-    read-only inside it: what it is started with is not its to rewrite.
-
-    Only for such a mind, and the caller is who knows: the gateway marks it
-    (`admin_credential_allowed`). A mind made for anyone else is left as
-    `scaffold_internal_mind` wrote it, because that credential opens every
-    person's conversations (DECIDED 2026-11-15, Daniel: a mind not owned by
-    him never reaches his credentials).
-
-    Before its container exists, never after: this console writes as root,
-    and from here on the folder belongs to the mind.
+    Read from the mind's compose file, which is this console's and which the
+    mind sees read-only, never from anything the mind can write. A mind made
+    here is known by what it is built as. Never follows a link.
     """
     if not _MIND_NAME_RE.fullmatch(name or ""):
-        raise ValueError("Invalid Mind name")
-    mind_dir = HIVE_MIND_MINDS_CONFIG_DIR / name
-    runtime_path = mind_dir / "runtime.yaml"
-    compose_path = mind_dir / "container" / "compose.yaml"
-    for written in (mind_dir, runtime_path, compose_path):
-        if os.path.islink(written):
-            raise ValueError(f"minds/{name} is not as this console wrote it")
-    runtime = yaml.safe_load(runtime_path.read_text())
-    compose = yaml.safe_load(compose_path.read_text())
-    service = compose["services"][name]
-    own = f"/usr/src/app/minds/{name}"
-    host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
-
-    runtime.pop("locked_down", None)
-    held = f"{ADMIN_CREDENTIAL_VARIABLE}="
-    service["environment"] = [
-        line for line in service["environment"] if not line.startswith(held)
-    ] + [f"{held}${{{ADMIN_CREDENTIAL_VARIABLE}}}"]
-    service["volumes"] = [
-        # The folder, not runtime.yaml alone: the mind saves a setting by
-        # writing a new file beside the old one and putting it in its place.
-        f"{host}:{own}:rw",
-        f"{host}/container:{own}/container:ro",
-        f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
-    ] + [spec for spec in service["volumes"] if not spec.startswith(f"{host}/")]
-
-    _replace_file(compose_path, yaml.safe_dump(compose, sort_keys=False))
-    _replace_file(runtime_path, yaml.safe_dump(runtime, sort_keys=False))
-    uid = _mind_uid()
-    os.chown(runtime_path, uid, uid)
-    os.chown(mind_dir, uid, uid)
-
-
-def is_locked_down(name: str) -> bool:
-    """Whether a mind on this host was created locked down (its root-owned
-    runtime.yaml says so). Never follows a link."""
-    if not _MIND_NAME_RE.fullmatch(name or ""):
-        return False
-    path = HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml"
+        return None
+    path = HIVE_MIND_MINDS_CONFIG_DIR / name / "container" / "compose.yaml"
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
-            return False
+            return None
         loaded = yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError):
-        return False
-    return isinstance(loaded, dict) and loaded.get("locked_down") is True
+        return None
+    service = (loaded.get("services") or {}).get(name) if isinstance(loaded, dict) else None
+    if not isinstance(service, dict):
+        return None
+    build = service.get("build")
+    if not isinstance(build, dict) or build.get("target") != MIND_BUILD_TARGET:
+        return None
+    return service
 
 
-def locked_down_minds() -> list[str]:
+def _environment(service: dict) -> dict[str, str]:
+    listed = service.get("environment") or []
+    if isinstance(listed, dict):
+        return {str(k): str(v) for k, v in listed.items()}
+    return dict(
+        str(item).split("=", 1) if "=" in str(item) else (str(item), "")
+        for item in listed)
+
+
+def holds_no_admin_credential(name: str) -> bool:
+    """Whether a mind on this host is one this console made, which is given
+    no admin credential: that credential opens every person's conversations
+    (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
+    credentials), and a mind made here is made the same whoever it is for."""
+    service = _own_service(name)
+    return service is not None and ADMIN_CREDENTIAL_VARIABLE not in _environment(service)
+
+
+def minds_without_the_admin_credential() -> list[str]:
     try:
         names = sorted(p.name for p in HIVE_MIND_MINDS_CONFIG_DIR.iterdir())
     except OSError:
         return []
-    return [name for name in names if is_locked_down(name)]
+    return [name for name in names if holds_no_admin_credential(name)]
 
 
 def name_is_a_host_already(name: str) -> bool:
@@ -943,18 +901,14 @@ def name_is_a_host_already(name: str) -> bool:
     return lowered.startswith("hive") or bool(_addresses(lowered))
 
 
-def _locked_identities() -> tuple[set[str], set[str]]:
-    names = set(locked_down_minds())
-    ids = set()
-    for name in names:
-        try:
-            loaded = yaml.safe_load(
-                (HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml").read_text()) or {}
-            ids.add(str(loaded.get("mind_id") or ""))
-        except (OSError, yaml.YAMLError):
-            continue
-    ids.discard("")
-    return names, ids
+def _identities_without_the_admin_credential() -> dict[str, str]:
+    """Each such mind's name and the id this console gave it, read from its
+    compose file: its runtime.yaml is its own to write."""
+    found = {}
+    for name in minds_without_the_admin_credential():
+        service = _own_service(name) or {}
+        found[name] = _environment(service).get("MIND_ID", "")
+    return found
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -976,8 +930,8 @@ async def withholds_admin_credential(url: str) -> bool:
     minds (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches
     his credentials). A gateway too old to mark its rows marks none.
 
-    Yes, too, when the address is one a locked-down mind's registry row
-    claims, whatever it is: such a mind can re-register itself with the
+    Yes, too, when the address is one that a mind this console made claims
+    in the registry, whatever it is: such a mind can re-register itself with the
     gateway at any address - a server of its own, or another mind's, which
     the console would then act on for it. And yes when the address leads to
     such a mind's container. A registry that cannot be read while one exists
@@ -985,7 +939,8 @@ async def withholds_admin_credential(url: str) -> bool:
     """
     import route_access
 
-    names, ids = _locked_identities()
+    identities = _identities_without_the_admin_credential()
+    names, ids = set(identities), set(identities.values()) - {""}
     try:
         rows = await route_access.registered_minds()
     except Exception:  # noqa: BLE001 - unreadable, judged below
@@ -1002,10 +957,79 @@ async def withholds_admin_credential(url: str) -> bool:
         return False
     if rows is None:
         return True
-    return await asyncio.to_thread(_leads_to_locked_container, target[1], names)
+    return await asyncio.to_thread(_leads_to_such_a_container, target[1], names)
 
 
-def _leads_to_locked_container(host: str, names: set[str]) -> bool:
+async def own_credential_for(url: str) -> str | None:
+    """The one mind's own gateway key that may be sent to `url`, or None.
+
+    How a change the console has already allowed, by the account of the
+    person signed in, reaches a mind that holds no admin credential: the
+    console presents that mind's own key, the one it was issued when it was
+    made, and the mind accepts what it already holds. Nothing new is issued
+    (Daniel, 2026-11-18: "A mind has a key and that is it").
+
+    Only when the address is that one mind's and nobody else's: every
+    registry row claiming it is the same mind this console made. An address
+    two minds claim, or one no row claims, gets nothing - a mind can
+    re-register itself anywhere, and another mind's key is not its to draw.
+    """
+    import holder_credentials
+    import route_access
+
+    identities = _identities_without_the_admin_credential()
+    if not identities:
+        return None
+    try:
+        rows = await route_access.registered_minds()
+    except Exception:  # noqa: BLE001 - a registry that cannot be read names nobody
+        return None
+    target = _origin(url)
+    claimants = [
+        row for row in rows or []
+        if _origin(str(row.get("gateway_url") or "")) == target]
+    if not claimants:
+        return None
+    by_id = {mind_id: name for name, mind_id in identities.items() if mind_id}
+    whose = set()
+    for row in claimants:
+        name = str(row.get("name") or "").lower()
+        mind_id = str(row.get("id") or "")
+        if name in identities and identities[name] and identities[name] == mind_id:
+            whose.add(name)
+        elif mind_id in by_id:
+            whose.add(by_id[mind_id])
+        else:
+            return None
+    if len(whose) != 1:
+        return None
+    (name,) = whose
+    service = holder_credentials.SERVICES["comms"]
+    try:
+        location = holder_credentials.locate(service, name)
+        return (holder_credentials._loaded_value(location) if location else None) or None
+    except Exception:  # noqa: BLE001 - a key that cannot be found is no key
+        # Kept in two files, or in one that cannot be read: nothing is sent,
+        # and the caller says the mind could not be reached.
+        return None
+
+
+def identity_as_made(name: str) -> dict[str, str] | None:
+    """Who a mind made here is, as this console wrote it: its id and the
+    address it answers at. From its compose file, never its runtime.yaml,
+    which is the mind's own to write - the console registers a mind with the
+    hive's admin credential, and must not take the mind's word for which
+    row that is."""
+    service = _own_service(name)
+    if service is None:
+        return None
+    mind_id = _environment(service).get("MIND_ID", "")
+    if not mind_id:
+        return None
+    return {"mind_id": mind_id, "gateway_url": f"http://{name}:8420"}
+
+
+def _leads_to_such_a_container(host: str, names: set[str]) -> bool:
     target = _addresses(host)
     if not target:
         return True
