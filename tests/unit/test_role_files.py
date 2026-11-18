@@ -104,7 +104,7 @@ def _prepare(harness: str) -> dict[str, str]:
 def _said(harness: str) -> list[str]:
     """The lines in the mind's error feed about this harness."""
     return [error["message"] for error in recent_errors()["errors"]
-            if f"({harness})" in error["message"]]
+            if f"a role's file did not reach this mind ({harness})" in error["message"]]
 
 
 class _Clock:
@@ -313,8 +313,9 @@ def test_a_conversation_that_starts_before_its_files_are_in_place_says_so(
         worker.join(10)
 
     assert any("started without waiting" in line for line in said)
-    # A third of the caller's timeout, not the longest wait there is.
-    assert waited < role_files.DEADLINE / 2
+    # A third of the caller's timeout, a tenth of a second, and not the
+    # longest wait there is.
+    assert waited < 1
     # And what was waiting is in place once the lock is let go.
     assert (mind[harness] / "role-hooks" / "time_inject.sh").is_file()
 
@@ -378,6 +379,9 @@ def test_a_file_still_missing_half_an_hour_later_is_named_again(
     def named() -> int:
         return sum(f"hook {hook} is granted by a role" in line for line in _said(harness))
 
+    # Still missing at each conversation inside the half hour: said once.
+    _prepare(harness)
+    _prepare(harness)
     _prepare(harness)
     clock.ahead += 30 * 60 - 1
     _prepare(harness)
