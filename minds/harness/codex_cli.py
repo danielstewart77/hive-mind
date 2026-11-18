@@ -44,7 +44,7 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
-from minds.harness import chat_surface, role_guard
+from minds.harness import chat_surface, role_files, role_guard
 from minds import (
     context_overflow,
     failed_turn,
@@ -446,7 +446,10 @@ def _role_guard(env: dict[str, str], timeout: float = 10.0) -> tuple[list[str], 
     """
     return role_guard.prepare_codex(
         CODEX_HOME, env.get("MIND_ID") or MIND_ID,
-        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout)
+        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
+        # Story 10.18.15: the hooks and skills its roles name arrive here,
+        # before config.toml is read for the hooks carried into the spawn.
+        on_grants=lambda grants: role_files.provision("codex", CODEX_HOME, grants, log=log))
 
 
 def _pane_role_guard() -> tuple[list[str], dict[str, str]]:
