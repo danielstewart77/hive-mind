@@ -62,11 +62,21 @@ async def set_capability_endpoint(node_id: str, endpoint: str) -> str:
         raise ValueError(
             "This Capability Node does not support endpoint configuration")
     normalized = normalize_endpoint(endpoint)
+    if node_id == "inference-proxy":
+        import provider_data
+        connection = await provider_data.get_connection("hive-proxy")
+        await provider_data.save_connection(dict(connection, base_url=normalized), "hive-proxy")
+        return normalized
     await store.set_capability_endpoint(node_id, normalized, int(time.time()))
     return normalized
 
 
 async def get_capability_endpoint(node_id: str) -> str | None:
+    if node_id == "inference-proxy":
+        state = await store.get_provider_connections()
+        for connection in state.get("connections", []):
+            if connection["id"] == "hive-proxy":
+                return connection["base_url"]
     row = await store.capability_endpoint(node_id)
     return str(row["endpoint"]) if row else None
 
@@ -75,6 +85,10 @@ async def clear_capability_endpoint(node_id: str) -> bool:
     if node_id not in _CONFIGURABLE_CAPABILITY_IDS:
         raise ValueError(
             "This Capability Node does not support endpoint configuration")
+    if node_id == "inference-proxy":
+        import provider_data
+        await provider_data.delete_connection("hive-proxy")
+        return True
     return await store.clear_capability_endpoint(node_id) > 0
 
 
@@ -328,6 +342,7 @@ def scaffold_internal_mind(
     description: str = "",
     ollama_base_url: str = "",
     ollama_api_key: str = "",
+    connection: dict | None = None,
 ) -> dict[str, str]:
     """Write minds/<name>/runtime.yaml and container/compose.yaml.
 
@@ -389,6 +404,13 @@ def scaffold_internal_mind(
         provider_env = _OLLAMA_ENV[harness](base, ollama_api_key)
         if provider_env:
             runtime["env"] = provider_env
+    if connection:
+        from provider_data import inference_environment
+        runtime["provider_connection"] = dict(connection)
+        # Endpoint metadata travels with the Mind; credentials stay in its
+        # own Compose environment, not in the public runtime configuration.
+        runtime["env"] = {k: v for k, v in inference_environment(connection, "", harness).items()
+                          if "KEY" not in k and "TOKEN" not in k}
 
     own = f"/usr/src/app/minds/{name}"
     host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
@@ -487,6 +509,16 @@ def scaffold_internal_mind(
             }
         }
     }
+    if connection:
+        from provider_data import inference_environment
+        service = compose["services"][name]
+        inference_names = {"INFERENCE_PROXY_URL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+                           "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
+                           "DSH_PROXY_BASE_URL", "DSH_API_KEY"}
+        service["environment"] = [item for item in service["environment"]
+                                  if item.split("=", 1)[0] not in inference_names]
+        service["environment"] += [f"{k}={v}" for k, v in inference_environment(
+            connection, f"${{{_proxy_variable(name)}}}", harness).items()]
     if is_dsh:
         service = compose["services"][name]
         service["environment"] += [
@@ -496,13 +528,13 @@ def scaffold_internal_mind(
             # code is root's.
             f"DSH_SPAWN_DIR={own}/data",
             # What its capture hook classifies with, as its own proxy client.
-            f"MIND_PROXY_KEY=${{{_proxy_variable(name)}}}",
+            *([f"MIND_PROXY_KEY=${{{_proxy_variable(name)}}}"] if not connection else []),
             "HIVE_CLASSIFIER_MODEL=${HIVE_CLASSIFIER_MODEL:-}",
         ]
         # The harness itself, read-only: a mind must not rewrite the tree it
         # is launched from.
         service["volumes"].append(
-            f"${{HOST_DSH_DIR:-${{HOST_PROJECT_DIR:-.}}/dsh}}:{DSH_MOUNT}:ro")
+            f"{os.getenv('HIVE_NEW_MIND_DSH_DIR', '').strip() or '${HOST_DSH_DIR:-${HOST_PROJECT_DIR:-.}/dsh}'}:{DSH_MOUNT}:ro")
         # Its profile and hooks, written by the image's own code as the
         # mind's user before it takes a conversation: the console makes minds
         # and holds none of that code.

@@ -286,3 +286,11 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
+
+## Inference providers
+
+Settings → Providers stores named endpoint URLs and API formats for direct OpenAI, Anthropic, Ollama, and proxy/custom connections. Tokens belong to Minds; enter a token when creating a Mind or on its configuration page. The new-Mind form lists models from the selected endpoint using the entered Mind token. Connections that allow unauthenticated requests can use a blank token. Reused tokens are accepted with a warning.
+
+Existing local Mind connections are imported without rewriting their runtime files, model choices, or credentials. Provider URL edits take effect for an existing Mind when it is explicitly reloaded. A provider assigned to Minds cannot be deleted or have its API format changed.
+
+New Minds need the configured-provider hive-mind runtime. During staged deployment, HIVE_MIND_BUILD_CONTEXT selects that source; HIVE_NEW_MIND_DSH_DIR selects the host DSH tree mounted by newly generated Minds, leaving existing fragments unchanged.
