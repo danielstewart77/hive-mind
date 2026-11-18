@@ -103,6 +103,18 @@ COMMS_SERVICE_HOLDERS = {
 LUCENT_SERVICE_HOLDERS = {"comms": COMMS, "console": CONSOLE}
 
 
+def _build_var(name: str) -> str:
+    return "HIVE_MIND_BUILD_" + name.upper()
+
+
+def new_mind_build_values(host: Host, answers: dict) -> dict[str, str]:
+    """The web proxy as `.env` holds it for the image build of a mind the
+    console creates; that mind's compose fragment names these variables and
+    never the values. Empty on a host with no web proxy."""
+    web = host.proxy_env([*reserved_service_names(answers), *given_hosts(answers)])
+    return {_build_var(k): v for k, v in web.items()}
+
+
 def env_ref(name: str) -> str:
     return "${%s}" % name
 
@@ -256,6 +268,10 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     values.setdefault(EMBEDDING_MODEL_VAR, "")
     values.setdefault(CLASSIFIER_MODEL_VAR, "")
     values.setdefault("HIVE_TOOLS_TOKEN", "")
+    # What the compose file of a mind the console creates is written with:
+    # where the install is on this host, and where its dsh tree is.
+    values["HOST_PROJECT_DIR"] = str(home.root)
+    values["HOST_DSH_DIR"] = str(home.dsh)
     values["TERMINAL_LABELS_TOKEN"] = values["COMMS_RENAME_TOKEN"]
     return values
 
@@ -285,10 +301,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     repo = home.repo
     hive_data = str(repo("hive-data"))
     dsn = env_ref("HIVE_DATABASE_URL")
-    names = [POSTGRES, COMMS, LUCENT, OLLAMA, proxy_adapter.SERVICE, CONSOLE, TERMINAL, VOICE,
-             tools.SERVICE, TELEGRAM, DISCORD]
+    names = reserved_service_names(answers)
     mind = answers.get("mind_name") or "mind"
-    names.append(mind)
     web = host.proxy_env([*names, *given_hosts(answers)])
     tz = mind_image.tz(host)
     pg_here = plan.runs_here(answers, "postgres")
@@ -406,6 +420,11 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "LUCENT_API_URL": LUCENT_URL,
                "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", CONSOLE)),
                "LUCENT_SOUL_BEARER_TOKEN": env_ref("LUCENT_SOUL_BEARER_TOKEN"),
+               # What issues a new mind its memory-store credential: Add a
+               # Mind mints one per service, and without this the memory
+               # store's is refused and the mind is not made. The gateway's
+               # is above; the proxy's is read from the .env it has mounted.
+               "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN"),
                # The console's model address is the proxy too, with the one
                # key: OLLAMA_BASE_URL / OLLAMA_URL are where it points a mind
                # it scaffolds for local models.
@@ -416,7 +435,21 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                # Where the hive's compose project is, for the console's
                # restart and mount controls; unset it names Daniel's checkout.
                "HIVE_MIND_PROJECT_PATH": str(home.root),
-               **site_links, **site.env_files_settings()}
+               **site_links, **site.env_files_settings(),
+               # Add a Mind: where a new mind's keys, its line in the stack
+               # and its image come from on this install. The web proxy goes
+               # to its image build, which installs packages.
+               **site.new_mind_settings(
+                   proxy_url=proxy_url(answers), build_context=str(repo("hive-mind")),
+                   # By reference: a web proxy's address can carry a
+                   # password, and a mind's compose fragment is a file
+                   # anyone on the host can read. The values are in .env.
+                   build_args={k: "$${%s:-}" % _build_var(k) for k in web},
+                   # A mind's name is its service name, its address on the
+                   # network, and `hive-mind-<name>` its container: none of
+                   # them may be one this file already uses.
+                   reserved=sorted({*names, *(n[len("hive-mind-"):] for n in names
+                                              if n.startswith("hive-mind-"))}))}
         if voice:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
@@ -429,6 +462,9 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         svc["ports"] = [f"0.0.0.0:{CONSOLE_PORT}:{CONSOLE_PORT}"]
         svc["volumes"] = [bind(home.data / "console", "/data"),
                           bind(home.minds, "/minds_hive_mind", "ro"),
+                          # The same folder, writable: where Add a Mind
+                          # writes a new mind and the list that includes it.
+                          bind(home.minds, site.MINDS_WRITE_MOUNT),
                           bind(repo("hive-tools"), "/hive_tools_repo", "ro"),
                           bind(home.env_file, site.ENV_FILE_MOUNT, kind=files)]
 
@@ -539,11 +575,63 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         for vol in svc.get("volumes", []):
             if vol.get("type") == "volume":
                 volumes[vol["source"]] = {"name": vol["source"]}
-    doc = {"name": PROJECT, "services": services,
+    # The minds the console creates are not in this file, which is rewritten
+    # on every run: each has a compose file of its own, and the list of them
+    # is one file in the minds folder that this one includes.
+    doc = {"name": PROJECT,
+           "include": [{"path": str(minds_stack(home).relative_to(home.root))}],
+           "services": services,
            "networks": {NETWORK: {"external": True, "name": NETWORK}}}
     if volumes:
         doc["volumes"] = volumes
     return Rendered(doc, mounts, mountpoints, files, host_paths)
+
+
+def reserved_service_names(answers: dict) -> list[str]:
+    """Every name this install's own services answer to on its network."""
+    return [POSTGRES, COMMS, LUCENT, OLLAMA, proxy_adapter.SERVICE, CONSOLE, TERMINAL, VOICE,
+            tools.SERVICE, TELEGRAM, DISCORD, answers.get("mind_name") or "mind"]
+
+
+def minds_stack(home: Home) -> Path:
+    """The list of the minds the console has created (see `render`)."""
+    return home.minds / site.MINDS_STACK
+
+
+def ensure_minds_stack(home: Home) -> bool:
+    """Make that list, empty, if this install has none; never rewrite one.
+
+    The stack file includes it, and compose refuses a stack whose include is
+    missing — so it exists before the first `docker compose` of a run. What
+    the console has added to it since is the console's, and is kept.
+    """
+    path = minds_stack(home)
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(site.MINDS_STACK_EMPTY)
+    return True
+
+
+def console_made_minds(home: Home) -> list[str]:
+    """The minds in that list, by service name: `<name>/container/compose.yaml`.
+
+    Read as the lines the console writes, with no YAML library: the installer
+    runs on a host with none. A line it does not recognise names no mind.
+    """
+    try:
+        lines = minds_stack(home).read_text().splitlines()
+    except OSError:
+        return []
+    names = []
+    for line in lines:
+        entry = line.strip()
+        if not entry.startswith("- path:"):
+            continue
+        parts = entry[len("- path:"):].split(" #", 1)[0].strip().strip("'\"").split("/")
+        if len(parts) == 3 and parts[1:] == ["container", "compose.yaml"] and parts[0]:
+            names.append(parts[0])
+    return names
 
 
 def console_image_build(home: Home, host: Host) -> list[str]:

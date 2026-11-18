@@ -223,3 +223,59 @@ def test_services_build_from_hive_minds_modules_and_minds_cannot_read_them(tmp_p
     for name in ("wren", compose.VOICE, compose.TELEGRAM, compose.DISCORD):
         hidden = {entry.split(":", 1)[0] for entry in services[name]["tmpfs"]}
         assert {"/usr/src/app/modules", "/usr/src/app/.git/modules"} <= hidden, name
+
+
+def test_the_console_can_make_a_mind_on_an_installed_hive_and_a_rerun_keeps_it(tmp_path):
+    """Daniel, 2026-11-17, Add a Mind on an installed hive: no env file for
+    the mind's keys, no stack file to list it in, nothing registered. The
+    console is told where each goes, can write there, and holds what issues
+    a key at each service; what it then lists survives the installer."""
+    inst = installer_at(tmp_path, answers(pieces=all_pieces()), host=a_host(
+        web_proxy={"HTTP_PROXY": "http://ann:s3cret@proxy.corp:3128"}))  # secret-guard: allow
+    config = render(inst)
+    home = inst.home
+    console = config["services"][compose.CONSOLE]
+    env = console["environment"]
+
+    # Its keys: a label the console has a writable file under.
+    files = json.loads(env["HIVE_ENV_FILES"])
+    env_mount = [v for v in console["volumes"] if v["target"] == files[env["HIVE_MIND_ENV_LABEL"]]]
+    assert env_mount[0]["source"] == str(home.env_file) and not env_mount[0].get("read_only")
+    written = {line.split("=", 1)[0]: line.split("=", 1)[1].strip("'")
+               for line in home.env_file.read_text().splitlines() if "=" in line}
+    assert written["HOST_PROJECT_DIR"] == str(home.root)
+    for credential in ("COMMS_ADMIN_BEARER_TOKEN", "LUCENT_ADMIN_BEARER_TOKEN"):
+        assert env[credential], credential
+
+    # Its folder and its line in the stack: under a mount the console may
+    # write, in a list that starts empty.
+    writable = [v["target"] for v in console["volumes"]
+                if v["source"] == str(home.minds) and not v.get("read_only")]
+    assert writable
+    listing = compose.minds_stack(home)
+    assert env["HIVE_MIND_STACK_COMPOSE"] == f"{writable[0]}/{listing.name}"
+    assert listing.read_text() == "include: []\n"
+    # The list sits among the minds, so its entries are relative to itself.
+    assert listing.parent == home.minds
+    assert env["HIVE_MIND_STACK_MINDS_PREFIX"] == "."
+
+    # What the console does there, then the installer run once more. The
+    # mind's image is built through the host's web proxy, which the console
+    # is handed by name: the fragment it writes is a file anyone can read.
+    # As the container gets it: compose's own printout doubles each dollar.
+    build_args = json.loads(env["HIVE_MIND_BUILD_ARGS"].replace("$$", "$"))
+    assert "s3cret" not in json.dumps(build_args)
+    fragment = home.minds / "atlas" / "container" / "compose.yaml"
+    fragment.parent.mkdir(parents=True)
+    fragment.write_text(json.dumps({"services": {"atlas": {
+        "image": "busybox", "build": {"context": ".", "args": build_args}}}}))
+    listing.write_text("include:\n  - path: atlas/container/compose.yaml\n")
+    # The console holds .env open as one mounted file and writes the mind's
+    # keys into it: the rerun must rewrite that same file, not put another
+    # in its place.
+    env_file_before = home.env_file.stat().st_ino
+    again = render(inst)
+    assert home.env_file.stat().st_ino == env_file_before
+    assert again["services"]["atlas"]["build"]["args"]["HTTP_PROXY"] == \
+        "http://ann:s3cret@proxy.corp:3128"  # secret-guard: allow
+    assert compose.console_made_minds(home) == ["atlas"]
