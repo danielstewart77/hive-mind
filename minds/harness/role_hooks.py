@@ -160,8 +160,12 @@ def _is_ours(command: str, hook: Hook, home: Path) -> bool:
     script = _script_path(command)
     if script is None:
         return False
+    installed = Path(home) / INSTALL_DIR / hook.script
     try:
-        return script.resolve() == (Path(home) / INSTALL_DIR / hook.script).resolve()
+        return script.resolve() == installed.resolve()
+    except RuntimeError:
+        # A link that leads back to itself: judged by where it sits.
+        return os.path.abspath(script) == os.path.abspath(installed)
     except (OSError, ValueError):
         return False
 
@@ -370,8 +374,8 @@ def differences(hook: Hook, hand_command: str, hand_timeout: int | None,
         raise HandCopyUnreadable(f"no script in the hand command {hand_command!r}")
     try:
         hand_text = script.read_text()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise HandCopyUnreadable(f"{script}: {exc}") from exc
+    except (OSError, ValueError) as exc:  # a path no file could have, too
+        raise HandCopyUnreadable(f"{script!s:.200}: {exc}") from exc
     tracked_files = (hook.script, *hook.helpers)
     if script.name not in tracked_files:
         found.append({"what": "file", "file": script.name, "only": "hand",
@@ -384,8 +388,8 @@ def differences(hook: Hook, hand_command: str, hand_timeout: int | None,
         except FileNotFoundError:
             found.append({"what": "file", "file": name, "only": "tracked"})
             continue
-        except (OSError, UnicodeDecodeError) as exc:
-            raise HandCopyUnreadable(f"{hand_path}: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            raise HandCopyUnreadable(f"{hand_path!s:.200}: {exc}") from exc
         if hand_text == tracked_text:
             continue
         found.append({"what": "file", "file": name, "hand_path": str(hand_path),
