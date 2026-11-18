@@ -65,6 +65,14 @@ def mind(monkeypatch, tmp_path):
     return homes
 
 
+OWN = {"claude": ("settings.json", json.dumps(
+           {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "bash /own/my_own.sh"}]}]}})),
+       "dsh": ("hooks.json", json.dumps(
+           {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "bash /own/my_own.sh"}]}]}})),
+       "codex": ("config.toml", '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\n'
+                                'command = "bash /own/my_own.sh"\n')}
+
+
 def _given(monkeypatch, *, hooks, skills):
     """The mind is given a role on the console: this is what the gateway
     then answers when the mind asks what its roles grant."""
@@ -82,12 +90,14 @@ def _start(harness: str, homes: dict) -> tuple[dict[str, str], dict[str, str]]:
         handed = json.loads(Path(env["DSH_HOOKS_CONFIG"]).read_text())
     elif harness == "claude":
         _args, env = claude._role_guard({})
-        handed = json.loads((homes["claude"] / "settings.json").read_text())
+        path = homes["claude"] / "settings.json"
+        handed = json.loads(path.read_text()) if path.exists() else {}
     else:
         _args, env = codex._role_guard({})
-        handed = tomllib.loads((homes["codex"] / "config.toml").read_text())
+        path = homes["codex"] / "config.toml"
+        handed = tomllib.loads(path.read_text()) if path.exists() else {}
     commands: dict[str, str] = {}
-    for groups in handed["hooks"].values():
+    for groups in handed.get("hooks", {}).values():
         for group in groups:
             for item in group["hooks"]:
                 words = shlex.split(item["command"])
@@ -101,18 +111,23 @@ def _start(harness: str, homes: dict) -> tuple[dict[str, str], dict[str, str]]:
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_a_mind_given_a_role_starts_its_next_conversation_with_that_roles_hooks_and_skills(
         monkeypatch, mind, harness):
+    # A mind that already runs a hook of its own, as every real one does.
+    name, text = OWN[harness]
+    (mind[harness] / name).write_text(text)
     _given(monkeypatch, hooks=["surface_inject", "time_inject"], skills=[SKILL])
 
     commands, env = _start(harness, mind)
 
-    assert {"surface_inject", "time_inject"} <= set(commands)
-    # What it is handed runs: started as the harness starts it, the surface
-    # hook says the surface it was told.
-    done = subprocess.run(commands["surface_inject"], shell=True, input="{}", text=True,
-                          capture_output=True, timeout=30,
-                          env={"PATH": os.environ["PATH"], **env, "COMMS_URL": "",
-                               "HIVE_SURFACE": "telegram"})
-    assert "<message-surface>telegram</message-surface>" in done.stdout
+    # What it is handed runs: started as the harness starts it, each granted
+    # hook says its piece: the surface it was told, and the time.
+    said = {}
+    for hook in ("surface_inject", "time_inject"):
+        said[hook] = subprocess.run(
+            commands[hook], shell=True, input="{}", text=True, capture_output=True, timeout=30,
+            env={"PATH": os.environ["PATH"], **env, "COMMS_URL": "",
+                 "HIVE_SURFACE": "telegram", "HIVE_MIND_TZ": "America/Chicago"}).stdout
+    assert "<message-surface>telegram</message-surface>" in said["surface_inject"]
+    assert "Current date and time" in said["time_inject"]
     assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
 
 
@@ -120,12 +135,29 @@ def test_a_mind_given_a_role_starts_its_next_conversation_with_that_roles_hooks_
 def test_a_granted_hook_or_skill_that_cannot_be_put_in_place_is_named_in_the_error_feed(
         monkeypatch, mind, harness):
     hook, skill = f"untracked_hook_{harness}", f"untracked-skill-{harness}"
-    _given(monkeypatch, hooks=["surface_inject", hook], skills=[skill])
+    # rotation_check is one of the four hooks each harness's own installer
+    # puts in place; nothing has put it on this mind.
+    _given(monkeypatch, hooks=["surface_inject", hook, "rotation_check"], skills=[skill])
 
     commands, _env = _start(harness, mind)
 
     said = [error["message"] for error in recent_errors()["errors"]]
     assert any(f"hook {hook} is granted by a role" in line for line in said)
+    assert any("hook rotation_check is granted by a role" in line for line in said)
     assert any(f"skill {skill} is granted by a role" in line for line in said)
     # And the conversation starts with what could be put in place.
     assert "surface_inject" in commands
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_tracked_hook_whose_files_cannot_be_written_is_named_in_the_error_feed(
+        monkeypatch, mind, harness):
+    # Where the installed scripts go is taken by a file, so none can be put there.
+    (mind[harness] / "role-hooks").write_text("in the way\n")
+    _given(monkeypatch, hooks=[f"untracked_{harness}", "skill_render_check"], skills=[])
+
+    _start(harness, mind)
+
+    said = [error["message"] for error in recent_errors()["errors"]]
+    assert any("skill_render_check" in line and "not installed" in line and f"({harness})" in line
+               for line in said)
