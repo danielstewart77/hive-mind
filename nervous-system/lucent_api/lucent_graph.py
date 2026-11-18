@@ -404,6 +404,58 @@ def _identity_refusal(detail: str) -> str:
     })
 
 
+async def _link_target(*, label: str, name: str, owner: object,
+                       stamp: object, mind_id: str, meta: dict,
+                       source: str, at: float) -> int:
+    """The id of the node a link points at, made only if it is not there.
+
+    One that is there is not written to at all. An edge is not a reason to
+    rewrite the node at its far end, and this used to: every linked write
+    restamped the target's data class, tier, source, as-of and updated-at
+    with the writer's own. A new mind's node is written with a link to its
+    owner, so making a mind relabelled its owner's Person node (found
+    2026-11-18), and any node a mind linked to dropped to the contextual
+    tier.
+
+    A real INSERT when it is missing, not `node_write`, for the reason
+    `graph_node_create` gives: `node_write` is the upsert, and it would turn
+    losing a race with another creator into the same overwrite, labels and
+    properties both.
+    """
+    scope = _identity_scope(label, owner)
+    existing = await _find_node(type=label, name=name, owner=scope)
+    if existing:
+        return existing["id"]
+    if stamp is None:
+        # No owner to file it under. The unique index does not collide on a
+        # null owner, so an INSERT here would let two creators each make
+        # one; `node_write` holds the lock that stops that. No route calls
+        # this without an owner to stamp.
+        made = await store.node_write(
+            owner=None, type=label, name=name, mind_id=mind_id,
+            properties=meta, data_class=meta.get("data_class"),
+            tier=meta.get("tier"), source=meta.get("source", source),
+            as_of=meta.get("as_of"), created_at=at, updated_at=at)
+        return made["id"]
+    try:
+        row = await _one(
+            f"INSERT INTO {NODES} (mind_id, owner, type, name, properties, "
+            "data_class, tier, source, as_of, created_at, updated_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10) "
+            "RETURNING id",
+            mind_id, stamp, label, name,
+            json.dumps(meta, separators=(",", ":")),
+            meta.get("data_class"), meta.get("tier"),
+            meta.get("source", source), meta.get("as_of"), at)
+    except hive_data.Conflict:
+        # Somebody made it between the look and the write. Theirs, as found.
+        existing = await _find_node(type=label, name=name, owner=scope)
+        if existing is None:
+            raise
+        return existing["id"]
+    return row["id"]
+
+
 async def graph_upsert_direct(
     *,
     entity_type: str,
@@ -454,11 +506,11 @@ async def graph_upsert_direct(
         )
         if guard_err is not None:
             return _identity_refusal(guard_err)
-        # The relation target is a second node this call writes to, and the
-        # find-or-create below updates its columns. Unguarded, naming another
-        # mind's own node as the target of any edge rewrote that node's tier
-        # and data class — standing identity down to contextual, which drops
-        # it out of the retrieval it exists for.
+        # The relation target is a second node this call can write: it is
+        # created below when it is not there. One that is there is left
+        # exactly as it was (see `_link_target`), but this guard came first
+        # and stays as the rule it is: nothing links to another mind's own
+        # node through this route.
         tgt_label = (
             await _validate_label(target_type or entity_type)
             if relation and target_name else ""
@@ -504,29 +556,10 @@ async def graph_upsert_direct(
         if relation and target_name:
             rel_type = _validate_relation(relation)
 
-            # Find-or-create the target node. Its properties are deliberately
-            # not touched when it already exists: an edge is not a reason to
-            # rewrite the node at its far end.
-            existing_target = await _find_node(
-                type=tgt_label, name=target_name,
-                owner=_identity_scope(tgt_label, owner))
-            if existing_target:
-                target_id = existing_target["id"]
-                await hive_data.run(lambda c: c.execute(
-                    f"UPDATE {NODES} SET data_class = $1, tier = $2, "
-                    "source = $3, as_of = $4, updated_at = $5 WHERE id = $6",
-                    meta.get("data_class"), meta.get("tier"),
-                    meta.get("source", source), meta.get("as_of"),
-                    props["created_at"], target_id))
-            else:
-                target_row = await store.node_write(
-                    owner=_stamped, type=tgt_label, name=target_name,
-                    mind_id=mind_id, properties=meta,
-                    data_class=meta.get("data_class"), tier=meta.get("tier"),
-                    source=meta.get("source", source), as_of=meta.get("as_of"),
-                    created_at=props["created_at"],
-                    updated_at=props["created_at"])
-                target_id = target_row["id"]
+            target_id = await _link_target(
+                label=tgt_label, name=target_name, owner=owner,
+                stamp=_stamped, mind_id=mind_id, meta=meta,
+                source=source, at=props["created_at"])
 
             edge_props = json.loads(edge_attrs) if edge_attrs.strip() else {}
             try:
