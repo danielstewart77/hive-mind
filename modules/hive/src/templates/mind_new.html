@@ -23,12 +23,12 @@
                 <div class="field is-full"><label for="mind-proxy-key">Proxy key</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>Paste the proxy key you want this Mind to use. If it is already in use, Hive warns you and uses it. Leave it empty to have Hive issue a key automatically.</small></div>
                 <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
-                <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
+                <div class="form-actions"><button class="button button-primary" type="submit" id="mind-submit"><i data-lucide="wand-sparkles"></i><span>Scaffold Mind</span></button><small id="mind-progress" role="status" hidden>Writing its folder, issuing its keys, listing it in the stack, registering it, then building and starting its container. The first build can take several minutes; leave this page open.</small></div>
             </form>
         </section>
         <aside class="overview-stack">
             <section class="surface">
-                <div class="surface-header"><div><h2>What gets written</h2><p>Two files, in this Hive's minds directory.</p></div></div>
+                <div class="surface-header"><div><h2>What gets written</h2><p>Two files, in this Hive's minds directory. If a step of making the Mind fails, everything is taken back and the Mind is not made.</p></div></div>
                 <ul class="service-list">
                     <li class="service-row"><span class="service-icon"><i data-lucide="file-cog"></i></span><span class="service-copy"><strong>runtime.yaml</strong><small>Harness, provider, model, and the provider env block.</small></span></li>
                     <li class="service-row"><span class="service-icon"><i data-lucide="container"></i></span><span class="service-copy"><strong>container/compose.yaml</strong><small>One service on the hivemind network.</small></span></li>
@@ -36,8 +36,8 @@
             </section>
             <div class="notice"><i data-lucide="sparkles"></i><span>Identity is not scaffolded. A Mind with no soul answers as a blank harness until you give it one.</span></div>
             <section class="surface" id="mind-result" hidden>
-                <div class="surface-header"><div><h2>Next steps</h2><p>Run on the Hive host, then register.</p></div></div>
-                <div class="surface-body overview-stack"><div id="mind-proxy-key-warning" role="status" hidden><div class="notice" id="mind-proxy-key-warning-text"></div></div><dl class="detail-grid" id="mind-identity"></dl><div id="mind-credentials"></div><div id="mind-commands"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-register">Register with the broker</button><small id="mind-register-status"></small></div>
+                <div class="surface-header"><div><h2 id="mind-result-title">Made</h2><p>Every step of making it finished.</p></div></div>
+                <div class="surface-body overview-stack"><div id="mind-proxy-key-warning" role="status" hidden><div class="notice" id="mind-proxy-key-warning-text"></div></div><dl class="detail-grid" id="mind-identity"></dl><div id="mind-commands"></div><div id="mind-start"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-start-again" hidden><span>Try starting it again</span></button></div>
             </section>
         </aside>
     </div>
@@ -45,7 +45,32 @@
 <script>
 window.addEventListener("DOMContentLoaded", function () {
     const h = window.HiveConsole, form = document.getElementById("mind-form");
-    let created = null;
+    const submit = document.getElementById("mind-submit"), progress = document.getElementById("mind-progress");
+    // One creation at a time, and something moving for as long as it runs:
+    // the request does not answer until the container has been built and
+    // started, which is minutes, and a still page reads as a dead one.
+    let made = null;
+    // The container's start, on its own: started, waiting on an approval, or
+    // not started and why — never "Started" over something that did not.
+    function showStart(data) {
+        const box = document.getElementById("mind-start"), again = document.getElementById("mind-start-again");
+        if (data.started) box.innerHTML = '<div><p class="command-label">Its container is started</p></div>';
+        else if (data.start_operation) box.innerHTML = '<div class="notice"><span>Its container is not started yet: the start is waiting on your approval in Hive Tools.' + (data.start_error ? " " + h.escapeHtml(data.start_error) : "") + '</span></div>';
+        else box.innerHTML = '<div class="error-state">Its container did not start: ' + h.escapeHtml(data.start_error || "no reason was given") + '</div>';
+        again.hidden = !!data.started;
+        document.getElementById("mind-next-step").textContent = data.next_step || "";
+    }
+
+    function setBusy(busy) {
+        submit.disabled = busy;
+        submit.classList.toggle("is-busy", busy);
+        submit.setAttribute("aria-busy", busy ? "true" : "false");
+        // Drawn in CSS rather than as an icon: the icon set comes from the
+        // internet, and a hive without it must still show something moving.
+        submit.innerHTML = (busy ? '<span class="button-spinner" aria-hidden="true"></span>' : '<i data-lucide="wand-sparkles"></i>') + '<span>' + (busy ? "Scaffolding…" : "Scaffold Mind") + '</span>';
+        progress.hidden = !busy;
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    }
     const options = {{ install_options | tojson }};
     const defaultModels = {};
     options.providers.forEach(function (item) { defaultModels[item.value] = item.internal_default_model || item.default_model; });
@@ -113,59 +138,45 @@ window.addEventListener("DOMContentLoaded", function () {
             role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
             roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
         };
+        document.getElementById("mind-result").hidden = true;
+        setBusy(true);
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
             form.elements.proxy_key.value = "";
-            created = data.registration;
             document.getElementById("mind-proxy-key-warning-text").textContent = data.proxy_key_warning || "";
             document.getElementById("mind-proxy-key-warning").hidden = !data.proxy_key_warning;
+            document.getElementById("mind-result-title").textContent = data.registration.name + " is made";
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
-            // The console starts the container itself now, so what used to
-            // be a command to paste is an account of what happened. Each
-            // step is reported on its own: one of them failing is a
-            // different state from all of them failing, and a success panel
-            // that hides a refusal sends the operator to talk to a mind
-            // that is not there.
+            // Making a Mind is all or nothing, so these are only ever steps
+            // that finished: one that failed is the error above the button,
+            // with the Mind not made. Starting its container is said
+            // separately, because it can fail, or wait, with the Mind made.
+            made = data.registration.name;
             const steps = [
-                ["Listed in the stack", data.include_error],
-                [data.start_operation ? "Start waiting on your approval in Hive Tools" : "Started", data.start_error],
-                ["Its node in the graph", data.soul_seed_error],
-                ["Registered with the gateway", data.registration_error]
+                "Credentials issued: " + ((data.credentials || []).map(function (row) { return row.service; }).join(", ") || "none"),
+                "Listed in the stack",
+                "Its node is in the graph",
+                "Registered with the gateway"
             ];
             document.getElementById("mind-commands").innerHTML = steps.map(function (step) {
-                return step[1]
-                    ? '<div class="error-state">' + h.escapeHtml(step[0]) + ' failed: ' + h.escapeHtml(step[1]) + '</div>'
-                    : '<div><p class="command-label">' + h.escapeHtml(step[0]) + '</p></div>';
+                return '<div><p class="command-label">' + h.escapeHtml(step) + '</p></div>';
             }).join("");
-            // A mind whose credentials did not land boots authenticating to
-            // nothing and fails from detached hooks, in silence. Saying it on
-            // the success screen is the only place the operator will look.
-            const credentials = document.getElementById("mind-credentials");
-            if (data.credential_error) {
-                credentials.innerHTML = '<div class="error-state">This Mind has no working credential for every service: '
-                    + h.escapeHtml(data.credential_error)
-                    + ' Issue the missing one on the credentials page before you build it.</div>';
-            } else {
-                credentials.innerHTML = '<p>Credentials issued: '
-                    + h.escapeHtml((data.credentials || []).map(function (row) { return row.service; }).join(", ") || "none")
-                    + '</p>';
-            }
-            document.getElementById("mind-next-step").textContent = data.next_step || "";
+            showStart(data);
             document.getElementById("mind-result").hidden = false;
-            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
         } catch (error) { errorBox.hidden = false; errorBox.textContent = error.message; }
+        finally { setBusy(false); }
     });
 
-    document.getElementById("mind-register").addEventListener("click", async function () {
-        const status = document.getElementById("mind-register-status");
-        if (!created) { status.textContent = "Scaffold the Mind first."; return; }
-        status.textContent = "Registering…";
-        try {
-            await h.requestJson("/api/minds/" + encodeURIComponent(created.name) + "/register", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({owner: created.owner})});
-            status.textContent = "Registered. " + created.name + " is part of the Hive.";
-        } catch (error) { status.textContent = error.message; }
-    });
 
+    document.getElementById("mind-start-again").addEventListener("click", async function (event) {
+        const button = event.currentTarget, box = document.getElementById("mind-start");
+        if (!made) return;
+        button.disabled = true;
+        button.innerHTML = '<span class="button-spinner" aria-hidden="true"></span><span>Starting…</span>';
+        try { showStart(await h.requestJson("/api/minds/" + encodeURIComponent(made) + "/start", {method: "POST"})); }
+        catch (error) { box.innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
+        finally { button.disabled = false; button.innerHTML = '<span>Try starting it again</span>'; }
+    });
 
     // The user a new Mind belongs to; the admin creating it unless another is picked.
     async function loadOwners(select, current) {

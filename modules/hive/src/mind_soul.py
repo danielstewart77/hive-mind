@@ -153,6 +153,23 @@ async def seed_mind_node(
     return _unwrap(response)
 
 
+async def remove_mind_node(mind_name: str, owner: str, credential: str) -> None:
+    """Delete the node `seed_mind_node` wrote, as the Mind that wrote it.
+
+    For a creation that failed after the seed. With the mind's own
+    credential, which is why this runs before that credential is revoked: a
+    node is deleted by the provenance that made it.
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        response = await client.request(
+            "DELETE",
+            f"{_base_url()}/graph/nodes",
+            json={"entity_type": "Mind", "name": node_name(mind_name), "owner": owner},
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+    _unwrap(response)
+
+
 async def push_soul(mind_name: str, soul_values: list[str], reason: str) -> dict:
     """Replace the Mind's soul, recorded as a console edit.
 

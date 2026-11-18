@@ -137,7 +137,14 @@ def _read_env_value(path: Path, key: str) -> str | None:
     )
     if not matches:
         return None
-    return matches[-1].split("=", 1)[1]
+    value = matches[-1].split("=", 1)[1]
+    # Without the quotes a value was written in, as compose and dotenv load
+    # it. The hive installer writes every value single-quoted, so that a `$`
+    # in a password is not an interpolation; read with them, a credential is
+    # presented to its service as `'abc'` and refused.
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    return value
 
 
 def _redact(value: str | None) -> str | None:

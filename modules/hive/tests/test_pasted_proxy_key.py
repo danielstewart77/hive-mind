@@ -84,7 +84,6 @@ def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     client, minds, env, stack, state = creation
     response = client.post("/api/minds", json=body(KEY, harness, provider))
     assert response.status_code == 200, response.text
-    assert response.json()["credential_error"] is None
     assert KEY not in response.text and KEY not in caplog.text
     assert env.read_text().split("PROXY_TOKEN_PASTED_KEY_FIXTURE=", 1)[1].splitlines()[0] == KEY
     assert state["proxy_requests"][0].headers["authorization"] == f"Bearer {KEY}"
@@ -146,7 +145,6 @@ def test_reused_proxy_key_warns_and_is_used_without_changing_existing_keys(
     env.write_text(env.read_text() + f"{existing_variable}={KEY}\n")
     response = client.post("/api/minds", json=body(KEY, "dsh", "openai"))
     assert response.status_code == 200, response.text
-    assert response.json()["credential_error"] is None
     warning = response.json()["proxy_key_warning"]
     assert warning and "already" in warning.lower() and "will use" in warning.lower()
     assert KEY not in response.text and KEY not in caplog.text

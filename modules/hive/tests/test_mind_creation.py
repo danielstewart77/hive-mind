@@ -17,7 +17,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import auth
 import configuration_data
+import credentials_data
+import holder_credentials
 import main as main_mod
+import mind_creation
 import accounts
 
 # A container mind starts on a model the inference proxy serves, since that
@@ -45,6 +48,9 @@ class _Recorder:
         self.received: list[dict] = []
         self.hitl: str | None = None
         self.refuse = False
+        # (method, path) pairs this service refuses, the rest answered.
+        self.refusing: set[tuple[str, str]] = set()
+        self.listing = False
         app = FastAPI()
 
         @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -63,8 +69,10 @@ class _Recorder:
                 "bearer": (request.headers.get("authorization") or ""
                            ).removeprefix("Bearer "),
             })
-            if self.refuse:
+            if self.refuse or (request.method, "/" + path) in self.refusing:
                 return JSONResponse({"error": "refused"}, status_code=403)
+            if self.listing and request.method == "GET":
+                return JSONResponse([])
             if self.hitl:
                 return JSONResponse({"hitl_request_id": self.hitl})
             return JSONResponse({"ok": True})
@@ -95,17 +103,51 @@ def lucent(monkeypatch):
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
+    """A console with a whole stand-in hive behind it, all of it in tmp_path:
+    the minds folder, the env file a mind's keys go into, the stack file, and
+    one server on a real port answering as the gateway, the memory store, the
+    inference proxy and Hive Tools. A creation here can finish, and everything
+    it writes or sends lands in something this fixture made."""
+    from multiuser_support import ThreadedServer
+
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     minds_dir = tmp_path / "minds"
     minds_dir.mkdir()
     monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_DIR", minds_dir)
     monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_CONFIG_DIR", minds_dir)
     monkeypatch.setattr(main_mod, "_broker_minds_safe", AsyncMock(return_value=[]))
-    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
-    test_client = TestClient(main_mod.app)
-    test_client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
-    test_client.minds_dir = minds_dir
-    return test_client
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"HOST_PROJECT_DIR={tmp_path}\nPROXY_CREDENTIAL_ADMIN_KEY=stand-in-proxy-admin\n")
+    files = {"hive_mind": env_file}
+    monkeypatch.setattr(credentials_data, "ENV_FILES", files)
+    monkeypatch.setattr(holder_credentials, "ENV_FILES", files)
+    # Read once at import, from whatever environment the suite was started in.
+    monkeypatch.setattr(holder_credentials, "MIND_ENV_LABEL", "hive_mind")
+    monkeypatch.setattr(credentials_data, "BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
+    monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", str(tmp_path))
+    for variable in ("HIVE_MIND_STACK_MINDS_PREFIX", "HIVE_MIND_PROXY_URL",
+                     "HIVE_MIND_RESERVED_NAMES", "HIVE_MIND_BUILD_ARGS"):
+        monkeypatch.delenv(variable, raising=False)
+    services = _Recorder()
+    services.listing = True
+    with ThreadedServer(services.app) as server:
+        for variable in ("GATEWAY_API_URL", "LUCENT_API_URL", "INFERENCE_PROXY_URL",
+                         "HIVE_TOOLS_URL"):
+            monkeypatch.setenv(variable, server.url)
+        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "stand-in-gateway-admin")
+        monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", "stand-in-memory-admin")
+        # The proxy's is not in the environment: it is read from the env file.
+        monkeypatch.delenv("PROXY_CREDENTIAL_ADMIN_KEY", raising=False)
+        monkeypatch.setenv("HIVE_TOOLS_TOKEN", "stand-in-tools-token")
+        user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
+        test_client = TestClient(main_mod.app)
+        test_client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
+        test_client.minds_dir = minds_dir
+        test_client.env_file = env_file
+        test_client.services = services
+        yield test_client
 
 
 def _create(client, **overrides):
@@ -175,9 +217,8 @@ def test_an_ollama_mind_calls_the_proxy_even_where_the_hive_names_a_bare_daemon(
         assert _create(client, provider="ollama").status_code == 200
 
     runtime = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())
-    assert runtime["env"]["ANTHROPIC_BASE_URL"] == (
-        configuration_data.DEFAULT_OLLAMA_BASE_URL
-    )
+    # The proxy as this console is told to reach it, never the daemon.
+    assert runtime["env"]["ANTHROPIC_BASE_URL"] == os.environ["INFERENCE_PROXY_URL"]
 
 
 def test_rejects_pairs_the_cli_cannot_serve(client):
@@ -285,7 +326,7 @@ def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
         item.split("=", 1) for item in compose["services"]["atlas"]["environment"])
     for login in ("ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"):
         assert environment[login] == "${" + own + "}"
-    assert environment["ANTHROPIC_BASE_URL"] == configuration_data.DEFAULT_OLLAMA_BASE_URL
+    assert environment["ANTHROPIC_BASE_URL"] == os.environ["INFERENCE_PROXY_URL"]
     runtime_env = yaml.safe_load(
         (client.minds_dir / "atlas" / "runtime.yaml").read_text()).get("env") or {}
     assert not {"ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"} & set(runtime_env)
@@ -555,20 +596,6 @@ def test_a_start_waiting_on_approval_is_reported_as_waiting_rather_than_started(
     assert "approval" in body["next_step"]
 
 
-def test_a_mind_with_no_credential_of_its_own_gets_no_node_and_says_so(
-    client, tmp_path, monkeypatch, hive_tools, lucent
-):
-    """Seeding it with the console's credential instead is the one thing
-    this must not do, so a mind holding none gets no node at all."""
-    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
-
-    response = _create(client)
-
-    assert response.status_code == 200
-    assert lucent.received == []
-    assert response.json()["soul_seed_error"]
-
-
 def test_a_start_that_hive_tools_refuses_is_not_reported_as_started(
     client, tmp_path, monkeypatch, hive_tools
 ):
@@ -582,4 +609,131 @@ def test_a_start_that_hive_tools_refuses_is_not_reported_as_started(
 
     assert body["started"] is False
     assert body["start_error"]
-    assert "not running yet" in body["next_step"]
+    assert "is not running" in body["next_step"]
+
+
+def _everything_a_creation_writes(client, tmp_path):
+    """The stand-in hive's files, as text: what a failed creation must leave
+    exactly as it found."""
+    return {
+        "minds": sorted(p.name for p in client.minds_dir.iterdir()),
+        "env": client.env_file.read_text(),
+        "stack": (tmp_path / "docker-compose.yml").read_text(),
+        "records": sorted(p.name for p in mind_creation.CREATION_DIR.glob("*"))
+        if mind_creation.CREATION_DIR.exists() else [],
+    }
+
+
+@pytest.mark.parametrize("refused,step", [
+    (("PUT", "/credentials/atlas"), "Issuing its credentials"),
+    (("POST", "/graph/upsert"), "Its node in the graph"),
+    (("POST", "/broker/minds"), "Registering it with the gateway"),
+])
+def test_a_creation_that_fails_at_a_step_says_not_made_names_the_step_and_leaves_nothing(
+    client, tmp_path, refused, step,
+):
+    """Daniel, 2026-11-17: the page showed "Started" beside three failures,
+    for a mind that existed nowhere it could run."""
+    before = _everything_a_creation_writes(client, tmp_path)
+    client.services.refusing.add(refused)
+
+    response = _create(client)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "atlas was not made" in detail
+    assert step in detail
+    assert _everything_a_creation_writes(client, tmp_path) == before
+    sent = client.services.received
+    if refused != ("PUT", "/credentials/atlas"):
+        # The keys it had been issued are taken back at each service too.
+        revoked = [r for r in sent
+                   if (r["method"], r["path"]) == ("DELETE", "/credentials/atlas")]
+        assert len(revoked) == 3
+    if refused == ("POST", "/broker/minds"):
+        # Its node was written by then, and is deleted as the mind that
+        # wrote it, before that mind's key is revoked.
+        wrote = [r for r in sent if (r["method"], r["path"]) == ("POST", "/graph/upsert")]
+        deleted = [r for r in sent if (r["method"], r["path"]) == ("DELETE", "/graph/nodes")]
+        assert len(wrote) == 1 and len(deleted) == 1
+        assert deleted[0]["bearer"] == wrote[0]["bearer"] != ""
+        assert deleted[0]["json"]["name"] == wrote[0]["json"]["name"]
+        order = [(r["method"], r["path"]) for r in sent]
+        assert order.index(("DELETE", "/graph/nodes")) < order.index(
+            ("DELETE", "/credentials/atlas"))
+
+
+def test_a_creation_that_cannot_be_listed_in_the_stack_says_not_made_and_leaves_nothing(
+    client, tmp_path, monkeypatch,
+):
+    stack = tmp_path / "docker-compose.yml"
+    stack.write_text("services:\n  hive-postgres:\n    image: postgres:17\n")
+    before = _everything_a_creation_writes(client, tmp_path)
+
+    response = _create(client)
+
+    assert response.status_code == 400
+    assert "atlas was not made" in response.json()["detail"]
+    assert "Listing it in the stack" in response.json()["detail"]
+    assert _everything_a_creation_writes(client, tmp_path) == before
+
+
+def _lay_out_as_the_installer_does(client, monkeypatch):
+    """One env file under the installer's label, and a stack list of its own
+    among the minds, empty. Returns that list."""
+    import dataclasses
+
+    files = {"nervous_system": client.env_file}
+    monkeypatch.setattr(credentials_data, "ENV_FILES", files)
+    monkeypatch.setattr(holder_credentials, "ENV_FILES", files)
+    monkeypatch.setattr(holder_credentials, "MIND_ENV_LABEL", "nervous_system")
+    monkeypatch.setitem(holder_credentials.SERVICES, "proxy", dataclasses.replace(
+        holder_credentials.SERVICES["proxy"], admin_file="nervous_system"))
+    stack = client.minds_dir / "stack.yaml"
+    stack.write_text("include: []\n")
+    monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(stack))
+    monkeypatch.setenv("HIVE_MIND_STACK_MINDS_PREFIX", ".")
+    return stack
+
+
+def test_a_creation_that_fails_on_a_hive_laid_out_as_the_installer_lays_it_out_leaves_nothing(
+    client, monkeypatch,
+):
+    stack = _lay_out_as_the_installer_does(client, monkeypatch)
+    env_before = client.env_file.read_text()
+    client.services.refusing.add(("POST", "/broker/minds"))
+
+    response = _create(client, harness="dsh", provider="anthropic")
+
+    assert response.status_code == 502
+    assert "atlas was not made" in response.json()["detail"]
+    assert client.env_file.read_text() == env_before
+    # Still a list compose can read: an `include:` with nothing under it is
+    # refused, and the whole stack with it.
+    assert stack.read_text() == "include: []\n"
+    assert sorted(p.name for p in client.minds_dir.iterdir()) == ["stack.yaml"]
+
+
+def test_on_a_hive_laid_out_as_the_installer_lays_it_out_a_new_mind_gets_its_keys_its_listing_and_its_registration(
+    client, tmp_path, monkeypatch,
+):
+    """Daniel, 2026-11-17, on an installed hive: "no hive_mind env file is
+    configured", "Listed in the stack failed", "Registered with the gateway
+    failed". There the keys go into the hive's one env file under another
+    label, and the stack list is a file of its own, beside the minds, that
+    starts empty."""
+    stack = _lay_out_as_the_installer_does(client, monkeypatch)
+
+    response = _create(client, harness="dsh", provider="anthropic")
+
+    assert response.status_code == 200, response.text
+    for service in holder_credentials.SERVICES.values():
+        key = holder_credentials.variable_name(service, "atlas")
+        assert credentials_data._read_env_value(client.env_file, key), key
+    assert yaml.safe_load(stack.read_text()) == {
+        "include": [{"path": "atlas/container/compose.yaml"}]}
+    registered = [r["json"] for r in client.services.received
+                  if (r["method"], r["path"]) == ("POST", "/broker/minds")]
+    assert [r["name"] for r in registered] == ["atlas"]
+    assert registered[0]["harness"] == "dsh"
+
