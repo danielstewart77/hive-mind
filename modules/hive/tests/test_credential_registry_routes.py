@@ -21,6 +21,7 @@ from fastapi import HTTPException
 import auth
 import credential_registry as registry
 import main as main_mod
+import accounts
 from hive_site.testing import run
 
 
@@ -314,6 +315,15 @@ class TestRotation:
         client.post("/api/settings/holders/comms/ada/rotate")
 
         assert registry.recall("comms_admin_bearer_token", "skippy") is None
+
+    def test_a_rotation_on_a_service_this_console_does_not_know_is_a_404(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        client = _authed_client(tmp_path, monkeypatch)
+
+        answer = client.post("/api/settings/holders/quokka/ada/rotate")
+
+        assert answer.status_code == 404
 
     def test_a_stranded_rotation_is_not_reported_as_a_bad_request(
         self, tmp_path, monkeypatch
