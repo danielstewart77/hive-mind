@@ -127,7 +127,7 @@ def _missing_script(command: str) -> str | None:
             # Only a plain full path can be judged from here: the shell
             # fills in a variable, and a relative path depends on where the
             # harness runs.
-            plain = os.path.isabs(word) and "$" not in word and "`" not in word
+            plain = os.path.isabs(word) and not any(mark in word for mark in "$`*?[{~")
             return word if plain and not os.path.isfile(word) else None
     return None
 
@@ -146,8 +146,8 @@ def _hooks(harness: str, home: Path, names: list[str], hooks_file: Path | None,
     for name in report.get("links_kept", []):
         problems.append((("link", name),
                          f"{name} under this mind's role-hooks folder is a link the mind "
-                         "made to a file that differs from the repository's; it was "
-                         "left as it is, and the repository's file was not put there"))
+                         "made; it was left as it is, and the repository's file was not "
+                         "put there"))
     if report.get("error"):
         problems.append((("hooks", "file"),
                          f"hooks {', '.join(names)} are granted by a role and were not "
@@ -280,7 +280,7 @@ def _say(log: logging.Logger | None, harness: str, home: Path, problems: list[Pr
             # Only a pass that ran to its end knows what no longer stands.
             seen = {key for key, _text in keyed}
             for key in [k for k in _SAID
-                        if k[:2] == whose and k not in seen and k[2:] not in (LATE, STUCK)]:
+                        if k[:2] == whose and k not in seen and k[2:] != LATE]:
                 del _SAID[key]
         _SAID.update({key: now for key, _text in due})
     for _key, text in due:
@@ -329,11 +329,12 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
             # An earlier spawn's pass is still at work on this home. One that
             # has already run past the longest wait is stuck, and is not
             # waited on again at every spawn.
-            if time.monotonic() - began <= DEADLINE:
+            waited_on = time.monotonic() - began <= DEADLINE
+            if waited_on:
                 other.join(max(0.0, until - time.monotonic()))
-            else:
-                stuck = time.monotonic() - began
             if other.is_alive():
+                if not waited_on:
+                    stuck = time.monotonic() - began
                 break
             another_finished = True
         if mine is not None:
@@ -341,7 +342,7 @@ def provision(harness: str, home: Path, grants: dict, *, hooks_file: Path | None
         if stuck:
             text = (f"an earlier install of this mind's hooks and skills has been running "
                     f"for {stuck:.0f} seconds and has not ended; nothing more is installed "
-                    "for it until its server is restarted")
+                    "for it until that ends or its server is restarted")
             _say(log, harness, home, [(STUCK, text)], time.time(), finished=False)
             result["problems"] = [text]
             return result
