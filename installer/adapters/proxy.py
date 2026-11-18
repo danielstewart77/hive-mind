@@ -53,8 +53,18 @@ ALLOW_CREATE = "PROXY_ALLOW_SCHEMA_CREATE"
 SCHEMA = "proxy"
 
 
+#: The proxy client whose key may issue and revoke other clients' keys, and
+#: nothing else of note: the console holds it, to give each mind it creates a
+#: key of its own (hive story 2.1.9). Named in the proxy's
+#: CREDENTIAL_ADMIN_CLIENTS; without one the proxy refuses every caller on
+#: those routes, and the console's Add a Mind page cannot finish.
+CREDENTIAL_ADMIN_CLIENT = "hive-console-credentials"
+CREDENTIAL_ADMIN_KEY = "PROXY_CREDENTIAL_ADMIN_KEY"
+
+
 def environment(env_ref, *, dsn_ref: str) -> dict[str, str]:
     return {
+        "CREDENTIAL_ADMIN_CLIENTS": CREDENTIAL_ADMIN_CLIENT,
         "DATABASE_URL": dsn_ref,
         "DB_SCHEMA": SCHEMA,
         ALLOW_CREATE: env_ref(ALLOW_CREATE),
@@ -137,9 +147,9 @@ def check_model(sh, compose, *, model: str, harness: str | None = "dsh") -> dict
     raise StepFailed(f"a test completion on {model!r} failed ({status}): {why}")
 
 
-def mint_key(sh, compose, *, client) -> str | None:
+def mint_key(sh, compose, *, client, kind: str = "mind") -> str | None:
     """The new key, or None when the client already had one (minted nothing)."""
-    out = _ok(*_cli(sh, compose, ["mint-key", "--client", client, "--kind", "mind"],
+    out = _ok(*_cli(sh, compose, ["mint-key", "--client", client, "--kind", kind],
                     quiet=True), f"a key for {client!r}")
     return str(out["key"]) if out.get("minted") and out.get("key") else None
 

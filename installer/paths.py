@@ -131,3 +131,33 @@ def write_private(path: Path, text: str) -> None:
     finally:
         os.close(fd)
     os.replace(tmp, path)
+
+
+def write_private_in_place(path: Path, text: str) -> None:
+    """Rewrite a private file where it is, keeping the file it already is.
+
+    For a file that a running container has bind-mounted as a single file:
+    the hive's `.env`, which the console writes each mind's keys into. A
+    rename puts a new file at the path and leaves the container holding the
+    old one, so everything it wrote from then on went into a file nothing
+    else reads — a mind made on the console came up holding no credential,
+    with every step reporting success. Written in place, the container and
+    the host go on seeing one file.
+
+    Not atomic, which is the price: a write that stops part way leaves the
+    file short. The installer keeps its own copy of every value
+    (`state/secrets.env`), written by rename, and a rerun restores from it.
+    A file that is not there yet is created the atomic way.
+    """
+    if not path.is_file() or path.is_symlink():
+        write_private(path, text)
+        return
+    data = text.encode("utf-8")
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
