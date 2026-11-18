@@ -1,11 +1,14 @@
 FROM python:3.12-slim
 
-# Install Docker CLI (for docker_ops tool), and git beside it: a mind the
+# Install Docker CLI (for docker_ops tool), with buildx beside it. A mind the
 # console creates is built from the published hive-mind tree, a git address,
-# and the builder this CLI falls back to fetches that with the client's own
-# git. Without it every such build stopped at "unable to find 'git'".
+# for one stage of its Dockerfile. Without buildx the CLI falls back to the
+# classic builder, which needs a git of its own to fetch that address and
+# then builds every stage above the one asked for, one of which wants a
+# second build context a mind's build never names. With it, the engine
+# fetches the tree and builds only the stage asked for.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl gnupg git && \
+    apt-get install -y --no-install-recommends curl gnupg && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
     chmod a+r /etc/apt/keyrings/docker.asc && \
@@ -13,7 +16,8 @@ RUN apt-get update && \
       https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
       > /etc/apt/sources.list.d/docker.list && \
     apt-get update && \
-    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin && \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+      docker-buildx-plugin && \
     apt-get purge -y curl gnupg && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
