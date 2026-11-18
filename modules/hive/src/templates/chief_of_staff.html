@@ -478,7 +478,7 @@
         'padding': '6px', 'background-color': '#1e293b',
         'border-width': 2, 'border-color': '#334155'
     } },
-    // A plain circle that Stash's own face fills, with nothing else on it:
+    // A plain circle that the selected chief's face fills:
     // no card, no crown (Daniel, 2026-11-15). His name and the count of
     // answers owed sit beneath it, because the count is what the page is
     // read for and a circle filled by a face has no room for it.
@@ -810,16 +810,6 @@
         deco.appendChild(entry.kind);
       }
 
-      if (!d.faceId && d.kind === 'chief') {
-        // A chief who is not a registered mind has no face to fetch; his
-        // circle still says who he is rather than standing empty.
-        entry.face = document.createElement('span');
-        entry.face.className = 'cos-face';
-        var only = document.createElement('span');
-        only.textContent = (d.label || '?').trim().charAt(0).toUpperCase();
-        entry.face.appendChild(only);
-        deco.appendChild(entry.face);
-      }
       if (d.faceId) {
         entry.face = document.createElement('span');
         entry.face.className = 'cos-face';

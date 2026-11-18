@@ -53,6 +53,7 @@ from typing import Any
 
 import kanban_data
 import mind_images
+import store
 from hive_data import core, staff
 
 #: What a ledger task in this status is: finished, and drawn in the barrel
@@ -128,8 +129,7 @@ LIVE_WITHIN = AGENT_TIMEOUT
 #: still the answer to "which session", just not all of it.
 NAME_LIMIT = 24
 
-#: The chief of staff's node. One root, named rather than derived: the page
-#: is about this mind and a hive with no ledger rows still draws him.
+#: The root remains present to anchor the work even before a chief is chosen.
 CHIEF_ID = "chief"
 
 #: What a card draws in its upper-left corner when the work it stands for is
@@ -563,8 +563,7 @@ def _chief_face(chief: str,
 
     The root's label is a display name this function is handed, not a
     registry row, so it is matched by name rather than by id. Case-folded
-    because the label is written for a reader ("Stash") and the registry
-    holds the slug ("stash").
+    because display names and registry names may use different casing.
     """
     wanted = (chief or "").strip().casefold()
     for row in minds:
@@ -678,7 +677,7 @@ def _lend_activity(nodes: dict[str, dict[str, Any]],
             node["active"] = True
 
 
-async def get_tree(*, chief: str = "Stash", now: float | None = None,
+async def get_tree(*, chief: str | None = None, now: float | None = None,
                    window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
     """Everything the page draws, in one answer.
 
@@ -697,6 +696,16 @@ async def get_tree(*, chief: str = "Stash", now: float | None = None,
     moment = time.time() if now is None else now
     tasks = await staff.tasks()
     mind_rows = await core.list_minds()
+    if chief is None:
+        role = await store.role_by_slug("chief-of-staff")
+        holders = set(await store.role_holders(role["id"])) if role else set()
+        selected = [row for row in mind_rows if row["mind_id"] in holders]
+        chief = ", ".join(row.get("name") or row["mind_id"] for row in selected)
+        chief_faces = [_face(row["mind_id"], row.get("name") or row["mind_id"])
+                       for row in selected]
+    else:
+        face = _chief_face(chief, mind_rows)
+        chief_faces = [face] if face is not None else []
     names = _mind_names(mind_rows)
     # One read of the board rather than three. `get_data`'s own docstring
     # says why: three reads are three moments, and a feature created between
@@ -862,9 +871,8 @@ async def get_tree(*, chief: str = "Stash", now: float | None = None,
 
     root = _node(CHIEF_ID, chief, "chief", questions=len(questions),
                  work_kind="chief", active=False)
-    chief_face = _chief_face(chief, mind_rows)
-    if chief_face is not None:
-        root["minds"] = [chief_face]
+    if chief_faces:
+        root["minds"] = chief_faces
     return {"nodes": [root, *nodes.values()],
             "edges": [{"source": source, "target": target}
                       for target, source in parent.items()],

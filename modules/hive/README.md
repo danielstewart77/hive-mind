@@ -81,6 +81,10 @@ native addon.
 
 ## Accounts and who sees what
 
+The Chief of Staff chart uses the Mind assigned the `chief-of-staff` role.
+With no assigned Mind, its root has no name or portrait. Assign or clear the
+role from the Mind's configuration page; the chart reads that same assignment.
+
 Accounts live in one of two stores, behind one interface (`auth`), and an
 install uses exactly one. That interface, the data store under it and the
 authorization middleware in front of it are the `hive_site` package in this

@@ -15,6 +15,7 @@ import pytest
 
 import chief_of_staff as cos
 import kanban_data
+import store
 from hive_data import core, staff
 from hive_site import testing as suite
 
@@ -641,6 +642,26 @@ async def test_the_root_carries_the_chief_s_own_face():
     root = _by_id(tree, cos.CHIEF_ID)
     assert [m["name"] for m in root["minds"]] == ["stash"]
     assert root["minds"][0]["initial"] == "S"
+
+
+async def test_chief_is_blank_until_a_mind_holds_the_chief_of_staff_role():
+    await _mind("stash")
+    chosen = await _mind("Smith")
+    tree = await cos.get_tree(now=NOW)
+    assert _by_id(tree, cos.CHIEF_ID)["label"] == ""
+    assert "minds" not in _by_id(tree, cos.CHIEF_ID)
+
+    role = await store.create_role("Chief of Staff", slug="chief-of-staff")
+    await store.set_mind_roles(chosen, [role])
+    tree = await cos.get_tree(now=NOW)
+    root = _by_id(tree, cos.CHIEF_ID)
+    assert root["label"] == "Smith"
+    assert [face["mind_id"] for face in root["minds"]] == [chosen]
+
+    await store.set_mind_roles(chosen, [])
+    tree = await cos.get_tree(now=NOW)
+    assert _by_id(tree, cos.CHIEF_ID)["label"] == ""
+    assert "minds" not in _by_id(tree, cos.CHIEF_ID)
 
 
 async def test_a_chief_who_is_not_a_registered_mind_carries_no_face():
