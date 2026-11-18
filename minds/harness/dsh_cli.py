@@ -55,7 +55,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from minds.harness import chat_surface, role_guard
+from minds.harness import chat_surface, role_files, role_guard
 from minds import (
     context_overflow,
     failed_turn,
@@ -353,9 +353,14 @@ def _role_hooks_env(env: dict[str, str], timeout: float = 10.0) -> dict[str, str
     gateway cannot say what the mind may use: the guard would have nothing
     to judge by, and a mind that cannot be held to its roles is not run.
     """
+    source = hooks_config()
     return role_guard.prepare(
-        DSH_HOME, hooks_config(), env.get("MIND_ID") or NAME,
-        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout)
+        DSH_HOME, source, env.get("MIND_ID") or NAME,
+        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
+        # Story 10.18.15: the hooks and skills its roles name arrive here,
+        # before the hooks file dsh is handed is written from the mind's own.
+        on_grants=lambda grants: role_files.provision(
+            "dsh", DSH_HOME, grants, hooks_file=Path(source) if source else None, log=log))
 
 
 def _patch_args() -> list[str]:
