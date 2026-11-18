@@ -135,6 +135,32 @@ def test_add_mind_defaults_to_dsh(creation):
     assert inputs.selected == ["dsh"]
 
 
+@pytest.mark.parametrize("existing_variable", [
+    "PROXY_TOKEN_OTHER_MIND", "MIND_PROXY_KEY", "PROXY_CREDENTIAL_ADMIN_KEY",
+    "PROXY_TOKEN_PASTED_KEY_FIXTURE",
+])
+def test_reused_proxy_key_warns_and_is_used_without_changing_existing_keys(
+    creation, caplog, existing_variable,
+):
+    client, minds, env, stack, _ = creation
+    env.write_text(env.read_text() + f"{existing_variable}={KEY}\n")
+    response = client.post("/api/minds", json=body(KEY, "dsh", "openai"))
+    assert response.status_code == 200, response.text
+    assert response.json()["credential_error"] is None
+    warning = response.json()["proxy_key_warning"]
+    assert warning and "already" in warning.lower() and "will use" in warning.lower()
+    assert KEY not in response.text and KEY not in caplog.text
+    assert credentials_data._read_env_value(env, existing_variable) == KEY
+    parsed = subprocess.run(
+        ["docker", "compose", "--env-file", str(env), "-f", str(stack), "config", "--format", "json"],
+        capture_output=True, text=True,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    service = json.loads(parsed.stdout)["services"]["pasted-key-fixture"]
+    assert service["environment"]["DSH_API_KEY"] == KEY
+    assert (minds / "pasted-key-fixture/runtime.yaml").exists()
+
+
 @pytest.mark.parametrize("key", ["bad key", "bad\nINJECTED=value", {"key": "bad"}, "x" * 4097])
 def test_malformed_pasted_key_is_refused_before_creation(creation, key):
     client, minds, env, stack, _ = creation

@@ -1197,7 +1197,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        proxy_key = await holder_credentials.validate_mind_proxy_key(name, body.pop("proxy_key", None))
+        proxy_key, proxy_key_warning = await holder_credentials.validate_mind_proxy_key(body.pop("proxy_key", None))
     except holder_credentials.MintRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -1368,6 +1368,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         "written": written,
         "credentials": minted,
         "credential_error": credential_error,
+        "proxy_key_warning": proxy_key_warning,
         "registration_error": registration_error,
         "registration": {
             "name": name,

@@ -712,35 +712,39 @@ async def provision_mind(
     return minted, ("; ".join(failures) if failures else None)
 
 
-async def validate_mind_proxy_key(name: str, supplied: Any) -> str | None:
+async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None]:
     """Verify a pasted inference key before creation makes any changes.
 
     A blank field retains automatic issuance. This read uses the supplied
     key, never the credential-management API, and never echoes its response.
+    Reuse returns a warning alongside the accepted key, without blocking it.
     """
     if supplied is None:
-        return None
+        return None, None
     if not isinstance(supplied, str):
         raise MintRefused("Paste the proxy key as text")
     value = supplied.strip()
     if not value:
-        return None
+        return None, None
     if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,4096}", value):
         raise MintRefused("Paste only the proxy key, without quotes or embedded whitespace")
     path = ENV_FILES.get("hive_mind")
     if path is None or not path.is_file():
         raise MintRefused("This Hive is not configured to store Mind proxy keys yet")
     service = SERVICES["proxy"]
+    warning = None
     try:
         text = credentials_data._read_text(path)
         known = re.findall(r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+|MIND_PROXY_KEY|PROXY_CREDENTIAL_ADMIN_KEY)=", text)
         for key in known:
             existing = _loaded_value(Location("hive_mind", key))
             if existing and secrets.compare_digest(existing, value):
-                raise MintRefused("Use a proxy key issued for this new Mind, rather than another existing key")
-        existing = _loaded_value(Location("hive_mind", variable_name(service, name)))
-        if existing:
-            raise MintRefused("That Mind name already has a proxy key; choose an unused name")
+                warning = (
+                    "This proxy key is already configured elsewhere in this Hive. "
+                    "The new Mind will use it as requested. Minds sharing a key "
+                    "share its proxy identity and limits; rotating it affects all of them."
+                )
+                break
     except Unreadable:
         raise MintRefused("The Mind credential file could not be read") from None
     try:
@@ -751,10 +755,10 @@ async def validate_mind_proxy_key(name: str, supplied: Any) -> str | None:
     except httpx.HTTPError:
         raise MintRefused("Could not verify the proxy key. Check the proxy connection and try again") from None
     if response.status_code in (401, 403):
-        raise MintRefused("The proxy rejected that key. Paste a working key issued for this Mind")
+        raise MintRefused("The proxy rejected that key. Check the key and try again")
     if response.status_code != 200:
         raise MintRefused("The proxy could not verify that key. Try again when it is available")
-    return value
+    return value, warning
 
 
 async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, Any]:
