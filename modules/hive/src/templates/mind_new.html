@@ -15,11 +15,12 @@
                     <div class="field"><label for="mind-owner">Owner</label><select id="mind-owner" name="owner"></select><small>The user this Mind belongs to.</small></div>
                     <div class="field"><label for="mind-description">Description</label><input id="mind-description" name="description" type="text" placeholder="What this Mind is for."></div>
                 </div>
-                <div class="field is-full"><label>Harness</label><div class="choice-grid"><label class="choice"><input type="radio" name="harness" value="claude_cli" checked><span class="choice-copy"><strong>Claude CLI</strong><small>Long-lived stream-json session per conversation.</small></span></label><label class="choice"><input type="radio" name="harness" value="codex_cli"><span class="choice-copy"><strong>Codex CLI</strong><small>One <code>codex exec</code> subprocess per turn.</small></span></label></div></div>
+                <div class="field is-full"><label>Harness</label><div class="choice-grid">{% for harness in install_options.harnesses %}<label class="choice"><input type="radio" name="harness" value="{{ harness.value }}"{% if harness.value == install_options.default_harness %} checked{% endif %}><span class="choice-copy"><strong>{{ harness.label }}</strong><small>{{ harness.description }}</small></span></label>{% endfor %}</div></div>
                 <div class="form-grid">
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
                 </div>
+                <div class="field is-full"><label for="mind-proxy-key">Proxy key</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>Paste the proxy key you want this Mind to use. If it is already in use, Hive warns you and uses it. Leave it empty to have Hive issue a key automatically.</small></div>
                 <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
@@ -36,7 +37,7 @@
             <div class="notice"><i data-lucide="sparkles"></i><span>Identity is not scaffolded. A Mind with no soul answers as a blank harness until you give it one.</span></div>
             <section class="surface" id="mind-result" hidden>
                 <div class="surface-header"><div><h2>Next steps</h2><p>Run on the Hive host, then register.</p></div></div>
-                <div class="surface-body overview-stack"><dl class="detail-grid" id="mind-identity"></dl><div id="mind-credentials"></div><div id="mind-commands"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-register">Register with the broker</button><small id="mind-register-status"></small></div>
+                <div class="surface-body overview-stack"><div id="mind-proxy-key-warning" role="status" hidden><div class="notice" id="mind-proxy-key-warning-text"></div></div><dl class="detail-grid" id="mind-identity"></dl><div id="mind-credentials"></div><div id="mind-commands"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-register">Register with the broker</button><small id="mind-register-status"></small></div>
             </section>
         </aside>
     </div>
@@ -108,12 +109,16 @@ window.addEventListener("DOMContentLoaded", function () {
             harness: selectedHarness(),
             provider: form.elements.provider.value,
             default_model: form.elements.default_model.value,
+            proxy_key: form.elements.proxy_key.value,
             role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
             roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
         };
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            form.elements.proxy_key.value = "";
             created = data.registration;
+            document.getElementById("mind-proxy-key-warning-text").textContent = data.proxy_key_warning || "";
+            document.getElementById("mind-proxy-key-warning").hidden = !data.proxy_key_warning;
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
             // The console starts the container itself now, so what used to
             // be a command to paste is an account of what happened. Each

@@ -421,7 +421,7 @@ async def mint(
             raise MintRefused(
                 f"{location.path} cannot be read, so the value it holds for "
                 f"{holder!r} could not be put back if the write failed"
-            )
+            ) from None
 
         await _put(service, holder, username, new_value, role, mind_id)
 
@@ -665,7 +665,7 @@ async def name_held_by_something_else(name: str) -> str | None:
 
 
 async def provision_mind(
-    name: str, mind_id: str, owner: str
+    name: str, mind_id: str, owner: str, *, proxy_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Give a brand-new containerised mind its own credentials, one per service.
 
@@ -690,6 +690,9 @@ async def provision_mind(
             if "hive_mind" not in ENV_FILES:
                 raise MintRefused("no hive_mind env file is configured (HIVE_ENV_FILES)")
             _ensure_key(ENV_FILES["hive_mind"], key)
+            if service.key == "proxy" and proxy_key is not None:
+                minted.append(await store_mind_proxy_key(name, owner, proxy_key))
+                continue
             minted.append(
                 await mint(
                     service,
@@ -707,6 +710,70 @@ async def provision_mind(
             # nothing — and the caller is told which it has.
             failures.append(f"{service.label}: {exc}")
     return minted, ("; ".join(failures) if failures else None)
+
+
+async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None]:
+    """Verify a pasted inference key before creation makes any changes.
+
+    A blank field retains automatic issuance. This read uses the supplied
+    key, never the credential-management API, and never echoes its response.
+    Reuse returns a warning alongside the accepted key, without blocking it.
+    """
+    if supplied is None:
+        return None, None
+    if not isinstance(supplied, str):
+        raise MintRefused("Paste the proxy key as text")
+    value = supplied.strip()
+    if not value:
+        return None, None
+    if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,4096}", value):
+        raise MintRefused("Paste only the proxy key, without quotes or embedded whitespace")
+    path = ENV_FILES.get("hive_mind")
+    if path is None or not path.is_file():
+        raise MintRefused("This Hive is not configured to store Mind proxy keys yet")
+    service = SERVICES["proxy"]
+    warning = None
+    try:
+        text = credentials_data._read_text(path)
+        known = re.findall(r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+|MIND_PROXY_KEY|PROXY_CREDENTIAL_ADMIN_KEY)=", text)
+        for key in known:
+            existing = _loaded_value(Location("hive_mind", key))
+            if existing and secrets.compare_digest(existing, value):
+                warning = (
+                    "This proxy key is already configured elsewhere in this Hive. "
+                    "The new Mind will use it as requested. Minds sharing a key "
+                    "share its proxy identity and limits; rotating it affects all of them."
+                )
+                break
+    except Unreadable:
+        raise MintRefused("The Mind credential file could not be read") from None
+    try:
+        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
+            response = await client.get(
+                service.url() + "/v1/models", headers={"Authorization": f"Bearer {value}"},
+            )
+    except httpx.HTTPError:
+        raise MintRefused("Could not verify the proxy key. Check the proxy connection and try again") from None
+    if response.status_code in (401, 403):
+        raise MintRefused("The proxy rejected that key. Check the key and try again")
+    if response.status_code != 200:
+        raise MintRefused("The proxy could not verify that key. Try again when it is available")
+    return value, warning
+
+
+async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, Any]:
+    """Persist an already verified key without minting or rotating it upstream."""
+    key = variable_name(SERVICES["proxy"], name)
+    path = ENV_FILES["hive_mind"]
+    async with _ROTATION_LOCK:
+        with credentials_data._WRITE_LOCK:
+            _ensure_key(path, key)
+            written = credentials_data._write_location(path, key, value, "hive_mind")
+            if not written["written"] or _loaded_value(Location("hive_mind", key)) != value:
+                raise MintRefused("The pasted proxy key could not be saved; creation cannot use it")
+    return {"service": "proxy", "holder": name, "username": owner, "role": "mind",
+            "file": "hive_mind", "path": str(path), "env_key": key,
+            "restart_target": RESTART_BY_FILE["hive_mind"]}
 
 
 async def check(service: Service, holder: str, role: str = "") -> dict[str, Any]:

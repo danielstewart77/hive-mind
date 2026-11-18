@@ -61,6 +61,24 @@ stamped into generated Edge Mind plans. Use
 from local config or an IP endpoint, and `EDGE_MIND_PROFILES` for profile
 overrides such as `hex:sentinel`.
 
+## Creating a container Mind
+
+The Add a Mind form defaults to DSH from
+[`hive-harness-dsh`](https://github.com/danielstewart77/hive-harness-dsh).
+Claude CLI and Codex CLI remain selectable. DSH uses the inference proxy
+for OpenAI, Anthropic, and Ollama models, with the new Mind's own proxy key.
+
+The supplied key may already be in use. Hive accepts a key the proxy accepts
+and shows a warning when it matches an existing local proxy credential.
+It uses that key for the new Mind without changing other Minds' keys.
+
+Build the DSH tree through the Hive installer before creating a DSH Mind.
+Its generated container mounts that tree read-only at `/opt/dsh` from
+`HOST_DSH_DIR`, defaulting to `${HOST_PROJECT_DIR}/dsh`. Each Mind has its
+own writable `.dsh` home. The container generates its Hive profile and hooks
+before starting the Mind server, and uses an executable `/tmp` for DSH's
+native addon.
+
 ## Accounts and who sees what
 
 Accounts live in one of two stores, behind one interface (`auth`), and an
