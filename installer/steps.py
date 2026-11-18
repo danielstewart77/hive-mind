@@ -18,7 +18,7 @@ from pathlib import Path
 
 from installer import collisions, compose, hive_api, plan, probe, secrets_store
 from installer.adapters import dsh, migrate, proxy as proxy_adapter, site, tools
-from installer.paths import REPO_BASE, write_private
+from installer.paths import REPO_BASE, write_private, write_private_in_place
 from installer.runner import NeedInput, Step
 from installer.shell import NETWORK, Shell, StepFailed, http_in_network
 
@@ -65,8 +65,12 @@ class Ctx:
         """Change values in the live .env, keeping everything else in it."""
         current = self.env()
         current.update(values)
-        write_private(self.home.env_file, secrets_store.format_env(current, ENV_HEADER))
+        # The installer's own copy first: the live file is rewritten in
+        # place, and a value made once — a key the proxy will not show
+        # again — must not exist only in a write that can stop part way.
         secrets_store.remember(self.home, values)
+        write_private_in_place(self.home.env_file,
+                               secrets_store.format_env(current, ENV_HEADER))
 
     def output(self, key: str, value=None):
         if value is None:
@@ -254,12 +258,19 @@ def render_config(ctx: Ctx):
             "data is not wanted, then run again")
     generated = secrets_store.resolve(home, compose.secret_names(answers))
     values = compose.env_values(home, answers, generated, current, typed=ctx.typed)
+    # The web proxy for a console-made mind's image build, as this host has
+    # it now: one named on an earlier run and since removed must not linger.
+    values = {k: v for k, v in values.items() if not k.startswith("HIVE_MIND_BUILD_")}
+    values.update(compose.new_mind_build_values(ctx.host, answers))
     rendered = compose.render(home, answers, ctx.host)
     compose.prepare_mounts(rendered)
-    write_private(home.env_file, secrets_store.format_env(values, ENV_HEADER))
+    # In place: the console has this file mounted and writes minds' keys
+    # into it. The installer's own copy first, so a short write is restorable.
     secrets_store.remember(home, values)
+    write_private_in_place(home.env_file, secrets_store.format_env(values, ENV_HEADER))
     # 0600 as well: a web proxy's credential is written into it literally.
     write_private(home.compose_file, rendered.text())
+    compose.ensure_minds_stack(home)
     ctx.sh.run([*ctx.compose, "config", "--quiet"], timeout=60)
     return f"{len(rendered.compose['services'])} services"
 
@@ -458,6 +469,16 @@ def proxy_setup(ctx: Ctx):
     elif not ctx.env().get("MIND_PROXY_KEY"):
         raise StepFailed(f"the proxy already has a key for {a['mind_name']!r} that this install "
                          f"did not record; revoke it on {_proxy_admin(ctx)} and run again")
+    # The key the console issues each new mind's own key with. Minted once;
+    # a rerun finds the client there and keeps the value this install holds.
+    admin = proxy_adapter.mint_key(ctx.sh, ctx.compose, kind="app",
+                                   client=proxy_adapter.CREDENTIAL_ADMIN_CLIENT)
+    if admin:
+        ctx.set_env(**{proxy_adapter.CREDENTIAL_ADMIN_KEY: admin})
+    elif not ctx.env().get(proxy_adapter.CREDENTIAL_ADMIN_KEY):
+        raise StepFailed(
+            f"the proxy already has a key for {proxy_adapter.CREDENTIAL_ADMIN_CLIENT!r} that "
+            f"this install did not record; revoke it on {_proxy_admin(ctx)} and run again")
     # Done only once a real completion has come back through the proxy: a
     # wrong upstream key is found here, with the provider's own words, not
     # at the mind's first turn.
@@ -871,10 +892,20 @@ def start_mind(ctx: Ctx):
     argv = [*ctx.compose, "up", "-d"]
     if dsh.tree_built(_dsh_fresh(ctx)):
         # The mind is stopped before its tree is replaced under it, and
-        # recreated on the new one at once.
-        ctx.sh.run([*ctx.compose, "stop", name], timeout=120)
+        # recreated on the new one at once. So is every mind the console has
+        # made: each mounts the same tree by its path, and one left running
+        # goes on holding the folder that was just deleted.
+        # Only the ones running now: one its owner stopped, or whose start
+        # is still waiting on an approval, is not the installer's to start.
+        running = ctx.sh.run([*ctx.compose, "ps", "--services", "--status", "running"],
+                             timeout=60, check=False)
+        up = set((running.stdout or "").split()) if running.returncode == 0 else set()
+        made = [s for s in compose.console_made_minds(ctx.home)
+                if s in up and s not in services]
+        ctx.sh.run([*ctx.compose, "stop", name, *made], timeout=120)
         _swap_dsh(ctx)
         argv.append("--force-recreate")
+        services = [*services, *made]
     ctx.sh.run([*argv, *services], timeout=600)
     _wait(ctx, f"the mind {name}", lambda: _healthy_in_network(ctx, f"http://{name}:8420/health"),
           240)
