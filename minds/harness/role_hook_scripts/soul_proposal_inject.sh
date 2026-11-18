@@ -23,7 +23,12 @@ set -uo pipefail
 
 # The directory the review skill reads and the flagger writes: the mind's
 # own state directory when it names one.
-PROPOSAL_DIR="${SOUL_PROPOSAL_DIR:-${AUTO_REMEMBER_LOG_DIR:-${HIVE_PROJECT_DIR:-$HOME}/data/auto-remember}/soul-proposals}"
+# Unnamed, it is the one in the mind's folder, found as every hook here
+# finds it: HIVE_MIND_DIR, else the folder the harness home this hook was
+# installed into sits in.
+_mind="${HIVE_MIND_DIR:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P)}"
+PROPOSAL_DIR="${SOUL_PROPOSAL_DIR:-${AUTO_REMEMBER_LOG_DIR:-$_mind/data/auto-remember}/soul-proposals}"
+unset _mind
 
 . "$(dirname "${BASH_SOURCE[0]}")/operator_name.sh"
 
