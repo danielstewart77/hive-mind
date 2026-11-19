@@ -207,7 +207,7 @@ TABLE.add(
 )
 # The settings page is one route; only its sessions section is a user's.
 TABLE.add(
-    Rule(USER, only_when=(("section", frozenset({"access", "features"})),)),
+    Rule(USER, only_when=(("section", frozenset({"access", "features", "remote-access"})),)),
     "GET /settings/{section}",
 )
 
@@ -467,3 +467,7 @@ TABLE.add(Rule(ADMIN), "GET /hive-errors", "GET /api/hive-errors")
 TABLE.add(Rule(ADMIN), "GET /api/settings/providers", "POST /api/settings/providers",
           "PUT /api/settings/providers/{provider_id}", "DELETE /api/settings/providers/{provider_id}",
           "POST /api/settings/providers/{provider_id}/models")
+
+TABLE.add(Rule(USER), 'GET /api/settings/remote-access', 'PUT /api/settings/remote-access', 'POST /api/remote-access/{action}')
+TABLE.add(Rule(ADMIN), 'PUT /api/settings/remote-access/global')
+TABLE.add(Rule(PUBLIC), 'POST /api/remote-access/authorize')

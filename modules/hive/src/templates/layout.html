@@ -87,6 +87,7 @@
         </div>
 
         <div class="console-sidebar-footer">
+            <div class="remote-access-shortcut"><button class="button" type="button" data-remote-toggle disabled>Remote access</button><a href="/settings/remote-access" aria-label="Configure remote access">Configure</a><small data-remote-status role="status"></small></div>
             {% if current_user.is_admin and feature_enabled['setup'] %}<a href="/setup" class="setup-link {% if path == '/setup' %}is-active{% endif %}"><i data-lucide="circle-check-big"></i><span>Setup guide</span></a>{% endif %}
             <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="console-nav-link {% if path.startswith('/settings') %}is-active{% endif %}"><i data-lucide="settings"></i><span>Settings</span></a>
             <div class="console-user">
@@ -102,6 +103,7 @@
             <button class="icon-button" type="button" data-sidebar-open aria-label="Open navigation"><i data-lucide="menu"></i></button>
             <a href="/overview" class="mobile-brand"><img src="{{ request.url_for('static', path='favicon.svg') }}" alt="">Hive</a>
             <div class="console-mobile-actions">
+                <a href="/settings/remote-access" class="icon-button" aria-label="Remote access"><i data-lucide="globe"></i></a>
                 {% block mobile_header_actions %}{% endblock %}
                 <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
             </div>
@@ -116,6 +118,7 @@
             {% endif %}
 <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
 <script src="{{ request.url_for('static', path='console.js') }}?v={{ asset_versions['console.js'] }}"></script>
+{% if current_user %}<script src="{{ request.url_for('static', path='remote-access.js') }}?v={{ asset_versions['remote-access.js'] }}"></script>{% endif %}
 <script src="{{ request.url_for('static', path='scripts.js') }}?v={{ asset_versions['scripts.js'] }}"></script>
 </body>
 </html>

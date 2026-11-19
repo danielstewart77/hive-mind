@@ -61,6 +61,7 @@ import mind_skills
 import mind_soul
 import mind_symbols
 import provider_data
+import remote_access_data
 import roles_data
 import route_access
 import skill_submissions
@@ -381,6 +382,8 @@ async def _render_template(request: Request, template_name: str,
     if context["current_user"]:
         context.setdefault("feature_enabled", await features.enabled(context["current_user"]))
         context.setdefault("feature_catalogue", features.FEATURES)
+    if remote_access_data.trusted(request) and (context.get("current_user") or {}).get("username") == request.headers.get("x-hive-remote-owner"):
+        context["terminal_url"] = request.headers.get("x-hive-remote-terminal", "")
     context["request"] = request
     return templates.TemplateResponse(request, template_name, context)
 
@@ -3265,8 +3268,70 @@ async def settings_page(request: Request):
 
 
 _SETTINGS_SECTIONS = {
-    "general", "access", "connections", "providers", "voice", "credentials", "advanced", "users", "features",
+    "general", "access", "remote-access", "connections", "providers", "voice", "credentials", "advanced", "users", "features",
 }
+
+
+
+@app.get("/api/settings/remote-access")
+async def api_remote_access_status(user: dict = Depends(require_auth)):
+    try:
+        return await remote_access_data.request("GET", remote_access_data.user_path(user["username"]))
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+@app.put("/api/settings/remote-access")
+async def api_remote_access_configuration(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Configuration must be an object")
+    try:
+        result = await remote_access_data.request("PUT", remote_access_data.user_path(user["username"]),
+            {key: body.get(key) for key in ("website_url", "terminal_url", "tunnel_token")})
+        log_event(log, "remote_access.configured", **_actor_fields(user))
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.post("/api/remote-access/authorize")
+async def api_remote_access_authorize(request: Request):
+    # This private gateway check accepts only its filesystem-held verifier
+    # key and a real account cookie. Admin status never overrides the owner.
+    if not remote_access_data.trusted(request):
+        raise HTTPException(403, "Private remote gateway only")
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Sign in required")
+    body = await request.json()
+    if not isinstance(body, dict) or user["username"] != body.get("owner"):
+        raise HTTPException(403, "Sign in as this connection's owner")
+    return {"authorized": True}
+
+@app.post("/api/remote-access/{action}")
+async def api_remote_access_action(action: str, user: dict = Depends(require_auth)):
+    if action not in {"on", "off"}:
+        raise HTTPException(400, "Choose on or off")
+    try:
+        result = await remote_access_data.request("POST", remote_access_data.user_path(user["username"]) + "/" + action)
+        log_event(log, "remote_access." + action, **_actor_fields(user))
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.put("/api/settings/remote-access/global")
+async def api_remote_access_global(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Configuration must be an object")
+    try:
+        result = await remote_access_data.request("PUT", "/global", {"allowed": body.get("allowed")})
+        log_event(log, "remote_access.global", allowed=result["allowed"], **_actor_fields(user))
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/api/settings/providers")

@@ -6,6 +6,7 @@
     <div class="settings-layout">
         <div class="settings-nav" role="navigation" aria-label="Settings sections">
             <a href="/settings/features" class="{% if settings_section == 'features' %}is-active{% endif %}">Features</a>
+            <a href="/settings/remote-access" class="{% if settings_section == 'remote-access' %}is-active{% endif %}">Remote access</a>
             {% if current_user.is_admin %}<a href="/settings/general" class="{% if settings_section == 'general' %}is-active{% endif %}">General</a>{% endif %}
             <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">{{ 'Owner and access' if current_user.is_admin else 'Account and sessions' }}</a>
             {% if current_user.is_admin %}<a href="/settings/users" class="{% if settings_section == 'users' %}is-active{% endif %}">Users and groups</a>
@@ -27,6 +28,17 @@
                     <p><button class="button button-primary" type="submit">Save features</button></p><p id="feature-save-status" role="status"></p>
                 </form>
             </section>
+        {% elif settings_section == 'remote-access' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Your remote access</h2><p>Use a dedicated Cloudflare tunnel from your own account. Both addresses must have Cloudflare Access enabled. Only your Hive account can use this connection.</p><p>Connections close automatically at 8:00 pm and 2:00 am America/Chicago. Closing remote access leaves your Minds running. Arm it here while connected locally.</p></div>
+                <form id="remote-access-form" class="surface-body form-grid">
+                    <div class="field"><label for="remote-website">Public website address</label><input id="remote-website" name="website_url" type="url" required placeholder="https://hive.example.com"></div>
+                    <div class="field"><label for="remote-terminal">Public web terminal address</label><input id="remote-terminal" name="terminal_url" type="url" required placeholder="https://terminal.example.com"></div>
+                    <div class="field"><label for="remote-token">Tunnel connector token</label><input id="remote-token" name="tunnel_token" type="password" autocomplete="new-password" spellcheck="false"><small id="remote-token-help">Paste the token for this tunnel, not a Cloudflare account API key.</small></div>
+                    <div class="form-actions"><button class="button button-primary" type="submit">Save connection</button><button class="button" type="button" data-remote-toggle disabled>Checking remote access…</button><small id="remote-save-status" role="status"></small></div>
+                    <p data-remote-status role="status"></p>
+                </form>
+            </section>
+            {% if current_user.is_admin %}<section class="surface"><div class="settings-section-copy"><h2>Global remote access</h2><p>Turning this off closes every user's tunnel and prevents rearming.</p></div><div class="surface-body"><label><input id="remote-global-allowed" type="checkbox" disabled> Allow users to arm remote access</label><p id="remote-global-status" role="status"></p></div></section>{% endif %}
         {% elif settings_section == 'general' %}
             <section class="surface"><div class="settings-section-copy"><h2>Installation</h2><p>Identity and first-run state for this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Product</dt><dd>Hive control center</dd></div><div class="detail-item"><dt>Owner</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Default view</dt><dd>System overview</dd></div></dl></div></section>
             <section class="surface"><div class="settings-section-copy"><h2>Setup guide</h2><p>Re-run readiness checks or continue an incomplete installation.</p></div><div class="surface-body"><a class="button" href="/setup"><i data-lucide="list-checks"></i>Open setup guide</a></div></section>
