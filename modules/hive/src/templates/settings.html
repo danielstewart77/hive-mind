@@ -10,6 +10,7 @@
             <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">{{ 'Owner and access' if current_user.is_admin else 'Account and sessions' }}</a>
             {% if current_user.is_admin %}<a href="/settings/users" class="{% if settings_section == 'users' %}is-active{% endif %}">Users and groups</a>
             <a href="/settings/connections" class="{% if settings_section == 'connections' %}is-active{% endif %}">Connections</a>
+            <a href="/settings/providers" class="{% if settings_section == 'providers' %}is-active{% endif %}">Providers</a>
             <a href="/settings/voice" class="{% if settings_section == 'voice' %}is-active{% endif %}">Voice</a>
             <a href="/settings/credentials" class="{% if settings_section == 'credentials' %}is-active{% endif %}">Credentials</a>
             <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>{% endif %}
@@ -34,6 +35,18 @@
             <section class="surface"><div class="surface-header"><div><h2>Mind sessions</h2><p>Delete abandoned conversation sessions.</p></div><button id="sessions-refresh" class="icon-button" type="button" aria-label="Refresh sessions"><i data-lucide="refresh-cw"></i></button></div><ul class="activity-list" id="settings-sessions"><li class="loading-state">Loading sessions…</li></ul></section>
         {% elif settings_section == 'connections' %}
             <section class="surface"><div class="surface-header"><div><h2>Shared services</h2><p>Connectivity from the Hive application.</p></div><button id="connections-refresh" class="icon-button" type="button" aria-label="Refresh connections"><i data-lucide="refresh-cw"></i></button></div><ul class="service-list" id="settings-connections"><li class="loading-state">Checking connections…</li></ul></section>
+        {% elif settings_section == 'providers' %}
+            <section class="surface"><div class="surface-header"><div><h2>Providers</h2><p>Named inference connections. Tokens belong to Minds and are entered on each Mind’s configuration. URL changes reach existing Minds when you reload them from their page.</p></div></div>
+                <div class="surface-body overview-stack" id="provider-list"></div>
+                <form class="surface-body form-grid" id="provider-form">
+                    <input name="id" type="hidden">
+                    <div class="field"><label for="provider-name">Name</label><input id="provider-name" name="name" required maxlength="100" placeholder="Hive Proxy"></div>
+                    <div class="field"><label for="provider-kind">Connection type</label><select id="provider-kind" name="kind"><option value="proxy">Proxy</option><option value="openai">Direct OpenAI</option><option value="anthropic">Direct Anthropic</option><option value="ollama">Ollama server</option><option value="custom">Custom</option></select></div>
+                    <div class="field"><label for="provider-url">Base URL</label><input id="provider-url" name="base_url" type="url" required placeholder="https://provider.example"></div>
+                    <div class="field"><label for="provider-format">API format</label><select id="provider-format" name="api_format"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="ollama">Ollama</option></select></div>
+                    <div class="form-actions"><button class="button button-primary" type="submit">Save provider</button><button class="button" type="button" id="provider-new">New provider</button><small id="provider-status" role="status"></small></div>
+                </form>
+            </section>
         {% elif settings_section == 'voice' %}
             <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Health of each speech server. A Mind's own engine and voice are set on its page.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
         {% elif settings_section == 'credentials' %}
@@ -94,6 +107,31 @@
 <script>
 window.addEventListener("DOMContentLoaded", function () {
     const h = window.HiveConsole;
+    const providerForm = document.getElementById("provider-form");
+    if (providerForm) {
+        let providers = [];
+        const status = document.getElementById("provider-status");
+        function setFormat() { const kind = providerForm.elements.kind.value; providerForm.elements.api_format.disabled = ["openai", "anthropic", "ollama"].includes(kind); if (providerForm.elements.api_format.disabled) providerForm.elements.api_format.value = kind; }
+        async function loadProviders() {
+            providers = (await h.requestJson("/api/settings/providers")).providers || [];
+            document.getElementById("provider-list").innerHTML = providers.map(p => '<div class="detail-item"><span class="entity-copy"><strong>' + h.escapeHtml(p.name) + '</strong><small>' + h.escapeHtml(p.base_url) + ' · ' + h.escapeHtml(p.kind) + '</small></span><button class="button" type="button" data-provider-edit="' + h.escapeHtml(p.id) + '">Edit</button><button class="button button-danger" type="button" data-provider-delete="' + h.escapeHtml(p.id) + '">Delete</button></div>').join("") || '<p>No providers configured.</p>';
+        }
+        providerForm.elements.kind.addEventListener("change", setFormat);
+        document.getElementById("provider-new").addEventListener("click", function () { providerForm.reset(); providerForm.elements.id.value = ""; setFormat(); status.textContent = ""; });
+        document.getElementById("provider-list").addEventListener("click", async function (event) {
+            const edit = event.target.closest("[data-provider-edit]"), remove = event.target.closest("[data-provider-delete]");
+            if (edit) { const p = providers.find(p => p.id === edit.dataset.providerEdit); ["id", "name", "kind", "base_url", "api_format"].forEach(k => providerForm.elements[k].value = p[k]); setFormat(); }
+            if (remove && window.confirm("Delete this provider?")) { try { await h.requestJson("/api/settings/providers/" + encodeURIComponent(remove.dataset.providerDelete), {method: "DELETE"}); await loadProviders(); } catch (error) { status.textContent = error.message; } }
+        });
+        providerForm.addEventListener("submit", async function (event) {
+            event.preventDefault(); const id = providerForm.elements.id.value;
+            const body = {}; ["name", "kind", "base_url", "api_format"].forEach(k => body[k] = providerForm.elements[k].value);
+            const button = providerForm.querySelector('[type="submit"]'); button.disabled = true;
+            try { await h.requestJson("/api/settings/providers" + (id ? "/" + encodeURIComponent(id) : ""), {method: id ? "PUT" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); status.textContent = "Provider saved."; await loadProviders(); }
+            catch (error) { status.textContent = error.message; } finally { button.disabled = false; }
+        });
+        loadProviders().catch(error => status.textContent = error.message);
+    }
     const featureForm = document.getElementById("feature-form");
     if (featureForm) featureForm.addEventListener("submit", async function (event) {
         event.preventDefault();

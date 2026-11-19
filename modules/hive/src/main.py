@@ -60,6 +60,7 @@ import mind_runtime
 import mind_skills
 import mind_soul
 import mind_symbols
+import provider_data
 import roles_data
 import route_access
 import skill_submissions
@@ -1200,6 +1201,13 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     name = str(body.get("name") or "").strip().lower()
     harness = str(body.get("harness") or "dsh")
     provider = str(body.get("provider") or "")
+    connection = None
+    if body.get("provider_id"):
+        try:
+            connection = await provider_data.get_connection(str(body["provider_id"]))
+            provider = provider_data.harness_provider(connection, harness)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
         raise HTTPException(
             status_code=400,
@@ -1211,13 +1219,18 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        proxy_key, proxy_key_warning = await holder_credentials.validate_mind_proxy_key(body.pop("proxy_key", None))
-    except holder_credentials.MintRefused as exc:
+        if connection:
+            proxy_key, proxy_key_warning = await holder_credentials.accept_mind_provider_token(body.pop("provider_token", body.pop("proxy_key", None)))
+        else:
+            proxy_key, proxy_key_warning = await holder_credentials.validate_mind_proxy_key(body.pop("proxy_key", None))
+    except (holder_credentials.MintRefused, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
     default_model = str(
-        body.get("default_model") or _INTERNAL_MIND_DEFAULT_MODELS[provider]
+        body.get("default_model") or ("" if connection else _INTERNAL_MIND_DEFAULT_MODELS[provider])
     ).strip()
+    if connection and not configuration_data_module._MODEL_NAME_RE.fullmatch(default_model):
+        raise HTTPException(status_code=400, detail="Select an initial model from the provider's model list")
     mind_id = str(body.get("mind_id") or uuid.uuid4())
     try:
         mind_id = str(uuid.UUID(mind_id))
@@ -1313,7 +1326,12 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             owner=owner,
             description=str(body.get("description") or ""),
             ollama_base_url=ollama_base_url,
+            **({"connection": connection} if connection else {}),
         )
+        if connection:
+            step = "Recording its provider connection"
+            creation.mark("provider")
+            await provider_data.bind_mind(name, connection["id"])
 
         # The generated compose file reads this mind's own variables, so
         # without these the container comes up holding nothing and is
@@ -1322,6 +1340,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         creation.mark("credentials")
         minted, credential_error = await holder_credentials.provision_mind(
             name, mind_id, owner, proxy_key=proxy_key,
+            **({"issue_proxy_key": connection["id"] == "hive-proxy"} if connection else {}),
         )
         if credential_error:
             raise _CreationStepFailed(credential_error)
@@ -1726,11 +1745,10 @@ async def dashboard_page(request: Request):
 
 
 async def _proxy_base_url() -> str:
-    return (
-        await get_capability_endpoint("inference-proxy")
-        or os.getenv("INFERENCE_PROXY_URL")
-        or "http://inference-proxy:8888"
-    ).rstrip("/")
+    try:
+        return provider_data.root_url(await provider_data.get_connection("hive-proxy"))
+    except ValueError:
+        raise RuntimeError("Configure the Hive Proxy connection in Settings → Providers") from None
 
 
 def _proxy_headers() -> dict:
@@ -3247,8 +3265,58 @@ async def settings_page(request: Request):
 
 
 _SETTINGS_SECTIONS = {
-    "general", "access", "connections", "voice", "credentials", "advanced", "users", "features",
+    "general", "access", "connections", "providers", "voice", "credentials", "advanced", "users", "features",
 }
+
+
+@app.get("/api/settings/providers")
+async def api_provider_connections(user: dict = Depends(require_auth)):
+    return {"providers": await provider_data.list_connections()}
+
+
+@app.post("/api/settings/providers")
+async def api_provider_create(request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Provider must be an object")
+        return await provider_data.save_connection(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.put("/api/settings/providers/{provider_id}")
+async def api_provider_update(provider_id: str, request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Provider must be an object")
+        return await provider_data.save_connection(body, provider_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.delete("/api/settings/providers/{provider_id}")
+async def api_provider_delete(provider_id: str, user: dict = Depends(require_auth)):
+    try:
+        await provider_data.delete_connection(provider_id)
+        return {"deleted": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@app.post("/api/settings/providers/{provider_id}/models")
+async def api_provider_models(provider_id: str, request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request must be an object")
+        connection = await provider_data.get_connection(provider_id)
+        harness = str(body.get("harness") or "dsh")
+        provider_data.harness_provider(connection, harness)
+        return {"models": await provider_data.fetch_models(connection, provider_data.normalize_token(body.get("token")), harness)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @app.get("/settings/{section}", response_class=HTMLResponse)
@@ -3270,7 +3338,12 @@ async def api_settings_minds(user: dict = Depends(require_auth)):
     except Exception:
         sessions = []
     sessions = route_access.visible_sessions(user, sessions, all_minds)
-    return {"minds": _add_session_activity(build_mind_registry(broker_minds), sessions)}
+    minds = _add_session_activity(build_mind_registry(broker_minds), sessions)
+    for mind in minds:
+        connection = await provider_data.connection_for_mind(mind["name"])
+        if connection and mind.get("local_config") and isinstance(mind["local_config"].get("config"), dict):
+            mind["local_config"]["config"]["provider_connection"] = connection
+    return {"minds": minds}
 
 
 async def _mind_gateway_url(name: str) -> str:
@@ -3824,7 +3897,10 @@ async def api_mind_proxy_key_update(
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object")
     try:
-        key, warning = await holder_credentials.validate_mind_proxy_key(body.get("proxy_key"))
+        if configuration.get("provider_connection"):
+            key, warning = await holder_credentials.accept_mind_provider_token(body.get("proxy_key"))
+        else:
+            key, warning = await holder_credentials.validate_mind_proxy_key(body.get("proxy_key"))
         if key is None:
             raise holder_credentials.MintRefused("Paste the proxy key this Mind should use")
         await holder_credentials.store_mind_proxy_key(
@@ -4893,6 +4969,9 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
         project_path = mind_mounts.hive_mind_project_path()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if await provider_data.apply_pending_url(name):
+        result = await _start_mind_container(name, user)
+        return {"status": "success" if result["started"] else "pending", **result}
     result = await _hive_tools_request(
         "POST",
         "/docker/restart",

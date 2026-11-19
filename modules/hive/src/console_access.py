@@ -464,3 +464,6 @@ TABLE.add(
 
 TABLE.add(Rule(USER), "GET /api/settings/features", "PUT /api/settings/features")
 TABLE.add(Rule(ADMIN), "GET /hive-errors", "GET /api/hive-errors")
+TABLE.add(Rule(ADMIN), "GET /api/settings/providers", "POST /api/settings/providers",
+          "PUT /api/settings/providers/{provider_id}", "DELETE /api/settings/providers/{provider_id}",
+          "POST /api/settings/providers/{provider_id}/models")

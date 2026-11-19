@@ -42,6 +42,7 @@ from fastapi import HTTPException
 import configuration_data
 import holder_credentials
 import mind_soul
+import provider_data
 import store
 
 #: Where a creation in progress is recorded. The console's own data folder,
@@ -50,6 +51,7 @@ CREATION_DIR = Path(os.environ.get("MIND_CREATION_DIR", "/data/mind-creations"))
 
 #: What each recorded step is called when it could not be taken back.
 STEP_LABELS = {
+    "provider": "its provider connection",
     "roles": "its role assignment",
     "folder": "its folder",
     "credentials": "its credentials",
@@ -63,7 +65,7 @@ log = logging.getLogger(__name__)
 
 #: The steps known only by the Mind's name. The folder carries the Mind's
 #: id, the gateway row and the role assignment are keyed by it.
-NAME_KEYED = ("credentials", "stack", "node")
+NAME_KEYED = ("credentials", "stack", "node", "provider")
 
 
 class InProgress(Exception):
@@ -224,6 +226,7 @@ async def unmake(
     `skip` names steps to strike without acting on them: see `sweep`.
     """
     actions: dict[str, Callable[[], Awaitable[Any]]] = {
+        "provider": lambda: provider_data.unbind_mind(creation.name),
         "gateway": lambda: deregister(creation.name, creation.mind_id),
         "node": lambda: _undo_node(creation),
         "stack": lambda: asyncio.to_thread(

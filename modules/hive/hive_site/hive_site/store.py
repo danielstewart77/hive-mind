@@ -860,3 +860,14 @@ async def get_navigation_features(username: str) -> dict:
 
 async def put_navigation_features(username: str, value: str) -> None:
     await core.put_setting("navigation.features:" + username, value, time.time(), unit=_live())
+
+
+async def get_provider_connections() -> dict:
+    import json
+    row = await core.get_setting("inference.connections", unit=_live())
+    return json.loads(row["value"]) if row else {}
+
+
+async def put_provider_connections(value: dict) -> None:
+    import json
+    await core.put_setting("inference.connections", json.dumps(value), time.time(), unit=_live())

@@ -331,7 +331,7 @@ async def _request(
         async with httpx.AsyncClient(timeout=timeout) as client:
             return await client.request(
                 method,
-                f"{service.url()}{path}",
+                f"{await _service_url(service)}{path}",
                 headers={"Authorization": f"Bearer {admin}"},
                 json=body,
             )
@@ -412,6 +412,7 @@ async def mint(
     """
     if location is None:
         location = locate(service, holder)
+    await _require_managed_proxy(service, holder)
     new_value = secrets.token_urlsafe(32)
 
     async with _ROTATION_LOCK:
@@ -507,6 +508,7 @@ async def revoke(service: Service, holder: str) -> dict[str, Any]:
     bedroom cannot be handed a new value from here, and leaving its old one
     live is the thing per-holder credentials existed to stop.
     """
+    await _require_managed_proxy(service, holder)
     response = await _request(service, "DELETE", f"/credentials/{holder}")
     if response.status_code >= 400:
         raise MintRefused(
@@ -528,6 +530,7 @@ async def rotate(service: Service, holder: str) -> dict[str, Any]:
     listing rather than guessed, so a rotation cannot quietly retype a mind as
     a person or drop the provenance its memory is filed under.
     """
+    await _require_managed_proxy(service, holder)
     holders = await list_holders(service)
     row = next(
         (r for r in holders if str(r.get("holder", "")).lower() == holder.strip().lower()),
@@ -680,6 +683,7 @@ async def name_held_by_something_else(name: str) -> str | None:
 
 async def provision_mind(
     name: str, mind_id: str, owner: str, *, proxy_key: str | None = None,
+    issue_proxy_key: bool = True,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Give a brand-new containerised mind its own credentials, one per service.
 
@@ -700,6 +704,8 @@ async def provision_mind(
     failures: list[str] = []
     for service in SERVICES.values():
         try:
+            if service.key == "proxy" and not issue_proxy_key and proxy_key is None:
+                continue
             key = variable_name(service, name)
             if MIND_ENV_LABEL not in ENV_FILES:
                 raise MintRefused(
@@ -765,7 +771,7 @@ async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None
     try:
         async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
             response = await client.get(
-                service.url() + "/v1/models", headers={"Authorization": f"Bearer {value}"},
+                await _service_url(service) + "/v1/models", headers={"Authorization": f"Bearer {value}"},
             )
     except httpx.HTTPError:
         raise MintRefused("Could not verify the proxy key. Check the proxy connection and try again") from None
@@ -791,6 +797,40 @@ async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, A
             "restart_target": RESTART_BY_FILE.get(MIND_ENV_LABEL, RESTART_BY_FILE["hive_mind"])}
 
 
+async def _service_url(service: Service) -> str:
+    if service.key == "proxy":
+        import provider_data
+        return provider_data.root_url(await provider_data.get_connection("hive-proxy"))
+    return service.url()
+
+
+async def _require_managed_proxy(service: Service, holder: str) -> None:
+    if service.key == "proxy":
+        import provider_data
+        connection = await provider_data.connection_for_mind(holder)
+        if connection and connection["id"] != "hive-proxy":
+            raise MintRefused("This Mind uses a direct or custom provider. Manage its key with that provider, then paste it on the Mind's page")
+
+
+async def accept_mind_provider_token(supplied: Any) -> tuple[str | None, str | None]:
+    """Accept a Mind-owned token; report reuse without asking an upstream."""
+    import provider_data
+    value = provider_data.normalize_token(supplied)
+    if not value:
+        return None, None
+    path = ENV_FILES.get(MIND_ENV_LABEL)
+    if path is None or not path.is_file():
+        raise MintRefused("This Hive is not configured to store Mind tokens yet")
+    warning = None
+    text = credentials_data._read_text(path)
+    for key in re.findall(r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+)=", text):
+        existing = _loaded_value(Location(MIND_ENV_LABEL, key))
+        if existing and secrets.compare_digest(existing, value):
+            warning = "This token is already used by another Mind. It will be used as requested; sharing it also shares its identity and limits."
+            break
+    return value, warning
+
+
 async def unprovision_mind(name: str) -> list[str]:
     """Undo `provision_mind` for a mind whose creation failed: each service
     stops accepting the value it issued, and the mind's three lines leave the
@@ -803,6 +843,12 @@ async def unprovision_mind(name: str) -> list[str]:
     """
     failures: list[str] = []
     holder = name.strip().lower()
+    try:
+        import configuration_data
+        connection = configuration_data.local_runtime_configuration(name).get("provider_connection") or {}
+        direct = bool(connection) and connection.get("kind") != "proxy"
+    except ValueError:
+        direct = False
     for service in SERVICES.values():
         key = variable_name(service, holder)
         try:
@@ -810,7 +856,7 @@ async def unprovision_mind(name: str) -> list[str]:
             # cannot have issued anything at: the value there, if any, was
             # pasted in, and is its owner's to keep.
             response = (await _request(service, "DELETE", f"/credentials/{holder}")
-                        if service.admin_token() else None)
+                        if service.admin_token() and not (direct and service.key == "proxy") else None)
             if (response is not None and response.status_code >= 400
                     and response.status_code != 404):
                 failures.append(
@@ -873,13 +919,22 @@ async def check(service: Service, holder: str, role: str = "") -> dict[str, Any]
         return {"status": "unreadable", "detail": f"{location.path} could not be read"}
     if not value:
         return {"status": "not_set", "detail": f"{location.env_key} is empty"}
+    if service.key == "proxy":
+        import provider_data
+        connection = await provider_data.connection_for_mind(holder)
+        if connection and connection["id"] != "hive-proxy":
+            try:
+                await provider_data.fetch_models(connection, value, "dsh")
+                return {"status": "working", "detail": "Accepted by this Mind's configured provider"}
+            except ValueError as exc:
+                return {"status": "undetermined", "detail": str(exc)}
     path = PROBE_PATHS.get(service.key)
     if path is None:
         return {"status": "undetermined", "detail": "nothing validates this over HTTP"}
     try:
         async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
             response = await client.get(
-                f"{service.url()}{path}", headers={"Authorization": f"Bearer {value}"}
+                f"{await _service_url(service)}{path}", headers={"Authorization": f"Bearer {value}"}
             )
     except (ValueError, UnicodeError) as exc:
         # A stray carriage return from a CRLF `.env`, or a non-ASCII byte:

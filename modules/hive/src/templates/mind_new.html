@@ -17,10 +17,10 @@
                 </div>
                 <div class="field is-full"><label>Harness</label><div class="choice-grid">{% for harness in install_options.harnesses %}<label class="choice"><input type="radio" name="harness" value="{{ harness.value }}"{% if harness.value == install_options.default_harness %} checked{% endif %}><span class="choice-copy"><strong>{{ harness.label }}</strong><small>{{ harness.description }}</small></span></label>{% endfor %}</div></div>
                 <div class="form-grid">
-                    <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
-                    <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
+                    <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>Select a connection configured in <a href="/settings/providers">Settings → Providers</a>.</small></div>
+                    <div class="field"><label for="mind-default-model">Initial model</label><select id="mind-default-model" name="default_model" required><option value="">Select a provider first</option></select><small id="mind-model-status" role="status"></small><button class="button button-quiet" id="mind-model-refresh" type="button">Refresh models</button></div>
                 </div>
-                <div class="field is-full"><label for="mind-proxy-key">Proxy key</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>Paste the proxy key you want this Mind to use. If it is already in use, Hive warns you and uses it. Leave it empty to have Hive issue a key automatically.</small></div>
+                <div class="field is-full"><label for="mind-proxy-key">Mind’s provider token</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>This token belongs to the new Mind. Paste its key to load the models it can access. A provider that accepts unauthenticated connections can leave this blank. Reusing a key gives a warning and uses it as requested.</small></div>
                 <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit" id="mind-submit"><i data-lucide="wand-sparkles"></i><span>Scaffold Mind</span></button><small id="mind-progress" role="status" hidden>Writing its folder, issuing its keys, listing it in the stack, registering it, then building and starting its container. The first build can take several minutes; leave this page open.</small></div>
@@ -71,29 +71,55 @@ window.addEventListener("DOMContentLoaded", function () {
         progress.hidden = !busy;
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     }
-    const options = {{ install_options | tojson }};
-    const defaultModels = {};
-    options.providers.forEach(function (item) { defaultModels[item.value] = item.internal_default_model || item.default_model; });
-    const providersFor = {};
-    options.harnesses.forEach(function (item) { providersFor[item.value] = item.providers; });
-    const providerLabels = {anthropic: "Anthropic", openai: "OpenAI", ollama: "Ollama (local)"};
+    let connections = [], modelGeneration = 0, modelTimer, previousProvider = "";
 
     function selectedHarness() { return form.querySelector('[name="harness"]:checked').value; }
 
     function renderProviders() {
         const select = form.elements.provider, previous = select.value;
-        const allowed = providersFor[selectedHarness()] || [];
-        select.innerHTML = allowed.map(function (value) {
-            return '<option value="' + value + '">' + (providerLabels[value] || value) + '</option>';
+        const harness = selectedHarness();
+        const allowed = connections.filter(function (p) {
+            return p.kind === "proxy" || harness === "dsh" ||
+                (harness === "claude_cli" ? p.api_format === "anthropic" : p.api_format !== "anthropic");
+        });
+        select.innerHTML = '<option value="">Select a provider</option>' + allowed.map(function (p) {
+            return '<option value="' + h.escapeHtml(p.id) + '">' + h.escapeHtml(p.name) + '</option>';
         }).join("");
-        select.value = allowed.indexOf(previous) !== -1 ? previous : allowed[0];
+        select.value = allowed.some(p => p.id === previous) ? previous : (allowed[0] && allowed[0].id) || "";
         onProviderChange();
     }
 
     function onProviderChange() {
-        const provider = form.elements.provider.value, isOllama = provider === "ollama";
-        form.elements.default_model.value = defaultModels[provider] || "";
+        const provider = form.elements.provider.value;
+        // A token entered for one endpoint must never be forwarded to a
+        // different endpoint merely because the dropdown changed.
+        if (previousProvider && previousProvider !== provider) form.elements.proxy_key.value = "";
+        previousProvider = provider;
+        form.elements.default_model.innerHTML = '<option value="">Select a model</option>';
+        loadModels();
     }
+
+    async function loadModels() {
+        clearTimeout(modelTimer);
+        const generation = ++modelGeneration, provider = form.elements.provider.value;
+        const select = form.elements.default_model, status = document.getElementById("mind-model-status");
+        if (!provider) { status.textContent = "Configure a provider in Settings to continue."; return; }
+        const previous = select.value;
+        select.disabled = true; status.textContent = "Loading models…";
+        try {
+            const data = await h.requestJson("/api/settings/providers/" + encodeURIComponent(provider) + "/models", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: form.elements.proxy_key.value, harness: selectedHarness()})});
+            if (generation !== modelGeneration) return;
+            select.innerHTML = '<option value="">Select a model</option>' + (data.models || []).map(function (m) { return '<option value="' + h.escapeHtml(m.id) + '">' + h.escapeHtml(m.label || m.id) + '</option>'; }).join("");
+            if ((data.models || []).some(m => m.id === previous)) select.value = previous;
+            status.textContent = (data.models || []).length ? "Models served by this provider using this Mind’s token." : "This provider returned no models for this Mind.";
+        } catch (error) { if (generation === modelGeneration) status.textContent = error.message; }
+        finally { if (generation === modelGeneration) select.disabled = false; }
+    }
+    form.elements.proxy_key.addEventListener("input", function () {
+        ++modelGeneration;
+        clearTimeout(modelTimer); modelTimer = setTimeout(loadModels, 500);
+    });
+    document.getElementById("mind-model-refresh").addEventListener("click", loadModels);
 
     form.addEventListener("change", function (event) {
         if (event.target.name === "harness") renderProviders();
@@ -119,7 +145,10 @@ window.addEventListener("DOMContentLoaded", function () {
         }).join("");
         box.addEventListener("change", function (event) {
             const model = event.target.dataset && event.target.dataset.model;
-            if (event.target.checked && model) form.elements.default_model.value = model;
+            if (event.target.checked && model) {
+                if (Array.from(form.elements.default_model.options).some(o => o.value === model)) form.elements.default_model.value = model;
+                else document.getElementById("mind-model-status").textContent = "The role’s model is not listed by this provider for this Mind. Select an available model.";
+            }
         });
     } catch (error) { document.getElementById("mind-roles").textContent = "Roles could not be read: " + error.message; } })();
 
@@ -127,14 +156,15 @@ window.addEventListener("DOMContentLoaded", function () {
         event.preventDefault();
         const errorBox = document.getElementById("mind-error");
         errorBox.hidden = true;
+        if (form.elements.default_model.disabled) { errorBox.hidden = false; errorBox.textContent = "Wait for the provider’s model list to finish loading."; return; }
         const body = {
             name: form.elements.name.value,
             owner: form.elements.owner.value,
             description: form.elements.description.value,
             harness: selectedHarness(),
-            provider: form.elements.provider.value,
+            provider_id: form.elements.provider.value,
             default_model: form.elements.default_model.value,
-            proxy_key: form.elements.proxy_key.value,
+            provider_token: form.elements.proxy_key.value,
             role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
             roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
         };
@@ -190,7 +220,10 @@ window.addEventListener("DOMContentLoaded", function () {
         }
     }
     loadOwners(document.getElementById("mind-owner"), {{ current_user.username | tojson }});
-    renderProviders();
+    (async function () {
+        try { connections = (await h.requestJson("/api/settings/providers")).providers || []; renderProviders(); }
+        catch (error) { document.getElementById("mind-model-status").textContent = error.message; }
+    })();
 });
 </script>
 {% endblock %}
