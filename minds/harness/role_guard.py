@@ -591,7 +591,12 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["prompt"]:
         # Nothing is judged on a typed prompt any more. A pane or a settings
         # file written before 2026-11-19 still calls this, so it answers yes
-        # without reading its input or asking the gateway.
+        # without asking the gateway. The prompt is read and dropped, so a
+        # harness writing a long one is not left with a closed pipe.
+        try:
+            sys.stdin.buffer.read()
+        except OSError:
+            pass
         return 0
     print("usage: role_guard.py guard | gate NAME -- COMMAND...", file=sys.stderr)
     return 1
