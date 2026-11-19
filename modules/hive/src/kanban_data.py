@@ -940,10 +940,27 @@ async def set_parent(record_id: str,
         return _row_to_record(moved)
 
 
-async def _delete(kind: str, record_id: str) -> dict[str, Any]:
+async def _delete(kind: str, record_id: str,
+                  only_if_empty: bool = False) -> dict[str, Any]:
+    """Remove a row and everything under it, and say what went.
+
+    `only_if_empty` refuses a row that has anything under it. It is checked
+    here, inside the unit the delete runs in, because a caller that counts
+    first and deletes second can have a row land under this one in between
+    and take it too without ever having agreed to.
+    """
     async with store.board_transaction():
         record = _row_to_record(await _fetch(record_id, kind))
         below = await store.descendants(record_id)
+        if only_if_empty and below:
+            kinds = [str(row["kind"]) for row in below]
+            listed = ", ".join(
+                f"{kinds.count(name)} {name if kinds.count(name) == 1 else _PLURALS[name]}"
+                for name in KINDS if name in kinds)
+            raise ValueError(
+                f"This item has {listed} under it, and a delete takes "
+                "everything under it too. Move them out first, or delete "
+                "with the cascade asked for.")
         files = await store.subtree_attachment_count(record_id)
         await store.delete_subtree(record_id)
     # What went, not what the caller's page thought would go.
@@ -951,17 +968,25 @@ async def _delete(kind: str, record_id: str) -> dict[str, Any]:
     return record
 
 
-async def delete_epic(record_id: str) -> dict[str, Any]:
-    return await _delete("epic", record_id)
+_PLURALS = {"epic": "epics", "feature": "features", "story": "stories",
+            "task": "tasks"}
 
 
-async def delete_feature(record_id: str) -> dict[str, Any]:
-    return await _delete("feature", record_id)
+async def delete_epic(record_id: str,
+                      only_if_empty: bool = False) -> dict[str, Any]:
+    return await _delete("epic", record_id, only_if_empty)
 
 
-async def delete_story(record_id: str) -> dict[str, Any]:
-    return await _delete("story", record_id)
+async def delete_feature(record_id: str,
+                         only_if_empty: bool = False) -> dict[str, Any]:
+    return await _delete("feature", record_id, only_if_empty)
 
 
-async def delete_task(record_id: str) -> dict[str, Any]:
-    return await _delete("task", record_id)
+async def delete_story(record_id: str,
+                       only_if_empty: bool = False) -> dict[str, Any]:
+    return await _delete("story", record_id, only_if_empty)
+
+
+async def delete_task(record_id: str,
+                      only_if_empty: bool = False) -> dict[str, Any]:
+    return await _delete("task", record_id, only_if_empty)

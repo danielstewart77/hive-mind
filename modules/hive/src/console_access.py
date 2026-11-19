@@ -301,11 +301,11 @@ TABLE.add(
 # the one-database check also makes, so that route names both credentials;
 # the rest are the board's alone.
 #
-# `DELETE /api/kanban/{kind}/{record_id}` is deliberately *not* here and
-# stays admin-only. Finished work goes to `done` and stays on the board, so
-# a mind working the backlog never needs a delete — and the one operation
-# that destroys a row and everything under it is not the one to open to a
-# credential sitting in an `.env`.
+# `DELETE /api/kanban/{kind}/{record_id}` is here too (Daniel, 2026-11-19:
+# the chief of staff has full create, read, update and delete on the board).
+# It takes the row and everything under it; `?only_if_empty=true` makes it
+# refuse a row with anything under it, which the board tool sends unless
+# the caller asked for the cascade.
 TABLE.add(
     Rule(ADMIN, bearer=(CUTOVER, BOARD)),
     "GET /api/kanban/data",
@@ -320,8 +320,8 @@ TABLE.add(
     "POST /api/kanban/stories",
     "POST /api/kanban/tasks",
     "PATCH /api/kanban/{kind}/{record_id}",
-    # An item's files. Attaching adds and destroys nothing, so it sits with
-    # the board's other writes rather than with its one delete.
+    "DELETE /api/kanban/{kind}/{record_id}",
+    # An item's files.
     "GET /api/kanban/items/{record_id}/attachments",
     "POST /api/kanban/items/{record_id}/attachments",
     "GET /api/kanban/items/{record_id}/attachments/{attachment_id}",
@@ -373,8 +373,8 @@ TABLE.add(
     "GET /api/dashboard/text",
     "GET /harness-runs",
     "GET /api/harness-runs",
-    # kanban — the pages, and the one write no bearer reaches. The board's
-    # API routes are classified above, with the bearer that also admits them.
+    # kanban — the pages. The board's API routes are classified above, with
+    # the bearer that also admits them.
     "GET /kanban",
     "GET /kanban/board",
     "GET /kanban/backlog",
@@ -382,7 +382,6 @@ TABLE.add(
     # The page's own read of the board and its numbers together. A mind has
     # /api/kanban/data and /api/kanban/numbers; this needs no bearer.
     "GET /api/kanban/board",
-    "DELETE /api/kanban/{kind}/{record_id}",
     # design pages
     "GET /design",
     "GET /design/{design_id}",

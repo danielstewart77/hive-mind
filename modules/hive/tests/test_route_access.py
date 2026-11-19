@@ -425,11 +425,8 @@ def test_the_board_bearer_is_attached_to_the_board_and_no_others():
     bearer in the wrong rule is a sessionless way into whatever that rule
     covers, and the rule next door carries every per-mind write on the hive.
 
-    The delete is the other half of this. It is the one board operation that
-    destroys a row and everything under it, finished work is never deleted
-    anyway, and a credential living in an `.env` is not what should be able
-    to reach it — so it stays off this set deliberately, and a change that
-    quietly added it fails here.
+    The delete is on it: the chief of staff has full create, read, update
+    and delete on the board (Daniel, 2026-11-19).
     """
     carrying = {
         f"{method} {path}"
@@ -447,6 +444,7 @@ def test_the_board_bearer_is_attached_to_the_board_and_no_others():
         "POST /api/kanban/stories",
         "POST /api/kanban/tasks",
         "PATCH /api/kanban/{kind}/{record_id}",
+        "DELETE /api/kanban/{kind}/{record_id}",
         "GET /api/kanban/items/{record_id}/attachments",
         "POST /api/kanban/items/{record_id}/attachments",
         "GET /api/kanban/items/{record_id}/attachments/{attachment_id}",
@@ -518,35 +516,78 @@ def test_a_mind_reads_and_writes_the_board_with_the_board_bearer_and_no_session(
         assert refused.status_code == 401, (path, refused.text)
 
 
-def test_the_board_bearer_does_not_delete_and_is_not_a_way_into_the_console(
+def test_a_mind_deletes_a_row_and_what_is_under_it_with_the_board_bearer(
         builtin_console, monkeypatch):
-    """The two edges of the grant.
-
-    Delete is the one board operation that destroys a row and everything
-    under it, and finished work is never deleted — it goes to `done` and
-    stays. It is therefore not on the board bearer's set, and a mind holding
-    the token is refused it exactly as an anonymous caller is. Nor is the
-    token a session: it admits the board and nothing else on the console,
-    so it cannot be used to read the memory store or edit another Mind.
+    """The chief of staff has full create, read, update and delete on the
+    board (Daniel, 2026-11-19), so the delete answers the board bearer with
+    no session, takes the row and everything under it, and says what went.
     """
     monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
     mind = builtin_console.client()
     good = {"Authorization": "Bearer a-board-token"}
 
-    epic_id = mind.post("/api/kanban/epics", json={"title": "Not deletable"},
+    epic_id = mind.post("/api/kanban/epics", json={"title": "Going"},
+                        headers=good).json()["id"]
+    feature_id = mind.post(
+        "/api/kanban/features", json={"title": "Under it", "epic_id": epic_id},
+        headers=good).json()["id"]
+    kept_id = mind.post("/api/kanban/epics", json={"title": "Staying"},
                         headers=good).json()["id"]
 
-    refused = mind.delete(f"/api/kanban/epics/{epic_id}", headers=good,
+    removed = mind.delete(f"/api/kanban/epics/{epic_id}", headers=good,
                           follow_redirects=False)
-    assert refused.status_code in (303, 401, 403), refused.text
-    # Still on the board: the refusal was a refusal, not a slow success.
-    after = mind.get("/api/kanban/data", headers=good).json()
-    assert epic_id in {row["id"] for row in after["epics"]}, after
 
-    for path in ("/api/memory/tables", "/api/admin/users",
-                 "/api/minds/arnold/settings"):
-        elsewhere = mind.get(path, headers=good, follow_redirects=False)
-        assert elsewhere.status_code in (303, 401, 403), (path, elsewhere.text)
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["removed"]["features"] == 1
+    after = mind.get("/api/kanban/data", headers=good).json()
+    assert {row["id"] for row in after["epics"]} == {kept_id}, after
+    assert feature_id not in {row["id"] for row in after["features"]}, after
+
+
+def test_the_board_bearer_is_not_a_way_into_the_console(
+        builtin_console, monkeypatch):
+    """The token is not a session: it admits the board and nothing else on
+    the console, so it cannot be used to read the memory store or edit
+    another Mind.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    mind = builtin_console.client()
+    good = {"Authorization": "Bearer a-board-token"}
+
+    elsewhere = mind.get("/api/memory/tables", headers=good,
+                         follow_redirects=False)
+    assert elsewhere.status_code in (303, 401, 403), elsewhere.text
+
+
+def test_a_delete_asked_to_spare_a_row_with_rows_under_it_removes_nothing(
+        builtin_console, monkeypatch):
+    """The board tool deletes with `only_if_empty` unless the cascade was
+    asked for, so a row that has something under it stays, with what is
+    under it, and the answer says what that is. The same row with nothing
+    under it goes.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    mind = builtin_console.client()
+    good = {"Authorization": "Bearer a-board-token"}
+    epic_id = mind.post("/api/kanban/epics", json={"title": "Has one"},
+                        headers=good).json()["id"]
+    feature_id = mind.post(
+        "/api/kanban/features", json={"title": "Under it", "epic_id": epic_id},
+        headers=good).json()["id"]
+
+    spared = mind.delete(f"/api/kanban/epics/{epic_id}?only_if_empty=true",
+                         headers=good)
+
+    assert spared.status_code == 400, spared.text
+    assert "1 feature" in spared.json()["detail"]
+    after = mind.get("/api/kanban/data", headers=good).json()
+    assert [row["id"] for row in after["epics"]] == [epic_id]
+    assert [row["id"] for row in after["features"]] == [feature_id]
+
+    gone = mind.delete(
+        f"/api/kanban/features/{feature_id}?only_if_empty=true", headers=good)
+    assert gone.status_code == 200, gone.text
+    assert mind.get("/api/kanban/data", headers=good).json()["features"] == []
 
 
 def test_an_install_that_issued_no_board_token_admits_no_bearer_to_the_board(

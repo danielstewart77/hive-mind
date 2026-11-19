@@ -1052,12 +1052,22 @@ async def api_kanban_update(
 
 
 @app.delete("/api/kanban/{kind}/{record_id}")
-async def api_kanban_delete(kind: str, record_id: str, user: dict = Depends(require_auth)):
+async def api_kanban_delete(
+        kind: str, record_id: str, only_if_empty: bool = False,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """Remove a row and everything under it.
+
+    `?only_if_empty=true` refuses a row with anything under it, decided
+    inside the delete rather than by a count read beforehand. The board
+    tool sends it unless the caller asked for the cascade.
+    """
     del user
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
     actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
-    return await _kanban_call(getattr(kanban_data, f"delete_{_SINGULAR[actual]}"), record_id)
+    return await _kanban_call(
+        getattr(kanban_data, f"delete_{_SINGULAR[actual]}"), record_id,
+        only_if_empty=only_if_empty)
 
 
 # ── the files a work item carries ──────────────────────────────────────
