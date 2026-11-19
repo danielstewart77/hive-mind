@@ -16,11 +16,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import credentials_data
 import holder_credentials
+from hive_site import testing
 
 
 def _run(coro):
-    """This repo has no pytest-asyncio; `asyncio.run` is its convention."""
-    return asyncio.run(coro)
+    """On the suite's loop: the proxy's address is read from the store, whose
+    pool belongs to that loop and to no other."""
+    return testing.run(coro)
 
 
 def _write_env(path, **kv):
