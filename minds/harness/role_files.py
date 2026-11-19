@@ -15,7 +15,8 @@ process can see a mind's harness home.
 **It only ever adds.** A hook the mind registered by hand is kept
 (`role_hooks.install` without ``replace``), a skill the mind has any copy of
 is not touched, and nothing is removed when a role is taken away: the guard
-already stops a hook or skill no role grants. What it does keep current is
+already stops a hook no role grants, and a skill the mind has is the mind's
+to run whatever its roles list. What it does keep current is
 what the installer itself put under ``<home>/role-hooks`` and registered:
 that directory is the repository's, and a change there is how a hook changed
 in the repository reaches the mind (story 10.18.12).

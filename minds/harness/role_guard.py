@@ -10,8 +10,8 @@ Codex as config overrides (`prepare_codex`). On dsh the mind's own hooks
 are gated by role as well, by the second command:
 
 * ``role_guard.py guard`` — a PreToolUse hook on every tool. A built-in tool
-  (shell, files, sub-minds, web) no held role allows is refused, and so is a
-  skill no held role grants, with a reason the model reads.
+  (shell, files, sub-minds, web) no held role allows is refused, with a
+  reason the model reads.
 * ``role_guard.py gate NAME -- COMMAND...`` — wraps each of the mind's own
   hooks. The hook runs when a held role grants NAME and is skipped when none
   does.
@@ -36,6 +36,11 @@ surface marker, the sub-agent reporter the console draws sub-minds from, and
 this guard itself — the set the mind server requires before it offers dsh,
 on either kind of mind. A role leaving one out would not restrict the mind; it would
 stop it remembering, or let it grow until it overflowed.
+
+**A skill is never refused.** A role gives a mind skills; it does not stand
+between a mind and a skill it has. Whatever skill exists for the mind loads,
+by tool call or typed as `/name`, whatever its roles list. Keeping a mind
+from a skill is done by not giving it the skill (Daniel, 2026-11-19).
 
 Standard library only: hooks run under the container's own ``python3``.
 """
@@ -93,9 +98,6 @@ FAMILY_PREFIXES = {
     "sub-minds": ("subagent", "collaboration"),
     "web": ("mcp__codex_apps__search_service",),
 }
-
-#: The tools that load a skill by name, and the argument naming it.
-SKILL_TOOLS = {"skill": "name", "Skill": "skill"}
 
 #: The hooks that keep a mind alive rather than shape what it does.
 ESSENTIAL_HOOKS = frozenset({
@@ -282,11 +284,6 @@ def tool_refusal(grants: dict, tool: str, arguments: dict | None) -> str | None:
     if family is not None and family not in (grants.get("tools") or []):
         return (f"The {family} tool ({tool}) is not allowed for this mind's roles "
                 f"({', '.join(grants.get('roles') or []) or 'none'}).")
-    if tool in SKILL_TOOLS:
-        name = str((arguments or {}).get(SKILL_TOOLS[tool]) or "").strip().lstrip("/")
-        if name not in (grants.get("skills") or []):
-            return (f"The skill {name or '(unnamed)'} is not granted by this mind's roles "
-                    f"({', '.join(grants.get('roles') or []) or 'none'}).")
     return None
 
 
@@ -336,9 +333,8 @@ def effective_hooks(source: dict | None, python: str = "python3") -> dict:
 def guard_hooks(python: str = "python3", checked: bool = False) -> dict[str, dict]:
     """The guard's hook group per event, in the shape every harness reads.
 
-    PreToolUse on every tool; UserPromptSubmit too, because a typed `/name`
-    loads a skill without any tool call, so the skill grant is checked on
-    the prompt as well.
+    PreToolUse on every tool, and nothing else: a typed prompt is never the
+    guard's to judge.
 
     ``checked`` is for Claude and Codex, which run a hook through a shell
     and let a tool run on any exit but 2. A terminal pane keeps its command
@@ -353,7 +349,7 @@ def guard_hooks(python: str = "python3", checked: bool = False) -> dict[str, dic
                    f"{{ echo 'The role guard cannot run, so this is refused.' >&2; exit {DENY}; }}; "
                    f"exec {run}")
         return {"hooks": [{"type": "command", "timeout": 10, "command": run}]}
-    return {"PreToolUse": group("guard"), "UserPromptSubmit": group("prompt")}
+    return {"PreToolUse": group("guard")}
 
 
 def delegate_names(patch_file: Path) -> list[str]:
@@ -432,7 +428,7 @@ def _who(mind: str, url: str) -> dict[str, str]:
     return {"MIND_ID": mind, "COMMS_URL": url}
 
 
-def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token: str,
+def prepare_claude(state_dir: Path, mind: str, url: str, token: str,
                    python: str = sys.executable or "python3",
                    timeout: float = 10.0, on_grants=None) -> tuple[list[str], dict[str, str]]:
     """The arguments and environment a Claude process is started with.
@@ -455,8 +451,7 @@ def prepare_claude(state_dir: Path, skills_dir: Path, mind: str, url: str, token
     except OSError as exc:
         raise NotStarted(f"the role guard's files could not be written: {exc}") from exc
     return (["--settings", str(settings)],
-            {"HIVE_ROLE_GRANTS_FILE": str(grants_file), "HIVE_SKILLS_DIR": str(skills_dir),
-             **_who(mind, url)})
+            {"HIVE_ROLE_GRANTS_FILE": str(grants_file), **_who(mind, url)})
 
 
 def toml_inline(value) -> str:
@@ -588,46 +583,21 @@ def _note(message: str) -> None:
         pass
 
 
-def prompt_refusal(grants: dict, prompt: str, skills_dir: Path | None) -> str | None:
-    """Why a typed `/name` is refused: it names an installed skill no role grants."""
-    if not grants.get("managed"):
-        return None
-    text = prompt.lstrip()
-    if not text.startswith("/"):
-        return None
-    name = text[1:].split(None, 1)[0] if len(text) > 1 else ""
-    if not name or skills_dir is None or not (skills_dir / name).is_dir():
-        return None
-    if name in (grants.get("skills") or []):
-        return None
-    return (f"The skill {name} is not granted by this mind's roles "
-            f"({', '.join(grants.get('roles') or []) or 'none'}).")
-
-
-def _prompt() -> int:
-    try:
-        event = json.loads(sys.stdin.read() or "{}")
-        env = _mind_env(dict(os.environ))
-        skills = env.get("HIVE_SKILLS_DIR") or (
-            str(Path(env["DSH_HOME"]) / "skills") if env.get("DSH_HOME") else "")
-        reason = prompt_refusal(current(), str(event.get("prompt") or ""),
-                                Path(skills) if skills else None)
-    except Exception as exc:  # noqa: BLE001 - every failure is a refusal
-        print(f"The role guard could not decide, so the prompt is refused: {exc}", file=sys.stderr)
-        return DENY
-    if reason:
-        print(reason, file=sys.stderr)
-        return DENY
-    return 0
-
-
 def main(argv: list[str]) -> int:
     if argv[:1] == ["guard"]:
         return _guard()
     if argv[:1] == ["gate"]:
         return _gate(argv[1:])
     if argv[:1] == ["prompt"]:
-        return _prompt()
+        # Nothing is judged on a typed prompt any more. A pane or a settings
+        # file written before 2026-11-19 still calls this, so it answers yes
+        # without asking the gateway. The prompt is read and dropped, so a
+        # harness writing a long one is not left with a closed pipe.
+        try:
+            sys.stdin.buffer.read()
+        except OSError:
+            pass
+        return 0
     print("usage: role_guard.py guard | gate NAME -- COMMAND...", file=sys.stderr)
     return 1
 
