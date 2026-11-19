@@ -15,6 +15,8 @@ changed.
 from __future__ import annotations
 
 from typing import Any, Sequence
+import json
+import re
 
 from . import _sql, pool
 from .errors import UnsettableColumn, ValueRefused
@@ -23,6 +25,77 @@ from .schema import COLUMNS, select_list
 from .unit import Unit
 
 Row = dict[str, Any]
+
+
+async def preflight_mind_rename(mind_id: str, old: str, new: str) -> None:
+    """Check every database destination without changing any live row."""
+    row = await get_mind(mind_id)
+    if not row or row['name'] != old:
+        raise ValueError('The Mind changed since this rename was requested')
+    if not re.fullmatch(r'[a-z][a-z0-9-]{1,31}', new):
+        raise ValueError('Invalid Mind name')
+    if old == new or await get_mind_by_name(new):
+        raise ValueError('The destination name is occupied')
+    for table in ('core.credentials', 'memory.credentials'):
+        if await _fetch_one(None, f'SELECT holder FROM {table} WHERE holder=$1', new):
+            raise ValueError('The destination credential holder is occupied')
+        source = await _fetch_one(None, f'SELECT role,username FROM {table} WHERE holder=$1', old)
+        if source and (source['role'] != 'mind' or source['username'] != row['owner']):
+            raise ValueError('The original holder does not belong to this Mind')
+    if await _fetch_one(None, 'SELECT id FROM memory.nodes WHERE owner=$1 AND type=$2 AND name=$3', row['owner'], 'Mind', new):
+        raise ValueError('The destination graph name is occupied')
+    if await _fetch_one(None, 'SELECT mind_name FROM core.secret_scopes WHERE mind_name=$1', new):
+        raise ValueError('The destination secret scope is occupied')
+    setting = await get_setting('inference.connections')
+    if setting and new in json.loads(setting['value']).get('minds', {}):
+        raise ValueError('The destination provider binding is occupied')
+
+
+async def rename_mind(mind_id: str, old: str, new: str) -> Row:
+    """Rename existing identity and its name references, never its key values.
+
+    One transaction across the registry, holders, graph label and provider
+    binding. The caller quiesces the runtime first. Retries are idempotent.
+    External inference issuers are deliberately untouched: their keys can be
+    supplied/reused and no issuer administrator credential is required.
+    """
+    from .unit import transaction
+    if not re.fullmatch(r'[a-z][a-z0-9-]{1,31}', new):
+        raise ValueError('Invalid Mind name: use 2–32 lowercase letters, digits or hyphens')
+    async with transaction() as unit:
+        await unit.hold(f'hive:mind:{mind_id}')
+        row = await get_mind(mind_id, unit=unit)
+        if not row or row['name'] not in (old, new):
+            raise ValueError('The Mind changed since this rename was requested')
+        collision = await get_mind_by_name(new, unit=unit)
+        if collision and collision['mind_id'] != mind_id:
+            raise ValueError('The destination name is occupied')
+        for table in ('core.credentials', 'memory.credentials'):
+            destination = await unit.fetch_one(f'SELECT holder FROM {table} WHERE holder=$1', new)
+            source = await unit.fetch_one(f'SELECT holder,role,username FROM {table} WHERE holder=$1', old)
+            if destination and row['name'] != new:
+                raise ValueError('The destination credential holder is occupied')
+            if source and (source['role'] != 'mind' or source['username'] != row['owner']):
+                raise ValueError('The original holder does not belong to this Mind')
+        if row['name'] == new:
+            return row
+        await unit.execute('UPDATE core.minds SET name=$2,gateway_url=$3 WHERE mind_id=$1',
+                           mind_id, new, f'http://{new}:8420')
+        for table in ('core.credentials', 'memory.credentials'):
+            await unit.execute(f'UPDATE {table} SET holder=$2 WHERE holder=$1', old, new)
+        await unit.execute('UPDATE core.secret_scopes SET mind_name=$2 WHERE mind_name=$1', old, new)
+        await unit.execute('UPDATE core.session_memory SET mind_name=$2 WHERE mind_id=$1', mind_id, new)
+        await unit.execute('UPDATE memory.nodes SET name=$2 WHERE mind_id=$1 AND type=$3', mind_id, new, 'Mind')
+        setting = await get_setting('inference.connections', unit=unit)
+        if setting:
+            state = json.loads(setting['value'])
+            bindings = state.setdefault('minds', {})
+            if new in bindings and old in bindings:
+                raise ValueError('The destination provider binding is occupied')
+            if old in bindings:
+                bindings[new] = bindings.pop(old)
+                await put_setting('inference.connections', json.dumps(state), setting['updated_at'], unit=unit)
+        return await get_mind(mind_id, unit=unit)
 
 
 async def _rows(connection: Any, sql: str, *args: Any) -> list[Row]:
