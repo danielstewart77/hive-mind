@@ -9,6 +9,10 @@ from minds.harness import dsh_cli
 def test_dsh_direct_connection_can_use_native_catalog_without_proxy_metadata(monkeypatch):
     monkeypatch.setattr(dsh_cli, "RUNTIME", {"provider_connection": {"kind": "openai", "api_format": "openai"}})
     monkeypatch.setattr(dsh_cli, "RUNTIME_ENV", {"DSH_PROXY_BASE_URL": "https://api.openai.com/v1", "DSH_API_KEY": "mind-key"})
+    # The adapter reads the process's own environment beside the mind's
+    # block, and a suite run from a mind's session carries that mind's key.
+    for name in dsh_cli._PROXY_KEY_SOURCES:
+        monkeypatch.delenv(name, raising=False)
     env = dsh_cli._model_env("gpt-4.1", None)
     assert env["HIVE_PROVIDER_TOKEN"] == "mind-key"
     assert "DSH_MODEL_CONTEXT_WINDOW" not in env

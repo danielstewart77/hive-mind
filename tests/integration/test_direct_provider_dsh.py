@@ -17,6 +17,13 @@ import yaml
 from minds.harness import dsh_profile
 from minds.provider_catalog import _native_metadata
 
+# The launcher under test is a built DSH tree, which no checkout of this
+# repository carries: without one named there is nothing here to run.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DSH_TEST_TREE"),
+    reason="DSH_TEST_TREE names no built DSH tree",
+)
+
 
 @pytest.mark.parametrize("kind,api,token", [("anthropic", "anthropic", "mind-owned-test-token"), ("custom", "openai", "mind-owned-test-token"), ("custom", "openai", ""), ("custom", "anthropic", "")])
 def test_dsh_uses_selected_provider_protocol_and_minds_token(tmp_path, monkeypatch, kind, api, token):
