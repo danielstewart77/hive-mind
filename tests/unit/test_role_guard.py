@@ -248,6 +248,17 @@ def test_a_persistent_terminal_is_a_shell_to_the_roles(gateway, tmp_path):
     assert _tool(env, "terminal_open", {}).returncode == 0
 
 
+def test_a_typed_skill_name_on_a_pane_that_still_asks_the_guard_goes_through(gateway, tmp_path):
+    (tmp_path / ".dsh" / "skills" / "send-sms").mkdir(parents=True)
+    gateway.grants = _managed(skills=["remember"])
+    event = {"hook_event_name": "UserPromptSubmit", "prompt": "/send-sms " + "x" * 200_000}
+
+    typed = subprocess.run([sys.executable, str(GUARD), "prompt"], input=json.dumps(event),
+                           env=_env(gateway, tmp_path), capture_output=True, text=True, timeout=30)
+
+    assert typed.returncode == 0 and typed.stderr == ""
+
+
 # ── the same guard on Claude and Codex (stories 10.18.6, 10.18.7) ─────────
 
 #: One tool per family as each harness names it: dsh, Claude, and Codex
