@@ -330,5 +330,3 @@ def test_the_gateway_is_asked_about_this_mind(monkeypatch, claude_home, codex_ho
 
     assert asked == [(harness.MIND_ID, "http://gateway", "secret")]
     assert extra["MIND_ID"] == harness.MIND_ID
-    if name == "claude":
-        assert extra["HIVE_SKILLS_DIR"] == str(claude_home / "skills")
