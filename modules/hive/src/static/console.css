@@ -963,3 +963,5 @@ a { color: inherit; }
 .md-body hr { border: 0; border-top: 1px solid var(--console-line); }
 .md-diagram { margin: 0 0 .75em; overflow-x: auto; }
 .md-diagram svg { max-width: 100%; height: auto; }
+ .remote-access-shortcut {display: grid; gap: .4rem; margin-bottom: .75rem; font-size: .8rem;}
+ .remote-access-shortcut small {color: var(--text-muted);}
