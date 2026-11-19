@@ -290,6 +290,8 @@ def create_app() -> FastAPI:
         from tools.docker_ops import router as docker_router
 
         app.include_router(docker_router)
+        from tools.mind_rename import router as rename_router
+        app.include_router(rename_router)
     except ImportError:
         pass
 

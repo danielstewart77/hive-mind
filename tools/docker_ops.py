@@ -78,6 +78,11 @@ def _result_json(rc: int, stdout: str, stderr: str) -> dict[str, Any]:
 def docker_mutate_gate(tool_name: str):
     """Dependency for mutating docker endpoints."""
 
+    # Register for default approval seeding just like other gated tools.
+    # Keep the Docker dependency below: it captures the query string that
+    # selects the project, so an approved replay targets the same path.
+    hitl_gate(tool_name)
+
     async def _check(
         request: Request,
         path: str = Query(...),
