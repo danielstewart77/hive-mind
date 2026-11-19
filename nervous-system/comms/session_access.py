@@ -33,6 +33,10 @@ from comms.user_access import (
 )
 
 TABLE = RouteTable()
+TABLE.add(Rule(ADMIN),
+          'POST /broker/minds/{mind_id}/rename/prepare',
+          'POST /broker/minds/{mind_id}/rename/release')
+TABLE.add(Rule(ADMIN), 'GET /broker/minds/rename/capabilities')
 
 # --- No credential ---------------------------------------------------------
 # `/sms/inbound` authenticates the sending device by HMAC over the body and is

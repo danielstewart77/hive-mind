@@ -629,15 +629,20 @@ class SessionManager:
                 )
 
     async def shutdown(self):
-        """Kill all subprocesses. The pool is the process's to close."""
+        """Stop gateway-owned processes; Minds retain their conversations.
+
+        Remote harnesses and tmux panes belong to Minds. Deleting them when
+        the gateway restarts interrupts a terminal and defeats rename recovery.
+        Explicit close/suspend still releases them through the normal routes.
+        """
         if self._dashboard_sweep_task:
             self._dashboard_sweep_task.cancel()
             self._dashboard_sweep_task = None
         # Kill RC subprocesses that may not have a corresponding main process
         for sid in list(self._rc_procs):
             await self.kill_rc_process(sid)
-        for sid in list(self._procs):
-            await self._kill_process(sid)
+        self._procs.clear()
+        self._mind_ids.clear()
         log.info("Session manager shut down")
 
     async def _dashboard_sweep_loop(self):
@@ -2099,6 +2104,10 @@ class SessionManager:
         # typed meanwhile queues behind the re-send rather than overtaking it
         # onto the fresh conversation.
         async with lock:
+            from comms import mind_maintenance
+            row = await self._get_row(session_id)
+            if row:
+                await mind_maintenance.check(row['mind_id'])
             while True:
                 outcome: dict = {}
                 async for event in self._send_locked(
@@ -4007,6 +4016,8 @@ class SessionManager:
         harness_sid: str | None = None,
     ) -> Any:
         # Every spawn carries the session's conversation id. A mind handed
+        from comms import mind_maintenance
+        await mind_maintenance.check(mind_id)
         # none would have to invent one, and an invented id is a conversation
         # only that process knows about — the blank-terminal bug in one line.
         if not resume_sid:
