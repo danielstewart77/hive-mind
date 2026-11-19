@@ -697,6 +697,11 @@ async def register_mind(
     async with hive_data.transaction() as unit:
         await unit.hold(f"hive:mind:{mind_id}")
         existing = await core.get_mind(mind_id, unit=unit)
+        maintenance = await core.get_setting('mind.rename.' + mind_id, unit=unit)
+        if existing and maintenance and maintenance['value']:
+            # The rename coordinator commits identity/holders together. Boot
+            # registration during the transition must not race that commit.
+            return
 
         if not existing and owner is None:
             raise OwnerRequired(f"mind {mind_id} is not registered and names no owner")

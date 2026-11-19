@@ -8,6 +8,7 @@ All Claude CLI interaction flows through here.
 import asyncio
 import json
 import os
+import re
 import secrets as _secrets
 import time
 import uuid
@@ -157,11 +158,48 @@ async def _session_mind(session_id: str) -> str | None:
 # `@app.middleware("http")`: the HTTP decorator does not wrap websocket
 # connections, and `/sessions/{id}/stream` and `/sessions/{id}/attach` are
 # websockets carrying a whole conversation each.
+from comms import mind_maintenance
+app.add_middleware(mind_maintenance.MaintenanceMiddleware, session_mind=_session_mind)
 app.add_middleware(
     user_access.UserAccess,
     table=session_access.TABLE,
     session_mind=_session_mind,
 )
+
+
+@app.post('/broker/minds/{mind_id}/rename/prepare', dependencies=[Depends(require_admin_bearer)])
+async def prepare_mind_rename(mind_id: str, request: Request):
+    body = await request.json()
+    operation_id = str(body.get('operation_id') or '')
+    if not re.fullmatch(r'[a-zA-Z0-9-]{1,100}', operation_id):
+        raise HTTPException(400, 'Invalid rename operation')
+    try:
+        return await mind_maintenance.prepare(mind_id, operation_id, session_mgr._locks)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/broker/minds/rename/capabilities', dependencies=[Depends(require_admin_bearer)])
+async def mind_rename_capabilities():
+    return {'version': 1}
+
+
+@app.post('/broker/minds/{mind_id}/rename/release', dependencies=[Depends(require_admin_bearer)])
+async def release_mind_rename(mind_id: str, request: Request):
+    body = await request.json()
+    try:
+        current = await mind_maintenance.state(mind_id)
+        if current and current.get('operation_id') != str(body.get('operation_id') or ''):
+            raise ValueError('This rename does not own the maintenance gate')
+        row = await core.get_mind(mind_id)
+        if row:
+            for session_id, process in session_mgr._procs.items():
+                session = await session_mgr._get_row(session_id)
+                if session and session.get('mind_id') == mind_id and isinstance(process, dict):
+                    process['_mind_url'] = row['gateway_url'].rstrip('/')
+        return await mind_maintenance.release(mind_id, str(body.get('operation_id') or ''))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 def _caller(conn: Request | WebSocket) -> user_access.Caller:
