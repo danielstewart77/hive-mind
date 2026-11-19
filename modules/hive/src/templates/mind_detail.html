@@ -4,9 +4,19 @@
 <main class="page" data-mind-id="{{ mind_id }}">
     <header class="page-header">
         <div class="page-header-copy"><p class="page-eyebrow">Mind details</p><h1 class="page-title" id="mind-title">Loading mind…</h1><p class="page-description" id="mind-description">Runtime identity and connection details.</p></div>
-        <div class="page-actions"><a class="button button-quiet" href="/minds"><i data-lucide="arrow-left"></i>All minds</a></div>
+        <div class="page-actions"><button class="button button-quiet" id="mind-rename-open" type="button">Rename</button><a class="button button-quiet" href="/minds"><i data-lucide="arrow-left"></i>All minds</a></div>
     </header>
     <div id="mind-error" class="error-state" hidden></div>
+    <section class="surface" id="mind-rename" hidden>
+        <div class="surface-header"><h2>Rename this Mind</h2></div>
+        <form class="surface-body overview-stack" id="mind-rename-form">
+            <p>Change its name throughout Hive, keeping its conversations, credentials, skills, settings and roles. An active turn or attached terminal will keep the rename waiting.</p>
+            <div class="field"><label for="mind-rename-name">New name</label><input id="mind-rename-name" name="name" required minlength="2" maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off"><small>2–32 lowercase letters, digits or hyphens.</small></div>
+            <div class="form-actions"><button class="button" id="mind-rename-submit" type="submit">Rename Mind</button><button class="button button-quiet" id="mind-rename-cancel" type="button" hidden>Cancel rename</button><button class="button button-quiet" id="mind-rename-recover" type="button" hidden>Retry recovery</button></div>
+            <p id="mind-rename-status" role="status" aria-live="polite"></p>
+            <a id="mind-rename-approval" href="{{ hive_tools_url }}" target="_blank" rel="noopener" hidden>Open Hive Tools to approve</a>
+        </form>
+    </section>
     <div class="overview-stack" id="mind-content">
         <section class="surface" id="mind-proxy-key" hidden><div class="surface-header"><h2>Mind’s provider token</h2></div><form class="surface-body overview-stack" id="mind-proxy-key-form"><div class="field"><label for="mind-proxy-key-input">Provider token</label><input id="mind-proxy-key-input" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" required><small>Paste the key this Mind should use. An already-used key is accepted with a warning.</small></div><div class="form-actions"><button class="button" type="submit">Save token</button></div><small id="mind-proxy-key-status" role="status"></small></form></section>
         <section class="surface" id="mind-down" hidden><div class="surface-header"><div><h2>This Mind is not answering</h2><p id="mind-down-text"></p></div><button class="button button-quiet" type="button" onclick="window.location.reload()">Check again</button></div></section>
@@ -28,6 +38,46 @@
 window.addEventListener("DOMContentLoaded", async function () {
     const h = window.HiveConsole;
     const requested = document.querySelector("[data-mind-id]").dataset.mindId;
+    let renameMindId = requested, renameTimer = null, renameWasPending = false;
+    const renameSection = document.getElementById("mind-rename");
+    const renameStatus = document.getElementById("mind-rename-status");
+    const renameSubmit = document.getElementById("mind-rename-submit");
+    function paintRename(result) {
+        const pending = !["none", "success", "failed", "cancelled"].includes(result.status);
+        if (pending) renameWasPending = true;
+        if (result.status !== "none") renameSection.hidden = false;
+        renameStatus.textContent = result.detail || "";
+        renameSubmit.disabled = pending;
+        document.getElementById("mind-rename-name").disabled = pending;
+        document.getElementById("mind-rename-recover").hidden = result.status !== "recovery_required";
+        document.getElementById("mind-rename-cancel").hidden = !["reserving", "waiting_approval", "waiting_idle"].includes(result.status);
+        document.getElementById("mind-rename-approval").hidden = result.status !== "waiting_approval";
+        if (result.status === "success" && renameWasPending) {
+            window.location.replace("/minds/" + encodeURIComponent(renameMindId));
+            return;
+        }
+        if (pending && result.status !== "recovery_required") renameTimer = window.setTimeout(pollRename, 3000);
+    }
+    async function pollRename() {
+        try { paintRename(await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename")); }
+        catch (error) { renameStatus.textContent = error.message; renameTimer = window.setTimeout(pollRename, 5000); }
+    }
+    document.getElementById("mind-rename-open").addEventListener("click", function () { renameSection.hidden = !renameSection.hidden; });
+    document.getElementById("mind-rename-form").addEventListener("submit", async function (event) {
+        event.preventDefault(); renameSubmit.disabled = true;
+        if (renameTimer) window.clearTimeout(renameTimer);
+        try { paintRename(await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: event.target.elements.name.value.trim().toLowerCase()})})); }
+        catch (error) { renameStatus.textContent = error.message; renameSubmit.disabled = false; }
+    });
+    document.getElementById("mind-rename-recover").addEventListener("click", async function () {
+        try { await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename/recover", {method: "POST"}); pollRename(); }
+        catch (error) { renameStatus.textContent = error.message; }
+    });
+    document.getElementById("mind-rename-cancel").addEventListener("click", async function () {
+        try { paintRename(await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename/cancel", {method: "POST"})); }
+        catch (error) { renameStatus.textContent = error.message; }
+    });
+    window.addEventListener("pagehide", function () { if (renameTimer) window.clearTimeout(renameTimer); });
     document.getElementById("mind-proxy-key-form").addEventListener("submit", async function (event) {
         event.preventDefault();
         const form = event.target, status = document.getElementById("mind-proxy-key-status");
@@ -840,6 +890,7 @@ window.addEventListener("DOMContentLoaded", async function () {
     try {
         const minds = (await h.requestJson("/api/settings/minds")).minds || [];
         const mind = minds.find(function (item) { return item.id === requested || item.name === requested || (item.id || "").startsWith(requested); });
+        if (mind) { renameMindId = mind.id; pollRename(); }
         if (!mind) throw new Error("Mind not found");
         const cfg = mind.local_config && mind.local_config.config || {};
         const proxySection = document.getElementById("mind-proxy-key");

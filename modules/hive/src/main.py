@@ -23,6 +23,8 @@ from pathlib import Path
 
 import httpx
 import yaml
+import mind_rename
+from starlette.responses import JSONResponse
 from fastapi import (
     Depends,
     FastAPI,
@@ -139,6 +141,7 @@ async def lifespan(app: FastAPI):
     log_event(log, "store.opened", component="hive-control-plane",
               engine="postgres")
     await seed_first_user()
+    mind_rename.recover_pending()
     # The ready-made roles, once per hive (story 10.18.3). A failure is
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
@@ -169,6 +172,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await mind_rename.stop()
         log_event(log, "service.stopped", component="hive-control-plane")
         # Before the store closes: what it had not taken back stays recorded
         # for the next start.
@@ -223,6 +227,7 @@ app = FastAPI(
 )
 # Authorization lives in one table (console_access.TABLE), enforced in front
 # of every route and websocket; a route the table does not name is admin-only.
+app.add_middleware(mind_rename.EditGate)
 app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
 install_fastapi_logging(app, log, "hive-control-plane")
 
@@ -812,7 +817,7 @@ async def new_mind_page(request: Request):
 
 @app.get("/minds/{mind_id}", response_class=HTMLResponse)
 async def mind_detail_page(request: Request, mind_id: str):
-    return await _console_page(request, "mind_detail.html", mind_id=mind_id)
+    return await _console_page(request, "mind_detail.html", mind_id=mind_id, hive_tools_url=_hive_tools_console_url())
 
 
 @app.get("/kanban", response_class=HTMLResponse)
@@ -1202,6 +1207,8 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         raise HTTPException(status_code=400, detail="Request body must be an object")
 
     name = str(body.get("name") or "").strip().lower()
+    if mind_rename.reserved(name):
+        raise HTTPException(409, 'That name is reserved by a pending rename')
     harness = str(body.get("harness") or "dsh")
     provider = str(body.get("provider") or "")
     connection = None
@@ -5013,6 +5020,44 @@ async def api_training_deploy(request: Request, user: dict = Depends(require_aut
         quantization=body.get("quantization"),
     )
     return result
+
+
+@app.post('/api/minds/{mind_id}/rename')
+async def api_mind_rename(mind_id: str, request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, 'Request body must be an object')
+    try:
+        result = await mind_rename.request_rename(mind_id, body.get('name'), user)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse(result, status_code=202)
+
+
+@app.get('/api/minds/{mind_id}/rename')
+async def api_mind_rename_status(mind_id: str, user: dict = Depends(require_auth)):
+    operation = mind_rename.latest(mind_id)
+    return mind_rename.public(operation) if operation else {'status': 'none'}
+
+
+@app.post('/api/minds/{mind_id}/rename/recover')
+async def api_mind_rename_recover(mind_id: str, user: dict = Depends(require_auth)):
+    operation = mind_rename.latest(mind_id)
+    if not operation:
+        raise HTTPException(404, 'Rename not found')
+    mind_rename.schedule(operation['operation_id'])
+    return mind_rename.public(operation)
+
+
+@app.post('/api/minds/{mind_id}/rename/cancel')
+async def api_mind_rename_cancel(mind_id: str, user: dict = Depends(require_auth)):
+    operation = mind_rename.latest(mind_id)
+    if not operation:
+        raise HTTPException(404, 'Rename not found')
+    try:
+        return await mind_rename.cancel(operation['operation_id'])
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @app.post("/api/minds/{name}/restart")
