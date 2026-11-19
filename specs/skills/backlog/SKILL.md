@@ -21,23 +21,36 @@ run under it skips all three.
 `/opt/venv/bin/python3 "$HIVE_PROJECT_DIR/tools/stateless/board/board.py"`.
 It prints one JSON object and exits 1 with `{"error": ...}` when refused.
 
-    board list [--kind epic|feature|story] [--status S] [--parent ID]
+    board list [--kind epic|feature|story|task] [--status S] [--parent ID]
     board show <id>                     one row, with its backlog number
     board relations <id>                its parent, children and choices
     board create epic --title T [--description D]
     board create feature --title T --epic <id> [--description D]
     board create story --title T (--feature <id> | --epic <id>)
                        [--description D] [--before <id>] [--status S]
+    board create task --title T [--parent <id>] [--description D] [--status S]
     board update <id> [--title T] [--description D] [--status S]
-    board move <id> --before <id>
+    board move <id> --before <id>       directly before that row, in its list
+    board move <id> --under <id>        a new parent, last in its list
+    board convert <id> --to epic|feature|story|task|bug [--under <id>]
+    board delete <id> [--cascade]
 
 Statuses are `backlog`, `committed`, `in_progress`, `done`. `list` comes
 back in backlog order, each row carrying the number the operator reads
 (`2.17.6`).
 
-There is no delete, and none to reach: finished work goes to `done` and
-stays on the board. Abandoned or blocked work goes back to `committed` with
-the reason added to its description.
+`move --under` is how a story goes to another feature and a feature to
+another epic; whatever is under the row comes with it. `convert` changes
+what a row is and keeps the row — same id, prose, status, files and
+children — so a task becomes a story, or a story a task, with nothing
+deleted and retyped.
+
+`delete` takes the row and everything under it and cannot be undone. A row
+with anything under it is refused, with what is under it named, until
+`--cascade` says that is meant. It is for a row that should never have been
+on the board: finished work goes to `done` and stays, and abandoned or
+blocked work goes back to `committed` with the reason added to its
+description.
 
 ## What each kind carries
 
@@ -88,5 +101,7 @@ finished, never to tidy the board.
   is not the value the console holds. Not yours to rotate: tell Daniel.
 - *does not reach ...* — that operation is not on this token, by design.
   Say so plainly rather than looking for another way round it.
+- *has ... under it* — the delete would take more than the row. Read what
+  is under it, then move those rows out or pass `--cascade` on purpose.
 - *did not answer* — the console is down. Report it; the board is not
   readable from anywhere else.

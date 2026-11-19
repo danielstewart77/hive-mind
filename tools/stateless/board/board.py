@@ -2,15 +2,19 @@
 """The hive's Kanban board, one operation per call, over the console's own
 board routes.
 
-    board.py list [--kind epic|feature|story] [--status S] [--parent ID]
+    board.py list [--kind epic|feature|story|task] [--status S] [--parent ID]
     board.py show ITEM
     board.py relations ITEM
     board.py create epic --title T [--description D]
     board.py create feature --title T --epic ID [--description D]
     board.py create story --title T (--feature ID | --epic ID)
                           [--description D] [--before ID] [--status S]
+    board.py create task --title T [--parent ID] [--description D] [--status S]
     board.py update ITEM [--title T] [--description D] [--status S]
     board.py move ITEM --before OTHER
+    board.py move ITEM --under PARENT
+    board.py convert ITEM --to epic|feature|story|task|bug [--under PARENT]
+    board.py delete ITEM [--cascade]
     board.py statuses
 
 Prints one JSON object on stdout. Exit 0 on success; exit 1 with
@@ -27,8 +31,18 @@ the operator reads (`2.17.6`) are computed from an order it is not in.
 The console is `HIVE_SITE_URL` and the credential is `BOARD_PUSH_TOKEN` —
 issued for the board specifically. It admits the operations above and
 nothing else on the console: not the memory store, not another Mind's
-settings, and not the delete. There is no delete here because there is none
-to reach: finished work goes to `done` and stays on the board.
+settings.
+
+`move --under` gives a row a new parent and touches nothing else: a story
+goes to another feature, a feature to another epic, and whatever is under
+the row comes with it. `convert` changes what a row is and keeps the row —
+the same id, the same prose, files, status and children — so a task becomes
+a story and a story a task without anything being deleted and retyped.
+
+`delete` takes the row and everything under it and cannot be undone. A row
+with anything under it is refused by the console, which says what is under
+it, until `--cascade` says that is meant. Finished work still goes to `done` and
+stays on the board; delete is for a row that should never have been there.
 """
 
 from __future__ import annotations
@@ -44,7 +58,11 @@ from urllib import error, parse, request
 STATUSES = ("backlog", "committed", "in_progress", "done")
 
 #: What each kind's collection is called in the board's own payload.
-_COLLECTIONS = {"epic": "epics", "feature": "features", "story": "stories"}
+_COLLECTIONS = {"epic": "epics", "feature": "features", "story": "stories",
+                "task": "tasks"}
+
+#: What a row can be converted to. A bug is a story the board marks as one.
+_TYPES = ("epic", "feature", "story", "task", "bug")
 
 _TIMEOUT = 30.0
 
@@ -147,7 +165,7 @@ def _board() -> list[dict[str, Any]]:
 
 
 def _parent_of(row: dict[str, Any]) -> str | None:
-    for key in ("parent_id", "feature_id", "epic_id"):
+    for key in ("parent_id", "feature_id", "epic_id", "story_id", "task_id"):
         if row.get(key):
             return str(row[key])
     return None
@@ -223,6 +241,11 @@ def do_create(args) -> dict[str, Any]:
             args.feature or args.epic)
         if args.status:
             body["status"] = args.status
+    elif args.kind == "task":
+        if args.parent:
+            body["parent_id"] = args.parent
+        if args.status:
+            body["status"] = args.status
 
     created = _call("POST", f"/api/kanban/{_COLLECTIONS[args.kind]}", body)
     item_id = created["id"]
@@ -266,8 +289,55 @@ def do_update(args) -> dict[str, Any]:
 
 
 def do_move(args) -> dict[str, Any]:
+    """Before another row, or under a new parent.
+
+    `--before` lands the row in the list the other row is in, at that point.
+    `--under` gives it the parent named and puts it last there, which is the
+    only way into a feature or an epic that has nothing in it yet. Either
+    way the row's own children come with it and no id changes.
+    """
+    if (args.before is None) == (args.under is None):
+        raise Refused("a move is exactly one of --before or --under")
     kind = do_show(argparse.Namespace(item=args.item))["kind"]
-    return _call("PATCH", _path(args.item, kind), {"before_id": args.before})
+    if args.before is not None:
+        return _call("PATCH", _path(args.item, kind),
+                     {"before_id": args.before})
+    if args.under == args.item:
+        raise Refused("an item cannot go under itself")
+    # Read first: the board reads an empty parent as "no parent", and a
+    # blank argument must not detach the row.
+    do_show(argparse.Namespace(item=args.under))
+    return _call("PATCH", _path(args.item, kind), {"parent_id": args.under})
+
+
+def do_convert(args) -> dict[str, Any]:
+    """Change what a row is, keeping the row.
+
+    The id, prose, status, files and children all stay; only the kind
+    changes, and the parent too when `--under` names one. Without it the row
+    keeps the parent it has, except an epic, which has none.
+    """
+    kind = do_show(argparse.Namespace(item=args.item))["kind"]
+    body: dict[str, Any] = {"type": args.to}
+    if args.under is not None:
+        if args.under == args.item:
+            raise Refused("an item cannot go under itself")
+        do_show(argparse.Namespace(item=args.under))
+        body["parent_id"] = args.under
+    return dict(_call("PATCH", _path(args.item, kind), body))
+
+
+def do_delete(args) -> dict[str, Any]:
+    """Remove a row, and with `--cascade` everything under it.
+
+    Whether the row has anything under it is decided by the console inside
+    the delete itself, not by a count read here first: a row that landed
+    under it between a count and a delete would go with it unagreed. The
+    answer is the row as it was, with what went under `removed`.
+    """
+    kind = do_show(argparse.Namespace(item=args.item))["kind"]
+    spare = "" if args.cascade else "?only_if_empty=true"
+    return _call("DELETE", f"{_path(args.item, kind)}{spare}")
 
 
 # ── the command line ───────────────────────────────────────────────────
@@ -328,6 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_prose(story)
     story.set_defaults(run=do_create, kind="story")
 
+    task = kinds.add_parser("task")
+    task.add_argument("--title", required=True)
+    task.add_argument("--parent", help="the row it is under, if any")
+    task.add_argument("--status", choices=STATUSES)
+    _add_prose(task)
+    task.set_defaults(run=do_create, kind="task")
+
     update = subs.add_parser("update", help="change a row's fields")
     update.add_argument("item")
     update.add_argument("--title")
@@ -335,10 +412,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_prose(update)
     update.set_defaults(run=do_update)
 
-    move = subs.add_parser("move", help="put a row before another")
+    move = subs.add_parser(
+        "move", help="put a row before another, or under a new parent")
     move.add_argument("item")
-    move.add_argument("--before", required=True)
+    move.add_argument("--before", help="the row it goes directly before")
+    move.add_argument("--under", help="the row that becomes its parent")
     move.set_defaults(run=do_move)
+
+    convert = subs.add_parser(
+        "convert", help="change what a row is, keeping the row")
+    convert.add_argument("item")
+    convert.add_argument("--to", required=True, choices=_TYPES)
+    convert.add_argument("--under", help="a new parent, when it needs one")
+    convert.set_defaults(run=do_convert)
+
+    delete = subs.add_parser(
+        "delete", help="remove a row; cannot be undone")
+    delete.add_argument("item")
+    delete.add_argument("--cascade", action="store_true",
+                        help="also remove everything under it")
+    delete.set_defaults(run=do_delete)
 
     statuses = subs.add_parser("statuses", help="the lanes a story moves in")
     statuses.set_defaults(run=do_statuses)
