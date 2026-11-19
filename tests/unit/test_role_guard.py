@@ -100,14 +100,14 @@ def test_a_tool_outside_the_union_of_the_roles_is_refused_and_one_inside_runs(ga
     assert delegate.returncode == role_guard.DENY
 
 
-def test_a_skill_no_role_grants_is_refused_and_a_granted_one_runs(gateway, tmp_path):
-    gateway.grants = _managed(skills=["remember", "code"])
+@pytest.mark.parametrize("tool, arguments", [("skill", {"name": "send-sms"}),
+                                             ("Skill", {"skill": "send-sms"})])
+def test_a_managed_mind_loads_a_skill_none_of_its_roles_list(gateway, tmp_path, tool, arguments):
+    gateway.grants = _managed(tools=["files"], skills=["remember"])
     env = _env(gateway, tmp_path)
 
-    assert _tool(env, "skill", {"name": "code"}).returncode == 0
-    refused = _tool(env, "skill", {"name": "send-sms"})
-    assert refused.returncode == role_guard.DENY
-    assert "send-sms" in refused.stderr
+    assert _tool(env, tool, arguments).returncode == 0
+    assert _tool(env, "bash", {"command": "ls"}).returncode == role_guard.DENY
 
 
 def test_a_role_changed_between_two_calls_is_obeyed_on_the_second(gateway, tmp_path):
@@ -248,24 +248,6 @@ def test_a_persistent_terminal_is_a_shell_to_the_roles(gateway, tmp_path):
     assert _tool(env, "terminal_open", {}).returncode == 0
 
 
-def _prompt(env, text):
-    event = {"hook_event_name": "UserPromptSubmit", "prompt": text}
-    return subprocess.run([sys.executable, str(GUARD), "prompt"], input=json.dumps(event),
-                          env=env, capture_output=True, text=True, timeout=30)
-
-
-def test_a_typed_skill_name_no_role_grants_is_refused(gateway, tmp_path):
-    (tmp_path / ".dsh" / "skills" / "send-sms").mkdir(parents=True)
-    (tmp_path / ".dsh" / "skills" / "remember").mkdir(parents=True)
-    gateway.grants = _managed(skills=["remember"])
-    env = _env(gateway, tmp_path)
-
-    refused = _prompt(env, "/send-sms tell Sloan dinner")
-    assert refused.returncode == role_guard.DENY and "send-sms" in refused.stderr
-    assert _prompt(env, "/remember this").returncode == 0
-    assert _prompt(env, "/model opus").returncode == 0
-
-
 # ── the same guard on Claude and Codex (stories 10.18.6, 10.18.7) ─────────
 
 #: One tool per family as each harness names it: dsh, Claude, and Codex
@@ -291,15 +273,6 @@ def test_one_role_grants_a_family_the_same_on_dsh_claude_and_codex(gateway, tmp_
     assert allowed == [0, 0, 0]
 
 
-def test_claudes_skill_tool_runs_only_a_skill_some_role_grants(gateway, tmp_path):
-    gateway.grants = _managed(skills=["remember"])
-    env = _env(gateway, tmp_path)
-
-    refused = _tool(env, "Skill", {"skill": "send-sms"})
-    assert refused.returncode == role_guard.DENY and "send-sms" in refused.stderr
-    assert _tool(env, "Skill", {"skill": "/remember"}).returncode == 0
-
-
 def _run_hook(command, event, env):
     return subprocess.run(command, shell=True, input=json.dumps(event), env=env,
                           capture_output=True, text=True, timeout=30)
@@ -307,8 +280,7 @@ def _run_hook(command, event, env):
 
 def test_the_settings_a_claude_process_is_given_put_the_guard_on_every_tool(gateway, tmp_path):
     gateway.grants = _managed(tools=["files"])
-    args, extra = role_guard.prepare_claude(tmp_path / "cfg", tmp_path / "cfg" / "skills",
-                                            "mind-1", gateway.url, "t", python=sys.executable)
+    args, extra = role_guard.prepare_claude(tmp_path / "cfg", "mind-1", gateway.url, "t", python=sys.executable)
     assert args[0] == "--settings"
     settings = json.loads(Path(args[1]).read_text())
     command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
@@ -319,22 +291,6 @@ def test_the_settings_a_claude_process_is_given_put_the_guard_on_every_tool(gate
 
     assert bash.returncode == role_guard.DENY and read.returncode == 0
     assert "matcher" not in settings["hooks"]["PreToolUse"][0]
-
-
-def test_a_typed_skill_on_claude_is_checked_against_its_own_skills_folder(gateway, tmp_path):
-    skills = tmp_path / "cfg" / "skills"
-    (skills / "send-sms").mkdir(parents=True)
-    gateway.grants = _managed(skills=[])
-    args, extra = role_guard.prepare_claude(tmp_path / "cfg", skills, "mind-1", gateway.url, "t",
-                                            python=sys.executable)
-    settings = json.loads(Path(args[1]).read_text())
-    command = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-    env = {**_env(gateway, tmp_path), **extra}
-    env.pop("DSH_HOME")
-
-    typed = _run_hook(command, {"hook_event_name": "UserPromptSubmit", "prompt": "/send-sms hi"}, env)
-
-    assert typed.returncode == role_guard.DENY and "send-sms" in typed.stderr
 
 
 def _codex_overrides(args):
@@ -382,7 +338,7 @@ def test_a_claude_or_codex_spawn_the_gateway_cannot_answer_for_is_refused(gatewa
     gateway.status = 500
     with pytest.raises(RuntimeError, match="not started"):
         if prepare == "claude":
-            role_guard.prepare_claude(tmp_path, tmp_path / "skills", "m", gateway.url, "t")
+            role_guard.prepare_claude(tmp_path, "m", gateway.url, "t")
         else:
             role_guard.prepare_codex(tmp_path, "m", gateway.url, "t")
 
@@ -422,8 +378,7 @@ def test_a_gateway_that_no_longer_knows_a_managed_mind_does_not_unmanage_it(gate
 
 def test_a_claude_guard_asks_about_its_own_mind_whatever_the_pane_inherited(gateway, tmp_path):
     gateway.grants = _managed(tools=["files"])
-    args, extra = role_guard.prepare_claude(tmp_path / "cfg", tmp_path / "cfg" / "skills",
-                                            "mind-1", gateway.url, "t", python=sys.executable)
+    args, extra = role_guard.prepare_claude(tmp_path / "cfg", "mind-1", gateway.url, "t", python=sys.executable)
     settings = json.loads(Path(args[1]).read_text())
     command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     # A pane's environment: nothing of the mind's but what the spawn handed it.
@@ -442,8 +397,7 @@ def test_a_claude_guard_asks_about_its_own_mind_whatever_the_pane_inherited(gate
 def test_a_guard_whose_interpreter_has_gone_refuses_the_tool(gateway, tmp_path, harness):
     gone = str(tmp_path / "venv" / "bin" / "python")
     if harness == "claude":
-        args, extra = role_guard.prepare_claude(tmp_path, tmp_path / "skills", "m",
-                                                gateway.url, "t", python=gone)
+        args, extra = role_guard.prepare_claude(tmp_path, "m", gateway.url, "t", python=gone)
         command = json.loads(Path(args[1]).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     else:
         args, extra = role_guard.prepare_codex(tmp_path, "m", gateway.url, "t", python=gone)

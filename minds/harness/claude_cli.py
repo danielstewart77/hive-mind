@@ -406,7 +406,7 @@ def _role_guard(env: dict[str, str], timeout: float = 10.0) -> tuple[list[str], 
     its roles is not run.
     """
     return role_guard.prepare_claude(
-        CONFIG_DIR, CONFIG_DIR / "skills", env.get("MIND_ID") or MIND_ID,
+        CONFIG_DIR, env.get("MIND_ID") or MIND_ID,
         env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
         # Story 10.18.15: the hooks and skills its roles name arrive here.
         on_grants=lambda grants: role_files.provision("claude", CONFIG_DIR, grants, log=log,
