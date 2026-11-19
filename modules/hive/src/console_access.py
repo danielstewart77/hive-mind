@@ -260,6 +260,11 @@ TABLE.add(
     "DELETE /api/settings/hive-comms/sessions/{session_id}",
 )
 TABLE.add(Rule(OWNER, param="request_id"), "GET /api/operations/{request_id}")
+TABLE.add(Rule(OWNER, param='mind_id'),
+          'POST /api/minds/{mind_id}/rename',
+          'GET /api/minds/{mind_id}/rename',
+          'POST /api/minds/{mind_id}/rename/recover',
+          'POST /api/minds/{mind_id}/rename/cancel')
 
 # The canvas snapshot and design sessions are also reached by a mind with a
 # bearer of its own, which the middleware verifies.

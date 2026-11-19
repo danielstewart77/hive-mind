@@ -93,8 +93,10 @@ def _mind_creation_records_in_a_folder_the_test_owns(tmp_path, monkeypatch):
     """The record a creation is made under defaults to `/data`, which inside
     the console's own container is the live one."""
     import mind_creation
+    import mind_rename
 
     monkeypatch.setattr(mind_creation, "CREATION_DIR", tmp_path / "mind-creations")
+    monkeypatch.setattr(mind_rename, 'RENAME_DIR', tmp_path / 'mind-renames')
 
 
 @pytest.fixture(autouse=True)
