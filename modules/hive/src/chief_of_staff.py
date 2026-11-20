@@ -129,6 +129,14 @@ LIVE_WITHIN = AGENT_TIMEOUT
 #: still the answer to "which session", just not all of it.
 NAME_LIMIT = 24
 
+#: How much of a name a tile draws beneath its number: a very few words,
+#: because the number is what Daniel calls the work by and the name is only
+#: there to say which one it is (Daniel, 2026-11-20). Whole words, never
+#: more than this many and never longer than this many characters, which is
+#: one line and a bit of a 100-pixel text column at 11px.
+TILE_WORDS = 4
+TILE_LIMIT = 24
+
 #: The root remains present to anchor the work even before a chief is chosen.
 CHIEF_ID = "chief"
 
@@ -447,6 +455,27 @@ def _unique(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _cut(text: str, limit: int) -> str:
     """The text, or as much as fits with an ellipsis saying it was cut."""
     return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+
+def _few_words(text: str) -> str:
+    """The first few whole words of a name, with an ellipsis if any went."""
+    words = text.split()
+    kept: list[str] = []
+    for word in words[:TILE_WORDS]:
+        if kept and len(" ".join([*kept, word])) > TILE_LIMIT:
+            break
+        kept.append(word)
+    out = _cut(" ".join(kept), TILE_LIMIT)
+    if len(kept) < len(words) and not out.endswith("\u2026"):
+        out += "\u2026"
+    return out
+
+
+def _tile(number: str, name: str) -> str:
+    """What a tile says, and all it says: the work's readable backlog number
+    first, then a few words of its name on the line beneath. Work with no
+    place on the board has no number, and says only its few words."""
+    return "\n".join(part for part in (number, _few_words(name)) if part)
 
 
 def _brief_words(brief: str) -> str:
@@ -853,6 +882,16 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
     _place_work(nodes, parent, board_nodes, board_parent, claimed, extra,
                 by_id, kinds, numbers)
     _lend_activity(nodes, parent)
+
+    # What each tile says. A ledger task on a board item is called by that
+    # item's number, so the few words beside it are that item's name too:
+    # a number and a name that belong to different things would be two
+    # labels, not one. `label` stays the whole name, for the detail line.
+    for node_id, node in nodes.items():
+        item_id = node.get("board_item") or node_id
+        item = by_id.get(item_id) or board_tasks.get(item_id)
+        node["tile"] = (_tile(numbers.get(item_id, ""), item["title"])
+                        if item else _tile("", node["label"]))
 
     # A story still being worked is not finished, whatever the board says:
     # the ledger is the authority on whether a task is over.
