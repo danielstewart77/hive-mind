@@ -274,10 +274,16 @@ raw SQL against `work_items`, which skips the ordering, the numbering and
 the write lock `kanban_data` holds above that table. It has no fallback to
 the house tokens, for the reason `DESIGN_PUSH_TOKEN` gives, and it is not
 `HIVE_SITE_ADMIN_TOKEN`, which also opens the memory store. It admits the
-board's reads, creates and updates. It does not admit
-`DELETE /api/kanban/{kind}/{record_id}`: finished work goes to `done` and
-stays on the board, so a mind working the backlog never needs the one
-operation that destroys a row and everything under it.
+whole board, `DELETE /api/kanban/{kind}/{record_id}` included: the chief of
+staff has full create, read, update and delete.
+
+`BOARD_PLANNER_TOKEN` is the board credential without the delete, for a
+mind that plans the backlog and is not the chief of staff. It reaches every
+board route `BOARD_PUSH_TOKEN` reaches except the delete, which answers it
+with 401. Issue it as its own value: the guard matches on the value, so one
+equal to `BOARD_PUSH_TOKEN` is that token and deletes. The mind's board tool reads
+`BOARD_PUSH_TOKEN` from its own environment, so the mind's compose file
+hands it this value under that name.
 
 ## Test
 

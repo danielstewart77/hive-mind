@@ -124,10 +124,32 @@ def board_token() -> str:
     return os.getenv("BOARD_PUSH_TOKEN", "")
 
 
+def board_planner_token() -> str:
+    """The credential a Mind plans the backlog with: the board, less the delete.
+
+    Two minds work the board and they are not trusted with the same thing.
+    The chief of staff holds `BOARD_PUSH_TOKEN` and may delete; a mind whose
+    job is planning — writing epics, features and stories — reads, creates
+    and updates and never needs the one operation that destroys a row and
+    everything under it (Daniel, 2026-11-20). One shared value could not say
+    that, so this is a second value naming every board route but the delete.
+
+    It has to be issued as a value of its own. The guard matches on the
+    value, so an install that sets this to the same string as
+    `BOARD_PUSH_TOKEN` has issued one credential under two names, and its
+    holder deletes.
+
+    Unset means no bearer is admitted through it, which is where an install
+    with no planning mind sits.
+    """
+    return os.getenv("BOARD_PLANNER_TOKEN", "")
+
+
 CANVAS = "canvas"
 DESIGN = "design"
 CUTOVER = "cutover"
 BOARD = "board"
+BOARD_PLANNER = "board_planner"
 
 # ── the table ──────────────────────────────────────────────────────────
 
@@ -152,6 +174,10 @@ TABLE = RouteTable(
         ),
         BOARD: BearerToken(
             board_token, unset_status=401,
+            unset_message="Authentication required",
+        ),
+        BOARD_PLANNER: BearerToken(
+            board_planner_token, unset_status=401,
             unset_message="Authentication required",
         ),
     },
@@ -297,21 +323,23 @@ TABLE.add(
 )
 
 # The board, reached by a signed-in admin in a browser and by a Mind with
-# the board bearer. The whole board is one read (`/api/kanban/data`), which
-# the one-database check also makes, so that route names both credentials;
-# the rest are the board's alone.
+# one of the two board bearers. The whole board is one read
+# (`/api/kanban/data`), which the one-database check also makes, so that
+# route names its credential too; the rest are the board's alone.
 #
-# `DELETE /api/kanban/{kind}/{record_id}` is here too (Daniel, 2026-11-19:
-# the chief of staff has full create, read, update and delete on the board).
-# It takes the row and everything under it; `?only_if_empty=true` makes it
+# The two board bearers differ by exactly one route. The chief of staff has
+# full create, read, update and delete on the board (Daniel, 2026-11-19); a
+# planning mind has everything but the delete (Daniel, 2026-11-20). So
+# `DELETE /api/kanban/{kind}/{record_id}` names the full bearer alone. It
+# takes the row and everything under it; `?only_if_empty=true` makes it
 # refuse a row with anything under it, which the board tool sends unless
 # the caller asked for the cascade.
 TABLE.add(
-    Rule(ADMIN, bearer=(CUTOVER, BOARD)),
+    Rule(ADMIN, bearer=(CUTOVER, BOARD, BOARD_PLANNER)),
     "GET /api/kanban/data",
 )
 TABLE.add(
-    Rule(ADMIN, bearer=BOARD),
+    Rule(ADMIN, bearer=(BOARD, BOARD_PLANNER)),
     "GET /api/kanban/numbers",
     "GET /api/kanban/relations/{record_id}",
     "GET /api/kanban/{kind}/{record_id}/descendants",
@@ -320,11 +348,14 @@ TABLE.add(
     "POST /api/kanban/stories",
     "POST /api/kanban/tasks",
     "PATCH /api/kanban/{kind}/{record_id}",
-    "DELETE /api/kanban/{kind}/{record_id}",
     # An item's files.
     "GET /api/kanban/items/{record_id}/attachments",
     "POST /api/kanban/items/{record_id}/attachments",
     "GET /api/kanban/items/{record_id}/attachments/{attachment_id}",
+)
+TABLE.add(
+    Rule(ADMIN, bearer=BOARD),
+    "DELETE /api/kanban/{kind}/{record_id}",
 )
 
 # House-wide: named so the table is complete, and so nobody mistakes a
