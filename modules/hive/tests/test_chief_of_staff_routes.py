@@ -54,6 +54,15 @@ def test_the_page_renders_and_is_reachable_from_the_sidebar(signed_in):
     assert 'href="/chief-of-staff"' in body.text
 
 
+def test_chief_of_staff_is_the_first_entry_in_the_sidebar(signed_in):
+    body = signed_in.get("/overview").text
+
+    nav = body[body.index('class="console-nav"'):]
+    first = nav[nav.index('<a href="'):].split('"')[1]
+
+    assert first == "/chief-of-staff"
+
+
 def test_one_call_answers_with_the_tree_the_barrel_and_the_questions(
         signed_in):
     """Three calls could be three different moments and disagree."""

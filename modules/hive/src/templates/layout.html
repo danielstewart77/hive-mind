@@ -48,6 +48,7 @@
         </div>
 
         <div class="console-nav" role="navigation" aria-label="Main navigation">
+            {% if feature_enabled['chief-of-staff'] %}<a href="/chief-of-staff" class="console-nav-link {% if path == '/chief-of-staff' %}is-active{% endif %}"><i data-lucide="users-round"></i><span>Chief of Staff</span></a>{% endif %}
             {% if feature_enabled['overview'] %}<a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>{% endif %}
             {% if feature_enabled['minds'] %}<a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>{% endif %}
             {% if feature_enabled['usage'] %}<a href="/usage" class="console-nav-link {% if path.startswith('/usage') %}is-active{% endif %}"><i data-lucide="gauge"></i><span>Usage</span></a>{% endif %}
@@ -71,8 +72,7 @@
             {% if feature_enabled['training'] %}<a href="/training" class="console-nav-link {% if path == '/training' %}is-active{% endif %}"><i data-lucide="graduation-cap"></i><span>Training</span></a>{% endif %}
             {% if feature_enabled['harness-runs'] %}<a href="/harness-runs" class="console-nav-link {% if path == '/harness-runs' %}is-active{% endif %}"><i data-lucide="flask-conical"></i><span>Harness runs</span></a>{% endif %}
 
-            {% if feature_enabled['chief-of-staff'] or feature_enabled['kanban'] or feature_enabled['canvas'] or feature_enabled['design'] %}<p class="console-nav-label">Workspace</p>{% endif %}
-            {% if feature_enabled['chief-of-staff'] %}<a href="/chief-of-staff" class="console-nav-link {% if path == '/chief-of-staff' %}is-active{% endif %}"><i data-lucide="users-round"></i><span>Chief of Staff</span></a>{% endif %}
+            {% if feature_enabled['kanban'] or feature_enabled['canvas'] or feature_enabled['design'] %}<p class="console-nav-label">Workspace</p>{% endif %}
             {% if feature_enabled['kanban'] %}<div class="console-nav-flyout">
                 <button type="button" class="console-nav-link console-nav-toggle{% if path.startswith('/kanban') %} is-active{% endif %}" aria-expanded="false" data-nav-flyout-toggle><i data-lucide="square-kanban"></i><span>Kanban</span><i class="nav-flyout-caret" data-lucide="chevron-right"></i></button>
                 <div class="console-nav-submenu">
