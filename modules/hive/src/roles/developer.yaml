@@ -8,6 +8,7 @@ tools:
 skills:
   - code
   - code-review
+  - end-turn
   - security-review
   - simplify
 hooks: []

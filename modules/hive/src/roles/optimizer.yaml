@@ -4,6 +4,7 @@ tools:
   - shell
   - files
 skills:
+  - end-turn
   - optimize-context
   - prune-memory
   - skill-curator

@@ -7,5 +7,6 @@ tools:
   - web
 skills:
   - add-hive-tool
+  - end-turn
   - restart-service
 hooks: []
