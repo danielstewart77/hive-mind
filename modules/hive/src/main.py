@@ -846,6 +846,7 @@ async def kanban_backlog_page(request: Request):
 _BEARER_USERS = {
     console_access.CUTOVER: "cutover-check",
     console_access.BOARD: "board-bearer",
+    console_access.BOARD_PLANNER: "board-planner-bearer",
 }
 
 

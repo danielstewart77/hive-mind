@@ -544,6 +544,61 @@ def test_a_mind_deletes_a_row_and_what_is_under_it_with_the_board_bearer(
     assert feature_id not in {row["id"] for row in after["features"]}, after
 
 
+def test_a_planning_mind_reads_and_writes_the_board_with_the_planner_bearer(
+        builtin_console, monkeypatch):
+    """A mind that plans the backlog and is not the chief of staff holds a
+    second board credential (Daniel, 2026-11-20). It lists the board, creates
+    under it and updates a row with no session, and what it wrote is what the
+    board then says.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    monkeypatch.setenv("BOARD_PLANNER_TOKEN", "a-planner-token")
+    mind = builtin_console.client()
+    planner = {"Authorization": "Bearer a-planner-token"}
+
+    created = mind.post("/api/kanban/epics",
+                        json={"title": "An epic the planner opened"},
+                        headers=planner)
+    assert created.status_code == 200, created.text
+    epic_id = created.json()["id"]
+
+    renamed = mind.patch(f"/api/kanban/epics/{epic_id}",
+                         json={"title": "Renamed by the planner"},
+                         headers=planner)
+    assert renamed.status_code == 200, renamed.text
+
+    listing = mind.get("/api/kanban/data", headers=planner)
+    assert listing.status_code == 200, listing.text
+    assert [row["title"] for row in listing.json()["epics"]] == [
+        "Renamed by the planner"]
+
+
+def test_the_planner_bearer_is_refused_the_delete_and_the_row_stays(
+        builtin_console, monkeypatch):
+    """The one route the two board credentials differ by. The planner's
+    delete is refused, the row it named is still on the board, and the same
+    delete with the chief of staff's token takes it.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    monkeypatch.setenv("BOARD_PLANNER_TOKEN", "a-planner-token")
+    mind = builtin_console.client()
+    planner = {"Authorization": "Bearer a-planner-token"}
+    full = {"Authorization": "Bearer a-board-token"}
+    epic_id = mind.post("/api/kanban/epics", json={"title": "Staying"},
+                        headers=planner).json()["id"]
+
+    refused = mind.delete(f"/api/kanban/epics/{epic_id}", headers=planner,
+                          follow_redirects=False)
+
+    assert refused.status_code == 401, refused.text
+    after = mind.get("/api/kanban/data", headers=planner).json()
+    assert [row["id"] for row in after["epics"]] == [epic_id]
+
+    removed = mind.delete(f"/api/kanban/epics/{epic_id}", headers=full)
+    assert removed.status_code == 200, removed.text
+    assert mind.get("/api/kanban/data", headers=full).json()["epics"] == []
+
+
 def test_the_board_bearer_is_not_a_way_into_the_console(
         builtin_console, monkeypatch):
     """The token is not a session: it admits the board and nothing else on
