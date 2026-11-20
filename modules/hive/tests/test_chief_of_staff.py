@@ -602,6 +602,75 @@ async def test_a_session_name_is_cut_to_what_a_card_can_hold():
     assert len(kept) <= 80
 
 
+# ------------------------------------------------------------ what a tile says
+#
+# Daniel, 2026-11-20: a tile says the work's readable backlog number first,
+# then a very few words of its name, and nothing else.
+
+
+async def test_a_story_tile_says_its_backlog_number_then_its_name():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story("The tree",
+                                           feature_id=feature["id"])
+    await _task("Chief of staff page", board_item=feature["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    number = (await kanban_data.backlog_numbers())[story["id"]]
+    assert number.count(".") == 2
+    assert _by_id(tree, story["id"])["tile"] == f"{number}\nThe tree"
+
+
+async def test_a_task_on_a_board_item_is_called_by_that_items_number_and_name():
+    """The number and the words beside it belong to the same thing, and the
+    session on the work is not a third thing on the tile."""
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    mind = await _mind("Cypher")
+    session = await _named_session(mind, name="Late shift")
+    task = await _task("Watch the page get built", board_item=feature["id"])
+    await staff.attach_session(task["id"], session, now=NOW)
+
+    tree = await cos.get_tree(now=NOW)
+
+    number = (await kanban_data.backlog_numbers())[feature["id"]]
+    assert _by_id(tree, task["id"])["tile"] == f"{number}\nVisualization"
+
+
+async def test_a_task_on_a_board_task_is_called_by_that_tasks_number():
+    item = await kanban_data.create_task("Tidy the tiles")
+    task = await _task("Ledger name for it", board_item=item["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    number = (await kanban_data.backlog_numbers())[item["id"]]
+    assert _by_id(tree, task["id"])["tile"] == f"{number}\nTidy the tiles"
+
+
+async def test_a_tile_keeps_only_the_first_few_words_of_a_long_name():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    story = await kanban_data.create_story(
+        "Show the id and then a short name on every tile of the board",
+        feature_id=feature["id"])
+    await _task("Chief of staff page", board_item=feature["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    number = (await kanban_data.backlog_numbers())[story["id"]]
+    assert _by_id(tree, story["id"])["tile"] == (
+        f"{number}\nShow the id and\u2026")
+
+
+async def test_work_with_no_place_on_the_board_says_only_its_few_words():
+    task = await _task("Fix the printer")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _by_id(tree, task["id"])["tile"] == "Fix the printer"
+
+
 # ------------------------------------------------------------- the chief's own
 #
 # The root is a mind too, and Daniel's first protection is about a mind that

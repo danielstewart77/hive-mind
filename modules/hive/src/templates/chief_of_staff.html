@@ -371,19 +371,18 @@
   function elements(data) {
     var out = [];
     data.nodes.forEach(function (n) {
+      // A tile says two things and no more: the work's backlog number, then
+      // a few words of its name (Daniel, 2026-11-20). The payload composes
+      // them as `tile`. The whole name and the session on the work are what
+      // a tap shows beneath the tree, not what the tile carries.
       var label = n.kind === 'chief'
         ? n.label + (n.questions ? '  (' + n.questions + '?)' : '')
-        : n.label;
-      // The session name sits beside the work's own name rather than
-      // replacing it: the task name is what the work is, the session name is
-      // which conversation is on it, and Daniel asked to see the second
-      // without losing the first. It is on this node only — a child of an
-      // assigned item carries no name, which is the payload's doing.
+        : (n.tile || n.label);
       var names = n.session_names || [];
-      if (names.length) label = label + '\n· ' + names[0];
       var face = (n.minds || [])[0] || null;
       out.push({ data: {
         id: n.id, label: label, kind: n.kind,
+        full: (n.board_number ? n.board_number + ' ' : '') + n.label + (names.length ? ' · ' + names[0] : ''),
         activity: n.activity || n.status || '',
         workKind: n.work_kind || '',
         active: n.active === true,
@@ -709,7 +708,7 @@
       cy.on('tap', 'node', function (evt) {
         var d = evt.target.data();
         document.getElementById('cos-detail').textContent =
-          d.detail ? d.label.split('\n')[0] + ' — ' + d.detail : d.label;
+          d.detail ? (d.full || d.label) + ' — ' + d.detail : (d.full || d.label);
       });
       return;
     }
