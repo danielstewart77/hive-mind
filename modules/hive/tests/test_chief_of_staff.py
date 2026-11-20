@@ -671,6 +671,16 @@ async def test_work_with_no_place_on_the_board_says_only_its_few_words():
     assert _by_id(tree, task["id"])["tile"] == "Fix the printer"
 
 
+async def test_a_name_that_is_one_long_word_is_cut_to_what_a_tile_can_hold():
+    """Spelled out rather than read off `cos.TILE_LIMIT`: a tile's text
+    column holds about twenty characters a line."""
+    task = await _task("x" * 60)
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _by_id(tree, task["id"])["tile"] == "x" * 23 + "\u2026"
+
+
 # ------------------------------------------------------------- the chief's own
 #
 # The root is a mind too, and Daniel's first protection is about a mind that
