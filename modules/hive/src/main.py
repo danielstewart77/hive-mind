@@ -393,7 +393,7 @@ async def _render_template(request: Request, template_name: str,
     return templates.TemplateResponse(request, template_name, context)
 
 
-def _safe_next_path(next_path: str | None, fallback: str = "/overview") -> str:
+def _safe_next_path(next_path: str | None, fallback: str = "/") -> str:
     if next_path and next_path.startswith("/") and not next_path.startswith("//"):
         return next_path
     return fallback
@@ -512,11 +512,19 @@ async def home(request: Request):
         return _login_redirect_for(request)
     if user.get("must_change"):
         return RedirectResponse(url="/password", status_code=303)
-    return RedirectResponse(url="/overview", status_code=303)
+    return RedirectResponse(url=await _landing_path(user), status_code=303)
+
+
+async def _landing_path(user: dict) -> str:
+    """Where the console opens: the Chief of Staff page for whoever may see
+    it and has not hidden it, Overview for everyone else."""
+    if user.get("is_admin") and (await features.enabled(user))["chief-of-staff"]:
+        return "/chief-of-staff"
+    return "/overview"
 
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, next: str = "/overview"):
+async def login_page(request: Request, next: str = "/"):
     current_user = await get_current_user_from_request(request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
@@ -529,7 +537,7 @@ async def _login_page(request: Request, *, status_code: int = 200,
         request,
         "login.html",
         current_user=None,
-        sign_in_methods=sso.sign_in_methods(context.get("next_path") or "/overview"),
+        sign_in_methods=sso.sign_in_methods(context.get("next_path") or "/"),
         **context,
     )
     response.status_code = status_code
@@ -541,7 +549,7 @@ async def login_submit(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
-    next: str = Form("/overview"),
+    next: str = Form("/"),
 ):
     account_store = auth.get_store()
     try:
@@ -607,7 +615,7 @@ async def _sso_refused(request: Request, exc: Exception, via: str,
 
 
 @app.get(sso.MICROSOFT_PATH, response_class=HTMLResponse)
-async def login_microsoft(request: Request, next: str = "/overview"):
+async def login_microsoft(request: Request, next: str = "/"):
     config = sso.microsoft_config()
     if config is None:
         raise HTTPException(status_code=404)
@@ -632,7 +640,7 @@ async def login_microsoft_callback(
         raise HTTPException(status_code=404)
     flow_cookie = request.cookies.get(sso.FLOW_COOKIE_NAME, "")
     next_path = str((await auth.read_flow(flow_cookie) or {}).get("next")
-                    or "/overview")
+                    or "/")
     account_store = auth.get_store()
     try:
         if error:
@@ -658,7 +666,7 @@ _NO_DOMAIN_TICKET = (
 
 
 @app.get(sso.WINDOWS_PATH, response_class=HTMLResponse)
-async def login_windows(request: Request, next: str = "/overview"):
+async def login_windows(request: Request, next: str = "/"):
     config = sso.windows_config()
     if config is None:
         raise HTTPException(status_code=404)
@@ -743,7 +751,7 @@ async def password_submit(
         )
     except auth.AuthError as exc:
         return await _password_page(request, status_code=exc.status, error=exc.message)
-    response = RedirectResponse(url="/overview", status_code=303)
+    response = RedirectResponse(url="/", status_code=303)
     set_session_cookie(request, response, token)
     log_event(log, "auth.password.changed", **_actor_fields(user))
     return response

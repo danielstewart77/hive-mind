@@ -10,7 +10,7 @@
         <div class="login-error">{{ error }}</div>
         {% endif %}
         <form action="/login" method="post" class="login-form">
-            <input type="hidden" name="next" value="{{ next_path or '/overview' }}">
+            <input type="hidden" name="next" value="{{ next_path or '/' }}">
             <label for="username">Username</label>
             <input id="username" name="username" type="text" autocomplete="username" required>
             <label for="password">Password</label>
