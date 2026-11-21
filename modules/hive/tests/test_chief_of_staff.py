@@ -672,6 +672,18 @@ async def test_work_with_no_place_on_the_board_says_only_its_few_words():
     assert _by_id(tree, task["id"])["tile"] == "Fix the printer"
 
 
+async def test_the_words_beneath_a_tiles_id_are_that_items_name_alone():
+    """The page draws the ID apart from the name, so the name it is handed
+    to put beneath must not carry the ID a second time."""
+    item = await kanban_data.create_task(
+        "Show the id and then a short name on every tile of the board")
+    task = await _task("Ledger name for it", board_item=item["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _by_id(tree, task["id"])["tile_name"] == "Show the id and\u2026"
+
+
 async def test_a_name_that_is_one_long_word_is_cut_to_what_a_tile_can_hold():
     """Spelled out rather than read off `cos.TILE_LIMIT`: a tile's text
     column holds about twenty characters a line."""
