@@ -26,13 +26,46 @@ def _authed_client(tmp_path, monkeypatch):
     return client
 
 
-def test_home_redirects_authenticated_owner_to_overview(tmp_path, monkeypatch):
+def test_the_console_opens_on_chief_of_staff_for_an_admin(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
 
     response = client.get("/", follow_redirects=False)
 
     assert response.status_code == 303
+    assert response.headers["location"] == "/chief-of-staff"
+
+
+def test_the_console_opens_on_overview_for_an_account_that_may_not_see_chief_of_staff(
+        monkeypatch):
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    user = run(auth.create_user("landing-member", "secret-pass", replace=True))
+    client = TestClient(main_mod.app)
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(user)))
+
+    response = client.get("/", follow_redirects=False)
+
     assert response.headers["location"] == "/overview"
+
+
+def test_the_console_opens_on_overview_for_an_admin_who_hid_chief_of_staff(
+        tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    client.put("/api/settings/features", json={"chief-of-staff": False})
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.headers["location"] == "/overview"
+
+
+def test_signing_in_with_no_destination_lands_on_chief_of_staff(monkeypatch):
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    run(auth.create_user("landing-admin", "secret-pass", is_admin=True, replace=True))
+    client = TestClient(main_mod.app)
+
+    response = client.post(
+        "/login", data={"username": "landing-admin", "password": "secret-pass"})
+
+    assert response.url.path == "/chief-of-staff"
 
 
 def test_login_uses_edge_mind_taxonomy(tmp_path, monkeypatch):

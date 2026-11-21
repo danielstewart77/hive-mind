@@ -7,6 +7,7 @@ import store
 
 # Stable IDs, shared by the settings list and the sidebar.
 FEATURES = [
+    ('chief-of-staff', 'Chief of Staff', True),
     ('overview', 'Overview', False), ('minds', 'Minds', False),
     ('usage', 'Usage', False), ('roles', 'Roles', True),
     ('bots', 'Bots', True), ('activity', 'Activity', True),
@@ -14,7 +15,7 @@ FEATURES = [
     ('edge-minds', 'Edge Minds', True), ('capability-nodes', 'Capability Nodes', True),
     ('graph', 'Graph', True), ('memory', 'Memory', True), ('rules', 'Rules', True),
     ('sentinel', 'Sentinel', True), ('training', 'Training', True),
-    ('harness-runs', 'Harness runs', True), ('chief-of-staff', 'Chief of Staff', True),
+    ('harness-runs', 'Harness runs', True),
     ('kanban', 'Kanban', True), ('kanban-backlog', 'Kanban · Backlog', True),
     ('kanban-board', 'Kanban · Board', True), ('canvas', 'Canvas', True), ('design', 'Design', True),
     ('terminal', 'Terminal', False), ('setup', 'Setup guide', True),

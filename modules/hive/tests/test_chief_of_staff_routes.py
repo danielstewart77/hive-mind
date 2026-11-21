@@ -63,6 +63,15 @@ def test_chief_of_staff_is_the_first_entry_in_the_sidebar(signed_in):
     assert first == "/chief-of-staff"
 
 
+def test_chief_of_staff_is_the_first_choice_in_the_features_list(signed_in):
+    body = signed_in.get("/settings/features").text
+
+    form = body[body.index('id="feature-form"'):]
+    first = form[form.index('name="'):].split('"')[1]
+
+    assert first == "chief-of-staff"
+
+
 def test_one_call_answers_with_the_tree_the_barrel_and_the_questions(
         signed_in):
     """Three calls could be three different moments and disagree."""

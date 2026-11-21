@@ -143,9 +143,9 @@ def windows_config() -> WindowsConfig | None:
     )
 
 
-def sign_in_methods(next_path: str = "/overview") -> list[dict[str, str]]:
+def sign_in_methods(next_path: str = "/") -> list[dict[str, str]]:
     """What the sign-in page offers beside the password form."""
-    query = "" if next_path == "/overview" else "?" + urllib.parse.urlencode({"next": next_path})
+    query = "" if next_path == "/" else "?" + urllib.parse.urlencode({"next": next_path})
     methods = list(auth.SIGN_IN_METHODS)
     if microsoft_config() is not None:
         methods.append({"label": "Sign in with Microsoft", "href": MICROSOFT_PATH + query})
