@@ -377,6 +377,17 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  // The few words under a tile's ID. A payload from before `tile_name`
+  // existed carries only `tile`, whose first line is the ID: that line is
+  // dropped when the ID is drawn apart, or the tile would say it twice.
+  function tileName(n, itemId) {
+    if (n.tile_name !== undefined && n.tile_name !== null) return n.tile_name;
+    var tile = n.tile || n.label;
+    if (itemId && tile === itemId) return '';
+    return itemId && tile.indexOf(itemId + '\n') === 0
+      ? tile.slice(itemId.length + 1) : tile;
+  }
+
   function elements(data) {
     var out = [];
     data.nodes.forEach(function (n) {
@@ -389,7 +400,7 @@
         ? String(n.item_number) : '';
       var label = n.kind === 'chief'
         ? n.label + (n.questions ? '  (' + n.questions + '?)' : '')
-        : (n.tile_name || n.tile || n.label);
+        : tileName(n, itemId);
       var names = n.session_names || [];
       var face = (n.minds || [])[0] || null;
       out.push({ data: {
@@ -510,7 +521,7 @@
         'text-max-width': '104px' } },
     // The ID sits across the top of a tile that has one, so the few words
     // of the name move down to make room for it.
-    { selector: 'node[?itemId]', style: { 'text-margin-y': 8 } },
+    { selector: 'node[?itemId]', style: { 'text-margin-y': 6 } },
     { selector: 'node[kind = "story"][?itemId]', style: {
         'text-margin-y': 7 } },
     // A sub-agent is its robot and nothing else: no circle, no card, no
