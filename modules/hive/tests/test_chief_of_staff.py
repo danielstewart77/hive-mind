@@ -604,11 +604,12 @@ async def test_a_session_name_is_cut_to_what_a_card_can_hold():
 
 # ------------------------------------------------------------ what a tile says
 #
-# Daniel, 2026-11-20: a tile says the work's readable backlog number first,
-# then a very few words of its name, and nothing else.
+# Daniel, 2026-11-21: a tile says the work's whole-number item ID first - the
+# ID column of the backlog, not its place in the order - then a very few
+# words of its name, and nothing else.
 
 
-async def test_a_story_tile_says_its_backlog_number_then_its_name():
+async def test_a_story_tile_says_its_item_id_then_its_name():
     epic = await kanban_data.create_epic("Chief of Staff")
     feature = await kanban_data.create_feature(epic["id"], "Visualization")
     story = await kanban_data.create_story("The tree",
@@ -617,13 +618,13 @@ async def test_a_story_tile_says_its_backlog_number_then_its_name():
 
     tree = await cos.get_tree(now=NOW)
 
-    number = (await kanban_data.backlog_numbers())[story["id"]]
-    assert number.count(".") == 2
+    number = story["item_number"]
+    assert isinstance(number, int)
     assert _by_id(tree, story["id"])["tile"] == f"{number}\nThe tree"
 
 
-async def test_a_task_on_a_board_item_is_called_by_that_items_number_and_name():
-    """The number and the words beside it belong to the same thing, and the
+async def test_a_task_on_a_board_item_is_called_by_that_items_id_and_name():
+    """The ID and the words beside it belong to the same thing, and the
     session on the work is not a third thing on the tile."""
     epic = await kanban_data.create_epic("Chief of Staff")
     feature = await kanban_data.create_feature(epic["id"], "Visualization")
@@ -634,17 +635,17 @@ async def test_a_task_on_a_board_item_is_called_by_that_items_number_and_name():
 
     tree = await cos.get_tree(now=NOW)
 
-    number = (await kanban_data.backlog_numbers())[feature["id"]]
+    number = feature["item_number"]
     assert _by_id(tree, task["id"])["tile"] == f"{number}\nVisualization"
 
 
-async def test_a_task_on_a_board_task_is_called_by_that_tasks_number():
+async def test_a_task_on_a_board_task_is_called_by_that_tasks_id():
     item = await kanban_data.create_task("Tidy the tiles")
     task = await _task("Ledger name for it", board_item=item["id"])
 
     tree = await cos.get_tree(now=NOW)
 
-    number = (await kanban_data.backlog_numbers())[item["id"]]
+    number = item["item_number"]
     assert _by_id(tree, task["id"])["tile"] == f"{number}\nTidy the tiles"
 
 
@@ -658,7 +659,7 @@ async def test_a_tile_keeps_only_the_first_few_words_of_a_long_name():
 
     tree = await cos.get_tree(now=NOW)
 
-    number = (await kanban_data.backlog_numbers())[story["id"]]
+    number = story["item_number"]
     assert _by_id(tree, story["id"])["tile"] == (
         f"{number}\nShow the id and\u2026")
 

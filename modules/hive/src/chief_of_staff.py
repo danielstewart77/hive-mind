@@ -129,8 +129,8 @@ LIVE_WITHIN = AGENT_TIMEOUT
 #: still the answer to "which session", just not all of it.
 NAME_LIMIT = 24
 
-#: How much of a name a tile draws beneath its number: a very few words,
-#: because the number is what Daniel calls the work by and the name is only
+#: How much of a name a tile draws beneath its ID: a very few words,
+#: because the ID is what Daniel calls the work by and the name is only
 #: there to say which one it is (Daniel, 2026-11-20). Whole words, never
 #: more than this many and never longer than this many characters, which is
 #: one line and a bit of a 100-pixel text column at 11px.
@@ -471,11 +471,14 @@ def _few_words(text: str) -> str:
     return out
 
 
-def _tile(number: str, name: str) -> str:
-    """What a tile says, and all it says: the work's readable backlog number
-    first, then a few words of its name on the line beneath. Work with no
-    place on the board has no number, and says only its few words."""
-    return "\n".join(part for part in (number, _few_words(name)) if part)
+def _tile(number: Any, name: str) -> str:
+    """What a tile says, and all it says: the work's whole-number item ID
+    first - the ID column of the backlog, not its place in the order
+    (Daniel, 2026-11-21) - then a few words of its name on the line beneath.
+    Work with no place on the board has no ID, and says only its few
+    words."""
+    return "\n".join(part for part in (str(number or ""), _few_words(name))
+                     if part)
 
 
 def _brief_words(brief: str) -> str:
@@ -884,13 +887,14 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
     _lend_activity(nodes, parent)
 
     # What each tile says. A ledger task on a board item is called by that
-    # item's number, so the few words beside it are that item's name too:
-    # a number and a name that belong to different things would be two
-    # labels, not one. `label` stays the whole name, for the detail line.
+    # item's ID, so the few words beside it are that item's name too: an ID
+    # and a name that belong to different things would be two labels, not
+    # one. `label` stays the whole name, for the detail line.
     for node_id, node in nodes.items():
         item_id = node.get("board_item") or node_id
         item = by_id.get(item_id) or board_tasks.get(item_id)
-        node["tile"] = (_tile(numbers.get(item_id, ""), item["title"])
+        node["item_number"] = item.get("item_number") if item else None
+        node["tile"] = (_tile(node["item_number"], item["title"])
                         if item else _tile("", node["label"]))
 
     # A story still being worked is not finished, whatever the board says:
