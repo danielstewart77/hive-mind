@@ -46,6 +46,15 @@
   .cos-face img { width:100%; height:100%; object-fit:cover; display:block; }
   .cos-face span { color:#e2e8f0; font-weight:600; line-height:1; }
   .cos-kind svg, .cos-face img { pointer-events:none; }
+  /* The work's whole-number item ID, drawn here rather than as a line of
+     the node's label: a Cytoscape label is one size and one weight, and at
+     the size of the name the ID could not be picked out (Daniel,
+     2026-11-21). It is what the work is called by, so it is the largest
+     text a tile carries. */
+  .cos-id {
+    color:#f8fafc; font-weight:700; line-height:1; text-align:center;
+    white-space:nowrap; font-variant-numeric:tabular-nums;
+  }
   .cos-spin {
     border-radius:50%; border-style:solid; border-color:rgba(34,197,94,0.25);
     border-top-color:#22c55e; animation:cos-rotate .9s linear infinite;
@@ -372,16 +381,19 @@
     var out = [];
     data.nodes.forEach(function (n) {
       // A tile says two things and no more: the work's whole-number item ID, then
-      // a few words of its name (Daniel, 2026-11-20). The payload composes
-      // them as `tile`. The whole name and the session on the work are what
-      // a tap shows beneath the tree, not what the tile carries.
+      // a few words of its name (Daniel, 2026-11-20). The ID is drawn by
+      // the decoration layer, large, and the label is the few words beneath
+      // it. The whole name and the session on the work are what a tap shows
+      // beneath the tree, not what the tile carries.
+      var itemId = (n.kind === 'task' || n.kind === 'feature' || n.kind === 'story') && n.item_number
+        ? String(n.item_number) : '';
       var label = n.kind === 'chief'
         ? n.label + (n.questions ? '  (' + n.questions + '?)' : '')
-        : (n.tile || n.label);
+        : (n.tile_name || n.tile || n.label);
       var names = n.session_names || [];
       var face = (n.minds || [])[0] || null;
       out.push({ data: {
-        id: n.id, label: label, kind: n.kind,
+        id: n.id, label: label, kind: n.kind, itemId: itemId,
         full: (n.item_number ? n.item_number + ' ' : '') + (n.kind === 'task' ? n.label : n.label.replace(/^\d+(\.\d+)* /, '')) + (names.length ? ' · ' + names[0] : ''),
         activity: n.activity || n.status || '',
         workKind: n.work_kind || '',
@@ -496,6 +508,11 @@
         'background-color': '#111827', 'border-color': KIND_COLOR.story,
         'width': 156, 'height': 50, 'font-size': '10px',
         'text-max-width': '104px' } },
+    // The ID sits across the top of a tile that has one, so the few words
+    // of the name move down to make room for it.
+    { selector: 'node[?itemId]', style: { 'text-margin-y': 8 } },
+    { selector: 'node[kind = "story"][?itemId]', style: {
+        'text-margin-y': 7 } },
     // A sub-agent is its robot and nothing else: no circle, no card, no
     // face (Daniel, 2026-11-15). The node is only the robot's footprint,
     // drawn by the decoration layer, and its few words sit beneath it the
@@ -785,7 +802,7 @@
     return cy.nodes().map(function (n) {
       var d = n.data();
       return [d.id, d.kind, d.workKind, d.faceId, d.faceVersion,
-              d.active ? 1 : 0, d.activity].join(':');
+              d.active ? 1 : 0, d.activity, d.itemId].join(':');
     }).join('|');
   }
 
@@ -824,6 +841,13 @@
         });
         entry.face.appendChild(img);
         deco.appendChild(entry.face);
+      }
+
+      if (d.itemId) {
+        entry.itemId = document.createElement('span');
+        entry.itemId.className = 'cos-id';
+        entry.itemId.textContent = d.itemId;
+        deco.appendChild(entry.itemId);
       }
 
       if (d.active === true) {
@@ -881,6 +905,18 @@
         } else if (!hidden) {
           place(entry.face, box.x2 - inset - fs, box.y1 + inset, fs);
           entry.face.style.fontSize = (fs * 0.6) + 'px';
+        }
+      }
+      if (entry.itemId) {
+        // Across the top of the tile, between the icon and the face, and
+        // sized with the tile so it is the same share of it at any zoom.
+        var idSize = (kind === 'story' ? 15 : 17) * zoom;
+        entry.itemId.style.display = hidden ? 'none' : '';
+        if (!hidden) {
+          entry.itemId.style.left = box.x1 + 'px';
+          entry.itemId.style.width = w + 'px';
+          entry.itemId.style.top = (box.y1 + 5 * zoom) + 'px';
+          entry.itemId.style.fontSize = idSize + 'px';
         }
       }
       if (entry.spin) {

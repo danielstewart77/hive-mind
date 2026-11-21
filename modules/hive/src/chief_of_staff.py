@@ -896,6 +896,11 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
         node["item_number"] = item.get("item_number") if item else None
         node["tile"] = (_tile(node["item_number"], item["title"])
                         if item else _tile("", node["label"]))
+        # The few words alone, for a page that draws the ID apart from them
+        # - larger, because the ID is what the work is called by and at one
+        # size with the name it could not be picked out (Daniel, 2026-11-21).
+        node["tile_name"] = _few_words(item["title"] if item
+                                       else node["label"])
 
     # A story still being worked is not finished, whatever the board says:
     # the ledger is the authority on whether a task is over.
