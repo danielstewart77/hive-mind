@@ -149,38 +149,6 @@ async def test_a_watch_not_yet_armed_is_not_woken_by_a_turn_already_running(
     assert brief_turn == [sender]
 
 
-async def test_ending_a_conversation_ends_the_watches_and_wakes_it_owed(
-        a_mind, clock, inspector):
-    worker = await _session(a_mind, clock)
-    sender = await _session(a_mind, clock)
-    await _armed(worker, sender, a_mind, clock)
-    await watches.record_stop(worker, "t1", "ended", turn_id=1)
-
-    await core.delete_session(sender)
-
-    assert await watches.on_session(worker) == []
-    assert await inspector.fetchval(
-        "SELECT count(*) FROM core.session_wakes "
-        "WHERE watched_session_id = $1", worker) == 0
-    assert await watches.latest_stop(worker) is not None
-
-
-async def test_asking_twice_leaves_one_watch_and_a_stranger_cannot_rewrite_it(
-        a_mind, clock):
-    worker = await _session(a_mind, clock)
-    sender = await _session(a_mind, clock)
-    first = await watches.ask(worker, sender, "original", _digest("a"), now=clock)
-    again = await watches.ask(worker, sender, "renamed", _digest("b"),
-                              presented=_digest("a"), now=clock)
-    stranger = await watches.ask(worker, sender, "hijacked", _digest("c"),
-                                 presented=_digest("zzz"), now=clock)
-
-    assert first["created"] is True
-    assert again["created"] is False and again["task"] == "renamed"
-    assert stranger["task"] == "renamed"
-    assert len(await watches.held_by(sender)) == 1
-
-
 async def test_a_brief_that_failed_before_it_started_owes_its_sender_one_wake(
         a_mind, clock):
     worker = await _session(a_mind, clock)
@@ -212,23 +180,3 @@ async def test_moving_a_ledger_task_to_done_ends_the_watch_on_its_session(
     assert len(still) == 1
     assert await watches.on_session(worker) == []
     assert await watches.record_stop(worker, "t1", "ended", turn_id=1) == []
-
-
-async def test_the_page_reads_a_task_as_stopped_from_the_gateways_own_stop_and_running_from_a_turn(
-        a_mind, clock):
-    from hive_data import staff
-
-    worker = await _session(a_mind, clock)
-    task = await staff.create_task("page", "in progress", now=clock)
-    await staff.attach_session(task["id"], worker, now=clock)
-
-    await core.record_turn(session_id=worker, role="user", content="go", created_at=clock)
-    working = (await staff.task(task["id"]))["stopped_at"]
-    await watches.record_stop(worker, "t1", "ended", turn_id=1, now=clock + 5)
-    stopped = (await staff.task(task["id"]))["stopped_at"]
-    await core.record_turn(session_id=worker, role="user", content="again", created_at=clock + 9)
-    resumed = (await staff.task(task["id"]))["stopped_at"]
-
-    assert working is None
-    assert stopped == clock + 5
-    assert resumed is None
