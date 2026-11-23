@@ -202,6 +202,11 @@ def _session_row(row: dict | None) -> dict | None:
     return session
 
 
+def _is_wake_text(content: str | None) -> bool:
+    """Whether a message is a wake the gateway delivered, by its own opening."""
+    return str(content or "").startswith("[wake]")
+
+
 _FINISH_CAPABILITY = re.compile(r"finish capability: [0-9a-f]{64}")
 _CAPABILITY_WITHHELD = "finish capability: (withheld from the record)"
 
@@ -1062,7 +1067,7 @@ class SessionManager:
                         watched, f"u{trailing['id']}", "died",
                         # A wake turn the restart cut off ends a wake turn,
                         # which wakes nobody (a wake never causes a wake).
-                        wake=str(trailing.get("content") or "").startswith("[wake]"),
+                        wake=_is_wake_text(trailing.get("content")),
                         turn_id=trailing["id"]))
         owed = await watches.senders_owed()
         self._wake(owed)
@@ -2595,6 +2600,8 @@ class SessionManager:
                             turn["user_turn_id"] = outcome.get("user_turn_id")
                             turn["answer_turn_id"] = outcome.get("answer_turn_id")
                             turn["unaccepted"] = bool(outcome.get("unaccepted"))
+                            turn["content"] = content
+                            turn["resend"] = resend
                         follow = outcome.get("next")
                         if not follow:
                             break
@@ -2608,6 +2615,8 @@ class SessionManager:
                     turn["unaccepted"] = bool(outcome.get("unaccepted"))
                     if outcome.get("started"):
                         turn["user_turn_id"] = outcome.get("user_turn_id")
+                        turn["content"] = content
+                        turn["resend"] = resend
                     raise
                 finally:
                     # Inside the lock: a message queued behind this turn must
@@ -2657,15 +2666,29 @@ class SessionManager:
         try:
             user_turn = turn.get("user_turn_id")
             if user_turn is not None and turn.get("unaccepted"):
-                # The mind never took this turn - unreachable, refused or
-                # gone - so it is no stop of this session and a wake carried
-                # by it was not delivered. The user row it wrote goes, and
-                # the wakes go back to being owed for the next check.
-                await self._undo_unaccepted_turn(session_id, user_turn, wake_ids)
-                if brief_from:
-                    await watches.owe_wake(
-                        session_id, brief_from, f"b{uuid.uuid4().hex}", "died")
-                    self._wake([brief_from])
+                if wake_ids is not None or (
+                        turn.get("resend") and _is_wake_text(turn.get("content"))):
+                    # A wake the mind never took was not delivered: it is no
+                    # stop of this session, the row it wrote goes so the
+                    # history shows no failed attempt, and the wakes go back
+                    # to being owed for the next check. A wake is recognised
+                    # by what it is as well as by its ids, because one sent
+                    # again after a restart arrives, as a re-send, with no
+                    # ids; a person's own message that merely begins the
+                    # same way is not one.
+                    await self._undo_unaccepted_turn(session_id, user_turn, wake_ids)
+                    return
+                # Any other message the mind never took stays in the history,
+                # as it always did, and is one turn that died: one stop under
+                # the turn's own key, which the slow check also finds and so
+                # never records a second time. A brief's watch was armed
+                # just below this row, so that stop is also the one wake its
+                # sender is owed.
+                owed = await self._record_stop(
+                    session_id, f"t{user_turn}", "died",
+                    wake=await watches.turn_is_wake(session_id), turn_id=user_turn)
+                self._wake(owed)
+                self._wake_when_idle(session_id)
                 return
             if user_turn is None:
                 if brief_from:

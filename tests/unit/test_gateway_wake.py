@@ -582,3 +582,78 @@ async def test_a_wake_turn_a_restart_cut_off_does_not_wake_the_watchers_of_its_c
     await _settle(gateway)
 
     assert _wakes_to(mind, watcher) == []
+
+
+# --- a message the mind never took (feature 850, story 851) ------------------
+
+def _history_of(history: list[dict], needle: str) -> list[str]:
+    return [turn["content"] for turn in history if needle in turn["content"]]
+
+
+async def test_a_chat_message_the_mind_never_took_is_still_in_the_history_afterwards(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.status[session["id"]] = 503
+
+    events = await _turn(gateway, session["id"], "are you there")
+
+    assert events and events[-1].get("is_error")            # the error is shown at the time
+    history = await gateway.get_session_turns(session["id"])
+    assert _history_of(history, "are you there") == ["are you there"]
+    assert all(turn["role"] != "assistant" for turn in history)   # and no error row is saved
+
+
+async def test_a_wake_the_mind_never_took_leaves_no_line_and_is_delivered_once_later(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    mind.status[sender["id"]] = 503
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+    failed = await gateway.get_session_turns(sender["id"])
+    await gateway.wake_sweep()
+    await _settle(gateway)
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert _history_of(failed, "[wake]") == []              # the failed attempt left no line
+    delivered = await gateway.get_session_turns(sender["id"])
+    assert len(_history_of(delivered, "[wake]")) == 1       # and it arrived once, later
+    assert (await watches.wake_state(MIND))["owed"] == 0
+
+
+async def test_a_wake_sent_again_after_a_restart_and_not_taken_leaves_no_line_either(
+        gateway, mind):
+    sender = await _session(gateway)
+    mind.status[sender["id"]] = 503
+
+    events = await _turn(gateway, sender["id"], "[wake] A session you are watching stopped.",
+                         resend=True)
+
+    assert events and events[-1].get("is_error")
+    assert _history_of(await gateway.get_session_turns(sender["id"]), "[wake]") == []
+
+
+async def test_a_brief_the_mind_never_took_stays_in_the_history_and_tells_its_sender_once(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await gateway.ask_watch(worker, sender, "the brief")
+    mind.status[worker["id"]] = 503
+
+    await _turn(gateway, worker["id"], "please build it", brief_from=sender["id"])
+    await _settle(gateway)
+    gateway._started_at = time.time() + 1          # a gateway restart, then the slow check
+    await gateway.wake_sweep()
+    await _settle(gateway)
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert _history_of(await gateway.get_session_turns(worker["id"]), "please build it") == [
+        "please build it"]
+    woken = _wakes_to(mind, sender)
+    assert len(woken) == 1 and "died" in woken[0]
+    answer = await gateway.latest_answer(worker["id"])
+    assert answer["outcome"] == "died" and answer["answer"] is None
