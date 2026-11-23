@@ -352,7 +352,8 @@ def _board_children(item_id: str, features: list[dict[str, Any]],
 
     None of these children carries an assigned mind or a session name, and
     none spins of its own accord; a story spins only when a working child is
-    drawn beneath it, which `get_tree` decides once the tree is whole. The
+    drawn beneath it, or when it is started and the task above it is
+    running, both of which `get_tree` decides once the tree is whole. The
     assignment is on the item a session was dispatched to, and
     copying it down the tree is the one thing Daniel said it must not do:
     a story drawn under an assigned feature is not itself assigned to
@@ -676,6 +677,41 @@ def _place_work(nodes: dict[str, dict[str, Any]], parent: dict[str, str],
             parent.setdefault(node_id, CHIEF_ID)
 
 
+#: The board's word for a story somebody has started. Named apart from
+#: `BOARD_DONE` for the same reason that is: the board's vocabulary, not the
+#: ledger's.
+BOARD_STARTED = "in_progress"
+
+
+def _spin_started_stories(nodes: dict[str, dict[str, Any]],
+                          parent: dict[str, str]) -> None:
+    """A started story under work that is running is being worked.
+
+    Daniel, 2026-11-22: a coder building a story herself, with no child,
+    left the feature spinning and every story dark, and the page could not
+    say which story she was on. The board can: a coder moves a story to in
+    progress when she starts it. That alone is not evidence of work - a
+    story left in progress overnight says the same - so it spins only while
+    the task it is drawn beneath is itself running, which is the watch and
+    the session agreeing. A story nobody started keeps what it had.
+    """
+    for node in nodes.values():
+        if node["kind"] != "story" or node.get("status") != BOARD_STARTED:
+            continue
+        seen: set[str] = set()
+        current = parent.get(node["id"])
+        while current is not None and current not in seen:
+            seen.add(current)
+            above = nodes.get(current)
+            if above is None:
+                break
+            if above["kind"] == "task":
+                if above.get("active") is True:
+                    node["active"] = True
+                break
+            current = parent.get(current)
+
+
 def _lend_activity(nodes: dict[str, dict[str, Any]],
                    parent: dict[str, str]) -> None:
     """A story with a working sub-agent anywhere beneath it is working too.
@@ -898,6 +934,7 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
 
     _place_work(nodes, parent, board_nodes, board_parent, claimed, extra,
                 by_id, kinds, numbers)
+    _spin_started_stories(nodes, parent)
     _lend_activity(nodes, parent)
 
     # What each tile says. A ledger task on a board item is called by that
