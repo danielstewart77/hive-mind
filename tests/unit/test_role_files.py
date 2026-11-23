@@ -69,6 +69,7 @@ def mind(monkeypatch, tmp_path):
     # What this process has already said, and its error feed, belong to
     # whichever test ran last: each test reads only its own mind's lines.
     monkeypatch.setattr(role_files, "_SAID", {})
+    monkeypatch.setattr(skills_api, "_WARNED", set())
     monkeypatch.setattr(hive_logging, "_ERRORS", deque(maxlen=100))
     return homes
 
@@ -469,3 +470,150 @@ def test_an_install_that_cannot_be_started_at_all_says_so(monkeypatch, mind, har
 
     assert any("the hooks and skills this mind's roles grant were not put in place: "
                "RuntimeError: can't start new thread" in line for line in _said(harness))
+
+
+GENERATED = "generated-skill"
+GENERATED_TEXT = ("---\nname: generated-skill\ndescription: a skill a workflow generated\n---\n"
+                  "Do the generated thing.\n")
+
+
+def _install_folder(tmp_path: Path) -> Path:
+    return tmp_path / "project" / "install" / "workflow-skills"
+
+
+def _generate(tmp_path: Path, name: str, text: str, **siblings: str) -> Path:
+    skill = _install_folder(tmp_path) / name
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(text)
+    for filename, content in siblings.items():
+        (skill / filename).write_text(content)
+    return skill
+
+
+def _provide(harness: str, mind: dict, skills: list[str]) -> dict:
+    return role_files.provision(
+        harness, mind[harness],
+        {"managed": True, "roles": ["general"], "hooks": [], "skills": skills,
+         "models": [], "tools": []})
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_role_naming_a_generated_skill_delivers_it_from_the_installs_folder_beside_a_tracked_one(
+        mind, tmp_path, harness):
+    _generate(tmp_path, GENERATED, GENERATED_TEXT, **{"helper.sh": "echo helper\n"})
+
+    result = _provide(harness, mind, [GENERATED, SKILL])
+
+    assert result["problems"] == []
+    delivered = mind[harness] / "skills" / GENERATED
+    assert "Do the generated thing." in (delivered / "SKILL.md").read_text()
+    assert (delivered / "helper.sh").read_text() == "echo helper\n"
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_with_a_copy_of_its_own_keeps_it_when_the_install_folder_holds_that_skill(
+        mind, tmp_path, harness):
+    _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    own = mind[harness] / "skills" / GENERATED
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text("---\nname: generated-skill\n---\nThe mind's own.\n")
+
+    _provide(harness, mind, [GENERATED])
+
+    assert "The mind's own." in (own / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_install_with_no_generated_skills_delivers_the_tracked_ones_as_before(
+        mind, tmp_path, harness):
+    assert not _install_folder(tmp_path).exists()
+
+    absent = _provide(harness, mind, [SKILL, GENERATED])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    assert not _install_folder(tmp_path).exists()
+    assert absent["skills"][SKILL] == "installed"
+    assert any(f"skill {GENERATED} is granted by a role and is not there to use" in text
+               for text in absent["problems"])
+    assert len(absent["problems"]) == 1
+
+    _install_folder(tmp_path).mkdir(parents=True)
+    (_install_folder(tmp_path) / ".gitkeep").write_text("")
+    empty = _provide(harness, mind, [SKILL, GENERATED])
+
+    assert empty["skills"] == {SKILL: "same", GENERATED: "missing"}
+    assert len(empty["problems"]) == 1
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_unreadable_install_folder_still_delivers_the_tracked_skills_and_is_named(
+        mind, tmp_path, harness):
+    folder = _install_folder(tmp_path)
+    folder.parent.mkdir(parents=True)
+    folder.write_text("a file where the folder should be\n")
+
+    result = _provide(harness, mind, [SKILL, GENERATED])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert any(f"skill {GENERATED} is granted by a role" in text and "cannot be listed" in text
+               for text in result["problems"])
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_skill_in_both_places_is_delivered_from_the_install_folder_and_the_clash_is_reported(
+        mind, tmp_path, harness, caplog):
+    _generate(tmp_path, SKILL, SKILL_TEXT.replace("Do the thing.", "Do the generated thing."))
+    caplog.set_level("WARNING", logger="hive-mind.skills")
+
+    result = _provide(harness, mind, [SKILL])
+
+    delivered = (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert "Do the generated thing." in delivered
+    assert result["problems"] == []
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[SKILL].as_dict()
+    assert row["source"] == "generated"
+    assert row["shadowed"] is True
+    assert "Do the generated thing." in row["repo"]
+    assert "Do the thing." in row["shadowed_text"]
+    assert any(record.getMessage() == "mind.skill.generated_shadows_tracked"
+               for record in caplog.records)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_tracked_skill_alone_reports_its_source_as_tracked(mind, harness):
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[SKILL].as_dict()
+
+    assert row["source"] == "tracked"
+    assert row["shadowed"] is False
+    assert "Do the thing." in row["repo"]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("written", ["no markdown yet", "empty markdown", "changes mid-copy"])
+def test_a_generated_skill_that_is_being_written_is_not_delivered_in_part(
+        monkeypatch, mind, tmp_path, harness, written):
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT, **{"helper.sh": "echo helper\n"})
+    if written == "no markdown yet":
+        (skill / "SKILL.md").unlink()
+    elif written == "empty markdown":
+        (skill / "SKILL.md").write_text("")
+    else:
+        # The operator writes another file into the folder after the copy has
+        # begun: the real copy runs, and the source moves under it.
+        real_copy = skill_reference._copytree
+
+        def copy_while_written(source, target):
+            real_copy(source, target)
+            (source / "second-file.md").write_text("written a moment later\n")
+
+        monkeypatch.setattr(skill_reference, "_copytree", copy_while_written)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    assert not (mind[harness] / "skills" / GENERATED / "SKILL.md").exists()
+    assert any(f"skill {GENERATED} is granted by a role" in text for text in result["problems"])
+    if written != "no markdown yet":
+        assert any("nothing was delivered" in text for text in result["problems"])
