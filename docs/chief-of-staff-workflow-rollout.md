@@ -43,8 +43,9 @@ install that made it.
   (Daniel, 2026-11-23): a big model for the planner, smaller ones below it,
   the same paradigm as home. Consequence: which model a role runs on is a
   fact about the install, not about the role. The shipped role files name
-  Claude models today (`chief-of-staff.yaml` says `claude-fable-5-2`), so
-  the model has to be chosen on each install rather than shipped.
+  no model, so the model is chosen on each install rather than shipped: a
+  mind whose roles name none runs the model it is configured with, and a
+  role that names a model still restricts as before.
 - **Skills may be tuned in place on an install; publishing is a separate,
   deliberate act** (Daniel, 2026-11-23). The fast loop that made the first
   run work - a mind misbehaves, its skill is fixed, the next turn has the

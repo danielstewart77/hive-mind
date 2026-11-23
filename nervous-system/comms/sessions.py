@@ -3532,11 +3532,13 @@ class SessionManager:
 
         Decided here for a mind under role management on every harness
         (stories 10.18.5 to 10.18.7); a mind never put under role management
-        runs on the model it names. For a managed one the model must be one
-        some held role names: the
-        one asked for when it is, else the mind's default when that is, else
-        the first a held role names, general first. None named by any role
-        is refused, because anything no role grants is denied.
+        runs on the model it names. For a managed one whose held roles name
+        a model, the model must be one some held role names: the one asked
+        for when it is, else the mind's default when that is, else the first
+        a held role names, general first. When no held role names a model
+        the roles restrict nothing here (the shipped roles name none), and
+        the conversation runs the model it is configured with, exactly as an
+        unmanaged mind's does.
         """
         model = wanted or session["model"]
         grants = await roles.grants_for(session["mind_id"])
@@ -3544,10 +3546,7 @@ class SessionManager:
             return model
         allowed = list(grants["models"])
         if not allowed:
-            raise ValueError(
-                "No role this mind holds names a model, so there is no model "
-                "it may run on. Give it a role that names one on the console's "
-                "Roles page.")
+            return model
         if model in allowed:
             return model
         if wanted:
