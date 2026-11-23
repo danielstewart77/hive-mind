@@ -699,6 +699,22 @@ class SessionManager:
     def _capability_digest(capability: str) -> bytes:
         return hashlib.sha256(capability.encode("utf-8")).digest()
 
+    async def _watch_capability(self, watched_id: str, sender_id: str) -> str:
+        """The capability that alone can mark this watch finished.
+
+        Derived from a secret this gateway keeps, not drawn at random, so it
+        can be handed to the owning conversation again: inside the wake that
+        conversation is woken with, which no other conversation receives.
+        A sender that rotated, and lost it with its context, gets it back
+        with its next wake. Only its digest is stored with the watch.
+        """
+        import hmac
+        stored = await core.put_auth_setting_if_absent(
+            "watch_capability_secret", secrets.token_hex(32))
+        secret = str((stored.get("row") or {}).get("value") or "")
+        return hmac.new(secret.encode(), f"{watched_id}:{sender_id}".encode(),
+                        hashlib.sha256).hexdigest()
+
     async def ask_watch(
         self, watched: dict, sender: dict, task: str, *,
         capability: str | None = None, armed_after: int | None = None,
@@ -716,7 +732,7 @@ class SessionManager:
         the watch existed. Without it the watch stays unarmed until the
         brief's own turn starts, so a turn already running cannot wake it.
         """
-        fresh = secrets.token_urlsafe(32)
+        fresh = await self._watch_capability(watched["id"], sender["id"])
         row = await watches.ask(
             watched["id"], sender["id"], task, self._capability_digest(fresh),
             presented=self._capability_digest(capability) if capability else None,
@@ -884,15 +900,22 @@ class SessionManager:
         """Run work with no reader, kept alive until it ends."""
         self._spawn_wake_task(coroutine)
 
-    @staticmethod
-    def _wake_text(claimed: list[dict]) -> str:
-        """One message naming every stopped task. It carries no answer."""
+    async def _wake_text(self, claimed: list[dict]) -> str:
+        """One message naming every stopped task. It carries no answer.
+
+        It does carry, for each task, the capability for marking it finished:
+        this turn is delivered to the owning conversation and to nobody else,
+        and a conversation whose context rotated away from the first one
+        needs it again.
+        """
         lines = []
         for wake in claimed:
             what = "died" if wake["outcome"] == "died" else "ended its turn"
+            capability = await self._watch_capability(
+                wake["watched_session_id"], wake["sender_session_id"])
             lines.append(
                 f"- Session {wake['watched_session_id']} {what}. "
-                f"Task: {wake['task']}")
+                f"Task: {wake['task']} (finish capability: {capability})")
         head = ("A session you are watching stopped." if len(lines) == 1 else
                 f"{len(lines)} sessions you are watching stopped.")
         return (
@@ -938,8 +961,9 @@ class SessionManager:
                 return
             ids = [w["id"] for w in claimed]
             try:
+                text = await self._wake_text(claimed)
                 async for _ in self.send_message(
-                    sender_id, self._wake_text(claimed), _wake_ids=ids,
+                    sender_id, text, _wake_ids=ids,
                 ):
                     pass
             except SenderBusy:
@@ -1006,6 +1030,13 @@ class SessionManager:
                     watched, f"t{turn['id']}", "ended", wake=await watches.turn_is_wake(watched),
                     turn_id=turn["id"], answer_turn_id=turn["id"]))
             if await self._terminal_turn_open(watched):
+                continue
+            row = await self._get_row(watched)
+            if row is None or self._pane_holds(row):
+                # A pane's turn ends through its Stop hook's report, and after
+                # a restart the live feed is empty, so nothing here can tell a
+                # turn that died from one still running. The hook reports its
+                # deaths itself.
                 continue
             trailing = await watches.trailing_user_turn(watched, watch["since_turn_id"])
             if trailing is not None:
@@ -2521,6 +2552,7 @@ class SessionManager:
             # so a message typed meanwhile queues behind the re-send rather
             # than overtaking it onto the fresh conversation.
             async with lock:
+                outcome: dict = {}
                 try:
                     from comms import mind_maintenance
                     row = await self._get_row(session_id)

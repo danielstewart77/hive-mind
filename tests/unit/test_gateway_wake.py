@@ -452,3 +452,33 @@ async def test_a_wake_turn_that_ends_in_a_terminal_pane_wakes_nobody(gateway, mi
     await _settle(gateway)
 
     assert _wakes_to(mind, watcher) == []
+
+
+async def test_a_sender_that_lost_its_capability_is_handed_it_again_in_its_next_wake(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    capability = await _watch(gateway, worker, sender)
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+
+    (woken,) = _wakes_to(mind, sender)
+    assert capability in woken
+    assert await gateway.finish_watch(worker["id"], sender["id"], capability) == "finished"
+
+
+async def test_a_gateway_restart_does_not_report_a_running_terminal_turn_as_died(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    await core.update_session(worker["id"], terminal_held=True)
+    await core.record_turn(session_id=worker["id"], role="user", content="typed",
+                           created_at=time.time() - 100)
+    gateway._started_at = time.time()
+
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert _wakes_to(mind, sender) == []
