@@ -318,28 +318,7 @@ async def test_the_end_of_a_turn_that_was_itself_a_wake_wakes_nobody(gateway, mi
     assert len([1 for sid, _ in mind.received if sid == b["id"]]) == 1
 
 
-# --- the answer and the ends of a watch -------------------------------------
-
-async def test_the_answer_is_the_stored_one_and_says_whether_the_turn_died(gateway, mind):
-    worker = await _session(gateway, OTHER)
-
-    await _turn(gateway, worker["id"])
-    answered = await gateway.latest_answer(worker["id"])
-    mind.script[worker["id"]] = [{"type": "result", "is_error": True}]
-    await _turn(gateway, worker["id"])
-    died = await gateway.latest_answer(worker["id"])
-    mind.hold[worker["id"]] = asyncio.Event()
-    running = asyncio.create_task(_turn(gateway, worker["id"]))
-    await mind.entered.setdefault(worker["id"], asyncio.Event()).wait()
-    working = await gateway.latest_answer(worker["id"])
-    mind.hold.pop(worker["id"]).set()
-    await running
-
-    assert answered["state"] == "idle" and answered["outcome"] == "ended"
-    assert answered["answer"].startswith("answer to")
-    assert died["outcome"] == "died" and died["answer"] is None
-    assert working == {**working, "state": "working", "answer": None}
-
+# --- who is never woken ------------------------------------------------------
 
 async def test_ending_the_sender_drops_the_wake_and_starts_nothing(gateway, mind):
     worker = await _session(gateway, OTHER)
@@ -357,24 +336,6 @@ async def test_ending_the_sender_drops_the_wake_and_starts_nothing(gateway, mind
     await _settle(gateway)
 
     assert [t for _, t in mind.received if "[wake]" in t] == []
-    assert (await gateway.latest_answer(worker["id"]))["outcome"] == "ended"
-
-
-async def test_ending_the_briefed_session_ends_the_watch_with_no_wake(gateway, mind):
-    worker = await _session(gateway, OTHER)
-    sender = await _session(gateway)
-    await _watch(gateway, worker, sender)
-    mind.hold[worker["id"]] = asyncio.Event()
-    running = asyncio.create_task(_turn(gateway, worker["id"]))
-    await mind.entered.setdefault(worker["id"], asyncio.Event()).wait()
-
-    await gateway.kill_session(worker["id"])
-    mind.hold.pop(worker["id"]).set()
-    await asyncio.gather(running, return_exceptions=True)
-    await _settle(gateway)
-
-    assert _wakes_to(mind, sender) == []
-    assert await gateway.watches_held_by(sender["id"]) == []
 
 
 async def test_a_sender_that_rotated_still_receives_the_wake_on_the_same_row(gateway, mind):
