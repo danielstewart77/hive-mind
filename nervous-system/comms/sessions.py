@@ -202,6 +202,41 @@ def _session_row(row: dict | None) -> dict | None:
     return session
 
 
+class _TurnAnswer:
+    """The text a turn will be saved as, gathered from its assistant frames.
+
+    Most harnesses send each message once and the saved copy is their words
+    run together, as it always was. A dsh mind (`dsh=True`) sends each finished
+    message as it happens and then its turn report's text again as a closing
+    frame, and the report holds only the last message of the turn. So its
+    messages are saved each once, in order with a blank line between, and the
+    closing frame is left out exactly when the message just before it already
+    said the same words. A turn with no messages (an older runner, or one that
+    said nothing) has nothing to be a repeat of, so the closing frame, with its
+    note about how the turn ended, is kept.
+    """
+
+    def __init__(self, dsh: bool = False) -> None:
+        self.dsh = dsh
+        self.pieces: list[str] = []
+        self._report_text: str | None = None
+
+    def expect_report(self, report: dict | None) -> None:
+        """The turn report arrived: the next assistant frame is its closing text."""
+        if self.dsh:
+            self._report_text = str((report or {}).get("text") or "")
+
+    def add(self, text: str) -> None:
+        closing, self._report_text = self._report_text, None
+        if (closing is not None and self.pieces and closing.strip()
+                and self.pieces[-1].strip() == text.strip()):
+            return
+        self.pieces.append(text)
+
+    def text(self) -> str:
+        return ("\n\n" if self.dsh else "").join(self.pieces)
+
+
 def _is_wake_text(content: str | None) -> bool:
     """Whether a message is a wake the gateway delivered, by its own opening."""
     return str(content or "").startswith("[wake]")
@@ -2926,7 +2961,8 @@ class SessionManager:
 
         import aiohttp
         retried = False
-        _assistant_buf: list[str] = []
+        _answer = _TurnAnswer(
+            dsh=await self.conversation_harness(session) == "dsh")
         _pinned_sid = session.get("conversation_id") or None
         _harness_sid = session.get("harness_sid") or None
         _sid_warned = False
@@ -3067,6 +3103,8 @@ class SessionManager:
 
                             observer_only = bool(event.pop("_observer_only", False))
                             _turn_events.append(event)
+                            if event.get("type") == "dsh_report":
+                                _answer.expect_report(event.get("report"))
 
                             ending = self._replacing_ending(event, resend)
                             if ending:
@@ -3135,7 +3173,7 @@ class SessionManager:
                                 if isinstance(_content, list):
                                     _content = "".join(c.get("text", "") for c in _content if isinstance(c, dict) and c.get("type") == "text")
                                 if isinstance(_content, str) and _content:
-                                    _assistant_buf.append(_content)
+                                    _answer.add(_content)
 
                             now = time.time()
                             await _update_session(session_id, last_active=now)
@@ -3176,7 +3214,7 @@ class SessionManager:
                                 # landed, and the next spawn must carry it
                                 # again.
                                 outcome["answer_turn_id"] = await self._close_turn(
-                                    session_id, "".join(_assistant_buf), now,
+                                    session_id, _answer.text(), now,
                                     landed=_pinned_sid if not event.get("is_error") else None,
                                 )
                                 elapsed = time.monotonic() - t0
@@ -3206,9 +3244,9 @@ class SessionManager:
             break  # exit retry loop on success
 
         if replaced is not None:
-            if replaced["kind"] == "goal" and _assistant_buf:
+            if replaced["kind"] == "goal" and _answer.pieces:
                 outcome["answer_turn_id"] = await self._close_turn(
-                    session_id, "".join(_assistant_buf), time.time(), landed=None,
+                    session_id, _answer.text(), time.time(), landed=None,
                 )
             settled = await self._settle_replacing_ending(replaced, content, images)
             for notice in settled.get("notices") or []:

@@ -28,6 +28,7 @@ from comms_broker_pg import broker_store, fetch, put_mind  # noqa: E402,F401
 
 MIND = "wake-mind-1"
 OTHER = "wake-mind-2"
+DSH = "wake-mind-dsh"
 
 
 class FakeMind:
@@ -89,6 +90,7 @@ async def gateway(broker_store, mind, monkeypatch):
     url = str(mind.server.make_url("")).rstrip("/")
     for mind_id in (MIND, OTHER):
         await put_mind(mind_id, mind_id, owner="daniel", gateway_url=url)
+    await put_mind(DSH, DSH, owner="daniel", gateway_url=url, harness="dsh_cli")
     manager.test_mind = mind
     yield manager
     for task in list(manager._wake_tasks):
@@ -692,3 +694,118 @@ async def test_a_brief_the_mind_never_took_stays_in_the_history_and_tells_its_se
     assert len(woken) == 1 and "died" in woken[0]
     answer = await gateway.latest_answer(worker["id"])
     assert answer["outcome"] == "died" and answer["answer"] is None
+
+
+# --- a dsh mind's answer is saved once (feature 850, story 852) --------------
+
+def _said(text: str) -> dict:
+    return {"type": "assistant", "message": {"role": "assistant",
+                                              "content": [{"type": "text", "text": text}]}}
+
+
+def _dsh_turn(*messages: str, report_text: str | None = None) -> list[dict]:
+    """The frames the dsh adapter sends: each finished message as it happens,
+    then the observer-only report, then the report's text again, then the result."""
+    last = messages[-1] if messages else ""
+    text = last if report_text is None else report_text
+    return [*(_said(m) for m in messages),
+            {"type": "dsh_report", "session_id": "x", "report": {"text": text, "outcome": "completed"},
+             "_observer_only": True},
+            _said(text or "No assistant text this turn (dsh stopped on: completed)."),
+            {"type": "result", "stop_reason": "completed", "is_error": False}]
+
+
+async def _saved_answers(gateway, session_id: str) -> list[str]:
+    return [t["content"] for t in await gateway.get_session_turns(session_id)
+            if t["role"] == "assistant"]
+
+
+async def test_a_turn_in_which_a_dsh_mind_speaks_and_finishes_stores_its_answer_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn("5")
+
+    await _turn(gateway, session["id"], "two and three?")
+
+    assert await _saved_answers(gateway, session["id"]) == ["5"]
+
+
+async def test_a_turn_in_which_a_dsh_mind_sends_several_finished_messages_stores_each_once_in_order(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn("first I looked", "then I built it", "done")
+
+    await _turn(gateway, session["id"], "build it")
+
+    assert await _saved_answers(gateway, session["id"]) == [
+        "first I looked\n\nthen I built it\n\ndone"]
+
+
+async def test_a_dsh_turn_with_no_text_still_saves_the_note_that_says_so_once(gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn(report_text="")
+
+    await _turn(gateway, session["id"], "hello")
+
+    (saved,) = await _saved_answers(gateway, session["id"])
+    assert saved.startswith("No assistant text this turn")
+
+
+async def test_a_dsh_turn_from_an_older_runner_that_sends_no_message_frames_saves_its_report_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn(report_text="all of it")
+
+    await _turn(gateway, session["id"], "hello")
+
+    assert await _saved_answers(gateway, session["id"]) == ["all of it"]
+
+
+async def test_a_dsh_turn_that_timed_out_after_sending_messages_saves_them_and_the_note_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = [
+        _said("half way"), _said("further on"),
+        _said("The turn was still running after 600 seconds and was stopped."),
+        {"type": "result", "stop_reason": "timeout", "is_error": True, "error_code": "TURN_TIMEOUT"}]
+
+    await _turn(gateway, session["id"], "long job")
+
+    assert await _saved_answers(gateway, session["id"]) == [
+        "half way\n\nfurther on\n\nThe turn was still running after 600 seconds and was stopped."]
+
+
+async def test_a_dsh_goal_run_that_ends_needing_a_new_conversation_saves_each_rounds_answer_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    first = _dsh_turn("round one done")
+    first[-1] = {"type": "result", "stop_reason": "rotation_needed", "is_error": False,
+                 "goal": {"objective": "ship it", "roundsLeft": 2}}
+    mind.script[session["id"]] = first
+
+    await _turn(gateway, session["id"], "/goal ship it", goal_rounds=3)
+
+    saved = await _saved_answers(gateway, session["id"])
+    assert saved[0] == "round one done"
+    assert saved.count("round one done") == 1 and "round one done\n\nround one done" not in "".join(saved)
+
+
+async def test_a_note_sent_before_a_dsh_turn_is_saved_once_followed_by_the_answer_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    note = "(1 attached image(s) did not reach the model: disk full.)"
+    mind.script[session["id"]] = [_said(note), *_dsh_turn("looked at it")]
+
+    await _turn(gateway, session["id"], "see attached")
+
+    assert await _saved_answers(gateway, session["id"]) == [f"{note}\n\nlooked at it"]
+
+
+async def test_a_claude_mind_saves_its_answer_as_it_always_did(gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.script[session["id"]] = [_said("one "), _said("two"),
+                                  {"type": "result", "result": "ok"}]
+
+    await _turn(gateway, session["id"], "hello")
+
+    assert await _saved_answers(gateway, session["id"]) == ["one two"]
