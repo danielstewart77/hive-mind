@@ -202,6 +202,14 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     delivered = any(r["success"] for r in results.values())
     print(json.dumps({"delivered": delivered, "channels": results}))
+    # A report a mind sends its person on its own - a chief of staff woken
+    # because a session stopped - arrived as text with no voice while its
+    # replies to a message were spoken (Daniel, 2026-11-23). Opt-in, because
+    # most callers of `send` are scripts raising an alert, and nobody asked
+    # for those to be read aloud. Only after the text has landed on
+    # Telegram: a voice note with no message beside it says nothing useful.
+    if getattr(args, "voice", False) and results.get("telegram", {}).get("success"):
+        _speak_detached(args.message)
     return 0 if delivered else 1
 
 
@@ -233,35 +241,33 @@ def _voice_server_url(voice_id: str) -> str:
     return resolver.resolve(voice_id) or legacy
 
 
-def cmd_voice(args: argparse.Namespace) -> int:
-    if args.test_mode:
-        print(json.dumps({"success": True, "detail": "Voice message sent (test)"}))
-        return 0
+def _speak_detached(message: str) -> bool:
+    """Queue `message` as a voice note to this mind's person; False when
+    there is nobody to send it to.
 
-    from core.secrets import get_credential
+    Forks: the caller returns at once, and the child synthesises and sends
+    with no timeout pressure. Best effort by design. The text is the
+    delivery, so a voice server that is down costs the sound and nothing
+    else, and is never reported as a failed notification.
+    """
     import httpx
 
     token = _bot_token()
     chat_id = _owner_chat_id()
-    voice_url = _voice_server_url(os.getenv("MIND_ID", "default"))
-
     if not token or not chat_id:
-        print(json.dumps({"success": False, "error": "Missing bot token or chat ID"}))
-        return 1
+        return False
+    voice_id = os.getenv("MIND_ID", "default")
+    voice_url = _voice_server_url(voice_id)
 
-    # Fork: parent returns immediately so the caller is unblocked.
-    # Child detaches and handles TTS synthesis + voice delivery with no timeout pressure.
-    pid = os.fork()
-    if pid != 0:
-        print(json.dumps({"success": True, "detail": "Voice synthesis queued"}))
-        return 0
+    sys.stdout.flush()
+    if os.fork() != 0:
+        return True
 
     # Child process
     os.setsid()
     try:
-        voice_id = os.getenv("MIND_ID", "default")
         tts_resp = httpx.post(
-            f"{voice_url}/tts", json={"text": args.message, "voice_id": voice_id}, timeout=None,
+            f"{voice_url}/tts", json={"text": message, "voice_id": voice_id}, timeout=None,
         )
         if tts_resp.status_code == 200:
             httpx.post(
@@ -276,6 +282,18 @@ def cmd_voice(args: argparse.Namespace) -> int:
         os._exit(0)
 
 
+def cmd_voice(args: argparse.Namespace) -> int:
+    if args.test_mode:
+        print(json.dumps({"success": True, "detail": "Voice message sent (test)"}))
+        return 0
+
+    if not _speak_detached(args.message):
+        print(json.dumps({"success": False, "error": "Missing bot token or chat ID"}))
+        return 1
+    print(json.dumps({"success": True, "detail": "Voice synthesis queued"}))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Hive Mind notification tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -286,6 +304,8 @@ def main() -> int:
                              help="Comma-separated channels (telegram,email,file)")
     send_parser.add_argument("--alert-file", default=None, help="Custom alert file path")
     send_parser.add_argument("--test-mode", action="store_true", help="Use mock delivery")
+    send_parser.add_argument("--voice", action="store_true",
+                             help="Follow a delivered Telegram message with a voice note of it")
 
     voice_parser = subparsers.add_parser("voice", help="Send voice message")
     voice_parser.add_argument("--message", required=True, help="Text to speak")
