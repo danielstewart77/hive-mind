@@ -550,3 +550,21 @@ def test_a_fresh_hive_has_its_ready_made_roles_once_the_console_has_started(monk
         slugs = {r["slug"] for r in testing.run(store.roles_list())}
 
     assert slugs == {"general", "chief-of-staff", "operator", "developer", "planner", "optimizer"}
+
+
+def test_the_role_editors_catalog_does_not_call_a_generated_skill_a_repo_one():
+    reports = [{"mind": "stash", "hooks": None, "skills": {"skills": [
+        {"name": "tracked", "repo": "text", "installed": "text", "source": "tracked"},
+        {"name": "made-here", "repo": "text", "installed": "text", "source": "generated",
+         "shadowed": False},
+        {"name": "both", "repo": "text", "installed": "text", "source": "generated",
+         "shadowed": True},
+        {"name": "older-mind", "repo": "text", "installed": None},
+    ]}}]
+
+    rows = {r["name"]: r for r in roles_data.catalog(reports, set())["skills"]}
+
+    assert (rows["tracked"]["repo"], rows["tracked"]["generated"]) == (True, False)
+    assert (rows["made-here"]["repo"], rows["made-here"]["generated"]) == (False, True)
+    assert (rows["both"]["repo"], rows["both"]["generated"]) == (True, True)
+    assert (rows["older-mind"]["repo"], rows["older-mind"]["generated"]) == (True, False)

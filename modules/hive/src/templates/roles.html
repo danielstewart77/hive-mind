@@ -114,7 +114,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         const span = kind === "skills" ? 2 : 1;
         const body = listed.map(function (r) {
             const minds = h.escapeHtml((r.minds || []).join(", ") || "none");
-            return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.repo ? "present" : "absent") : "") + '</td><td>' + minds);
+            return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.generated ? (r.repo ? "generated here (and in the repo)" : "generated here") : (r.repo ? "present" : "absent")) : "") + '</td><td>' + minds);
         }).concat(unseen.map(function (name) { return cells(name, '</td><td colspan="' + span + '">' + missing); }));
         document.getElementById("role-" + kind).innerHTML = body.join("") || '<tr><td colspan="' + (span + 2) + '">' + (asked - silent.length > 0 ? "No Mind reported any." : "No Mind answered.") + '</td></tr>';
         const notes = [];

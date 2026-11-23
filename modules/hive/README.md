@@ -299,6 +299,7 @@ the console. It has no fallback to the house tokens or to
 routes admit no bearer. The value is the same in the console's `.env` and in
 the stack `.env`, which is what hands it, with `HIVE_SITE_URL`, to the
 operator mind; that mind's roles tool reads both from its own environment.
+A mind holding the operator role is given `ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}` in its compose file (`src/operator_attachment.py`), so the value must be set, the same, in the stack `.env` that compose substitutes for minds as well as in the console's.
 
 ## Test
 

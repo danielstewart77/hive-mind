@@ -60,6 +60,7 @@ import mind_images
 import mind_mounts
 import mind_runtime
 import mind_skills
+import operator_attachment
 import mind_soul
 import mind_symbols
 import provider_data
@@ -1425,6 +1426,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             step = "Its role assignment"
             creation.mark("roles")
             await store.set_mind_roles(mind_id, role_ids)
+            # Made holding the operator role: its fragment says so before its
+            # container is first made from it, so there is nothing to re-make.
+            if any(r["slug"] == operator_attachment.OPERATOR_ROLE_SLUG
+                   for r in await store.roles_of(mind_id)):
+                await asyncio.to_thread(operator_attachment.reconcile, name, True)
     except Exception as exc:  # noqa: BLE001 - every failure unmakes the mind
         why = str(getattr(exc, "detail", "") or exc) or type(exc).__name__
         leftovers = await mind_creation.unmake(creation, _deregister_mind)
@@ -4634,9 +4640,26 @@ async def api_delete_role(role_id: str, user: dict = Depends(require_admin_or_ro
             status_code=409,
             detail="The general role cannot be deleted: every agent under role "
                    "management holds it. It can be edited.")
+    # Read before the delete, which takes the holdings with it: the minds
+    # that held the operator role lose what it attached.
+    holders = (await store.role_holders(rid)
+               if role["slug"] == operator_attachment.OPERATOR_ROLE_SLUG else [])
     await store.delete_role(rid)
     log_event(log, "role.deleted", **_actor_fields(user), role_id=rid, slug=role["slug"])
-    return {"ok": True}
+    answer: dict = {"ok": True}
+    if holders:
+        names = {str(m.get("mind_id") or m.get("id") or ""): str(m.get("name") or "")
+                 for m in await _broker_minds_safe()}
+        answer["attachments"] = {}
+        for mind_id in holders:
+            if names.get(mind_id):
+                answer["attachments"][names[mind_id]] = (
+                    await _attach_for_roles(names[mind_id], mind_id, user))["attachments"]
+            else:
+                answer["attachments"][mind_id] = {
+                    "changed": False, "recreated": False,
+                    "detail": "This mind is not in the registry, so its attachments were not changed."}
+    return answer
 
 
 def _role_lock(role_id: int) -> str:
@@ -4805,7 +4828,60 @@ async def api_set_mind_roles(name: str, body: dict, user: dict = Depends(require
     mind_id = await _mind_id_for(name)
     await store.set_mind_roles(mind_id, ids)
     log_event(log, "mind.roles.set", **_actor_fields(user), mind_name=name, role_ids=ids)
-    return {"ok": True, "grants": await store.grants_for(mind_id)}
+    answer = {"ok": True, "grants": await store.grants_for(mind_id)}
+    answer.update(await _attach_for_roles(name, mind_id, user))
+    return answer
+
+
+async def _attach_for_roles(name: str, mind_id: str, user: dict) -> dict:
+    """Make a console-made mind's container match the roles it now holds.
+
+    The role assignment is already saved and stays saved whatever happens
+    here. A container's attachments are fixed when it is made, so when the
+    fragment had to change (the install's skills folder was never attached,
+    or the operator role was given or taken) the mind is re-made from it, the
+    way the mounts page does, and the answer says so plainly: `attachments`
+    is what came of it.
+    """
+    operator = any(r["slug"] == operator_attachment.OPERATOR_ROLE_SLUG
+                   for r in await store.roles_of(mind_id))
+    try:
+        result = await asyncio.to_thread(operator_attachment.reconcile, name, operator)
+    except (operator_attachment.AttachmentRefused, ValueError, OSError) as exc:
+        return {"attachments": {
+            "changed": False, "recreated": False,
+            "detail": f"The roles are saved, but this mind's attachments were not changed: {exc}"}}
+    if not result["changed"]:
+        return {"attachments": {"changed": False, "recreated": False,
+                                "detail": result.get("detail", "")}}
+    log_event(log, "mind.attachments.changed", **_actor_fields(user), mind_name=name,
+              operator=operator)
+    target = mind_mounts.compose_target(name)
+    made = ("The roles are saved and this mind's compose file now carries "
+            + ("the install's skills folder, writable, and the operator's credential"
+               if operator else "the install's skills folder, read-only")
+            + ". This mind is being re-made from it")
+    try:
+        recreate = await _hive_tools_request(
+            "POST", "/docker/up",
+            params={"path": target.project_path, "service": target.service},
+            timeout=310.0)
+    except HTTPException as exc:
+        return {"attachments": {"changed": True, "recreated": False,
+                                "detail": f"{made}, but that did not happen: {exc.detail}"}}
+    if recreate.get("hitl_request_id"):
+        await console_access.record_operation_from(recreate, user)
+        return {"attachments": {
+            "changed": True, "recreated": False,
+            "operation_id": str(recreate["hitl_request_id"]),
+            "detail": f"{made}; that is waiting on your approval in Hive Tools."}}
+    if recreate.get("error") or recreate.get("status") == "error":
+        return {"attachments": {
+            "changed": True, "recreated": False,
+            "detail": f"{made}, but that did not happen: "
+                      f"{recreate.get('error') or recreate.get('stderr') or 'no detail'}"}}
+    return {"attachments": {"changed": True, "recreated": True,
+                            "detail": f"{made}, and it has been."}}
 
 
 @app.get("/api/minds/{name}/files/{tree}")
