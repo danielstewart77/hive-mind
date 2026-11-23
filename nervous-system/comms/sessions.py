@@ -1806,7 +1806,37 @@ class SessionManager:
             # The session was ended between finding it and writing to it: a
             # kill takes no turn lock. Nothing to record the turn against.
             return {"ok": False, "error": "no active session"}
+        if role == "assistant":
+            # One stop for each assistant post, never for each post: the Stop
+            # hook posts the user's part and then the assistant's.
+            is_wake = await watches.turn_is_wake(active["id"])
+            owed = await self._record_stop(
+                active["id"], f"t{written['id']}", "ended", wake=is_wake,
+                turn_id=written["id"], answer_turn_id=written["id"])
+            if is_wake:
+                await watches.end_wake_turn(active["id"])
+            self._wake(owed)
+            self._wake_when_idle(active["id"])
         return {"ok": True, "session_id": active["id"]}
+
+    async def _record_terminal_death(self, session_id: str) -> dict:
+        """A terminal turn that died: no answer to store, but a stop to tell of.
+
+        Keyed on the newest turn, so the one failure reported twice is one
+        stop. A turn failing only because the conversation overflowed and is
+        being re-sent never reaches here: the hook reports nothing for it.
+        """
+        latest = await core.latest_turn(session_id)
+        turn_id = latest["id"] if latest else None
+        key = f"d{turn_id}" if turn_id is not None else f"d{uuid.uuid4().hex}"
+        is_wake = await watches.turn_is_wake(session_id)
+        owed = await self._record_stop(
+            session_id, key, "died", wake=is_wake, turn_id=turn_id)
+        if is_wake:
+            await watches.end_wake_turn(session_id)
+        self._wake(owed)
+        self._wake_when_idle(session_id)
+        return {"ok": True, "session_id": session_id, "died": True}
 
     async def get_carry_forward(
         self, session_id: str, conversation_id: str
@@ -2467,6 +2497,7 @@ class SessionManager:
                         if outcome.get("started"):
                             turn["user_turn_id"] = outcome.get("user_turn_id")
                             turn["answer_turn_id"] = outcome.get("answer_turn_id")
+                            turn["unaccepted"] = bool(outcome.get("unaccepted"))
                         follow = outcome.get("next")
                         if not follow:
                             break
@@ -2477,6 +2508,9 @@ class SessionManager:
                         resend = bool(follow.get("resend"))
                 except BaseException:
                     turn["raised"] = True
+                    turn["unaccepted"] = bool(outcome.get("unaccepted"))
+                    if outcome.get("started"):
+                        turn["user_turn_id"] = outcome.get("user_turn_id")
                     raise
                 finally:
                     # Inside the lock: a message queued behind this turn must
@@ -2486,6 +2520,19 @@ class SessionManager:
         finally:
             # Never reached the lock (cancelled while queued): nothing began.
             await finish()
+
+    async def _undo_unaccepted_turn(
+        self, session_id: str, user_turn_id: int, wake_ids: list[int] | None,
+    ) -> None:
+        async def _undo(unit) -> None:
+            await core.delete_turn(user_turn_id, unit=unit)
+            if wake_ids:
+                await watches.undeliver(wake_ids, unit=unit)
+
+        try:
+            await _atomically(_undo)
+        except Exception:
+            log.exception("could not undo an unaccepted turn of %s", session_id)
 
     @staticmethod
     def _turn_succeeded(result: dict | None) -> bool:
@@ -2512,6 +2559,17 @@ class SessionManager:
         """
         try:
             user_turn = turn.get("user_turn_id")
+            if user_turn is not None and turn.get("unaccepted"):
+                # The mind never took this turn - unreachable, refused or
+                # gone - so it is no stop of this session and a wake carried
+                # by it was not delivered. The user row it wrote goes, and
+                # the wakes go back to being owed for the next check.
+                await self._undo_unaccepted_turn(session_id, user_turn, wake_ids)
+                if brief_from:
+                    await watches.owe_wake(
+                        session_id, brief_from, f"b{uuid.uuid4().hex}", "died")
+                    self._wake([brief_from])
+                return
             if user_turn is None:
                 if brief_from:
                     await watches.owe_wake(
@@ -2728,6 +2786,7 @@ class SessionManager:
         # Route message to mind container via HTTP, stream SSE response
         proc_info = self._procs.get(session_id)
         if not proc_info or not proc_info.get("_mind_url"):
+            outcome["unaccepted"] = True
             raise ValueError(f"No mind container URL for session {session_id}")
 
         mind_url = proc_info["_mind_url"]
@@ -2769,6 +2828,7 @@ class SessionManager:
                             # takes no turn lock, so it lands mid-turn, and
                             # falling through here would spawn a harness on
                             # the transcript of the conversation just ended.
+                            outcome["unaccepted"] = True
                             fresh = await self._get_row(session_id)
                             if not fresh or fresh.get("status") == "closed":
                                 log.info(
@@ -2798,6 +2858,7 @@ class SessionManager:
                             # looks nothing like a mind that is down and
                             # must not be diagnosed as one.
                             await resp.read()
+                            outcome["unaccepted"] = True
                             log.error(
                                 "Mind %s refused the gateway's credential "
                                 "for session %s", mind_id, session_id,
@@ -2831,6 +2892,7 @@ class SessionManager:
                             # yield nothing, so the surface shows a
                             # useless generic error).
                             body_text = await resp.text()
+                            outcome["unaccepted"] = True
                             try:
                                 detail = json.loads(body_text).get("error", body_text)
                             except (json.JSONDecodeError, AttributeError):
@@ -2859,6 +2921,7 @@ class SessionManager:
                             yield err_event
                             return
 
+                        outcome["unaccepted"] = False
                         async for line in resp.content:
                             line = line.decode().strip()
                             if not line or not line.startswith("data: "):
@@ -2995,6 +3058,8 @@ class SessionManager:
                         else:
                             return  # stream exhausted
             except aiohttp.ClientError as exc:
+                if not _turn_events:
+                    outcome["unaccepted"] = True
                 log.error("Mind container %s unreachable for session %s: %s", mind_url, session_id, exc)
                 if resend:
                     await self._clear_resend(session_id)
