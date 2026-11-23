@@ -2145,6 +2145,7 @@ class SessionManager:
         # typed meanwhile queues behind the re-send rather than overtaking it
         # onto the fresh conversation.
         status = "died"
+        outcome: dict = {}
         try:
             async with lock:
                 from comms import mind_maintenance
@@ -2175,7 +2176,7 @@ class SessionManager:
                     goal_rounds = follow.get("goal_rounds")
                     resend = bool(follow.get("resend"))
         finally:
-            if not _watch_wake:
+            if not _watch_wake and outcome.get("started"):
                 self._wake_watchers(session_id, status)
 
     async def _send_locked(
@@ -2352,6 +2353,9 @@ class SessionManager:
                 f"Session {session_id} ended — caller should open a new session"
             ) from exc
 
+        # A stored user turn marks the point at which a turn exists. Refusal
+        # before this point must not invent a died turn.
+        outcome["started"] = True
         # Route message to mind container via HTTP, stream SSE response
         proc_info = self._procs.get(session_id)
         if not proc_info or not proc_info.get("_mind_url"):
