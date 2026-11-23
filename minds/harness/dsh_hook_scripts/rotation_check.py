@@ -267,6 +267,37 @@ def assess(event: dict) -> dict | None:
             "client_ref": client_ref, "started_at": _started_at(entries)}
 
 
+def report_death(event: dict, assessed: dict | None) -> bool:
+    """Tell the gateway a terminal turn died, so its watcher is woken.
+
+    Only a turn typed into a browser terminal needs this: a chat turn's
+    death is seen by the gateway itself. Nothing is stored for it - there is
+    no answer - and the gateway keys the stop on the turn, so a report sent
+    twice is one stop. A turn that failed only because the conversation
+    overflowed is being rotated and re-sent, which is not a death: it
+    reports nothing, and the re-sent turn's own end is the stop.
+    """
+    if os.environ.get("HIVE_SURFACE") != "terminal" or not failed(event):
+        return False
+    if event.get("error_code") == hive.CONTEXT_WINDOW_EXCEEDED:
+        return False
+    client_type = os.environ.get("SURFACE", "")
+    client_ref = os.environ.get("CLIENT_REF", "")
+    comms_url, bearer = hive.comms()
+    if not (comms_url and client_type and client_ref):
+        return False
+    try:
+        hive.request("POST", f"{comms_url}/sessions/record-turn", bearer, {
+            "client_type": client_type, "client_ref": client_ref,
+            "role": "assistant", "died": True,
+            "conversation_id": str(event.get("session_id") or "") or None,
+        })
+    except Exception as exc:  # noqa: BLE001 — the gateway's slow check finds it
+        hive.log(NAME, f"death report failed sid={event.get('session_id')}: {exc}")
+        return False
+    return True
+
+
 def arm(assessed: dict) -> bool:
     """Arm the rotation with the gateway; stage it on disk for a pane."""
     comms_url, bearer = hive.comms()
@@ -310,6 +341,7 @@ def main() -> None:
         # dsh reads this answer before starting the next round, so it is
         # decided here rather than in a detached child with no stdout.
         assessed = assess(event)
+        report_death(event, assessed)
         if assessed and assessed["rotate"]:
             sys.stdout.write(json.dumps({"rotate": True}) + "\n")
         return
@@ -317,6 +349,7 @@ def main() -> None:
         return
     try:
         assessed = assess(event)
+        report_death(event, assessed)
         if assessed and assessed["rotate"]:
             arm(assessed)
     except Exception as exc:  # noqa: BLE001 — a hook never fails the turn

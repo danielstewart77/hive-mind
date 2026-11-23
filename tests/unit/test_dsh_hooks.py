@@ -245,6 +245,36 @@ def test_a_terminal_arm_is_staged_where_the_gateway_drops_it(mind, service, monk
     assert not staged.exists()
 
 
+def test_a_terminal_turn_that_died_tells_the_gateway_and_an_overflow_does_not(
+        mind, service, monkeypatch):
+    seen, _ = service
+    monkeypatch.setenv("HIVE_SURFACE", "terminal")
+    rotation_check = importlib.import_module("rotation_check")
+
+    rotation_check.report_death(
+        {"session_id": "conv-9", "stop_reason": "error"}, None)
+    rotation_check.report_death(
+        {"session_id": "conv-9", "stop_reason": "error",
+         "error_code": "CONTEXT_WINDOW_EXCEEDED"}, None)
+    rotation_check.report_death({"session_id": "conv-9"}, None)
+
+    posts = [r for r in seen if r["path"] == "/sessions/record-turn"]
+    assert len(posts) == 1
+    assert posts[0]["body"]["died"] is True
+    assert posts[0]["body"]["client_ref"] == "chat-1"
+    assert posts[0]["auth"] == "Bearer comms-key"
+
+
+def test_a_chat_turn_that_failed_is_not_reported_by_the_hook(mind, service, monkeypatch):
+    seen, _ = service
+    monkeypatch.setenv("HIVE_SURFACE", "telegram")
+    rotation_check = importlib.import_module("rotation_check")
+
+    rotation_check.report_death({"session_id": "c", "stop_reason": "error"}, None)
+
+    assert [r for r in seen if r["path"] == "/sessions/record-turn"] == []
+
+
 # --- rotation_fire ---------------------------------------------------------
 
 
