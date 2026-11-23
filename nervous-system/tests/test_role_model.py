@@ -79,7 +79,7 @@ def test_a_role_changed_between_turns_moves_the_next_turn_onto_its_model(comms_d
 def test_a_managed_mind_whose_roles_name_no_model_runs_the_model_it_is_configured_with(comms_db):
     async def scenario():
         mgr = await make_manager()
-        mind = await _mind()
+        mind = await _mind(default="claude-sonnet-5-5")
         await roles.set_mind_roles(mind, [await _role(None), await _role(None)])
         await seed_session("s3", mind_id=mind, harness="dsh", model="claude-haiku-5-5")
         row = await mgr._get_row("s3")
