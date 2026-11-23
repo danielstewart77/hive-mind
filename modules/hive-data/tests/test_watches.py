@@ -206,3 +206,20 @@ async def test_a_wake_held_for_a_suspended_or_closed_conversation_is_not_owed_to
 
     assert live["owed"] == 1
     assert (await watches.wake_state(a_mind))["owed"] == 0
+
+
+async def test_the_wakes_of_a_wake_turn_the_mind_never_took_are_owed_again_without_their_ids(
+        a_mind, clock):
+    worker = await _session(a_mind, clock)
+    sender = await _session(a_mind, clock)
+    await _armed(worker, sender, a_mind, clock)
+    await watches.record_stop(worker, "t1", "ended", turn_id=1)
+    claimed = await watches.claim_pending(sender)
+    await watches.mark_delivered([row["id"] for row in claimed])
+    assert await watches.turn_is_wake(sender) is True
+
+    undone = await watches.undeliver_open(sender)
+
+    assert undone == 1
+    assert await watches.turn_is_wake(sender) is False
+    assert [r["outcome"] for r in await watches.claim_pending(sender)] == ["ended"]

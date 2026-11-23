@@ -372,6 +372,21 @@ async def undeliver(ids: list[int], *, unit: Unit | None = None) -> int:
     return len(rows)
 
 
+async def undeliver_open(sender: str, *, unit: Unit | None = None) -> int:
+    """The sender's open wake turn was never taken by its mind: its wakes are owed again.
+
+    For a wake sent again after a gateway restart, which no longer knows the
+    ids it carried: the wakes it was carrying are the sender's delivered ones
+    whose turn is still open.
+    """
+    rows = await _fetch(
+        unit,
+        'UPDATE core.session_wakes SET state = \'pending\', turn_open = false, '
+        'claimed_at = NULL, delivered_at = NULL WHERE sender_session_id = $1 '
+        'AND turn_open AND state = \'delivered\' RETURNING id', sender)
+    return len(rows)
+
+
 async def wake_state(mind_id: str, *, since: float | None = None,
                      unit: Unit | None = None) -> dict:
     """What a mind would lose if its container went down now.
