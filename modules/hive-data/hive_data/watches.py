@@ -334,3 +334,13 @@ async def reset_open_turns(*, unit: Unit | None = None) -> int:
         'AND NOT EXISTS (SELECT 1 FROM core.sessions s WHERE s.id = '
         'w.sender_session_id AND s.resend_content IS NOT NULL) RETURNING w.id')
     return len(rows)
+
+
+async def undeliver(ids: list[int], *, unit: Unit | None = None) -> int:
+    """The sender's mind never took the wake turn: the wakes are owed again."""
+    rows = await _fetch(
+        unit,
+        'UPDATE core.session_wakes SET state = \'pending\', turn_open = false, '
+        'claimed_at = NULL, delivered_at = NULL WHERE id = ANY($1::bigint[]) '
+        'AND state = \'delivered\' RETURNING id', ids)
+    return len(rows)
