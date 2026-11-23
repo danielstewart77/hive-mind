@@ -31,6 +31,17 @@
             escapeHtml(ok ? goodText : badText) + "</span>";
     }
 
+    // A mind's picture in a list: the same route the Mind page and the Chief
+    // of Staff chart draw from, which answers with the mind's initial letter
+    // until a picture is set (Daniel, 2026-11-22). A row with no id has
+    // nothing to ask that route for, so it keeps its two letters.
+    function mindAvatar(mind) {
+        const id = mind && mind.id, name = mind && mind.name || "?";
+        if (!id) return '<span class="entity-avatar">' + escapeHtml(name.slice(0, 2)) + '</span>';
+        return '<img class="entity-avatar is-picture" loading="lazy" alt="" src="/api/minds/' +
+            encodeURIComponent(id) + '/image">';
+    }
+
     function serviceCheckRow(name, description, service, icon, options) {
         options = options || {};
         service = service || {};
@@ -106,7 +117,7 @@
         return data;
     }
 
-    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill, serviceCheckRow: serviceCheckRow, normalizeOverview: normalizeOverview};
+    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill, mindAvatar: mindAvatar, serviceCheckRow: serviceCheckRow, normalizeOverview: normalizeOverview};
 
     const app = document.querySelector("[data-console-app]");
     if (app) {

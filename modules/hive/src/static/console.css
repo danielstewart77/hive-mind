@@ -209,6 +209,7 @@ a { color: inherit; }
 [data-row-href] { cursor: pointer; }
 .entity-cell { display: flex; align-items: center; gap: 10px; min-width: 150px; }
 .entity-avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; background: var(--console-cyan-soft); color: #8ad9e2; font-weight: 700; text-transform: uppercase; }
+.entity-avatar.is-picture { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #0b1220; border: 1px solid var(--console-line-strong); flex: none; }
 .entity-copy { display: flex; flex-direction: column; min-width: 0; }
 .entity-copy a, .entity-copy strong { color: var(--console-text); font-weight: 600; text-decoration: none; }
 .entity-copy a:hover { color: var(--console-cyan); }
