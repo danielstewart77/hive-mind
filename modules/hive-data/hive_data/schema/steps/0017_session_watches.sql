@@ -83,3 +83,71 @@ CREATE TABLE IF NOT EXISTS core.session_wakes (
 );
 
 CREATE INDEX IF NOT EXISTS session_wakes_sender_state ON core.session_wakes (sender_session_id, state);
+
+-- The Chief of Staff page shows a task as stopped when `staff.tasks.stopped_at`
+-- is set, which only the old watch ever wrote. With the watch gone the
+-- gateway's own records write it: a recorded stop of any session a task is
+-- paired with sets it (the first stop wins, as `note_stopped` did), and a user
+-- turn written into such a session clears it (`note_running`). Done in the
+-- database so the gateway stays ignorant of the ledger and every writer of a
+-- turn gets it. `woken_at` is no longer written by anything.
+--
+-- Moving a ledger task to done is the act that tells the gateway the chief of
+-- staff is finished with its sessions (feature 2.1, story 7): one step, so a
+-- row can never be done while its session still wakes him. Done in the
+-- database because every writer of a status - the ledger tool, the console, a
+-- hand edit - must get it for nothing. The watch and the wakes owed under it go
+-- together (their foreign key cascades). Defined only where the ledger exists:
+-- a deployment that runs comms and not the staff schema has no tasks to move.
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'staff')
+       AND pg_catalog.to_regclass('staff.tasks') IS NOT NULL
+       AND pg_catalog.to_regclass('staff.task_sessions') IS NOT NULL THEN
+        CREATE OR REPLACE FUNCTION staff.end_watches_on_done() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $fn$
+        BEGIN
+            DELETE FROM core.session_watches
+            WHERE watched_session_id IN (
+                SELECT session_id FROM staff.task_sessions
+                WHERE task_id = NEW.id);
+            RETURN NEW;
+        END $fn$;
+        CREATE OR REPLACE FUNCTION staff.note_stop_from_gateway() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $fn$
+        BEGIN
+            UPDATE staff.tasks t
+            SET stopped_at = NEW.stopped_at, updated_at = NEW.stopped_at
+            WHERE t.stopped_at IS NULL AND t.status <> 'done' AND t.id IN (
+                SELECT task_id FROM staff.task_sessions
+                WHERE session_id = NEW.session_id);
+            RETURN NEW;
+        END $fn$;
+        DROP TRIGGER IF EXISTS session_stops_note_stop ON core.session_stops;
+        CREATE TRIGGER session_stops_note_stop
+            AFTER INSERT ON core.session_stops
+            FOR EACH ROW EXECUTE FUNCTION staff.note_stop_from_gateway();
+
+        CREATE OR REPLACE FUNCTION staff.note_running_from_gateway() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $fn$
+        BEGIN
+            UPDATE staff.tasks t SET stopped_at = NULL
+            WHERE t.stopped_at IS NOT NULL AND t.id IN (
+                SELECT task_id FROM staff.task_sessions
+                WHERE session_id = NEW.session_id);
+            RETURN NEW;
+        END $fn$;
+        DROP TRIGGER IF EXISTS session_turns_note_running ON core.session_turns;
+        CREATE TRIGGER session_turns_note_running
+            AFTER INSERT ON core.session_turns
+            FOR EACH ROW WHEN (NEW.role <> 'assistant')
+            EXECUTE FUNCTION staff.note_running_from_gateway();
+
+        DROP TRIGGER IF EXISTS tasks_end_watches_on_done ON staff.tasks;
+        CREATE TRIGGER tasks_end_watches_on_done
+            AFTER UPDATE OF status ON staff.tasks
+            FOR EACH ROW
+            WHEN (NEW.status = 'done' AND OLD.status IS DISTINCT FROM 'done')
+            EXECUTE FUNCTION staff.end_watches_on_done();
+    END IF;
+END $do$;

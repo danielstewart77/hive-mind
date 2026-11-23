@@ -344,3 +344,28 @@ async def undeliver(ids: list[int], *, unit: Unit | None = None) -> int:
         'claimed_at = NULL, delivered_at = NULL WHERE id = ANY($1::bigint[]) '
         'AND state = \'delivered\' RETURNING id', ids)
     return len(rows)
+
+
+async def wake_state(mind_id: str, *, since: float | None = None,
+                     unit: Unit | None = None) -> dict:
+    """What a mind would lose if its container went down now.
+
+    `owed` counts wakes waiting or being delivered to any conversation of the
+    mind; `delivered_since` lists wakes handed to it after `since`, which a
+    restart in that window may have cut off.
+    """
+    owed = await _fetch_one(
+        unit,
+        'SELECT count(*) AS n FROM core.session_wakes w JOIN core.sessions s '
+        'ON s.id = w.sender_session_id WHERE s.mind_id = $1 '
+        'AND w.state IN (\'pending\', \'claimed\')', mind_id)
+    delivered = []
+    if since is not None:
+        delivered = await _fetch(
+            unit,
+            'SELECT w.watched_session_id, w.sender_session_id, w.stop_key, '
+            'w.delivered_at FROM core.session_wakes w JOIN core.sessions s '
+            'ON s.id = w.sender_session_id WHERE s.mind_id = $1 '
+            'AND w.state = \'delivered\' AND w.delivered_at >= $2 '
+            'ORDER BY w.delivered_at', mind_id, since)
+    return {"owed": int(owed["n"]) if owed else 0, "delivered_since": delivered}

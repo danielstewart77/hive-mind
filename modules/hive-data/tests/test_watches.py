@@ -193,3 +193,42 @@ async def test_a_brief_that_failed_before_it_started_owes_its_sender_one_wake(
     assert (first, second) == (True, False)
     claimed = await watches.claim_pending(sender)
     assert [r["outcome"] for r in claimed] == ["died"]
+
+
+async def test_moving_a_ledger_task_to_done_ends_the_watch_on_its_session(
+        a_mind, clock, inspector):
+    from hive_data import staff
+
+    worker = await _session(a_mind, clock)
+    sender = await _session(a_mind, clock)
+    await _armed(worker, sender, a_mind, clock)
+    task = await staff.create_task("build it", "in progress", now=clock)
+    await staff.attach_session(task["id"], worker, now=clock)
+
+    await staff.update_task(task["id"], status="in progress", now=clock + 1)
+    still = await watches.on_session(worker)
+    await staff.update_task(task["id"], status="done", now=clock + 2)
+
+    assert len(still) == 1
+    assert await watches.on_session(worker) == []
+    assert await watches.record_stop(worker, "t1", "ended", turn_id=1) == []
+
+
+async def test_the_page_reads_a_task_as_stopped_from_the_gateways_own_stop_and_running_from_a_turn(
+        a_mind, clock):
+    from hive_data import staff
+
+    worker = await _session(a_mind, clock)
+    task = await staff.create_task("page", "in progress", now=clock)
+    await staff.attach_session(task["id"], worker, now=clock)
+
+    await core.record_turn(session_id=worker, role="user", content="go", created_at=clock)
+    working = (await staff.task(task["id"]))["stopped_at"]
+    await watches.record_stop(worker, "t1", "ended", turn_id=1, now=clock + 5)
+    stopped = (await staff.task(task["id"]))["stopped_at"]
+    await core.record_turn(session_id=worker, role="user", content="again", created_at=clock + 9)
+    resumed = (await staff.task(task["id"]))["stopped_at"]
+
+    assert working is None
+    assert stopped == clock + 5
+    assert resumed is None
