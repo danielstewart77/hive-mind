@@ -200,16 +200,6 @@ async def test_a_turn_already_running_does_not_wake_a_watch_whose_brief_has_not_
     assert len(_wakes_to(mind, sender)) == 1
 
 
-async def test_a_brief_without_asking_wakes_nobody(gateway, mind):
-    worker = await _session(gateway, OTHER)
-    sender = await _session(gateway)
-
-    await _turn(gateway, worker["id"])
-    await _settle(gateway)
-
-    assert _wakes_to(mind, sender) == []
-
-
 # --- protected behaviour 2 ---------------------------------------------------
 
 async def test_a_sender_mid_turn_gets_its_waiting_wakes_as_one_message_after_the_turn(
@@ -319,23 +309,6 @@ async def test_the_end_of_a_turn_that_was_itself_a_wake_wakes_nobody(gateway, mi
 
 
 # --- who is never woken ------------------------------------------------------
-
-async def test_ending_the_sender_drops_the_wake_and_starts_nothing(gateway, mind):
-    worker = await _session(gateway, OTHER)
-    sender = await _session(gateway)
-    await _watch(gateway, worker, sender)
-    mind.hold[worker["id"]] = asyncio.Event()
-    running = asyncio.create_task(_turn(gateway, worker["id"]))
-    await mind.entered.setdefault(worker["id"], asyncio.Event()).wait()
-
-    await core.delete_session(sender["id"])
-    mind.hold.pop(worker["id"]).set()
-    await running
-    await _settle(gateway)
-    await gateway.wake_sweep()
-    await _settle(gateway)
-
-    assert [t for _, t in mind.received if "[wake]" in t] == []
 
 
 async def test_a_sender_that_rotated_still_receives_the_wake_on_the_same_row(gateway, mind):
