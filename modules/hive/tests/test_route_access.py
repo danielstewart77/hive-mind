@@ -806,6 +806,25 @@ def test_a_skill_added_or_removed_on_a_role_that_does_not_exist_is_a_404(
     assert (added.status_code, removed.status_code) == (404, 404), (added.text, removed.text)
 
 
+def test_the_keep_promote_and_take_routes_admit_the_roles_bearer_and_answer_for_the_role(
+        builtin_console, monkeypatch):
+    """Each is answered by its own handler (a 404 for a role or repo copy that
+    is not there), which only happens when the bearer was admitted: a handler
+    that still wanted a session would answer 401 to this caller."""
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+
+    kept = operator.post("/api/roles/987654/keep", headers=_ROLES_GOOD)
+    promoted = operator.post("/api/roles/987654/promote", headers=_ROLES_GOOD)
+    taken = operator.post("/api/roles/repo/no-such-role-anywhere/take", headers=_ROLES_GOOD)
+    huge = operator.post("/api/roles/99999999999999999999/skills", headers=_ROLES_GOOD,
+                         json={"skill": "plan"})
+
+    assert (kept.status_code, promoted.status_code, taken.status_code,
+            huge.status_code) == (404, 404, 404, 404), (
+        kept.text, promoted.text, taken.text, huge.text)
+
+
 def test_a_wrong_or_absent_roles_bearer_changes_no_role_on_any_roles_route(
         builtin_console, monkeypatch):
     """A role changes what every mind holding it may use, so the credential

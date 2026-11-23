@@ -4498,9 +4498,14 @@ async def api_mind_skill_remove(
 
 def _role_id(value: str) -> int:
     try:
-        return int(value)
+        number = int(value)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="No such role") from exc
+    # Roles are keyed by a 64-bit id: a number outside it names no role, and
+    # the database would refuse it as a server error rather than a 404.
+    if not 0 <= number < 2 ** 63:
+        raise HTTPException(status_code=404, detail="No such role")
+    return number
 
 
 @app.get("/api/roles")
@@ -4635,7 +4640,10 @@ async def api_delete_role(role_id: str, user: dict = Depends(require_admin_or_ro
 
 
 def _role_lock(role_id: int) -> str:
-    """The advisory-lock key every write to one role's grants takes."""
+    """The advisory-lock key the one-skill add and remove and the whole-list replace take.
+
+    Taking a role from the repo is a deliberate full replace and does not.
+    """
     return f"roles:role:{role_id}"
 
 
