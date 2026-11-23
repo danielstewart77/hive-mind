@@ -48,6 +48,7 @@ running is `staff.agent_state`, the one reading the sweep shares.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -478,6 +479,25 @@ def _brief_words(brief: str) -> str:
     return " ".join(stem.replace("-", " ").replace("_", " ").split())
 
 
+#: A reported child's description may end by naming the board item it was
+#: sent to build - ` #<board id>` or ` #<item number>` - which is the only
+#: thing that says which story a coder's child is on (Daniel, 2026-11-22: a
+#: feature's task spun and none of its stories did). The reporter puts it
+#: there, read from the child's own brief; it rides in the description
+#: because that is the one free field a report carries, and it is taken off
+#: again before the description is drawn.
+_ITEM_REF = re.compile(r"\s*#([0-9A-Za-z]+)\s*$")
+
+
+def _about(agent: dict[str, Any]) -> tuple[str, str]:
+    """A reported child's description, and the board item it names if any."""
+    about = (agent.get("about") or "").strip()
+    found = _ITEM_REF.search(about)
+    if found is None:
+        return about, ""
+    return about[:found.start()].strip(), found.group(1)
+
+
 def _agent_label(agent: dict[str, Any]) -> str:
     """What a sub-agent node says: a few words of what it is doing.
 
@@ -491,7 +511,7 @@ def _agent_label(agent: dict[str, Any]) -> str:
     if brief:
         words = _brief_words(brief)
     else:
-        words = ((agent.get("about") or "").strip()
+        words = (_about(agent)[0]
                  or (agent.get("agent_type") or "").strip())
     return _cut(words, NAME_LIMIT) if words else AGENT_FALLBACK
 
@@ -805,6 +825,9 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
             questions.append({"task": task["id"], "name": label,
                               "question": question})
 
+        # The stories drawn beneath this task, by board id and by item
+        # number: the only places a child naming a story may be hung.
+        stories_here: dict[str, str] = {}
         if work_kind != TASK_KIND:
             if claimed[board_item] != task["id"]:
                 extra.append(task["id"])
@@ -813,6 +836,12 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
                     board_item, features, stories, numbers, kinds)
                 for node in sub_nodes:
                     board_nodes.setdefault(node["id"], node)
+                    if node["kind"] == "story":
+                        stories_here[node["id"]] = node["id"]
+                        number = (by_id.get(node["id"]) or {}).get(
+                            "item_number")
+                        if number is not None:
+                            stories_here[str(number)] = node["id"]
                 for edge in sub_edges:
                     board_parent.setdefault(edge["target"], edge["source"])
                 barrel.extend(sub_barrel)
@@ -859,7 +888,13 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
                 agent_type=agent.get("agent_type", ""),
                 about=agent.get("about", ""), stale=stale,
                 started_at=agent["started_at"]))
-            parent.setdefault(agent["id"], placed[agent["id"]] or task["id"])
+            # A child of the conversation itself that names a story drawn
+            # beneath this task hangs off that story, so the story is what
+            # spins. A name that is no such story changes nothing: the
+            # child stays on the task, where it certainly belongs.
+            home = placed[agent["id"]] or stories_here.get(
+                _about(agent)[1]) or task["id"]
+            parent.setdefault(agent["id"], home)
 
     _place_work(nodes, parent, board_nodes, board_parent, claimed, extra,
                 by_id, kinds, numbers)

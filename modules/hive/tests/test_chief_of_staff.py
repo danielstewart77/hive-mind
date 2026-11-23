@@ -1252,6 +1252,51 @@ async def test_a_story_with_a_working_child_beneath_it_is_working():
     assert _by_id(tree, story_task["id"])["active"] is True
 
 
+async def _feature_task_with_two_stories():
+    epic = await kanban_data.create_epic("Chief of Staff")
+    feature = await kanban_data.create_feature(epic["id"], "Visualization")
+    one = await kanban_data.create_story("The robot", feature_id=feature["id"])
+    two = await kanban_data.create_story("The face", feature_id=feature["id"])
+    task = await _paired_task("sess-rep", name="The feature")
+    await staff.update_task(task["id"], board_item=feature["id"], now=NOW)
+    await staff.note_stopped(task["id"], now=NOW)
+    return task, one, two
+
+
+async def test_a_child_that_names_a_story_hangs_off_that_story_and_spins_it():
+    """A coder holds the whole feature in one conversation, so the story a
+    child is building is known only from what the child was told."""
+    task, one, two = await _feature_task_with_two_stories()
+    child = await _reported("a1", label=f"Build the robot #{one['id']}")
+    await _reported("a1", "working", now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 11)
+
+    assert _parents(tree, child["id"]) == [one["id"]]
+    assert _by_id(tree, one["id"])["active"] is True
+    assert _by_id(tree, two["id"])["active"] is False
+    assert _by_id(tree, child["id"])["label"] == "Build the robot"
+
+
+async def test_a_child_that_names_a_story_by_its_item_number_hangs_off_it():
+    task, one, two = await _feature_task_with_two_stories()
+    child = await _reported("a1", label=f"Build the face #{two['item_number']}")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _parents(tree, child["id"]) == [two["id"]]
+
+
+async def test_a_child_that_names_no_story_of_this_task_stays_on_the_task():
+    task, one, two = await _feature_task_with_two_stories()
+    child = await _reported("a1", label="Research #s0000000000000000")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _parents(tree, child["id"]) == [task["id"]]
+    assert _by_id(tree, child["id"])["label"] == "Research"
+
+
 async def test_a_story_whose_child_only_runs_shows_what_it_showed_before():
     story_task, child = await _story_task_with_a_child()
     await _reported("c1", "working", parent="p1", now=NOW + 10)
