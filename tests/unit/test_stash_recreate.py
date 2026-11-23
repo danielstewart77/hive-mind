@@ -18,8 +18,6 @@ import pytest
 
 TOOL = (Path(__file__).resolve().parents[2]
         / "tools" / "stateless" / "stash_recreate" / "stash_recreate.py")
-WATCH = (Path(__file__).resolve().parents[2]
-         / "tools" / "staff_watch" / "staff_watch.py")
 
 STASH = "3d3ae243-989b-41f0-87bd-5a79ef42c70c"
 CONV = "af6953e6-ca36-484d-a58d-f737c9510f5c"
@@ -96,44 +94,17 @@ def test_no_mind_server_means_busy_not_idle(sr):
     assert sr.busy_processes(ps, OWN_PS)
 
 
-@pytest.fixture
-def watch():
-    pytest.importorskip("hive_data",
-                        reason="hive_data is not installed in this environment")
-    return _load("staff_watch", WATCH)
-
-
-NOW = 1_800_000_000.0
-
-
-def _task(task_id, status="in progress", stopped_at=None, woken_at=None):
-    return {"id": task_id, "name": f"task {task_id}", "status": status,
-            "sessions": ["s-1"], "stopped_at": stopped_at,
-            "woken_at": woken_at}
-
-
-def test_a_turn_in_flight_in_the_chiefs_conversation_is_busy(sr, watch):
-    live = {"sessions": [{"session_id": CONV, "mind_id": STASH,
-                          "last_block_at": NOW - 5}], "idle": []}
-    reasons = sr.judge_watch(watch, live, [], STASH, NOW)
+def test_a_turn_in_flight_in_the_chiefs_conversation_is_busy(sr):
+    reasons = sr.judge_wake_state({"mid_turn": [CONV], "owed": 0})
     assert any(CONV in r for r in reasons)
 
 
-def test_a_task_owed_a_wake_is_busy_and_a_quiet_one_is_not(sr, watch):
-    live = {"sessions": [], "idle": []}
-    owed = sr.judge_watch(watch, live, [_task("t1", stopped_at=NOW - 60)],
-                          STASH, NOW)
-    quiet = sr.judge_watch(watch, live, [_task("t2", status="on hold",
-                                               stopped_at=NOW - 60)],
-                           STASH, NOW)
-    assert any("t1" in r for r in owed)
-    assert quiet == []
-
-
-def test_an_idle_feed_and_settled_ledger_are_idle(sr, watch):
-    live = {"sessions": [], "idle": [{"session_id": CONV, "mind_id": STASH}]}
-    tasks = [_task("t3", stopped_at=NOW - 60, woken_at=NOW - 30)]
-    assert sr.judge_watch(watch, live, tasks, STASH, NOW) == []
+def test_a_wake_waiting_at_the_gateway_is_busy_and_a_settled_one_is_not(sr):
+    owed = sr.judge_wake_state({"mid_turn": [], "owed": 2})
+    settled = sr.judge_wake_state({"mid_turn": [], "owed": 0,
+                                   "delivered_since": []})
+    assert any("2 wake" in r for r in owed)
+    assert settled == []
 
 
 # ------------------------------------------------------------ the fake docker
@@ -179,17 +150,17 @@ def _healthy_docker(over=None):
         "image inspect": (0, "sha256:old\n", ""),
         "docker run": (0, _probe(), ""),
         "exec hive-mind-stash ps": (0, IDLE_PS, ""),
-        "watch-check": (0, json.dumps({"reasons": []}), ""),
+        "gateway-check": (0, json.dumps({"mid_turn": [], "owed": 0}), ""),
     }
     return Docker({**(over or {}), **{k: v for k, v in answers.items()
                                       if k not in (over or {})}})
 
 
-def test_an_unanswerable_watch_is_busy(sr, monkeypatch):
-    docker = _healthy_docker({"watch-check": (1, "", "no such container")})
+def test_an_unanswerable_gateway_is_busy(sr, monkeypatch):
+    docker = _healthy_docker({"gateway-check": (1, "", "no such container")})
     monkeypatch.setattr(subprocess, "run", docker)
     reasons = sr.check_idle()
-    assert any("watch could not say" in r for r in reasons)
+    assert any("gateway could not say" in r for r in reasons)
 
 
 # -------------------------------------------- P2: never idle, never recreated
@@ -402,12 +373,11 @@ def test_a_real_question_asked_meanwhile_is_never_cleared(sr, monkeypatch):
     assert ledger.tasks["t1"]["question"] == "Daniel, which branch?"
 
 
-def test_a_wake_marked_during_the_recreate_is_handed_back(sr):
-    tasks = [{"id": "a", "name": "A", "woken_at": 100.0},
-             {"id": "b", "name": "B", "woken_at": 50.0},
-             {"id": "c", "name": "C", "woken_at": None}]
-    assert [t["id"] for t in sr.woken_since(tasks, 90.0)] == ["a"]
-    assert [t["id"] for t in sr.woken_since(tasks, 100.0)] == ["a"]
+def test_a_wake_the_gateway_handed_over_during_the_recreate_is_handed_back(sr):
+    state = {"delivered_since": [
+        {"watched_session_id": "w-1", "stop_key": "t41", "delivered_at": 100.0}]}
+    assert sr.woken_since(state) == [{"id": "t41", "name": "session w-1"}]
+    assert sr.woken_since({"delivered_since": []}) == []
 
 
 FREE = [{"id": "t1", "status": "done", "question": None}]
@@ -483,14 +453,15 @@ def _run_docker(sr, probes=None, woken=()):
 
     def watch(args):
         if "--since" in args:
-            return 0, json.dumps({"reasons": [], "woken": list(woken)}), ""
-        return 0, json.dumps({"reasons": []}), ""
+            return 0, json.dumps({"mid_turn": [], "owed": 0,
+                                  "delivered_since": list(woken)}), ""
+        return 0, json.dumps({"mid_turn": [], "owed": 0}), ""
 
     ledger = Ledger(FREE)
     docker = _verify_docker(ledger, GOOD_MOUNT)
     docker.answers.update({
         "compose up": up, "{{.State.StartedAt}}": started,
-        "exec hive-mind-stash ps": ps, "watch-check": watch,
+        "exec hive-mind-stash ps": ps, "gateway-check": watch,
         "docker run": lambda a: (0, next(probes), ""),
         "deliver": (0, json.dumps({"delivered": True, "session": CONV,
                                    "turn_completed": True}), "")})
@@ -499,7 +470,7 @@ def _run_docker(sr, probes=None, woken=()):
 
 def test_an_idle_chief_is_recreated_once_with_no_deps_and_reported(
         sr, monkeypatch):
-    docker, _ = _run_docker(sr, woken=[{"id": "t9", "name": "lost wake"}])
+    docker, _ = _run_docker(sr, woken=[{"watched_session_id": "w-9", "stop_key": "t9", "delivered_at": 1.0}])
     monkeypatch.setattr(subprocess, "run", docker)
     out = sr.run("bubbles", deadline=300, wait=lambda *a: None)
     (up,) = docker.ran("compose up")

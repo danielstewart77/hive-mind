@@ -56,6 +56,14 @@ TABLE.add(
     "POST /sessions/{session_id}/suspend",
     "POST /sessions/{session_id}/resume",
     "POST /sessions/{session_id}/message",
+    # The gateway's wake (feature 2.1). The answer, the ask and the finish are
+    # about a session of a mind the caller's owner owns; the handlers hold a
+    # mind's own credential to the same owner. `watches` is addressed by the
+    # asking conversation, which is the one it lists.
+    "GET /sessions/{session_id}/answer",
+    "POST /sessions/{session_id}/watch",
+    "POST /sessions/{session_id}/watch/finish",
+    "GET /sessions/{session_id}/watches",
     "GET /sessions/{session_id}/events",
     "GET /sessions/{session_id}/history",
     "POST /sessions/{session_id}/activate",
@@ -164,6 +172,7 @@ TABLE.add(
 # Each of these takes only the admin token today and continues to.
 TABLE.add(
     Rule(ADMIN),
+    "GET /minds/{mind_id}/wake-state",
     "GET /sessions/live",
     "GET /sessions/live/text",
     "PUT /broker/minds/{mind_id}/owner",

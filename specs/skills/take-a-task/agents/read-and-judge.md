@@ -22,12 +22,16 @@ anybody is on it at all.
 Given: a comms session id, its ledger task id, the task description, and any
 board item the task names.
 
-1. Read it. `GET $COMMS_URL/sessions/<id>` (a 404 is a session that has
+1. Read it. `GET $COMMS_URL/sessions/<id>/answer` first: the gateway's own
+   record of the latest turn, `state` working or idle, `outcome` ended or
+   died, and the `answer` itself. It survives a gateway restart and your own
+   rotation, and is never a partial answer. Then `GET $COMMS_URL/sessions/<id>` (a 404 is a session that has
    ended; check `status` before relying on anything),
    `GET $COMMS_URL/sessions/<id>/history` for its last turns, and
    `GET $COMMS_URL/sessions/live/text?session_id=<id>` for the blocks while
    they are still buffered. Every call carries
-   `-H "Authorization: Bearer $COMMS_ADMIN_BEARER_TOKEN"`.
+   `-H "Authorization: Bearer $COMMS_BEARER_TOKEN"`, except the live text, which is
+   an admin route and takes `$COMMS_ADMIN_BEARER_TOKEN`.
 2. Judge by reading, never by pattern-matching the text: did it finish, fail,
    or is it holding a question?
 3. If it is holding a question, decide whether the task already answers it —
