@@ -813,7 +813,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             const on = r.general ? grants.managed : holding.has(r.id);
             return '<label class="checkbox-row"><input type="checkbox" data-role-id="' + r.id + '"' + (on ? " checked" : "") + (r.general ? " disabled" : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (every managed Mind)" : "") + '</label>';
         }).join("");
-        const grid = grants.managed ? [["Skills", (grants.skills || []).join(", ") || "none"], ["Hooks", (grants.hooks || []).join(", ") || "none"], ["Models", (grants.models || []).join(", ") || "none"], ["Built-in tools", (grants.tools || []).join(", ") || "none"]] : [];
+        const grid = grants.managed ? [["Skills", (grants.skills || []).join(", ") || "none"], ["Hooks", (grants.hooks || []).join(", ") || "none"], ["Models", (grants.models || []).join(", ") || "none named: runs its own model"], ["Built-in tools", (grants.tools || []).join(", ") || "none"]] : [];
         document.getElementById("mind-roles-grants").innerHTML = grid.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
     }
     document.getElementById("mind-roles-save").addEventListener("click", async function () {
