@@ -501,8 +501,16 @@ def _provide(harness: str, mind: dict, skills: list[str]) -> dict:
 def test_a_role_naming_a_generated_skill_delivers_it_from_the_installs_folder_beside_a_tracked_one(
         mind, tmp_path, harness):
     _generate(tmp_path, GENERATED, GENERATED_TEXT, **{"helper.sh": "echo helper\n"})
+    # The untouched as-generated copy sits beside it and is never a skill.
+    kept = _install_folder(tmp_path) / ".as-generated"
+    (kept / GENERATED).mkdir(parents=True)
+    (kept / GENERATED / "SKILL.md").write_text(GENERATED_TEXT.replace("generated thing", "kept thing"))
+    (kept / "SKILL.md").write_text("---\nname: x\n---\nnot a skill\n")
 
     result = _provide(harness, mind, [GENERATED, SKILL])
+    names = {pair.name for pair in skills_api.list_skills(harness)}
+    assert ".as-generated" not in names
+    assert "kept thing" not in (mind[harness] / "skills" / GENERATED / "SKILL.md").read_text()
 
     assert result["problems"] == []
     delivered = mind[harness] / "skills" / GENERATED
