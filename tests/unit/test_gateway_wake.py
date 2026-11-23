@@ -392,3 +392,63 @@ async def test_a_terminal_turn_wakes_once_for_the_assistant_post_and_a_death_say
     assert len(one) == 1 and "ended its turn" in one[0]
     both = _wakes_to(mind, sender)
     assert len(both) == 2 and "died" in both[1]
+
+
+# --- the slow check never announces a stop a second time --------------------
+
+async def test_the_slow_check_does_not_wake_again_for_stops_whose_records_were_pruned(
+        gateway, mind):
+    """Only the newest few stops are kept. The check once read every older
+    reply as an unannounced stop and woke the sender again for each."""
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    for _ in range(watches.STOPS_KEPT + 2):
+        await _turn(gateway, worker["id"])
+        await _settle(gateway)
+    delivered = len(_wakes_to(mind, sender))
+
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert delivered == watches.STOPS_KEPT + 2
+    assert len(_wakes_to(mind, sender)) == delivered
+
+
+async def test_a_turn_that_died_after_saying_something_wakes_the_sender_once(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    mind.script[worker["id"]] = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "half an answer"}]}},
+        {"type": "result", "is_error": True, "result": "boom"}]
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    woken = _wakes_to(mind, sender)
+    assert len(woken) == 1 and "died" in woken[0]
+
+
+async def test_a_wake_turn_that_ends_in_a_terminal_pane_wakes_nobody(gateway, mind):
+    """A wake delivered to a conversation held in a browser terminal ends
+    through the Stop hook's report, not through the code that sent it."""
+    watcher = await _session(gateway, MIND)
+    pane = await _session(gateway, OTHER)
+    worker = await _session(gateway, OTHER)
+    await _watch(gateway, pane, watcher, "the pane's work")
+    await _watch(gateway, worker, pane, "the worker")
+    await core.bind_surface(client_type="terminal", client_ref="tile-2",
+                            session_id=pane["id"])
+    await watches.record_stop(worker["id"], "t1", "ended", turn_id=1)
+    claimed = await watches.claim_pending(pane["id"])
+    await watches.mark_delivered([row["id"] for row in claimed])
+
+    await gateway.record_turn("terminal", "tile-2", "user", "the wake text")
+    await gateway.record_turn("terminal", "tile-2", "assistant", "read it")
+    await _settle(gateway)
+
+    assert _wakes_to(mind, watcher) == []
