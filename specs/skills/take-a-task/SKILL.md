@@ -8,7 +8,10 @@ description: Take a piece of work Daniel hands over, give it to the mind that sh
 `ledger` below is `/opt/venv/bin/python3 "$HIVE_PROJECT_DIR/tools/stateless/staff_ledger/staff_ledger.py"`;
 it prints JSON and exits nonzero with `{"error"}` on a refusal. Every comms
 call goes to `$COMMS_URL` with
-`-H "Authorization: Bearer $COMMS_ADMIN_BEARER_TOKEN" -H "Content-Type: application/json"`.
+`-H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json"`:
+your own credential, which the gateway accepts for a mind of your owner.
+Only the live feed, `GET /sessions/live` and `GET /sessions/live/text`, needs
+the admin token, `$COMMS_ADMIN_BEARER_TOKEN`.
 Never the broker: it ends a callee's session after each wake, which orphans
 the task.
 
@@ -21,13 +24,12 @@ works only where these are true. None of them arrives with the skill:
   `$HIVE_PROJECT_DIR` the hive-mind checkout, with `hive_data` importable
   (the `mind-ledger` image target) and `HIVE_DATABASE_URL` naming a login
   that reaches the `staff` schema.
-- `$COMMS_URL` and `$COMMS_ADMIN_BEARER_TOKEN` are in the environment: the
-  live-session feed and the message route are admin routes.
-- `$MIND_NAME` is this mind's folder name under `minds/`, and
-  `data/turns/` under it is writable.
+- `$COMMS_URL`, `$COMMS_BEARER_TOKEN` (your own credential) and
+  `$HIVE_SESSION_ID` (this conversation) are in the environment.
+- `$MIND_NAME` is this mind's folder name under `minds/`.
 - `board` is the board tool as `/backlog` describes it, with its token.
-- The watch (`tools/staff_watch`) runs beside the mind, or nothing wakes it
-  when a session stops.
+- The gateway wakes you when a session you briefed stops. There is no watch
+  container and no timer beside you.
 
 ## You orchestrate; sub-agents execute
 
@@ -142,16 +144,14 @@ talking to Daniel, and editing the roster or a skill. Those are yours.
    tell Daniel it has gone out and end the turn. The child sends it detached
    and confirms it landed; a brief that never arrived comes back from the
    child and you tell him then.
-   - **Landed means generating, never a 200.** The send is an SSE stream and
-     closing it cancels the turn, so a POST that returns 200 and exits has
-     delivered nothing. Whoever sends — the child, or you when the children
-     have failed — must send exactly as `brief-a-session.md` does: `setsid -f
-     curl -sS -N` into a file under `data/turns/`, keeping the stream open,
-     then confirm the session is under `sessions` (generating) in
-     `GET /sessions/live` or that the `.sse` file holds `data:` lines.
-     Nothing is reported as sent, and no row is left reading as dispatched,
-     until one of those is true. (Daniel, 2026-11-16: the board showed
-     nothing working because a 200-and-close was reported as delivered.)
+   - **Landed means accepted.** The brief asks the gateway to wake you, and
+     the gateway answers `202` with `accepted: true` once it holds the watch
+     and has taken the brief. Nothing is held open and nothing is saved to a
+     file. Report nothing as sent, and leave no row reading as dispatched,
+     until you have seen that `202`. The wake comes back to *this*
+     conversation: a brief sent from a conversation that is then ended is
+     never answered, so after `/new` or `/clear` ask again for every open row
+     (see `/tend-the-ledger`).
    - *Complex*: if it needs more than one turn, put it on the board as a
      story first and name it in what you tell him.
    - *Very complex*: create the feature on the board, with no stories yet,
