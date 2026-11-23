@@ -579,7 +579,10 @@ def test_a_skill_in_both_places_is_delivered_from_the_install_folder_and_the_cla
 
     delivered = (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
     assert "Do the generated thing." in delivered
-    assert result["problems"] == []
+    # Said in the feed too, one sentence for the clash, not only in the log.
+    assert [text for text in result["problems"]] == [
+        f"skill {SKILL} is in the repository and in this install's generated skills; "
+        "the generated one is what this mind is given"]
     row = {pair.name: pair for pair in skills_api.list_skills(harness)}[SKILL].as_dict()
     assert row["source"] == "generated"
     assert row["shadowed"] is True
@@ -596,6 +599,54 @@ def test_a_tracked_skill_alone_reports_its_source_as_tracked(mind, harness):
     assert row["source"] == "tracked"
     assert row["shadowed"] is False
     assert "Do the thing." in row["repo"]
+
+
+TRUNCATED = [
+    ("frontmatter cut off", "---\nname: generated-skill\ndescription: a skill a work", "never closes"),
+    ("no frontmatter", "Do the generated thing.\n", "has no frontmatter"),
+    ("another name", "---\nname: some-other\ndescription: d\n---\nbody\n", "names 'some-other'"),
+    ("no description", "---\nname: generated-skill\n---\nbody\n", "has no description"),
+]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("case,text,said", TRUNCATED, ids=[c[0] for c in TRUNCATED])
+def test_a_generated_skill_whose_markdown_is_stable_but_not_whole_is_not_delivered(
+        mind, tmp_path, harness, case, text, said):
+    _generate(tmp_path, GENERATED, text)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    assert any(said in line and "nothing was delivered" in line for line in result["problems"])
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("where", ["SKILL.md", "a folder", "a file inside"])
+def test_a_generated_skill_holding_a_link_is_not_delivered_nor_read_through(
+        mind, tmp_path, harness, where):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(GENERATED_TEXT.replace("generated thing", "host file"))
+    (outside / "secret.txt").write_text("host secret\n")
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    if where == "SKILL.md":
+        (skill / "SKILL.md").unlink()
+        (skill / "SKILL.md").symlink_to(outside / "SKILL.md")
+    elif where == "a folder":
+        (skill / "notes").symlink_to(outside)
+    else:
+        (skill / "secret.txt").symlink_to(outside / "secret.txt")
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    # A linked SKILL.md is not read at all, so the grant is named as unreadable;
+    # a link further in is named as the reason nothing was delivered.
+    said = "could not be read on this mind (unreadable)" if where == "SKILL.md" else "holds a link"
+    assert any(said in line for line in result["problems"])
+    listed = {pair.name: pair for pair in skills_api.list_skills(harness)}[GENERATED]
+    assert "host file" not in (listed.repo_text or "")
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
