@@ -5,10 +5,9 @@ description: Keep every watched task moving and give Daniel the sitrep. Trigger 
 
 # /tend-the-ledger
 
-`ledger`, the comms calls and the detached, confirmed send of a message
-into a session (`POST /sessions/<id>/message`) are as in `/take-a-task`.
-The ledger and the sessions are the truth, never your memory of them.
-Your own markers live in `${DSH_SPAWN_DIR:-$HIVE_PROJECT_DIR/minds/$MIND_NAME}/data/`.
+`ledger` and the comms calls are as in `/take-a-task`. The ledger and the
+sessions are the truth, never your memory of them. Your own markers live in
+`${DSH_SPAWN_DIR:-$HIVE_PROJECT_DIR/minds/$MIND_NAME}/data/`.
 
 Statuses: `in progress` (working, watched), `waiting on response` (Daniel
 has been asked), `on hold` (a question held overnight), `with Daniel` (he
@@ -16,13 +15,28 @@ took it), `done` (reported finished). Every move names the status you read
 it in: `ledger set-status <task> "<new>" --expect "<old>"`. A refusal means
 it moved under you; read it again.
 
-The watch wakes you. A tick beside you compares `GET /sessions/live` against
-the rows every minute and drops one message naming every task whose sessions
-have stopped, so a wake is already the list and you never hunt for it. It
-records on the row when they stopped (`stopped_at`) and when you were told
-(`woken_at`), both in `ledger show`, and it never wakes you mid-turn: wakes
-that land while you are talking arrive together on the next tick that finds
-you idle. It sets no status, ever — every status is yours.
+The gateway wakes you. Every time a session you briefed stops, it drops one
+turn into the conversation that sent the brief, naming the task and saying
+whether the turn ended or died. A wake carries no answer: fetch it,
+`GET $COMMS_URL/sessions/<id>/answer`, whenever you want, as often as you
+want. You are never woken mid-turn; wakes that fall due while you are talking
+arrive together as one message once you are idle. It sets no status, ever —
+every status is yours. A row on `on hold` or `with Daniel` wakes you like any
+other: what you do about it is your judgement.
+
+Moving a row to `done` ends the watch on its sessions in the same step, so a
+row is never `done` while its session still wakes you. Moving a row back out
+of `done` does not restore it: ask again (below).
+
+**A new conversation asks again.** A wake goes only to the conversation that
+sent the brief, and the watches end with that conversation. So the first
+thing a conversation does after `/new`, `/clear` or a rotation of your own
+container's session is, for every ledger row not `done` that has a session
+the gateway still knows (`ledger list`, then `GET /sessions/<id>`), ask to
+be woken about it with no new brief:
+`curl -sS -X POST -H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg s "$HIVE_SESSION_ID" --arg t "<task name>" '{sender_session_id: $s, task: $t, already_briefed: true}')" "$COMMS_URL/sessions/<id>/watch"`.
+Asking twice is harmless. `GET $COMMS_URL/sessions/$HIVE_SESSION_ID/watches`
+lists what you hold.
 
 ## A watched session stopped
 
@@ -35,17 +49,16 @@ you idle. It sets no status, ever — every status is yours.
    `check-a-feature.md` instead. A board item it now covers goes into the
    description.
 3. Tell Daniel what the session said and what you dispatched, and end the
-   turn. The mind's closing answer is the last `result` event in the stream
-   saved under `data/turns/`: read that one event yourself, in the same turn
+   turn. The mind's closing answer is one call away:
+   `GET $COMMS_URL/sessions/<id>/answer`. Read it yourself, in the same turn
    as the wake, and give Daniel its verdict and any question it ends on,
-   marked as the mind's own words that no reader has checked yet. It is one
-   event, not the transcript, so it costs little context. The reader checks
-   it, and its report follows as a correction or a Boop. Never make Daniel
-   wait on a reader for an answer already sitting in a file: on 16 November
-   a ninety-second answer reached him fifteen minutes late, and only because
-   he asked (Daniel, 2026-11-16). With no saved stream, or no result event
-   in it, say so and say that a reader has gone in. Never hold the turn open
-   waiting for the reader.
+   marked as the mind's own words that no reader has checked yet. It costs
+   little context. The reader checks it, and its report follows as a
+   correction or a Boop. Never make Daniel wait on a reader for an answer
+   already sitting at the gateway: on 16 November a ninety-second answer
+   reached him fifteen minutes late, and only because he asked (Daniel,
+   2026-11-16). An `outcome` of `died` is a turn that died, not one that
+   finished: say so. Never hold the turn open waiting for the reader.
 4. As each child reports: whatever the task already answers — Daniel's
    instructions, the description, the board item it names — answer in the
    session yourself. Pointing the agent at the story that settles it is an
@@ -115,7 +128,7 @@ is wrong.
 ## A session that has gone quiet
 
 A task `in progress` whose session has produced nothing for long enough that
-you notice, and which the watch has not reported as stopped, is chased rather
+you notice, and which the gateway has not reported as stopped, is chased rather
 than guessed at: hand `chase.md` a sub-agent with the session, the task and
 what it was last asked. Say that you are chasing it, end the turn, and report
 what comes back. A nudge is not progress and is never reported as any.
