@@ -809,3 +809,13 @@ async def test_a_claude_mind_saves_its_answer_as_it_always_did(gateway, mind):
     await _turn(gateway, session["id"], "hello")
 
     assert await _saved_answers(gateway, session["id"]) == ["one two"]
+
+
+async def test_two_identical_real_messages_from_a_dsh_mind_are_both_kept_beside_a_matching_report(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn("ok", "ok")
+
+    await _turn(gateway, session["id"], "say it twice")
+
+    assert await _saved_answers(gateway, session["id"]) == ["ok\n\nok"]
