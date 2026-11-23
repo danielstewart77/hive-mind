@@ -178,8 +178,17 @@ async def owe_wake(watched: str, sender: str, stop_key: str, outcome: str, *,
 
     A brief that was accepted and then failed before its turn began has no
     turn to end. Its sender is still owed the news, and nobody else is.
-    Arms the watch as well, so the death is not left behind an unarmed row.
+    Arms the watch as well, so the death is not left behind an unarmed row:
+    a watch whose brief never began stays unarmed otherwise, and every later
+    stop of the session would wake nobody. It is armed at the newest turn, as
+    a watch asked for after the fact is, and only if it is not armed already.
     """
+    await _execute(
+        unit,
+        'UPDATE core.session_watches SET armed = true, since_turn_id = '
+        '(SELECT COALESCE(max(id), 0) FROM core.session_turns '
+        'WHERE session_id = $1) WHERE watched_session_id = $1 '
+        'AND sender_session_id = $2 AND NOT armed', watched, sender)
     row = await _fetch_one(
         unit,
         'INSERT INTO core.session_wakes (watched_session_id, '
@@ -321,13 +330,22 @@ async def unrecorded_answers(session_id: str, since_turn_id: int, *,
         session_id, since_turn_id)
 
 
+async def turn_row(session_id: str, turn_id: int, *,
+                   unit: Unit | None = None) -> Row | None:
+    """One turn of a session by its id: the answer a stop names, read alone."""
+    return await _fetch_one(
+        unit,
+        'SELECT id, role, content FROM core.session_turns '
+        'WHERE session_id = $1 AND id = $2', session_id, turn_id)
+
+
 async def trailing_user_turn(session_id: str, since_turn_id: int, *,
                              unit: Unit | None = None) -> Row | None:
     """The newest turn, when it is a user turn after the watch armed that
     nothing answered and no stop covers: a turn that died with its process."""
     return await _fetch_one(
         unit,
-        'SELECT t.id FROM core.session_turns t WHERE t.session_id = $1 '
+        'SELECT t.id, t.content FROM core.session_turns t WHERE t.session_id = $1 '
         'AND t.id > $2 AND t.role <> \'assistant\' AND t.id = ('
         'SELECT max(id) FROM core.session_turns WHERE session_id = $1) '
         'AND NOT EXISTS (SELECT 1 FROM core.session_stops s WHERE '
@@ -359,13 +377,16 @@ async def wake_state(mind_id: str, *, since: float | None = None,
     """What a mind would lose if its container went down now.
 
     `owed` counts wakes waiting or being delivered to any conversation of the
-    mind; `delivered_since` lists wakes handed to it after `since`, which a
-    restart in that window may have cut off.
+    mind that can still be handed one; a suspended or closed conversation is
+    skipped by delivery, so a wake held for it is not something a restart
+    would lose. `delivered_since` lists wakes handed to it after `since`,
+    which a restart in that window may have cut off.
     """
     owed = await _fetch_one(
         unit,
         'SELECT count(*) AS n FROM core.session_wakes w JOIN core.sessions s '
         'ON s.id = w.sender_session_id WHERE s.mind_id = $1 '
+        'AND s.status NOT IN (\'closed\', \'suspended\') '
         'AND w.state IN (\'pending\', \'claimed\')', mind_id)
     delivered = []
     if since is not None:

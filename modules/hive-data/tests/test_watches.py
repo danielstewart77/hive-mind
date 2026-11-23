@@ -180,3 +180,29 @@ async def test_moving_a_ledger_task_to_done_ends_the_watch_on_its_session(
     assert len(still) == 1
     assert await watches.on_session(worker) == []
     assert await watches.record_stop(worker, "t1", "ended", turn_id=1) == []
+
+
+async def test_a_brief_that_failed_before_it_started_arms_the_watch_for_later_stops(
+        a_mind, clock):
+    worker = await _session(a_mind, clock)
+    sender = await _session(a_mind, clock)
+    await watches.ask(worker, sender, "task", _digest("cap"), now=clock)
+    await watches.owe_wake(worker, sender, "b-1", "died")
+
+    owed = await watches.record_stop(worker, "t9", "ended", turn_id=9)
+
+    assert owed == [sender]
+
+
+async def test_a_wake_held_for_a_suspended_or_closed_conversation_is_not_owed_to_the_mind(
+        a_mind, clock):
+    worker = await _session(a_mind, clock)
+    sender = await _session(a_mind, clock)
+    await _armed(worker, sender, a_mind, clock)
+    await watches.record_stop(worker, "t1", "ended", turn_id=1)
+    live = await watches.wake_state(a_mind)
+
+    await core.update_session(sender, status="suspended")
+
+    assert live["owed"] == 1
+    assert (await watches.wake_state(a_mind))["owed"] == 0
