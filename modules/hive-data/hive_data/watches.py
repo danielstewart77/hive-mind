@@ -303,13 +303,21 @@ async def unrecorded_answers(session_id: str, since_turn_id: int, *,
     A stop the gateway never saw happen as an event: a terminal's report
     whose stop was never recorded, or a gateway that died between a reply
     being stored and its stop being written.
+
+    "Accounted for" is a watermark, not a lookup: the newest turn any stop of
+    this session covers, as its own turn or as its answer. Stops are pruned to
+    the newest few, and a lookup by name would find every pruned one missing and
+    announce it a second time under a new key. Every stop that stores a reply
+    names it as `answer_turn_id`, died ones included, so a reply never lies
+    above the watermark it belongs to.
     """
     return await _fetch(
         unit,
         'SELECT t.id FROM core.session_turns t WHERE t.session_id = $1 '
-        'AND t.role = \'assistant\' AND t.id > $2 AND NOT EXISTS ('
-        'SELECT 1 FROM core.session_stops s WHERE s.session_id = $1 AND '
-        '(s.turn_id = t.id OR s.answer_turn_id = t.id)) ORDER BY t.id',
+        'AND t.role = \'assistant\' AND t.id > $2 AND t.id > COALESCE(('
+        'SELECT max(GREATEST(COALESCE(s.turn_id, 0), '
+        'COALESCE(s.answer_turn_id, 0))) FROM core.session_stops s '
+        'WHERE s.session_id = $1), 0) ORDER BY t.id',
         session_id, since_turn_id)
 
 
