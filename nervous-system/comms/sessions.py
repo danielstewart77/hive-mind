@@ -11,7 +11,9 @@ import asyncio
 import json
 import logging
 import os
+import hashlib
 import re
+import secrets
 import signal
 import time
 import uuid
@@ -21,7 +23,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import hive_data
-from hive_data import core, roles, sessions_ops
+from hive_data import core, roles, sessions_ops, watches
 from hive_data.errors import MissingReference
 from hive_data.rows import UNSET
 
@@ -34,6 +36,10 @@ from hive_logging import log_event
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 
 log = logging.getLogger("hive-mind.sessions")
+
+
+class SenderBusy(RuntimeError):
+    """A wake found its sender mid-turn. Not a failure: the wake stays owed."""
 
 
 class MindCallFailed(RuntimeError):
@@ -590,44 +596,13 @@ class SessionManager:
         #: none of which the per-session observer stream provides.
         self.dashboard = LiveFeed()
         self._dashboard_sweep_task: asyncio.Task | None = None
-        self._watch_wakes: set[asyncio.Task] = set()
-
-    async def upsert_watch(
-        self, watched_session_id: str, sender_session_id: str, task: str,
-    ) -> Any:
-        """Persist a standing watch; re-registering the pair updates its task."""
-        from hive_data import watches
-        return await watches.upsert_watch(
-            watched_session_id, sender_session_id, task,
-        )
-
-    def _wake_watchers(self, session_id: str, status: str) -> None:
-        """Deliver independently of the turn and never let a wake wake another."""
-        async def deliver() -> None:
-            try:
-                from hive_data import watches
-                registered = await watches.list_watches(session_id)
-                for watch in registered:
-                    target = watch["sender_session_id"]
-                    if target == session_id:
-                        continue
-                    text = (f"Watched session {session_id} {status}. "
-                            f"Task: {watch['task']}")
-                    async def send_one(target: str, text: str) -> None:
-                        try:
-                            async for _ in self.send_message(target, text, _watch_wake=True):
-                                pass
-                        except Exception:
-                            log.exception("Watch wake to %s failed", target)
-                    wake = asyncio.create_task(send_one(target, text))
-                    self._watch_wakes.add(wake)
-                    wake.add_done_callback(self._watch_wakes.discard)
-            except Exception:
-                log.exception("Could not deliver watches for %s", session_id)
-
-        task = asyncio.create_task(deliver())
-        self._watch_wakes.add(task)
-        task.add_done_callback(self._watch_wakes.discard)
+        self._wake_sweep_task: asyncio.Task | None = None
+        self._rechecking: set[str] = set()
+        #: Wake deliveries in flight, held so they are not collected mid-turn.
+        self._wake_tasks: set[asyncio.Task] = set()
+        #: When this process began. A turn that began before it and has no
+        #: ending was cut off by the restart, which is a turn that died.
+        self._started_at = time.time()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -650,6 +625,12 @@ class SessionManager:
         # Mark any previously "running" sessions as idle (stale from crash)
         await core.reconcile_session_status(was="running", now="idle")
         self._dashboard_sweep_task = asyncio.create_task(self._dashboard_sweep_loop())
+        # Settle the wakes a previous process left half-delivered, then keep
+        # the slow check running. The first pass is a task of its own: it can
+        # deliver turns, and a start must not wait on a model.
+        await watches.release_stale_claims(time.time() + 1)
+        await watches.reset_open_turns()
+        self._wake_sweep_task = asyncio.create_task(self._wake_sweep_loop())
         log.info("Session manager started")
 
     async def _backfill_harness(self) -> None:
@@ -676,6 +657,9 @@ class SessionManager:
         if self._dashboard_sweep_task:
             self._dashboard_sweep_task.cancel()
             self._dashboard_sweep_task = None
+        if self._wake_sweep_task:
+            self._wake_sweep_task.cancel()
+            self._wake_sweep_task = None
         # Kill RC subprocesses that may not have a corresponding main process
         for sid in list(self._rc_procs):
             await self.kill_rc_process(sid)
@@ -698,6 +682,299 @@ class SessionManager:
             except Exception:
                 log.exception("Dashboard sweep failed")
             await asyncio.sleep(self.DASHBOARD_SWEEP_INTERVAL_SECONDS)
+
+    # ------------------------------------------------------------------
+    # Wakes (feature 2.1): a stop of a watched session wakes its watcher
+    # ------------------------------------------------------------------
+    #: The slow check. Minutes, not seconds: it is the backstop for a wake the
+    #: event path lost, never the mechanism, and with nothing owed a pass
+    #: costs a few queries and no model turn.
+    WAKE_SWEEP_INTERVAL_SECONDS = 300.0
+    #: A claim older than this belongs to a delivery that never finished.
+    WAKE_CLAIM_STALE_SECONDS = 600.0
+    #: Once a terminal sender is found mid-turn, when to look again.
+    TERMINAL_RECHECK_SECONDS = 100.0
+
+    @staticmethod
+    def _capability_digest(capability: str) -> bytes:
+        return hashlib.sha256(capability.encode("utf-8")).digest()
+
+    async def ask_watch(
+        self, watched: dict, sender: dict, task: str, *,
+        capability: str | None = None, armed_after: int | None = None,
+    ) -> dict:
+        """Ask to be woken at every stop of ``watched``, as ``sender``.
+
+        Returns the watch and, only on the call that created it, the
+        capability that alone can mark it finished: the gateway keeps its
+        digest, so the value cannot be read back by another conversation of
+        the same mind, which shares the credential and not this. A repeat
+        ask presenting the capability may change the task; one that does not
+        leaves the watch as it was.
+
+        ``armed_after`` arms the watch at once, for a task briefed before
+        the watch existed. Without it the watch stays unarmed until the
+        brief's own turn starts, so a turn already running cannot wake it.
+        """
+        fresh = secrets.token_urlsafe(32)
+        row = await watches.ask(
+            watched["id"], sender["id"], task, self._capability_digest(fresh),
+            presented=self._capability_digest(capability) if capability else None,
+        )
+        if armed_after is not None:
+            await watches.arm(watched["id"], sender["id"], armed_after)
+            row = {**row, "armed": True}
+        result = {k: v for k, v in row.items() if k != "created"}
+        if row["created"]:
+            result["capability"] = fresh
+        return result
+
+    async def armed_after_now(self, session_id: str) -> int:
+        """Where a watch asked for after the fact starts counting stops.
+
+        A turn running right now must still wake it, so a chat turn that is
+        mid-flight (its user row written, its answer not) is counted from
+        before that row; otherwise from the newest turn.
+        """
+        newest = await core.latest_turn(session_id)
+        if newest is None:
+            return 0
+        lock = self._locks.get(session_id)
+        if lock is not None and lock.locked() and newest["role"] != "assistant":
+            return newest["id"] - 1
+        return newest["id"]
+
+    async def finish_watch(
+        self, watched_id: str, sender_id: str, capability: str,
+    ) -> str:
+        """The owner says it is done with that session: `finished`, `absent`
+        or `refused`. Discards wakes still waiting for it."""
+        return await watches.finish(
+            watched_id, sender_id, self._capability_digest(capability))
+
+    async def watches_held_by(self, sender_id: str) -> list[dict]:
+        return await watches.held_by(sender_id)
+
+    async def latest_answer(self, session_id: str) -> dict | None:
+        """What the briefed session said at the end of its newest turn.
+
+        From the stored record, so it survives a restart of this gateway and
+        a rotation of the asker. Never a partial answer: a session that is
+        mid-turn says so and returns nothing else, and a turn that died
+        returns no text rather than an older turn's.
+        """
+        row = await self._get_row(session_id)
+        if not row:
+            return None
+        sid = row["id"]
+        lock = self._locks.get(sid)
+        if (lock is not None and lock.locked()) or await self._terminal_turn_open(sid, row):
+            return {"session_id": sid, "state": "working", "outcome": None,
+                    "answer": None, "stop_key": None, "stopped_at": None}
+        stop = await watches.latest_stop(sid)
+        if stop is None:
+            # Nothing recorded as a stop: a session older than this record, or
+            # one whose terminal never reported. The newest stored reply is
+            # the best answer there is, and it says it is unverified.
+            last = await core.latest_turn(sid, role="assistant")
+            return {"session_id": sid, "state": "idle", "outcome": "unknown",
+                    "answer": last["content"] if last else None,
+                    "stop_key": None,
+                    "stopped_at": last["created_at"] if last else None}
+        answer = None
+        if stop["outcome"] == "ended":
+            turn_id = stop["answer_turn_id"] or stop["turn_id"]
+            for turn in await core.list_turns(sid):
+                if turn["id"] == turn_id and turn["role"] == "assistant":
+                    answer = turn["content"]
+        return {"session_id": sid, "state": "idle", "outcome": stop["outcome"],
+                "answer": answer, "stop_key": stop["stop_key"],
+                "stopped_at": stop["stopped_at"]}
+
+    async def _terminal_turn_open(self, session_id: str, row: dict | None = None) -> bool:
+        """Whether a turn taken in a terminal pane is still running.
+
+        A pane never says its turn ended, so the live feed infers it from
+        silence. The mind's own Stop hook does say, through the context it
+        reports: a report later than the last block, on a conversation the
+        feed calls quiet, is the turn over. A size estimated when the
+        conversation opened is not a Stop report.
+        """
+        state = self.dashboard.state(session_id)
+        if not state.get("generating"):
+            return False
+        row = row or await self._get_row(session_id)
+        observed = (row or {}).get("context_observed_at")
+        last = state.get("last_block_at")
+        if (state.get("quiet") and observed is not None and last is not None
+                and (row or {}).get("context_kind") != "estimated"
+                and float(observed) >= float(last) - 5.0):
+            return False
+        return True
+
+    async def _sender_busy(self, sender_id: str) -> bool:
+        lock = self._locks.get(sender_id)
+        if lock is not None and lock.locked():
+            return True
+        return await self._terminal_turn_open(sender_id)
+
+    def _spawn_wake_task(self, coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine)
+        self._wake_tasks.add(task)
+        task.add_done_callback(self._wake_tasks.discard)
+
+    async def _record_stop(
+        self, session_id: str, stop_key: str, outcome: str, *, wake: bool,
+        turn_id: int | None, answer_turn_id: int | None = None,
+        unit: Any = None,
+    ) -> list[str]:
+        """Record a stop and who it owes a wake. Never raises: a stop that
+        cannot be recorded is found again by the slow check."""
+        try:
+            return await watches.record_stop(
+                session_id, stop_key, outcome, wake=wake, turn_id=turn_id,
+                answer_turn_id=answer_turn_id, unit=unit)
+        except MissingReference:
+            # The session was ended: a kill takes no turn lock, and an ended
+            # session sends no wake for its ending.
+            return []
+        except Exception:
+            log.exception("could not record the stop of %s", session_id)
+            return []
+
+    def _wake(self, senders: list[str]) -> None:
+        for sender in dict.fromkeys(senders):
+            self._spawn_wake_task(self._deliver_wakes(sender))
+
+    def _wake_when_idle(self, session_id: str) -> None:
+        """Deliver what is held for this session once its turn lock is free.
+
+        Called from inside the turn that is ending, where the lock is still
+        held: a delivery attempted at once would find its sender busy and
+        give up until the slow check. Waiting on the lock itself is exact.
+        """
+        async def later() -> None:
+            lock = self._locks.get(session_id)
+            if lock is not None:
+                async with lock:
+                    pass
+            await self._deliver_wakes(session_id)
+
+        self._spawn_wake_task(later())
+
+    def run_detached(self, coroutine: Any) -> None:
+        """Run work with no reader, kept alive until it ends."""
+        self._spawn_wake_task(coroutine)
+
+    @staticmethod
+    def _wake_text(claimed: list[dict]) -> str:
+        """One message naming every stopped task. It carries no answer."""
+        lines = []
+        for wake in claimed:
+            what = "died" if wake["outcome"] == "died" else "ended its turn"
+            lines.append(
+                f"- Session {wake['watched_session_id']} {what}. "
+                f"Task: {wake['task']}")
+        head = ("A session you are watching stopped." if len(lines) == 1 else
+                f"{len(lines)} sessions you are watching stopped.")
+        return (
+            f"[wake] {head}\n" + "\n".join(lines) + "\n\n"
+            "This is not a message to reply to and it carries no answer. "
+            "Fetch the latest answer from the gateway "
+            "(GET /sessions/<session id>/answer), then either brief that "
+            "session again with a real new instruction, or mark the task "
+            "finished. Do not send an acknowledgment.")
+
+    async def _deliver_wakes(self, sender_id: str) -> None:
+        """Hand a sender everything it is owed, as one turn, if it is idle.
+
+        Idle is checked, then the wakes are claimed in one statement, then
+        the turn is sent; `send_message` re-checks the lock with no await
+        between the check and taking it, so a turn that began in the gap
+        makes this a no-op rather than a second queued turn. A wake that
+        could not be handed over is released and stays owed.
+        """
+        try:
+            if await self._sender_busy(sender_id):
+                if sender_id not in self._rechecking and not (
+                        self._locks.get(sender_id) and self._locks[sender_id].locked()):
+                    # A terminal pane never says its turn ended: the feed
+                    # infers it from silence. Look once more when that
+                    # inference will have settled; the slow check follows.
+                    self._rechecking.add(sender_id)
+
+                    async def again() -> None:
+                        try:
+                            await asyncio.sleep(self.TERMINAL_RECHECK_SECONDS)
+                        finally:
+                            self._rechecking.discard(sender_id)
+                        await self._deliver_wakes(sender_id)
+
+                    self._spawn_wake_task(again())
+                return
+            row = await self._get_row(sender_id)
+            if not row or row.get("status") in _RETIRED:
+                return
+            claimed = await watches.claim_pending(sender_id)
+            if not claimed:
+                return
+            ids = [w["id"] for w in claimed]
+            try:
+                async for _ in self.send_message(
+                    sender_id, self._wake_text(claimed), _wake_ids=ids,
+                ):
+                    pass
+            except SenderBusy:
+                pass
+            except Exception:
+                log.exception("wake delivery to %s failed", sender_id)
+            finally:
+                await watches.release_claims(ids)
+        except Exception:
+            log.exception("could not deliver wakes to %s", sender_id)
+
+    async def _wake_sweep_loop(self) -> None:
+        while True:
+            try:
+                await self.wake_sweep()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Wake sweep failed")
+            await asyncio.sleep(self.WAKE_SWEEP_INTERVAL_SECONDS)
+
+    async def wake_sweep(self) -> int:
+        """One pass of the slow check. Returns how many senders it nudged.
+
+        Finds stops no event announced - a terminal turn whose report was
+        lost, a turn cut off by a restart - records them, and then delivers
+        whatever is owed. A wake already delivered is never owed again: the
+        stop is one row, the wake for it one row, and delivery a conditional
+        update.
+        """
+        await watches.release_stale_claims(time.time() - self.WAKE_CLAIM_STALE_SECONDS)
+        for watch in await watches.armed_watches():
+            watched = watch["watched_session_id"]
+            for turn in await watches.unrecorded_answers(
+                    watched, watch["since_turn_id"]):
+                self._wake(await self._record_stop(
+                    watched, f"t{turn['id']}", "ended", wake=await watches.turn_is_wake(watched),
+                    turn_id=turn["id"], answer_turn_id=turn["id"]))
+            lock = self._locks.get(watched)
+            if lock is not None and lock.locked():
+                continue
+            if await self._terminal_turn_open(watched):
+                continue
+            trailing = await watches.trailing_user_turn(watched, watch["since_turn_id"])
+            if trailing is not None:
+                turn = await core.latest_turn(watched)
+                if turn and turn["id"] == trailing["id"] and turn["created_at"] < self._started_at:
+                    self._wake(await self._record_stop(
+                        watched, f"u{trailing['id']}", "died", wake=False,
+                        turn_id=trailing["id"]))
+        owed = await watches.senders_owed()
+        self._wake(owed)
+        return len(owed)
 
     # ------------------------------------------------------------------
     # Session CRUD
@@ -1471,7 +1748,7 @@ class SessionManager:
 
     async def record_turn(
         self, client_type: str, client_ref: str, role: str, content: str,
-        conversation_id: str | None = None,
+        conversation_id: str | None = None, *, died: bool = False,
     ) -> dict:
         """Append one turn to the active session's ``session_turns`` ledger.
 
@@ -1487,12 +1764,16 @@ class SessionManager:
         if not active:
             return {"ok": False, "error": "no active session"}
         now = time.time()
+        if died:
+            return await self._record_terminal_death(active["id"])
+        written: dict = {}
 
         async def _write(unit) -> None:
-            await core.record_turn(
+            stored = await core.record_turn(
                 session_id=active["id"], role=role, content=_storable(content),
                 created_at=now, unit=unit,
             )
+            written["id"] = stored["row"]["id"]
             # This is the only write a browser-terminal turn ever makes, so it
             # is also the only chance to say the session was used.
             # `send_message` keeps `last_active` current for chat surfaces;
@@ -1525,8 +1806,6 @@ class SessionManager:
             # The session was ended between finding it and writing to it: a
             # kill takes no turn lock. Nothing to record the turn against.
             return {"ok": False, "error": "no active session"}
-        if role == "assistant":
-            self._wake_watchers(active["id"], "completed a turn")
         return {"ok": True, "session_id": active["id"]}
 
     async def get_carry_forward(
@@ -2122,7 +2401,8 @@ class SessionManager:
         *,
         goal_rounds: int | None = None,
         resend: bool = False,
-        _watch_wake: bool = False,
+        brief_from: str | None = None,
+        _wake_ids: list[int] | None = None,
     ):
         """Send a message and yield NDJSON response events.
 
@@ -2138,46 +2418,121 @@ class SessionManager:
         goal run that stopped after a round because the conversation reached
         its threshold is rotated and the goal dispatched again, with the
         rounds it had left, onto the fresh one.
+
+        ``brief_from`` names the conversation that asked to be woken about
+        this message; its watch arms when this turn is written. ``_wake_ids``
+        is set only by the gateway delivering a wake: such a turn is refused
+        when the sender is mid-turn, and when it ends it wakes nobody.
+
+        However the turn ends - a result, an error, a cut stream, a caller
+        that went away - exactly one stop is recorded afterwards, and the
+        watchers of this session are woken from it.
         """
         lock = self._locks.setdefault(session_id, asyncio.Lock())
-        # The lock is held across the replacement and the turn that follows
-        # it. The conversation is replaced under this same row, so a message
-        # typed meanwhile queues behind the re-send rather than overtaking it
-        # onto the fresh conversation.
-        status = "died"
-        outcome: dict = {}
+        if _wake_ids is not None and lock.locked():
+            # Checked here, with no await before the acquire below, so a turn
+            # cannot begin in the gap: a wake is held, never queued behind.
+            raise SenderBusy(session_id)
+        turn: dict = {}
+        finished = False
+
+        async def finish() -> None:
+            nonlocal finished
+            if not finished:
+                finished = True
+                await asyncio.shield(self._finish_turn(
+                    session_id, turn, brief_from=brief_from, wake_ids=_wake_ids))
+
         try:
+            # The lock is held across the replacement and the turn that
+            # follows it. The conversation is replaced under this same row,
+            # so a message typed meanwhile queues behind the re-send rather
+            # than overtaking it onto the fresh conversation.
             async with lock:
-                from comms import mind_maintenance
-                row = await self._get_row(session_id)
-                if row:
-                    await mind_maintenance.check(row['mind_id'])
-                while True:
-                    outcome: dict = {}
-                    result = None
-                    async for event in self._send_locked(
-                        session_id, content, images, goal_rounds=goal_rounds,
-                        resend=resend, outcome=outcome,
-                    ):
-                        if event.get("type") == "result":
-                            result = event
-                        yield event
-                    follow = outcome.get("next")
-                    if not follow:
-                        if result is not None:
-                            reason = result.get("stop_reason") or result.get("outcome")
-                            if (not result.get("is_error") and not result.get("error_code")
-                                    and result.get("subtype") != "error"
-                                    and reason not in ("error", "failed", "cancelled", ROTATION_NEEDED)):
-                                status = "completed a turn"
-                        return
-                    content = follow["content"]
-                    images = follow.get("images")
-                    goal_rounds = follow.get("goal_rounds")
-                    resend = bool(follow.get("resend"))
+                try:
+                    from comms import mind_maintenance
+                    row = await self._get_row(session_id)
+                    if row:
+                        await mind_maintenance.check(row['mind_id'])
+                    while True:
+                        outcome: dict = {}
+                        async for event in self._send_locked(
+                            session_id, content, images, goal_rounds=goal_rounds,
+                            resend=resend, outcome=outcome, brief_from=brief_from,
+                            wake_ids=_wake_ids,
+                        ):
+                            if event.get("type") == "result":
+                                turn["result"] = event
+                            yield event
+                        if outcome.get("started"):
+                            turn["user_turn_id"] = outcome.get("user_turn_id")
+                            turn["answer_turn_id"] = outcome.get("answer_turn_id")
+                        follow = outcome.get("next")
+                        if not follow:
+                            break
+                        turn.pop("result", None)
+                        content = follow["content"]
+                        images = follow.get("images")
+                        goal_rounds = follow.get("goal_rounds")
+                        resend = bool(follow.get("resend"))
+                except BaseException:
+                    turn["raised"] = True
+                    raise
+                finally:
+                    # Inside the lock: a message queued behind this turn must
+                    # not begin before this turn's ending is on the record,
+                    # or it could read this turn's wake mark as its own.
+                    await finish()
         finally:
-            if not _watch_wake and outcome.get("started"):
-                self._wake_watchers(session_id, status)
+            # Never reached the lock (cancelled while queued): nothing began.
+            await finish()
+
+    @staticmethod
+    def _turn_succeeded(result: dict | None) -> bool:
+        """Whether a turn's final result is one that finished, not one that died."""
+        if not result:
+            return False
+        reason = result.get("stop_reason") or result.get("outcome")
+        return not (
+            result.get("is_error") or result.get("error_code")
+            or result.get("subtype") == "error"
+            or reason in ("error", "failed", "cancelled", ROTATION_NEEDED))
+
+    async def _finish_turn(
+        self, session_id: str, turn: dict, *, brief_from: str | None,
+        wake_ids: list[int] | None,
+    ) -> None:
+        """Record how a turn ended and wake the session's watchers from it.
+
+        The one place every ending passes: it runs in the `finally` of
+        `send_message`. A turn that never began - refused before its user
+        row was written - is no stop of this session, so it wakes nobody,
+        except that the conversation that asked to be woken about a brief
+        which was accepted and then failed to begin is told it died.
+        """
+        try:
+            user_turn = turn.get("user_turn_id")
+            if user_turn is None:
+                if brief_from:
+                    await watches.owe_wake(
+                        session_id, brief_from, f"b{uuid.uuid4().hex}", "died")
+                    self._wake([brief_from])
+                return
+            ended = (not turn.get("raised")
+                     and self._turn_succeeded(turn.get("result")))
+            is_wake = wake_ids is not None or await watches.turn_is_wake(session_id)
+            owed = await self._record_stop(
+                session_id, f"t{user_turn}", "ended" if ended else "died",
+                wake=is_wake, turn_id=user_turn,
+                answer_turn_id=turn.get("answer_turn_id") if ended else None)
+            if is_wake:
+                await watches.end_wake_turn(session_id)
+            self._wake(owed)
+            # A sender that was busy goes idle here: what was held for it
+            # arrives now, as one message.
+            self._wake_when_idle(session_id)
+        except Exception:
+            log.exception("could not record how a turn of %s ended", session_id)
 
     async def _send_locked(
         self,
@@ -2188,6 +2543,8 @@ class SessionManager:
         goal_rounds: int | None,
         resend: bool,
         outcome: dict,
+        brief_from: str | None = None,
+        wake_ids: list[int] | None = None,
     ):
         """One turn of `send_message`, under its lock.
 
@@ -2342,6 +2699,15 @@ class SessionManager:
                 await _update_session(
                     session_id, resend_dispatched_at=time.time(), unit=unit
                 )
+            if wake_ids:
+                # Handed to the sender in the same change that writes the
+                # turn: a crash leaves the wake owed, or delivered, never both.
+                await watches.mark_delivered(wake_ids, unit=unit)
+            if brief_from:
+                # The brief's own turn exists now. Only stops of turns from
+                # here on wake the watch.
+                await watches.arm(
+                    session_id, brief_from, turn["row"]["id"] - 1, unit=unit)
             return turn["row"]["id"]
 
         try:
@@ -2352,10 +2718,13 @@ class SessionManager:
             raise ValueError(
                 f"Session {session_id} ended — caller should open a new session"
             ) from exc
-
-        # A stored user turn marks the point at which a turn exists. Refusal
-        # before this point must not invent a died turn.
+        # A stored user turn is the point at which a turn exists. A refusal
+        # before it invents no stop; anything after it is a turn that ended
+        # or died, and `send_message` records which.
         outcome["started"] = True
+        outcome["user_turn_id"] = user_turn_id
+        outcome["answer_turn_id"] = None
+
         # Route message to mind container via HTTP, stream SSE response
         proc_info = self._procs.get(session_id)
         if not proc_info or not proc_info.get("_mind_url"):
@@ -2610,7 +2979,7 @@ class SessionManager:
                                 # a handover the harness choked on has not
                                 # landed, and the next spawn must carry it
                                 # again.
-                                await self._close_turn(
+                                outcome["answer_turn_id"] = await self._close_turn(
                                     session_id, "".join(_assistant_buf), now,
                                     landed=_pinned_sid if not event.get("is_error") else None,
                                 )
@@ -2635,7 +3004,7 @@ class SessionManager:
 
         if replaced is not None:
             if replaced["kind"] == "goal" and _assistant_buf:
-                await self._close_turn(
+                outcome["answer_turn_id"] = await self._close_turn(
                     session_id, "".join(_assistant_buf), time.time(), landed=None,
                 )
             settled = await self._settle_replacing_ending(replaced, content, images)
@@ -2647,7 +3016,7 @@ class SessionManager:
 
     async def _close_turn(
         self, session_id: str, reply: str, at: float, *, landed: str | None,
-    ) -> None:
+    ) -> int | None:
         """Put a turn's reply on the ledger, and clear the seed it delivered.
 
         ``landed`` names the conversation a turn completed on without error;
@@ -2657,14 +3026,16 @@ class SessionManager:
         ledger left to write to, and that is not this turn's failure.
         """
         if not reply and not landed:
-            return
+            return None
+        written: dict = {}
 
         async def _write(unit) -> None:
             if reply:
-                await core.record_turn(
+                stored = await core.record_turn(
                     session_id=session_id, role="assistant", content=_storable(reply),
                     created_at=at, unit=unit,
                 )
+                written["id"] = stored["row"]["id"]
             if landed:
                 await core.update_session_if(
                     session_id, expected={"carry_forward_sid": landed},
@@ -2676,6 +3047,8 @@ class SessionManager:
             await _atomically(_write)
         except MissingReference:
             log.info("session %s ended before its reply was recorded", session_id)
+            return None
+        return written.get("id")
 
     @staticmethod
     def _replacing_ending(event: dict, resend: bool) -> dict | None:
@@ -3927,6 +4300,9 @@ class SessionManager:
             await _atomically(_rebind)
         except MissingReference as exc:
             raise ValueError(f"Session not found: {session_id}") from exc
+        # Resume is not a turn ending, so it is its own trigger for the
+        # wakes held while this conversation was suspended.
+        self._wake([session_id])
         return await self._session_dict(session_id)
 
     async def set_harness_sid(self, session_id: str, harness_sid: str) -> dict:
@@ -3977,6 +4353,9 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
+        # The watches on this session end first, so the dying turn's own
+        # ending cannot slip a "died" wake out: no wake is sent for an ending.
+        await watches.end_on_session(session["id"])
         await self._kill_process(session_id)
         await core.delete_session(session["id"])
         await self._publish_session_event(
