@@ -858,7 +858,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             const buttons = state.actions.map(function (action) {
                 return '<button class="button button-quiet" type="button" data-skill="' + h.escapeHtml(row.name) + '" data-action="' + action + '">' + ACTION_LABELS[action] + "</button>";
             }).join(" ");
-            return '<tr><td>' + h.escapeHtml(row.name) + (row.community ? ' <span class="status-pill"><span></span>Community submission</span>' : '') + '</td><td>' + (row.repo !== null && row.repo !== undefined ? "present" : "absent") +
+            return '<tr><td>' + h.escapeHtml(row.name) + (row.community ? ' <span class="status-pill"><span></span>Community submission</span>' : '') + '</td><td>' + (row.repo !== null && row.repo !== undefined ? (row.source === "generated" ? "present, generated on this install" + (row.shadowed ? " (hides the repo's own copy)" : "") : "present") : "absent") +
                 '</td><td>' + h.escapeHtml(state.label) + '</td><td class="row-actions">' + buttons +
                 '</td></tr><tr class="skill-diff" data-diff-for="' + h.escapeHtml(row.name) + '" hidden><td colspan="4"><pre class="code-panel"></pre></td></tr>';
         }).join("");
