@@ -676,3 +676,203 @@ def test_a_generated_skill_that_is_being_written_is_not_delivered_in_part(
     assert any(f"skill {GENERATED} is granted by a role" in text for text in result["problems"])
     if written != "no markdown yet":
         assert any("nothing was delivered" in text for text in result["problems"])
+
+
+# --- A change to the install's copy of a generated skill reaches the minds that were given it ---
+
+NEWER_TEXT = GENERATED_TEXT.replace("Do the generated thing.", "Do the newer generated thing.")
+EDITED = "---\nname: generated-skill\ndescription: tuned\n---\nThe mind tuned this.\n"
+
+
+def _first_delivery(harness: str, mind: dict, tmp_path: Path, **siblings: str) -> Path:
+    """The role names a generated skill and the mind is given it by provision itself."""
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT, **siblings)
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    return skill
+
+
+def _delivered_text(mind: dict, harness: str) -> str:
+    return (mind[harness] / "skills" / GENERATED / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_still_holding_what_it_was_given_gets_the_newer_copy_of_a_generated_skill(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path, **{"helper.sh": "echo one\n"})
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    (skill / "helper.sh").write_text("echo two\n")
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the newer generated thing." in _delivered_text(mind, harness)
+    assert (mind[harness] / "skills" / GENERATED / "helper.sh").read_text() == "echo two\n"
+    assert result["problems"] == []
+    assert result["skills"][GENERATED] == "updated"
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[GENERATED]
+    assert row.state == "same"
+    # The next conversation finds nothing more to do.
+    assert _provide(harness, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+def test_every_harness_of_a_mind_gets_the_newer_copy_whichever_conversation_starts_first(
+        mind, tmp_path):
+    skill = _first_delivery("claude", mind, tmp_path)
+    for other in ("codex", "dsh"):
+        assert _provide(other, mind, [GENERATED])["problems"] == []
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+
+    assert _provide("codex", mind, [GENERATED])["problems"] == []
+
+    for harness in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, harness)
+        assert _provide(harness, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_newer_generated_skill_is_delivered_though_each_harness_copy_differs_from_the_source(
+        mind, tmp_path, harness):
+    # Every harness's copy carries only the frontmatter that harness reads, so
+    # none of them is the source byte for byte, and none of them was edited.
+    rich = GENERATED_TEXT.replace(
+        "description: a skill a workflow generated\n",
+        "description: a skill a workflow generated\nargument-hint: <what>\n"
+        "harness:\n  dsh: {whenToUse: when asked}\n")
+    skill = _generate(tmp_path, GENERATED, rich)
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    assert _delivered_text(mind, harness) != rich
+
+    (skill / "SKILL.md").write_text(rich.replace("Do the generated thing.", "Do the newer thing."))
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the newer thing." in _delivered_text(mind, harness)
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("where", ["the harness copy", "another harness's copy", "the reference"])
+def test_a_mind_that_changed_its_own_copy_keeps_it_and_is_told_the_two_differ(
+        mind, tmp_path, harness, where):
+    skill = _first_delivery(harness, mind, tmp_path)
+    for other in HARNESSES:
+        _provide(other, mind, [GENERATED])
+    elsewhere = next(h for h in HARNESSES if h != harness)
+    if where == "the harness copy":
+        edited = mind[harness] / "skills" / GENERATED / "SKILL.md"
+    elif where == "another harness's copy":
+        edited = mind[elsewhere] / "skills" / GENERATED / "SKILL.md"
+    else:
+        edited = skill_reference.reference_path("skill", GENERATED) / "SKILL.md"
+    edited.write_text(EDITED)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert edited.read_text() == EDITED
+    for h in HARNESSES:
+        assert "newer generated thing" not in _delivered_text(mind, h)
+    assert "newer generated thing" not in (
+        skill_reference.reference_path("skill", GENERATED) / "SKILL.md").read_text()
+    assert result["skills"][GENERATED] == "differs"
+    assert result["problems"] == [
+        f"skill {GENERATED} has changed in this install's generated skills, and this mind "
+        "has changed its own copy since it was given; its copy was left as it is and now "
+        "differs"]
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[GENERATED]
+    assert row.state == "differs"
+    assert "newer generated thing" in row.repo_text
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_edit_merged_into_the_reference_is_still_the_minds_when_the_install_copy_changes(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path)
+    (mind[harness] / "skills" / GENERATED / "SKILL.md").write_text(EDITED)
+    # The mind's own start-up pass merges an in-place edit into its reference.
+    skill_reference.check(catalog=lambda h: None, notify=lambda text: None)
+    assert "The mind tuned this." in (
+        skill_reference.reference_path("skill", GENERATED) / "SKILL.md").read_text()
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "The mind tuned this." in _delivered_text(mind, harness)
+    assert "newer generated thing" not in _delivered_text(mind, harness)
+    assert result["skills"][GENERATED] == "differs"
+    assert len(result["problems"]) == 1
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_changed_sibling_file_counts_as_the_minds_edit_not_only_the_markdown(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path, **{"helper.sh": "echo one\n"})
+    (mind[harness] / "skills" / GENERATED / "helper.sh").write_text("echo mine\n")
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert (mind[harness] / "skills" / GENERATED / "helper.sh").read_text() == "echo mine\n"
+    assert "newer generated thing" not in _delivered_text(mind, harness)
+    assert result["skills"][GENERATED] == "differs"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_generated_skill_the_mind_already_had_before_deliveries_were_recorded_is_left_alone(
+        mind, tmp_path, harness):
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    # How every copy at home today got there: rendered, with nothing said of
+    # what it was rendered from.
+    skill_reference.install(
+        "skill", GENERATED, harness, GENERATED_TEXT, skill,
+        catalog=lambda h: None, notify=lambda text: None)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_copy_the_mind_made_itself_is_left_alone_when_the_install_copy_changes(
+        mind, tmp_path, harness):
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    own = mind[harness] / "skills" / GENERATED
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text(EDITED)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert (own / "SKILL.md").read_text() == EDITED
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_tracked_skill_is_not_updated_when_the_repository_changes_it(mind, tmp_path, harness):
+    assert _provide(harness, mind, [SKILL])["problems"] == []
+    tracked = tmp_path / "project" / "specs" / "skills" / SKILL / "SKILL.md"
+    tracked.write_text(SKILL_TEXT.replace("Do the thing.", "Do the newer thing."))
+
+    result = _provide(harness, mind, [SKILL])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_newer_generated_skill_that_cannot_be_delivered_leaves_the_mind_its_copy_and_is_named(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path)
+
+    (skill / "SKILL.md").write_text("---\nname: generated-skill\ndescription: a skill a work")
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert any(f"skill {GENERATED} has a newer copy" in text and "nothing was delivered" in text
+               for text in result["problems"])
+
+    # Once the operator has finished writing it, the mind has it.
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    assert "Do the newer generated thing." in _delivered_text(mind, harness)
