@@ -52,6 +52,17 @@ on the board: finished work goes to `done` and stays, and abandoned or
 blocked work goes back to `committed` with the reason added to its
 description.
 
+## Naming an item
+
+An item is named by its **ID**: the whole number in the board's ID column,
+`item_number` on the record, as in "feature 856". The dotted number
+(`2.1`, `2.17.6`) is its **order**, and the order changes whenever anything
+above it moves, so it never identifies an item - not to the operator, not in
+a brief to another mind, not in a commit, a pull request or a document. Say
+the order only when the order is the point ("856 is now first in its epic").
+The module has no lookup by `item_number`: walk the epics, features and
+stories and match it.
+
 ## What each kind carries
 
 **Epic** — the overall effort and why it is being done. No sequence; its
