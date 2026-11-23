@@ -135,10 +135,34 @@ def test_a_skill_that_is_tuned_and_stale_gets_a_line_for_each(tree, capsys):
 
 def test_lines_come_out_sorted_by_skill_name(tree, capsys):
     root, skills = tree
-    (skills / "beta" / "SKILL.md").write_text("tuned\n")
-    (skills / "alpha" / "SKILL.md").write_text("tuned\n")
+    names = ["zulu", "mike", "echo", "tango", "alpha", "kilo", "beta", "yankee"]
+    for name in names:
+        (skills / name).mkdir(exist_ok=True)
+        (skills / name / "SKILL.md").write_text("tuned\n")
+        copy = skills / ".as-generated" / name
+        copy.mkdir(exist_ok=True)
+        (copy / "SKILL.md").write_text("generated\n")
+        (copy / ".generated.json").write_text(
+            (skills / ".as-generated" / "alpha" / ".generated.json").read_text()
+            if name != "alpha" else (copy / ".generated.json").read_text())
     _, lines = run(root, skills, capsys)
+    tuned = [l.split(":")[0] for l in lines if ": tuned" in l]
+    assert tuned == sorted(names)
+
+
+def test_a_record_that_cannot_be_parsed_or_names_a_path_with_a_nul_is_a_problem(
+        tree, capsys):
+    root, skills = tree
+    record = skills / ".as-generated" / "alpha" / ".generated.json"
+    record.write_text("[" * 200000)
+    data = json.loads((skills / ".as-generated" / "beta" / ".generated.json").read_text())
+    beta = skills / ".as-generated" / "beta" / ".generated.json"
+    data["document"] = "docs/s\u0000x"
+    beta.write_text(json.dumps(data))
+    code, lines = run(root, skills, capsys)
+    assert code == 1
     assert [l.split(":")[0] for l in lines] == ["alpha", "beta"]
+    assert all(": problem" in l for l in lines)
 
 
 def test_a_skill_with_no_as_generated_copy_is_a_problem(tree, capsys):

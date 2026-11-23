@@ -87,7 +87,7 @@ def _unsafe(path: object) -> bool:
 def _version(path: Path) -> str | None:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -97,7 +97,7 @@ def _record(copy: Path) -> tuple[dict | None, str | None]:
         data = json.loads((copy / RECORD).read_bytes().decode("utf-8"))
     except FileNotFoundError:
         return None, "record missing"
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None, "record unreadable"
     if not isinstance(data, dict):
         return None, "record is not an object"
