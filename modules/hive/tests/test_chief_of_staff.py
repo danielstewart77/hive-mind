@@ -1263,6 +1263,30 @@ async def _feature_task_with_two_stories():
     return task, one, two
 
 
+async def test_a_started_story_spins_while_the_task_above_it_is_running():
+    """A coder building a story herself has no child to draw, and the page
+    must still say which story she is on."""
+    task, one, two = await _feature_task_with_two_stories()
+    await kanban_data.update_story(one["id"], status="in_progress")
+    await staff.note_running(task["id"])
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _by_id(tree, task["id"])["active"] is True
+    assert _by_id(tree, one["id"])["active"] is True
+    assert _by_id(tree, two["id"])["active"] is False
+
+
+async def test_a_started_story_under_stopped_work_does_not_spin():
+    task, one, two = await _feature_task_with_two_stories()
+    await kanban_data.update_story(one["id"], status="in_progress")
+
+    tree = await cos.get_tree(now=NOW)
+
+    assert _by_id(tree, task["id"])["active"] is False
+    assert _by_id(tree, one["id"])["active"] is False
+
+
 async def test_a_child_that_names_a_story_hangs_off_that_story_and_spins_it():
     """A coder holds the whole feature in one conversation, so the story a
     child is building is known only from what the child was told."""
