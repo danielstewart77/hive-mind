@@ -22,7 +22,7 @@
         <section class="surface" id="mind-down" hidden><div class="surface-header"><div><h2>This Mind is not answering</h2><p id="mind-down-text"></p></div><button class="button button-quiet" type="button" onclick="window.location.reload()">Check again</button></div></section>
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         {% if current_user.is_admin %}<section class="surface" id="mind-owner" hidden><div class="surface-header"><div><h2>Owner</h2><p>The user this Mind belongs to. They see it, and everything downstream of it, on their own console.</p></div></div><form class="surface-body overview-stack" id="mind-owner-form"><div class="field"><label for="mind-owner-user">Owner</label><select id="mind-owner-user" name="owner" required></select></div><div class="form-actions"><button class="button" type="submit">Move to this owner</button></div><small id="mind-owner-status"></small></form></section>{% endif %}
-        <section class="surface" id="mind-image" data-editable hidden><div class="surface-header"><div><h2>Picture</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-image-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-image-form"><p>The face this Mind is drawn with on the Chief of Staff chart. Until one is set it wears its initial letter. Uploading replaces whatever is there &mdash; there is only ever one picture.</p><div class="field"><label for="mind-image-file">Picture</label><input type="file" id="mind-image-file" name="file" accept="image/png,image/jpeg,image/webp,image/gif" required><small>A PNG, JPEG, WEBP or GIF. An SVG is refused: served from this origin it would run script. The format is read from the file itself, so renaming it does not help.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-image-upload">Upload picture</button></div><small id="mind-image-status"></small></form></div></section>
+        <section class="surface" id="mind-image" hidden><div class="surface-header"><div><h2>Picture</h2></div></div><div class="surface-body overview-stack"><div id="mind-image-summary"></div><input type="file" id="mind-image-file" name="file" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Choose a picture"><small id="mind-image-status"></small></div></section>
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
         <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-engine">Engine</label><select id="mind-voice-engine" name="voice_engine" required></select><small id="mind-voice-engine-help"></small></div><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form><form class="surface-body overview-stack" id="mind-clip-form" hidden><div class="field"><label for="mind-clip-file">Add a reference clip</label><input type="file" id="mind-clip-file" name="file" accept="audio/wav,.wav" required><small>A clean WAV recording. Added beside this Mind&#39;s existing clips; select it above to speak in it.</small></div><div class="form-actions"><button class="button button-quiet" type="submit" id="mind-clip-upload">Upload clip</button></div><small id="mind-clip-status"></small></form></div></section>
         <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
@@ -1174,11 +1174,10 @@ window.addEventListener("DOMContentLoaded", async function () {
 
     // The Mind's picture. Keyed by `mind.id` rather than by its name, because
     // the file outlives a rename and a name does not — the registry rewrites
-    // `name` on an upsert and keeps `mind_id`. The summary shows the picture
-    // itself, since "is one set" is a question a thumbnail answers and a
-    // label cannot: the route answers with the generated initial letter when
-    // there is no file, so an image always loads and the preview is what
-    // distinguishes the two.
+    // `name` on an upsert and keeps `mind_id`. The section is the picture and
+    // the chooser and nothing else (Daniel, 2026-11-22): the route answers
+    // with the generated initial letter when there is no file, so an image
+    // always loads, and choosing a file uploads it.
     function renderImage(mindId, mindName) {
         const section = document.getElementById("mind-image");
         section.hidden = false;
@@ -1188,36 +1187,32 @@ window.addEventListener("DOMContentLoaded", async function () {
             // by that id, so there is nothing to upload against — said out
             // loud, because a section that simply did not appear is one
             // Daniel would read as the feature being missing.
-            document.getElementById("mind-image-summary").innerHTML =
-                '<div class="detail-item"><dt>Picture</dt><dd>Cannot be set: ' +
-                'this Mind has no id in the registry, and a picture is keyed ' +
-                'by it. Re-register the Mind and this appears.</dd></div>';
-            section.querySelector("[data-edit-toggle]").hidden = true;
+            document.getElementById("mind-image-summary").textContent =
+                'Cannot be set: this Mind has no id in the registry, and a ' +
+                'picture is keyed by it. Re-register the Mind and this appears.';
+            document.getElementById("mind-image-file").hidden = true;
             return;
         }
         section.dataset.mindId = mindId;
-        section.querySelector("[data-edit-toggle]").hidden = false;
+        document.getElementById("mind-image-file").hidden = false;
         const url = "/api/minds/" + encodeURIComponent(mindId) + "/image?v=" + Date.now();
         document.getElementById("mind-image-summary").innerHTML =
-            '<div class="detail-item"><dt>Picture</dt><dd>' +
             '<img src="' + h.escapeHtml(url) + '" alt="' +
             h.escapeHtml((mindName || "this Mind") + " picture") +
-            '" style="width:64px;height:64px;border-radius:50%;object-fit:cover;' +
-            'background:#0b1220;border:1px solid var(--console-line-strong)"></dd></div>' +
-            '<div class="detail-item"><dt>Drawn on</dt><dd>The Chief of Staff chart</dd></div>';
+            '" style="width:96px;height:96px;border-radius:50%;object-fit:cover;' +
+            'background:#0b1220;border:1px solid var(--console-line-strong)">';
     }
 
-    document.getElementById("mind-image-form").addEventListener("submit", async function (event) {
-        event.preventDefault();
+    document.getElementById("mind-image-file").addEventListener("change", async function () {
         const section = document.getElementById("mind-image"), status = document.getElementById("mind-image-status");
         const file = document.getElementById("mind-image-file");
-        if (!file.files || !file.files.length) { status.textContent = "Choose an image first."; return; }
+        if (!file.files || !file.files.length) return;
         const body = new FormData();
         body.append("file", file.files[0]);
         status.textContent = "Uploading…";
         try {
             await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindId) + "/image", {method: "POST", body: body});
-            status.textContent = "Saved. The chart shows it on this Mind's cards.";
+            status.textContent = "";
             file.value = "";
             renderImage(section.dataset.mindId, document.getElementById("mind-title").textContent);
         } catch (error) { status.textContent = error.message; }
