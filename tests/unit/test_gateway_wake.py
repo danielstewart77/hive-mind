@@ -819,3 +819,26 @@ async def test_two_identical_real_messages_from_a_dsh_mind_are_both_kept_beside_
     await _turn(gateway, session["id"], "say it twice")
 
     assert await _saved_answers(gateway, session["id"]) == ["ok\n\nok"]
+
+
+async def test_a_session_whose_message_the_mind_took_and_died_on_with_no_answer_still_counts_as_having_had_a_turn(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.script[session["id"]] = [{"type": "result", "is_error": True, "result": "crashed"}]
+
+    await _turn(gateway, session["id"], "do the long job")
+    await _settle(gateway)
+
+    assert (await watches.latest_stop(session["id"]))["outcome"] == "died"
+    assert await gateway._had_turns(session["id"]) is True
+
+
+async def test_a_turn_the_mind_took_then_lost_the_connection_on_still_counts_as_having_had_a_turn(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.cut.add(session["id"])
+
+    await _turn(gateway, session["id"], "do the long job")
+    await _settle(gateway)
+
+    assert await gateway._had_turns(session["id"]) is True

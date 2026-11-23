@@ -237,6 +237,12 @@ class _TurnAnswer:
         return ("\n\n" if self.dsh else "").join(self.pieces)
 
 
+#: The stop key for a message the mind never took, followed by the id of its
+#: row. A turn the mind took and then died on is keyed `t` and that id, so
+#: the two are told apart by the stop kept for the row.
+NEVER_TOOK_KEY = "n"
+
+
 def _is_wake_text(content: str | None) -> bool:
     """Whether a message is a wake the gateway delivered, by its own opening."""
     return str(content or "").startswith("[wake]")
@@ -2721,12 +2727,15 @@ class SessionManager:
                     return
                 # Any other message the mind never took stays in the history
                 # (feature 2.1 had erased it) and is one turn that died: one
-                # stop under the turn's own key, which the slow check also finds and so
-                # never records a second time. A brief's watch was armed
+                # stop keyed on the turn, which the slow check skips because the turn
+                # already has a stop, so it never records a second one. The key
+                # says the mind never took it (a turn it took and died on is
+                # `t`): a switch hands a conversation over only if a transcript
+                # exists. A brief's watch was armed
                 # just below this row, so that stop is also the one wake its
                 # sender is owed.
                 owed = await self._record_stop(
-                    session_id, f"t{user_turn}", "died",
+                    session_id, f"{NEVER_TOOK_KEY}{user_turn}", "died",
                     wake=await watches.turn_is_wake(session_id), turn_id=user_turn)
                 self._wake(owed)
                 self._wake_when_idle(session_id)
@@ -4288,8 +4297,14 @@ class SessionManager:
         A message the mind never took stays in the ledger (it is history), but
         it left no transcript behind, so a conversation holding nothing else is
         still a new one: a harness or model switch made to get past the failure
-        must find nothing to read, not refuse for want of a transcript. Told
-        from a turn that ended by the stop recorded for it: died, with no reply.
+        must find nothing to read, not refuse for want of a transcript. A turn
+        the mind took and then died on with no reply is not that: its
+        transcript holds the message and any work, and it is handed over as
+        before. The two are told apart by the stop kept for the newest row,
+        keyed as never taken only for a message the mind never took. If that
+        stop could not be written the row reads as taken, which errs towards
+        asking for a transcript: a switch that is refused, never one that
+        loses a conversation.
         """
         newest = await core.latest_turn(session_id)
         if newest is None:
@@ -4299,9 +4314,8 @@ class SessionManager:
         if await core.latest_turn(session_id, role="assistant") is not None:
             return True
         stop = await watches.latest_stop(session_id)
-        never_took = (stop is not None and stop["outcome"] == "died"
-                      and stop["turn_id"] == newest["id"]
-                      and stop["answer_turn_id"] is None)
+        never_took = (stop is not None
+                      and stop["stop_key"] == f"{NEVER_TOOK_KEY}{newest['id']}")
         return not never_took
 
     async def _refuse_unavailable_harness(self, mind_id: str, harness: str) -> None:
