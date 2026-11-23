@@ -172,6 +172,7 @@ TABLE.add(
 # Each of these takes only the admin token today and continues to.
 TABLE.add(
     Rule(ADMIN),
+    "GET /minds/{mind_id}/wake-state",
     "GET /sessions/live",
     "GET /sessions/live/text",
     "PUT /broker/minds/{mind_id}/owner",

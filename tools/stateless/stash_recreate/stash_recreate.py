@@ -21,8 +21,9 @@ What dies with the container, and so is waited for:
   stream with a detached curl in this container, and the gateway runs a turn
   only while a reader holds its stream, so killing the reader loses the reply.
 - A tool call, a sleeping poll, a terminal pane, another `docker exec`.
-- A wake the watch owes, which would be delivered into a container that is
-  not there.
+- A wake the gateway owes the chief, which is held (the chief is mid-turn) or
+  waiting. The gateway keeps it across the recreate and delivers it once the
+  chief is idle again, so the tool only refuses to cut a turn short.
 
 What survives: everything under `minds/stash` (the harness's session logs,
 the mind's data and workspace) is a read-write bind mount, so a conversation
@@ -32,7 +33,7 @@ processes do not.
 Every answer is JSON on stdout. A run's progress, every check and every
 reason it waited are kept in `minds/stash/data/recreate/status.json`, which
 the chief reads from inside once it is back; the outcome is also delivered to
-it as one turn, in the conversation the watch would wake.
+it as one turn, in the chief's most recently active conversation.
 """
 
 from __future__ import annotations
@@ -40,7 +41,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import importlib.util
 import json
 import os
 import re
@@ -67,7 +67,6 @@ LOCK = STATE_DIR / ".lock"
 
 SERVICE = "stash"
 CONTAINER = "hive-mind-stash"
-WATCH = "hive-mind-stash-watch"
 STASH_MIND_ID = "3d3ae243-989b-41f0-87bd-5a79ef42c70c"
 
 #: Where both containers keep this checkout, and where the fragment mounts
@@ -299,35 +298,34 @@ def busy_processes(ps_text: str, own_args: str) -> list[str]:
     return reasons
 
 
-def judge_watch(watch: Any, live: dict, tasks: list[dict], mind_id: str,
-                now: float) -> list[str]:
-    """What the live feed and the ledger say would be lost, per the watch.
+def judge_wake_state(state: dict) -> list[str]:
+    """What the gateway says would be lost, from its answer about the mind.
 
-    `watch` is the staff_watch module, so "mid-turn" and "owed a wake" mean
-    exactly what they mean to the process that delivers wakes. Read only.
+    `mid_turn` is the conversations of the mind that are producing output, by
+    the same answer the gateway uses to hold a wake for a busy sender, so
+    "mid-turn" here means exactly what it means to the thing that delivers
+    wakes. Any wake waiting for the mind counts: a held wake is delivered by
+    the gateway once the mind is idle, so refusing while one is waiting only
+    makes the recreate wait for the quiet that delivers it. Read only.
     """
-    plan = watch.decide(live, tasks, mind_id, now)
     reasons = []
-    if plan["mid_turn"]:
-        generating, _ = watch.live_state(live)
-        mine = sorted(sid for sid, entry in generating.items()
-                      if entry.get("mind_id") == mind_id)
+    if state.get("mid_turn"):
         reasons.append("a turn is in flight in conversation "
-                       + ", ".join(mine))
-    owed = [task for task in tasks if task["id"] in plan["pending"]
-            and task.get("status") not in watch.QUIET]
-    for task in owed:
-        reasons.append(f"task {task['id']} ({task.get('name')}) is owed a "
-                       "wake the watch has not delivered")
+                       + ", ".join(sorted(str(s) for s in state["mid_turn"])))
+    owed = int(state.get("owed") or 0)
+    if owed:
+        reasons.append(f"{owed} wake(s) for the chief are waiting at the "
+                       "gateway and have not been delivered")
     return reasons
 
 
-def woken_since(tasks: list[dict], since: float) -> list[dict]:
-    """Tasks the watch marked woken at or after `since`: a wake sent then may
-    have died with the container, and is marked delivered regardless."""
-    return [{"id": t["id"], "name": t.get("name")} for t in tasks
-            if t.get("woken_at") is not None
-            and float(t["woken_at"]) >= since]
+def woken_since(state: dict) -> list[dict]:
+    """Wakes the gateway handed to the chief at or after the window opened: one
+    delivered then may have been cut off by the container going down, and the
+    gateway counts it delivered regardless."""
+    return [{"id": str(w.get("stop_key")),
+             "name": f"session {w.get('watched_session_id')}"}
+            for w in state.get("delivered_since") or []]
 
 
 # ------------------------------------------------- is it idle: the side effects
@@ -340,9 +338,13 @@ def _ps() -> subprocess.CompletedProcess:
     return _cmd(["docker", "exec", CONTAINER, *_OWN_PS], timeout=30)
 
 
-def _watch(*args: str) -> Any:
-    done = _cmd(["docker", "exec", WATCH, PYTHON, TOOL_IN_CONTAINER, *args],
-                timeout=60)
+def _inside(*args: str, stdin: str | None = None,
+            timeout: float = 60) -> Any:
+    """Run this tool's own subcommand inside the chief's container, which
+    holds the gateway's address and the credential to ask it."""
+    command = ["docker", "exec"] + (["-i"] if stdin is not None else []) + [
+        CONTAINER, PYTHON, TOOL_IN_CONTAINER, *args]
+    done = _cmd(command, timeout=timeout, stdin=stdin)
     answer = _json_out(done)
     if done.returncode != 0 or not isinstance(answer, dict) \
             or "error" in answer:
@@ -364,40 +366,40 @@ def check_idle() -> list[str]:
     else:
         reasons += busy_processes(ps.stdout, " ".join(_OWN_PS))
     try:
-        reasons += [str(r) for r in _watch("watch-check")["reasons"]]
+        reasons += judge_wake_state(_inside("gateway-check"))
     except (Refused, KeyError, TypeError) as exc:
-        reasons.append("the watch could not say whether a turn is in flight "
+        reasons.append("the gateway could not say whether a turn is in flight "
                        f"or a wake is owed: {exc}")
     return reasons
 
 
-def _load_watch():
-    path = REPO / "tools" / "staff_watch" / "staff_watch.py"
-    spec = importlib.util.spec_from_file_location("staff_watch", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _gateway(path: str, *, payload: dict | None = None,
+             timeout: float = 30.0) -> Any:
+    """One call to the gateway from inside the chief's container."""
+    url = (os.environ.get("COMMS_URL") or "").strip().rstrip("/")
+    token = (os.environ.get("COMMS_ADMIN_BEARER_TOKEN") or "").strip()
+    if not url or not token:
+        raise Refused("COMMS_URL and COMMS_ADMIN_BEARER_TOKEN are not set in "
+                      "this container")
+    request = urllib.request.Request(
+        f"{url}{path}",
+        data=None if payload is None else json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
+        method="GET" if payload is None else "POST")
+    return request, timeout
 
 
-async def _watch_check(since: float | None) -> dict:
-    """Run inside the watch's container, which holds the feed and ledger."""
-    watch = _load_watch()
-    watch._level()
+def _gateway_check(since: float | None) -> dict:
+    """Run inside the chief's container: the gateway's word about the chief."""
     mind_id = (os.environ.get("MIND_ID") or "").strip() or STASH_MIND_ID
-    await watch._connect()
+    suffix = "" if since is None else f"?since={since}"
+    request, timeout = _gateway(f"/minds/{mind_id}/wake-state{suffix}")
     try:
-        live = watch.read_live()
-        tasks = await watch.staff.tasks()
-        for task in tasks:
-            task["sessions"] = [row["session_id"] for row in
-                                await watch.staff.task_sessions(task["id"])]
-    finally:
-        await watch.hive_data.close(drain_timeout=5.0)
-    out: dict[str, Any] = {
-        "reasons": judge_watch(watch, live, tasks, mind_id, time.time())}
-    if since is not None:
-        out["woken"] = woken_since(tasks, since)
-    return out
+        with urllib.request.urlopen(request, timeout=timeout) as answer:
+            return json.loads(answer.read().decode())
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise Refused(f"the gateway did not answer: {exc}") from None
 
 
 def wait_for_idle(run: Run, deadline: float, *,
@@ -667,30 +669,45 @@ def verify(run: Run, before: str | None, source: str, held: list[str],
 
 
 def deliver(text: str) -> dict:
-    """Hand the chief one turn, through the watch's container, read to end."""
-    done = _cmd(["docker", "exec", "-i", WATCH, PYTHON, TOOL_IN_CONTAINER,
-                 "deliver"], timeout=TURN_TIMEOUT + 60, stdin=text)
-    answer = _json_out(done)
-    if isinstance(answer, dict):
-        return answer
-    return {"delivered": False, "error": _tail(done)}
+    """Hand the chief one turn, through his own container, read to end."""
+    try:
+        return _inside("deliver", stdin=text, timeout=TURN_TIMEOUT + 60)
+    except Refused as exc:
+        return {"delivered": False, "error": str(exc)}
+
+
+def target_session(live: dict, mind_id: str) -> str | None:
+    """The mind's own most recently active idle conversation, or None.
+
+    Its most recent one is the surface Daniel last spoke to it on. A mind with
+    no conversation at all is not given one: a conversation opened here would
+    carry no surface binding, so its reply would reach nobody.
+    """
+    mine = [entry for entry in live.get("idle") or []
+            if entry.get("mind_id") == mind_id and entry.get("session_id")]
+    if not mine:
+        return None
+    mine.sort(key=lambda entry: entry.get("last_active") or 0, reverse=True)
+    return str(mine[0]["session_id"])
 
 
 def _deliver_inside(text: str) -> dict:
-    """Run inside the watch's container: one turn, held to its end, in the
-    conversation the watch itself would wake."""
-    watch = _load_watch()
+    """Run inside the chief's container: one turn, held to its end, in the
+    conversation Daniel last used. The gateway runs a turn only while a reader
+    holds its stream, so this reads it to the end."""
     mind_id = (os.environ.get("MIND_ID") or "").strip() or STASH_MIND_ID
-    session = watch.target_session(watch.read_live(), mind_id)
+    request, timeout = _gateway("/sessions/live")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as answer:
+            live = json.loads(answer.read().decode())
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"delivered": False, "error": f"the gateway did not answer: {exc}"}
+    session = target_session(live, mind_id)
     if session is None:
         return {"delivered": False,
                 "error": "the chief has no idle conversation to report into"}
-    url, token = watch._comms()
-    request = urllib.request.Request(
-        f"{url}/sessions/{session}/message",
-        data=json.dumps({"content": text}).encode(),
-        headers={"Authorization": f"Bearer {token}",
-                 "Content-Type": "application/json"}, method="POST")
+    request, _ = _gateway(f"/sessions/{session}/message",
+                          payload={"content": text})
     last: dict = {}
     try:
         with urllib.request.urlopen(request, timeout=TURN_TIMEOUT) as answer:
@@ -720,10 +737,10 @@ def _report_text(data: dict) -> str:
         lines.append(f"{mark} {check['check']}")
     woken = data.get("woken_in_window") or []
     if woken:
-        lines.append("The watch marked these tasks woken while your container "
-                     "was going down, so that wake may never have reached you: "
-                     + "; ".join(f"{t['id']} ({t['name']})" for t in woken)
-                     + ". Run /tend-the-ledger for them.")
+        lines.append("The gateway handed you these wakes while your container "
+                     "was going down, so one may never have reached you: "
+                     + "; ".join(f"{t['name']} (stop {t['id']})" for t in woken)
+                     + ". Fetch each session's latest answer and read it.")
     if data.get("marker_left_on"):
         lines.append(f"The probe question could not be cleared from task "
                      f"{data['marker_left_on']}; clear it with "
@@ -805,7 +822,7 @@ def recreate(record: Run, build: bool, deadline: float,
                               f"ledger tool while waiting "
                               f"({'; '.join(behind)})")
             # The last word is a check made after the probe, so nothing that
-            # started while it ran is killed unseen; a wake the watch sends
+            # started while it ran is killed unseen; a wake the gateway sends
             # from here on is named in the report.
             window = time.time()
             last = check()
@@ -840,8 +857,8 @@ def recreate(record: Run, build: bool, deadline: float,
                      "failed; see checks")
     finally:
         with contextlib.suppress(Exception):
-            record.data["woken_in_window"] = _watch(
-                "watch-check", "--since", str(window))["woken"]
+            record.data["woken_in_window"] = woken_since(
+                _inside("gateway-check", "--since", str(window)))
 
 
 def run(reason: str, *, build: bool = True, deadline: float = DEADLINE,
@@ -1002,7 +1019,7 @@ def _parser() -> argparse.ArgumentParser:
     ran.add_argument("--no-build", dest="build", action="store_false")
     sub.add_parser("check", help="is the chief idle (host)")
     sub.add_parser("install", help="the systemd user units (host)")
-    checked = sub.add_parser("watch-check", help=argparse.SUPPRESS)
+    checked = sub.add_parser("gateway-check", help=argparse.SUPPRESS)
     checked.add_argument("--since", type=float)
     sub.add_parser("deliver", help=argparse.SUPPRESS)
     return parser
@@ -1030,9 +1047,8 @@ def main(argv: list[str] | None = None) -> int:
             out = {"idle": not reasons, "busy": reasons}
         elif args.command == "install":
             out = install()
-        elif args.command == "watch-check":
-            import asyncio  # noqa: PLC0415
-            out = asyncio.run(_watch_check(args.since))
+        elif args.command == "gateway-check":
+            out = _gateway_check(args.since)
         else:
             out = _deliver_inside(sys.stdin.read())
     except Refused as exc:

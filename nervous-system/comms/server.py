@@ -1383,6 +1383,13 @@ async def _run_brief(session_id: str, content: str, images, goal_rounds, sender_
         log.exception("watched brief to %s failed", session_id)
 
 
+@app.get("/minds/{mind_id}/wake-state")
+async def get_mind_wake_state(mind_id: str, since: float | None = None):
+    """Whether a mind is mid-turn or owed a wake, for whatever must not lose
+    either - the recreate of the chief of staff's container. Admin only."""
+    return await session_mgr.mind_idle_state(mind_id, since=since)
+
+
 @app.get("/sessions/{session_id}/answer")
 async def get_session_answer(session_id: str, request: Request):
     """The latest answer of a session: what its mind said at the end of its
