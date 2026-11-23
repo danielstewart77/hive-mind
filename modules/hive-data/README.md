@@ -496,6 +496,29 @@ fragment passes in. That role sees only `staff`, so
 `hive_data.connect()`'s schema check, which reads every schema, is passed
 `verify=False` by a process connecting as it.
 
+## Gateway watches
+
+`hive_data.watches` is what lets the gateway wake a mind when a session it
+briefed stops (step 17, feature 2.1). Three tables in `core`, all keyed on
+`sessions.id`, which survives a rotation, never on the conversation id a
+rotation replaces:
+
+* `session_watches`: one row for each (briefed session, asking conversation),
+  holding the task and the sha256 of the capability only that conversation was
+  given. A watch is not `armed` until its own brief's turn is written, so a
+  turn already running cannot wake it. Either end being ended deletes it.
+* `session_stops`: one row for each turn end the gateway recorded, which is the
+  record a sender's "latest answer" is read from. `wake` marks a turn that was
+  itself a wake, which wakes nobody.
+* `session_wakes`: one row for each watch for each stop. The unique key
+  (watch, stop) is the rule that a stop wakes a sender once, however many paths
+  find it; a wake goes `pending`, `claimed`, `delivered`.
+
+Step 17 also installs three triggers where the `staff` schema exists: a stop
+recorded for a session paired with a ledger task sets that task's `stopped_at`,
+a user turn written into it clears it (what the Chief of Staff page reads), and
+moving a task to `done` ends the watches on its sessions.
+
 ## Scope
 
 This package covers the `core`, `memory`, `tools`, `board` and `staff`

@@ -44,6 +44,18 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "mind_id", "mind_name", "client_ref", "conversation_id", "body",
         "created_at"),
     "session_turns": ("id", "session_id", "role", "content", "created_at"),
+    #: Gateway watches (step 17, feature 2.1). Keyed on `sessions.id`, which
+    #: survives a rotation, never on the conversation id a rotation replaces.
+    "session_watches": (
+        "watched_session_id", "sender_session_id", "task", "armed",
+        "since_turn_id", "capability_digest", "created_at"),
+    "session_stops": (
+        "id", "session_id", "stop_key", "outcome", "wake", "turn_id",
+        "answer_turn_id", "stopped_at"),
+    "session_wakes": (
+        "id", "watched_session_id", "sender_session_id", "stop_key",
+        "outcome", "state", "turn_open", "created_at", "claimed_at",
+        "delivered_at"),
     "sessions": (
         "id", "conversation_id", "surface", "surface_id", "opening_line",
         "model", "created_at", "last_active", "status", "mind_id",
