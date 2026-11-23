@@ -375,6 +375,9 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
         f"{host}:{own}:rw",
         f"{host}/container:{own}/container:ro",
         f"{host}/session_token:{own}/session_token:ro",
+        # The install's generated skills, read-only: the one folder of the
+        # checkout a role's skill may come from.
+        "${HOST_PROJECT_DIR:-.}/install/workflow-skills:/usr/src/app/install/workflow-skills:ro",
     ]
     assert (client.minds_dir / "atlas" / home).is_dir()
     # The published tree, at the branch it is published on, and the stage
@@ -383,6 +386,28 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
     assert service["build"]["target"] == "locked-mind"
     environment = dict(item.split("=", 1) for item in service["environment"])
     assert environment["KEY_RING"] == f"{own}/data/keyring"
+
+
+def test_a_mind_made_holding_the_operator_role_is_made_with_the_folder_writable_and_the_credential(
+    client
+):
+    from hive_site import testing
+    import roles_data
+    import store
+
+    testing.run(roles_data.seed())
+    operator = next(r["id"] for r in testing.run(store.roles_list()) if r["slug"] == "operator")
+
+    assert _create(client, role_ids=[operator]).status_code == 200
+
+    service = yaml.safe_load(
+        (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text()
+    )["services"]["atlas"]
+    folder = "${HOST_PROJECT_DIR:-.}/install/workflow-skills:/usr/src/app/install/workflow-skills"
+    assert f"{folder}:rw" in service["volumes"]
+    assert f"{folder}:ro" not in service["volumes"]
+    assert "ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}" in service["environment"]
+    assert "HIVE_SITE_URL=http://hive-site:8710" in service["environment"]
 
 
 def test_a_mind_made_from_the_console_is_not_locked_and_its_settings_card_reaches_it_with_its_own_key(
