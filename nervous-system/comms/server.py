@@ -230,6 +230,35 @@ async def _refuse_foreign_session(request: Request, session_id: str) -> None:
         raise HTTPException(404, "Session not found")
 
 
+async def _caller_reaches_mind(caller: user_access.Caller, mind_id: object) -> bool:
+    """Whether this caller may brief or read a session of that mind.
+
+    A mind's own credential reaches its own mind, and the mind of a different
+    registered mind with the *same owner* (Daniel, 2026-11-22: any mind may
+    brief another mind of the same user with its own credential). An owner
+    has to exist: an ownerless or unregistered mind is never reached this way,
+    so the ownerless-conversation fallback cannot become a way in. Everyone
+    else keeps the rule they had.
+    """
+    keys = await user_access.holder_keys(caller)
+    if keys is None or user_access.mind_is_named_in(keys, mind_id):
+        return True
+    if caller.role != user_access.MIND or not caller.username:
+        return False
+    owner = await user_access.owner_of_mind(str(mind_id or ""))
+    return owner is not None and owner == user_access.normalize_username(caller.username)
+
+
+async def _refuse_unreachable_session(request: Request, session_id: str) -> dict:
+    """The session row, or the 404 every refusal shares. For the routes a mind
+    may use on another mind of the same owner: briefing, reading its answer,
+    watching it."""
+    row = await session_mgr._get_row(session_id)
+    if not row or not await _caller_reaches_mind(_caller(request), row.get("mind_id")):
+        raise HTTPException(404, "Session not found")
+    return row
+
+
 async def _reachable(surface: object, sender: object, session: dict | None) -> dict | None:
     """The conversation a bot's chat is bound to, if this sender may reach it.
 
@@ -484,8 +513,24 @@ class ImageAttachment(BaseModel):
 
 
 class WakeRequest(BaseModel):
+    """Ask to be woken about a brief. ``sender_session_id`` is the
+    conversation sending it, by any id it knows itself by."""
     sender_session_id: str
     task: str
+
+
+class WatchRequest(BaseModel):
+    sender_session_id: str
+    task: str = ""
+    #: Presented on a repeat ask to change the task of a watch already held.
+    capability: str | None = None
+    #: A task briefed before it was watched: count its stops from now.
+    already_briefed: bool = False
+
+
+class FinishWatchRequest(BaseModel):
+    sender_session_id: str
+    capability: str
 
 
 class MessageRequest(BaseModel):
@@ -716,11 +761,29 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
-    # A mind may brief a different registered mind owned by the same person.
-    # Do not use the ownerless legacy fallback to grant that capability.
-    if caller.role == user_access.MIND and not await _names_own_mind(caller, body.mind_id):
-        if not await user_access.owner_of_mind(body.mind_id):
-            return JSONResponse({"error": "Mind not found"}, status_code=404)
+    # `owns_mind` answers a question about a person, and nine of this hive's
+    # minds answer to one. So it is no scoping between them: skippy's own
+    # credential could open a conversation on mordecai, dispatch into it, and
+    # have the turn written to mordecai's memory. A `mind` holder is held to
+    # its own mind here exactly as it is on the machinery routes; a person, a
+    # service and the admin credential are unrestricted, since a surface bot
+    # serves every mind its owner has.
+    #
+    # The refusal is this route's own, not the sibling guards' "Session not
+    # found": on a route that creates conversations, that sentence sends the
+    # operator looking for one. It is also what `owns_mind` already answers
+    # for a mind belonging to someone else, and — because a mind holder never
+    # reaches the primary-user fallback below it — for a mind that is not
+    # registered at all.
+    #
+    # Briefing is the exception (Daniel, 2026-11-22): a mind's own credential
+    # may open a conversation on another registered mind with the same owner.
+    # `_caller_reaches_mind` demands that owner exist, so a mind that is not
+    # registered, or has none, is refused as before.
+    if not await _caller_reaches_mind(caller, body.mind_id):
+        return JSONResponse(
+            {"error": "Mind not found"}, status_code=404
+        )
     # The bot's credential says which box is calling, not who is talking.
     # On a Telegram or Discord surface the person is the sender's account,
     # and they reach only a mind they own (story 2.1.15). Refused in the same
@@ -970,13 +1033,16 @@ class RecordTurnRequest(BaseModel):
     client_type: str
     client_ref: str
     role: str
-    content: str
+    content: str = ""
     # The conversation the turn was typed into. Optional because an older
     # hook won't send it; when it is present the stored carry-forward is
     # only cleared if it was composed for this same conversation, so a turn
     # still in flight from before a rotation cannot clear the seed the
     # rotation just wrote.
     conversation_id: str | None = None
+    # A terminal turn that died: nothing to ledger, but the sender watching
+    # this session is owed a wake that says so. No answer is stored.
+    died: bool = False
 
 
 class HarnessStateRequest(BaseModel):
@@ -1041,7 +1107,7 @@ async def record_turn(body: RecordTurnRequest, request: Request):
     await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.record_turn(
         body.client_type, body.client_ref, body.role, body.content,
-        conversation_id=body.conversation_id,
+        conversation_id=body.conversation_id, died=body.died,
     )
 
 
@@ -1256,34 +1322,41 @@ async def resume_session(session_id: str, body: ActivateRequest):
 # ---------------------------------------------------------------------------
 # Message endpoint (SSE streaming)
 # ---------------------------------------------------------------------------
+async def _sender_for(request: Request, reported: str) -> dict:
+    """The conversation asking to be woken, resolved to its lasting id.
+
+    Any id the sender knows itself by - the gateway's, the conversation id a
+    rotation replaces, a harness thread - resolves to the session row, whose
+    id survives rotation. It has to be a conversation of the caller's own
+    mind: a wake goes back to the conversation that sent the brief, so
+    naming somebody else's is refused as a missing session.
+    """
+    sender = await _resolve_reported_conversation((reported or "").strip())
+    if not sender or not await _names_own_mind(_caller(request), sender.get("mind_id")):
+        raise HTTPException(404, "Session not found")
+    return sender
+
+
 @app.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest, request: Request):
-    caller = _caller(request)
-    target = await session_mgr._get_row(session_id)
-    if not target or not await user_access.owns_mind(caller, target['mind_id']):
-        raise HTTPException(404, "Session not found")
-    if caller.role == user_access.MIND and not await user_access.owner_of_mind(target['mind_id']):
-        raise HTTPException(404, "Session not found")
+    target = await _refuse_unreachable_session(request, session_id)
     images = [{"media_type": img.media_type, "data": img.data} for img in body.images] if body.images else None
     if body.wake is not None:
-        sender = await _resolve_reported_conversation(body.wake.sender_session_id)
-        if not sender or caller.role != user_access.MIND:
-            raise HTTPException(404, "Session not found")
-        if not user_access.mind_is_named_in(await user_access.holder_keys(caller), sender['mind_id']):
-            raise HTTPException(404, "Session not found")
-        if sender['id'] == target['id'] or not body.wake.task.strip():
+        # A brief that asks to be woken is send-and-return: the gateway runs
+        # the turn to its end with nobody reading, and wakes the sender from
+        # its stop. It answers once the watch is held and the brief accepted.
+        sender = await _sender_for(request, body.wake.sender_session_id)
+        task = body.wake.task.strip()
+        if sender["id"] == target["id"] or not task:
             raise HTTPException(422, "A wake needs a task and another session")
-        await session_mgr.upsert_watch(target['id'], sender['id'], body.wake.task.strip())
-
-        async def run_brief():
-            try:
-                async for _ in session_mgr.send_message(target['id'], body.content, images=images, goal_rounds=body.goal_rounds):
-                    pass
-            except Exception:
-                log.exception("watched brief failed session=%s", target['id'])
-
-        asyncio.create_task(run_brief())
-        return JSONResponse({"accepted": True, "session_id": target['id']}, status_code=202)
+        if target.get("status") in sessions._RETIRED:
+            raise HTTPException(409, f"Session {target['id']} is {target['status']}")
+        watch = await session_mgr.ask_watch(target, sender, task)
+        session_mgr.run_detached(_run_brief(
+            target["id"], body.content, images, body.goal_rounds, sender["id"]))
+        return JSONResponse(
+            {"accepted": True, "session_id": target["id"], "watch": watch},
+            status_code=202)
     log.info("message: session=%s chars=%d", session_id, len(body.content))
     t0 = time.monotonic()
 
@@ -1295,6 +1368,69 @@ async def send_message(session_id: str, body: MessageRequest, request: Request):
         log.info("message: done session=%s elapsed=%.1fs", session_id, time.monotonic() - t0)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+async def _run_brief(session_id: str, content: str, images, goal_rounds, sender_id: str) -> None:
+    """Run a watched brief to its end with no reader. Its ending - whatever it
+    is, including a brief that fails before it starts - wakes the sender."""
+    try:
+        async for _ in session_mgr.send_message(
+            session_id, content, images=images, goal_rounds=goal_rounds,
+            brief_from=sender_id,
+        ):
+            pass
+    except Exception:
+        log.exception("watched brief to %s failed", session_id)
+
+
+@app.get("/sessions/{session_id}/answer")
+async def get_session_answer(session_id: str, request: Request):
+    """The latest answer of a session: what its mind said at the end of its
+    newest turn, and whether that turn finished or died. From the stored
+    record, so it holds across a gateway restart and a sender's rotation."""
+    await _refuse_unreachable_session(request, session_id)
+    answer = await session_mgr.latest_answer(session_id)
+    if answer is None:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    return answer
+
+
+@app.post("/sessions/{session_id}/watch")
+async def ask_watch(session_id: str, body: WatchRequest, request: Request):
+    """Ask to be woken at every stop of a session without sending a brief:
+    for a task that was briefed before it was watched. Answers with the
+    capability on the call that created the watch, and never again."""
+    target = await _refuse_unreachable_session(request, session_id)
+    sender = await _sender_for(request, body.sender_session_id)
+    if sender["id"] == target["id"]:
+        raise HTTPException(422, "A wake needs another session")
+    task = body.task.strip() or f"session {target['id']}"
+    armed_after = (await session_mgr.armed_after_now(target["id"])
+                   if body.already_briefed else None)
+    return await session_mgr.ask_watch(
+        target, sender, task, capability=body.capability, armed_after=armed_after)
+
+
+@app.post("/sessions/{session_id}/watch/finish")
+async def finish_watch(session_id: str, body: FinishWatchRequest, request: Request):
+    """The one explicit act that ends a watch: its owner says it is finished.
+    Needs the capability the owner was given, so no other conversation of the
+    same mind can end it. Finishing twice is harmless."""
+    target = await _refuse_unreachable_session(request, session_id)
+    sender = await _sender_for(request, body.sender_session_id)
+    result = await session_mgr.finish_watch(target["id"], sender["id"], body.capability)
+    if result == "refused":
+        raise HTTPException(403, "That watch is held by another conversation")
+    return {"result": result, "session_id": target["id"]}
+
+
+@app.get("/sessions/{session_id}/watches")
+async def list_watches(session_id: str, request: Request):
+    """The watches a conversation holds, so it can tell what it will be woken
+    about. Never carries a capability."""
+    sender = await _sender_for(request, session_id)
+    return {"session_id": sender["id"],
+            "watches": await session_mgr.watches_held_by(sender["id"])}
 
 
 @app.get("/sessions/{session_id}/events")
