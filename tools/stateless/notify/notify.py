@@ -222,6 +222,17 @@ def _voice_server_url(voice_id: str) -> str:
     its `VOICE_SERVER_URL` happened to name.
     """
     legacy = os.getenv("VOICE_SERVER_URL", "http://voice-server:8422")
+    # A mind's own container is given no voice server addresses at all; only
+    # its bot is. So the fallback above is the stack's Chatterbox service,
+    # and a mind that speaks through Kokoro had every notification sent to
+    # an engine holding no voice for it, which answered 400 into a discarded
+    # response (found 2026-11-23: the chief of staff's reports never
+    # spoke). Where nothing is configured, the engines are at the stack's
+    # own service names, exactly as the fallback already assumes for one of
+    # them. A host that names its server keeps what it named.
+    unconfigured = "VOICE_SERVER_URL" not in os.environ
+    stack = {"chatterbox": "http://voice-server:8422",
+             "kokoro": "http://voice-server-kokoro:8422"} if unconfigured else {}
     try:
         from hive_surfaces import voice_routing
     except ImportError:
@@ -233,8 +244,10 @@ def _voice_server_url(voice_id: str) -> str:
         os.getenv("COMMS_URL", ""),
         os.getenv("COMMS_BEARER_TOKEN", ""),
         {
-            voice_routing.CHATTERBOX: os.getenv("VOICE_SERVER_URL_CHATTERBOX", ""),
-            voice_routing.KOKORO: os.getenv("VOICE_SERVER_URL_KOKORO", ""),
+            voice_routing.CHATTERBOX: os.getenv(
+                "VOICE_SERVER_URL_CHATTERBOX", "") or stack.get("chatterbox", ""),
+            voice_routing.KOKORO: os.getenv(
+                "VOICE_SERVER_URL_KOKORO", "") or stack.get("kokoro", ""),
         },
         fallback_url=legacy,
     )

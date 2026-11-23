@@ -205,3 +205,33 @@ def test_a_sent_report_asked_to_be_spoken_is_followed_by_a_voice_note_to_the_sam
     assert note["url"].endswith("/sendVoice")
     assert note["data"] == {"chat_id": "5550001"}
     assert note["files"]["voice"][1] == b"SPOKEN"
+
+
+def test_a_kokoro_mind_with_no_voice_addresses_configured_is_spoken_by_kokoro(monkeypatch):
+    """A mind's own container holds no voice server addresses. Its report
+    went to the stack's other engine, which has no voice for it and refused
+    (2026-11-23), so the chief of staff's notifications never spoke."""
+    import io
+    import json as _json
+    import urllib.request
+    _env(monkeypatch)
+    for name in ("VOICE_SERVER_URL", "VOICE_SERVER_URL_KOKORO", "VOICE_SERVER_URL_CHATTERBOX"):
+        monkeypatch.delenv(name, raising=False)
+    notify = _notify_module(monkeypatch)
+
+    class _Answer(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        return _Answer(_json.dumps(
+            [{"mind_id": "mind-2", "name": "two", "voice_engine": "kokoro"}]).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert notify._voice_server_url("mind-2") == "http://voice-server-kokoro:8422"
