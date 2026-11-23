@@ -28,6 +28,7 @@ from comms_broker_pg import broker_store, fetch, put_mind  # noqa: E402,F401
 
 MIND = "wake-mind-1"
 OTHER = "wake-mind-2"
+DSH = "wake-mind-dsh"
 
 
 class FakeMind:
@@ -89,6 +90,7 @@ async def gateway(broker_store, mind, monkeypatch):
     url = str(mind.server.make_url("")).rstrip("/")
     for mind_id in (MIND, OTHER):
         await put_mind(mind_id, mind_id, owner="daniel", gateway_url=url)
+    await put_mind(DSH, DSH, owner="daniel", gateway_url=url, harness="dsh_cli")
     manager.test_mind = mind
     yield manager
     for task in list(manager._wake_tasks):
@@ -582,3 +584,261 @@ async def test_a_wake_turn_a_restart_cut_off_does_not_wake_the_watchers_of_its_c
     await _settle(gateway)
 
     assert _wakes_to(mind, watcher) == []
+
+
+# --- a message the mind never took (feature 850, story 851) ------------------
+
+def _history_of(history: list[dict], needle: str) -> list[str]:
+    return [turn["content"] for turn in history if needle in turn["content"]]
+
+
+async def test_a_chat_message_the_mind_never_took_is_still_in_the_history_afterwards(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.status[session["id"]] = 503
+
+    events = await _turn(gateway, session["id"], "are you there")
+
+    assert events and events[-1].get("is_error")            # the error is shown at the time
+    history = await gateway.get_session_turns(session["id"])
+    assert _history_of(history, "are you there") == ["are you there"]
+    assert all(turn["role"] != "assistant" for turn in history)   # and no error row is saved
+
+
+async def test_a_wake_the_mind_never_took_leaves_no_line_and_is_delivered_once_later(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    mind.status[sender["id"]] = 503
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+    failed = await gateway.get_session_turns(sender["id"])
+    await gateway.wake_sweep()
+    await _settle(gateway)
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert _history_of(failed, "[wake]") == []              # the failed attempt left no line
+    delivered = await gateway.get_session_turns(sender["id"])
+    assert len(_history_of(delivered, "[wake]")) == 1       # and it arrived once, later
+    assert (await watches.wake_state(MIND))["owed"] == 0
+
+
+async def test_a_wake_sent_again_after_a_restart_and_not_taken_leaves_no_line_and_is_owed_again(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    await watches.record_stop(worker["id"], "t1", "ended", turn_id=1)
+    claimed = await watches.claim_pending(sender["id"])
+    await watches.mark_delivered([row["id"] for row in claimed])    # a wake turn was open at the restart
+    mind.status[sender["id"]] = 503
+
+    events = await _turn(gateway, sender["id"], "[wake] A session you are watching stopped.",
+                         resend=True)
+
+    assert events and events[-1].get("is_error")
+    assert _history_of(await gateway.get_session_turns(sender["id"]), "[wake]") == []
+    assert (await watches.wake_state(MIND))["owed"] == 1          # and it is tried again
+    await gateway.wake_sweep()
+    await _settle(gateway)
+    assert len(_history_of(await gateway.get_session_turns(sender["id"]), "[wake]")) == 1
+    assert (await watches.wake_state(MIND))["owed"] == 0
+
+
+async def test_a_message_a_person_typed_beginning_with_wake_is_kept_when_the_mind_never_took_it(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.status[session["id"]] = 503
+
+    await _turn(gateway, session["id"], "[wake] is a word I typed", resend=True)
+
+    assert _history_of(await gateway.get_session_turns(session["id"]), "I typed") == [
+        "[wake] is a word I typed"]
+
+
+async def test_a_session_whose_only_message_the_mind_never_took_counts_as_never_having_had_a_turn(
+        gateway, mind):
+    failed = await _session(gateway, OTHER)
+    answered = await _session(gateway, OTHER)
+    mind.status[failed["id"]] = 503
+
+    await _turn(gateway, failed["id"], "first try")
+    await _turn(gateway, answered["id"], "hello")
+    await _settle(gateway)
+
+    assert await gateway._had_turns(failed["id"]) is False
+    assert await gateway._had_turns(answered["id"]) is True
+
+
+async def test_a_brief_the_mind_never_took_stays_in_the_history_and_tells_its_sender_once(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await gateway.ask_watch(worker, sender, "the brief")
+    mind.status[worker["id"]] = 503
+
+    await _turn(gateway, worker["id"], "please build it", brief_from=sender["id"])
+    await _settle(gateway)
+    gateway._started_at = time.time() + 1          # a gateway restart, then the slow check
+    await gateway.wake_sweep()
+    await _settle(gateway)
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert _history_of(await gateway.get_session_turns(worker["id"]), "please build it") == [
+        "please build it"]
+    woken = _wakes_to(mind, sender)
+    assert len(woken) == 1 and "died" in woken[0]
+    answer = await gateway.latest_answer(worker["id"])
+    assert answer["outcome"] == "died" and answer["answer"] is None
+
+
+# --- a dsh mind's answer is saved once (feature 850, story 852) --------------
+
+def _said(text: str) -> dict:
+    return {"type": "assistant", "message": {"role": "assistant",
+                                              "content": [{"type": "text", "text": text}]}}
+
+
+def _dsh_turn(*messages: str, report_text: str | None = None) -> list[dict]:
+    """The frames the dsh adapter sends: each finished message as it happens,
+    then the observer-only report, then the report's text again, then the result."""
+    last = messages[-1] if messages else ""
+    text = last if report_text is None else report_text
+    return [*(_said(m) for m in messages),
+            {"type": "dsh_report", "session_id": "x", "report": {"text": text, "outcome": "completed"},
+             "_observer_only": True},
+            _said(text or "No assistant text this turn (dsh stopped on: completed)."),
+            {"type": "result", "stop_reason": "completed", "is_error": False}]
+
+
+async def _saved_answers(gateway, session_id: str) -> list[str]:
+    return [t["content"] for t in await gateway.get_session_turns(session_id)
+            if t["role"] == "assistant"]
+
+
+async def test_a_turn_in_which_a_dsh_mind_speaks_and_finishes_stores_its_answer_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn("5")
+
+    await _turn(gateway, session["id"], "two and three?")
+
+    assert await _saved_answers(gateway, session["id"]) == ["5"]
+
+
+async def test_a_turn_in_which_a_dsh_mind_sends_several_finished_messages_stores_each_once_in_order(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn("first I looked", "then I built it", "done")
+
+    await _turn(gateway, session["id"], "build it")
+
+    assert await _saved_answers(gateway, session["id"]) == [
+        "first I looked\n\nthen I built it\n\ndone"]
+
+
+async def test_a_dsh_turn_with_no_text_still_saves_the_note_that_says_so_once(gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn(report_text="")
+
+    await _turn(gateway, session["id"], "hello")
+
+    (saved,) = await _saved_answers(gateway, session["id"])
+    assert saved.startswith("No assistant text this turn")
+
+
+async def test_a_dsh_turn_from_an_older_runner_that_sends_no_message_frames_saves_its_report_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn(report_text="all of it")
+
+    await _turn(gateway, session["id"], "hello")
+
+    assert await _saved_answers(gateway, session["id"]) == ["all of it"]
+
+
+async def test_a_dsh_turn_that_timed_out_after_sending_messages_saves_them_and_the_note_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = [
+        _said("half way"), _said("further on"),
+        _said("The turn was still running after 600 seconds and was stopped."),
+        {"type": "result", "stop_reason": "timeout", "is_error": True, "error_code": "TURN_TIMEOUT"}]
+
+    await _turn(gateway, session["id"], "long job")
+
+    assert await _saved_answers(gateway, session["id"]) == [
+        "half way\n\nfurther on\n\nThe turn was still running after 600 seconds and was stopped."]
+
+
+async def test_a_dsh_goal_run_that_ends_needing_a_new_conversation_saves_each_rounds_answer_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    first = _dsh_turn("round one done")
+    first[-1] = {"type": "result", "stop_reason": "rotation_needed", "is_error": False,
+                 "goal": {"objective": "ship it", "roundsLeft": 2}}
+    mind.script[session["id"]] = first
+
+    await _turn(gateway, session["id"], "/goal ship it", goal_rounds=3)
+
+    saved = await _saved_answers(gateway, session["id"])
+    assert saved[0] == "round one done"
+    assert saved.count("round one done") == 1 and "round one done\n\nround one done" not in "".join(saved)
+
+
+async def test_a_note_sent_before_a_dsh_turn_is_saved_once_followed_by_the_answer_once(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    note = "(1 attached image(s) did not reach the model: disk full.)"
+    mind.script[session["id"]] = [_said(note), *_dsh_turn("looked at it")]
+
+    await _turn(gateway, session["id"], "see attached")
+
+    assert await _saved_answers(gateway, session["id"]) == [f"{note}\n\nlooked at it"]
+
+
+async def test_a_claude_mind_saves_its_answer_as_it_always_did(gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.script[session["id"]] = [_said("one "), _said("two"),
+                                  {"type": "result", "result": "ok"}]
+
+    await _turn(gateway, session["id"], "hello")
+
+    assert await _saved_answers(gateway, session["id"]) == ["one two"]
+
+
+async def test_two_identical_real_messages_from_a_dsh_mind_are_both_kept_beside_a_matching_report(
+        gateway, mind):
+    session = await _session(gateway, DSH)
+    mind.script[session["id"]] = _dsh_turn("ok", "ok")
+
+    await _turn(gateway, session["id"], "say it twice")
+
+    assert await _saved_answers(gateway, session["id"]) == ["ok\n\nok"]
+
+
+async def test_a_session_whose_message_the_mind_took_and_died_on_with_no_answer_still_counts_as_having_had_a_turn(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.script[session["id"]] = [{"type": "result", "is_error": True, "result": "crashed"}]
+
+    await _turn(gateway, session["id"], "do the long job")
+    await _settle(gateway)
+
+    assert (await watches.latest_stop(session["id"]))["outcome"] == "died"
+    assert await gateway._had_turns(session["id"]) is True
+
+
+async def test_a_turn_the_mind_took_then_lost_the_connection_on_still_counts_as_having_had_a_turn(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.cut.add(session["id"])
+
+    await _turn(gateway, session["id"], "do the long job")
+    await _settle(gateway)
+
+    assert await gateway._had_turns(session["id"]) is True

@@ -202,6 +202,52 @@ def _session_row(row: dict | None) -> dict | None:
     return session
 
 
+class _TurnAnswer:
+    """The text a turn will be saved as, gathered from its assistant frames.
+
+    Most harnesses send each message once and the saved copy is their words
+    run together, as it always was. A dsh mind (`dsh=True`) sends each finished
+    message as it happens and then its turn report's text again as a closing
+    frame, and the report holds only the last message of the turn. So its
+    messages are saved each once, in order with a blank line between, and the
+    closing frame is left out exactly when the message just before it already
+    said the same words. A turn with no messages (an older runner, or one that
+    said nothing) has nothing to be a repeat of, so the closing frame, with its
+    note about how the turn ended, is kept.
+    """
+
+    def __init__(self, dsh: bool = False) -> None:
+        self.dsh = dsh
+        self.pieces: list[str] = []
+        self._report_text: str | None = None
+
+    def expect_report(self, report: dict | None) -> None:
+        """The turn report arrived: the next assistant frame is its closing text."""
+        if self.dsh:
+            self._report_text = str((report or {}).get("text") or "")
+
+    def add(self, text: str) -> None:
+        closing, self._report_text = self._report_text, None
+        if (closing is not None and self.pieces and closing.strip()
+                and self.pieces[-1].strip() == text.strip()):
+            return
+        self.pieces.append(text)
+
+    def text(self) -> str:
+        return ("\n\n" if self.dsh else "").join(self.pieces)
+
+
+#: The stop key for a message the mind never took, followed by the id of its
+#: row. A turn the mind took and then died on is keyed `t` and that id, so
+#: the two are told apart by the stop kept for the row.
+NEVER_TOOK_KEY = "n"
+
+
+def _is_wake_text(content: str | None) -> bool:
+    """Whether a message is a wake the gateway delivered, by its own opening."""
+    return str(content or "").startswith("[wake]")
+
+
 _FINISH_CAPABILITY = re.compile(r"finish capability: [0-9a-f]{64}")
 _CAPABILITY_WITHHELD = "finish capability: (withheld from the record)"
 
@@ -1062,7 +1108,7 @@ class SessionManager:
                         watched, f"u{trailing['id']}", "died",
                         # A wake turn the restart cut off ends a wake turn,
                         # which wakes nobody (a wake never causes a wake).
-                        wake=str(trailing.get("content") or "").startswith("[wake]"),
+                        wake=_is_wake_text(trailing.get("content")),
                         turn_id=trailing["id"]))
         owed = await watches.senders_owed()
         self._wake(owed)
@@ -2595,6 +2641,8 @@ class SessionManager:
                             turn["user_turn_id"] = outcome.get("user_turn_id")
                             turn["answer_turn_id"] = outcome.get("answer_turn_id")
                             turn["unaccepted"] = bool(outcome.get("unaccepted"))
+                            turn["content"] = content
+                            turn["resend"] = resend
                         follow = outcome.get("next")
                         if not follow:
                             break
@@ -2608,6 +2656,8 @@ class SessionManager:
                     turn["unaccepted"] = bool(outcome.get("unaccepted"))
                     if outcome.get("started"):
                         turn["user_turn_id"] = outcome.get("user_turn_id")
+                        turn["content"] = content
+                        turn["resend"] = resend
                     raise
                 finally:
                     # Inside the lock: a message queued behind this turn must
@@ -2625,6 +2675,11 @@ class SessionManager:
             await core.delete_turn(user_turn_id, unit=unit)
             if wake_ids:
                 await watches.undeliver(wake_ids, unit=unit)
+            else:
+                # A wake sent again after a restart: the ids are gone, and the
+                # wakes it carried are the sender's delivered ones whose turn
+                # is still open.
+                await watches.undeliver_open(session_id, unit=unit)
 
         try:
             await _atomically(_undo)
@@ -2657,15 +2712,33 @@ class SessionManager:
         try:
             user_turn = turn.get("user_turn_id")
             if user_turn is not None and turn.get("unaccepted"):
-                # The mind never took this turn - unreachable, refused or
-                # gone - so it is no stop of this session and a wake carried
-                # by it was not delivered. The user row it wrote goes, and
-                # the wakes go back to being owed for the next check.
-                await self._undo_unaccepted_turn(session_id, user_turn, wake_ids)
-                if brief_from:
-                    await watches.owe_wake(
-                        session_id, brief_from, f"b{uuid.uuid4().hex}", "died")
-                    self._wake([brief_from])
+                # A wake is known by its ids, or, for one sent again after a
+                # restart (which carries none), by the sender's wake turn
+                # still being open: the gateway's own record, not the text,
+                # so a person's message that merely begins "[wake]" is never
+                # taken for one.
+                if wake_ids is not None or (
+                        turn.get("resend") and await watches.turn_is_wake(session_id)):
+                    # A wake the mind never took was not delivered: it is no
+                    # stop of this session, the row it wrote goes so the
+                    # history shows no failed attempt, and the wakes it
+                    # carried go back to being owed for the next check.
+                    await self._undo_unaccepted_turn(session_id, user_turn, wake_ids)
+                    return
+                # Any other message the mind never took stays in the history
+                # (feature 2.1 had erased it) and is one turn that died: one
+                # stop keyed on the turn, which the slow check skips because the turn
+                # already has a stop, so it never records a second one. The key
+                # says the mind never took it (a turn it took and died on is
+                # `t`): a switch hands a conversation over only if a transcript
+                # exists. A brief's watch was armed
+                # just below this row, so that stop is also the one wake its
+                # sender is owed.
+                owed = await self._record_stop(
+                    session_id, f"{NEVER_TOOK_KEY}{user_turn}", "died",
+                    wake=await watches.turn_is_wake(session_id), turn_id=user_turn)
+                self._wake(owed)
+                self._wake_when_idle(session_id)
                 return
             if user_turn is None:
                 if brief_from:
@@ -2897,7 +2970,8 @@ class SessionManager:
 
         import aiohttp
         retried = False
-        _assistant_buf: list[str] = []
+        _answer = _TurnAnswer(
+            dsh=await self.conversation_harness(session) == "dsh")
         _pinned_sid = session.get("conversation_id") or None
         _harness_sid = session.get("harness_sid") or None
         _sid_warned = False
@@ -3038,6 +3112,8 @@ class SessionManager:
 
                             observer_only = bool(event.pop("_observer_only", False))
                             _turn_events.append(event)
+                            if event.get("type") == "dsh_report":
+                                _answer.expect_report(event.get("report"))
 
                             ending = self._replacing_ending(event, resend)
                             if ending:
@@ -3106,7 +3182,7 @@ class SessionManager:
                                 if isinstance(_content, list):
                                     _content = "".join(c.get("text", "") for c in _content if isinstance(c, dict) and c.get("type") == "text")
                                 if isinstance(_content, str) and _content:
-                                    _assistant_buf.append(_content)
+                                    _answer.add(_content)
 
                             now = time.time()
                             await _update_session(session_id, last_active=now)
@@ -3147,7 +3223,7 @@ class SessionManager:
                                 # landed, and the next spawn must carry it
                                 # again.
                                 outcome["answer_turn_id"] = await self._close_turn(
-                                    session_id, "".join(_assistant_buf), now,
+                                    session_id, _answer.text(), now,
                                     landed=_pinned_sid if not event.get("is_error") else None,
                                 )
                                 elapsed = time.monotonic() - t0
@@ -3177,9 +3253,9 @@ class SessionManager:
             break  # exit retry loop on success
 
         if replaced is not None:
-            if replaced["kind"] == "goal" and _assistant_buf:
+            if replaced["kind"] == "goal" and _answer.pieces:
                 outcome["answer_turn_id"] = await self._close_turn(
-                    session_id, "".join(_assistant_buf), time.time(), landed=None,
+                    session_id, _answer.text(), time.time(), landed=None,
                 )
             settled = await self._settle_replacing_ending(replaced, content, images)
             for notice in settled.get("notices") or []:
@@ -4216,8 +4292,31 @@ class SessionManager:
         )
 
     async def _had_turns(self, session_id: str) -> bool:
-        """Whether this session's ledger holds any turn at all."""
-        return await core.latest_turn(session_id) is not None
+        """Whether this session's ledger holds a turn a mind took.
+
+        A message the mind never took stays in the ledger (it is history), but
+        it left no transcript behind, so a conversation holding nothing else is
+        still a new one: a harness or model switch made to get past the failure
+        must find nothing to read, not refuse for want of a transcript. A turn
+        the mind took and then died on with no reply is not that: its
+        transcript holds the message and any work, and it is handed over as
+        before. The two are told apart by the stop kept for the newest row,
+        keyed as never taken only for a message the mind never took. If that
+        stop could not be written the row reads as taken, which errs towards
+        asking for a transcript: a switch that is refused, never one that
+        loses a conversation.
+        """
+        newest = await core.latest_turn(session_id)
+        if newest is None:
+            return False
+        if newest["role"] == "assistant":
+            return True
+        if await core.latest_turn(session_id, role="assistant") is not None:
+            return True
+        stop = await watches.latest_stop(session_id)
+        never_took = (stop is not None
+                      and stop["stop_key"] == f"{NEVER_TOOK_KEY}{newest['id']}")
+        return not never_took
 
     async def _refuse_unavailable_harness(self, mind_id: str, harness: str) -> None:
         """Refuse a new conversation on a harness the mind reports unavailable.
