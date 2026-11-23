@@ -122,6 +122,9 @@ BEGIN
                 SELECT task_id FROM staff.task_sessions
                 WHERE session_id = NEW.session_id);
             RETURN NEW;
+        EXCEPTION WHEN OTHERS THEN
+            -- Bookkeeping for a page. It must never refuse a stop.
+            RETURN NEW;
         END $fn$;
         DROP TRIGGER IF EXISTS session_stops_note_stop ON core.session_stops;
         CREATE TRIGGER session_stops_note_stop
@@ -135,6 +138,9 @@ BEGIN
             WHERE t.stopped_at IS NOT NULL AND t.id IN (
                 SELECT task_id FROM staff.task_sessions
                 WHERE session_id = NEW.session_id);
+            RETURN NEW;
+        EXCEPTION WHEN OTHERS THEN
+            -- Bookkeeping for a page. It must never refuse a turn write.
             RETURN NEW;
         END $fn$;
         DROP TRIGGER IF EXISTS session_turns_note_running ON core.session_turns;
