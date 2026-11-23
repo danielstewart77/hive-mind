@@ -156,3 +156,52 @@ def test_a_refused_claim_read_sends_a_container_minds_notification_to_nobody(mon
         lambda request: httpx.Response(404, json={"detail": "No such claim"})))
 
     assert notify._owner_chat_id(client) == ""
+
+
+class _ChildDone(BaseException):
+    """Raised where the forked child would exit, so the test regains control."""
+
+
+def test_a_sent_report_asked_to_be_spoken_is_followed_by_a_voice_note_to_the_same_chat(
+        monkeypatch, capsys):
+    """Daniel, 2026-11-23: the chief of staff's reports after a wake reached
+    Telegram as text with no voice. `send --voice` says the text, then
+    speaks it, to the person the text went to."""
+    import argparse
+    import httpx
+    _env(monkeypatch)
+    notify = _notify_module(monkeypatch)
+    posts = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return httpx.Response(200, json={"claimed": True, "claimed_ref": "5550001"},
+                              request=httpx.Request("GET", url))
+
+    def fake_post(url, json=None, data=None, files=None, timeout=None, **_):
+        posts.append({"url": url, "json": json, "data": data, "files": files})
+        return httpx.Response(200, content=b"SPOKEN", request=httpx.Request("POST", url))
+
+    def child_exit(code):
+        raise _ChildDone()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
+    # The process boundary: run the child's half in this process.
+    monkeypatch.setattr(notify.os, "fork", lambda: 0)
+    monkeypatch.setattr(notify.os, "setsid", lambda: None)
+    monkeypatch.setattr(notify.os, "_exit", child_exit)
+
+    args = argparse.Namespace(message="Mordecai has finished the plan.", channels="telegram",
+                              alert_file=None, test_mode=False, voice=True)
+    try:
+        notify.cmd_send(args)
+    except _ChildDone:
+        pass
+
+    text, speech, note = posts
+    assert text["url"].endswith("/sendMessage")
+    assert speech["url"].endswith("/tts")
+    assert speech["json"]["text"] == "Mordecai has finished the plan."
+    assert note["url"].endswith("/sendVoice")
+    assert note["data"] == {"chat_id": "5550001"}
+    assert note["files"]["voice"][1] == b"SPOKEN"
