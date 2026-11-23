@@ -41,6 +41,8 @@ class FakeMind:
         self.hold: dict[str, asyncio.Event] = {}
         self.status: dict[str, int] = {}
         self.entered: dict[str, asyncio.Event] = {}
+        #: sessions whose turn is answered 200 and then cut off.
+        self.cut: set[str] = set()
         self.app = web.Application()
         self.app.router.add_post("/sessions/{sid}/message", self._message)
         self.server = TestServer(self.app)
@@ -61,6 +63,9 @@ class FakeMind:
         ]
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
+        if sid in self.cut:
+            request.transport.abort()
+            return response
         for event in events:
             await response.write(f"data: {__import__('json').dumps(event)}\n\n".encode())
         await response.write_eof()
@@ -357,7 +362,6 @@ async def test_a_terminal_turn_wakes_once_for_the_assistant_post_and_a_death_say
     await gateway.record_turn("terminal", "tile-1", "assistant", "done it")
     await _settle(gateway)
     one = _wakes_to(mind, sender)
-    await gateway.record_turn("terminal", "tile-1", "user", "again")
     await gateway.record_turn("terminal", "tile-1", "", "", died=True)
     await _settle(gateway)
 
@@ -368,6 +372,47 @@ async def test_a_terminal_turn_wakes_once_for_the_assistant_post_and_a_death_say
 
 
 # --- the slow check never announces a stop a second time --------------------
+
+async def test_a_terminal_that_dies_twice_with_nothing_recorded_between_wakes_the_sender_twice(
+        gateway, mind):
+    """The Stop hook ledgers nothing for a turn that failed, so two deaths
+    in a row have no row between them."""
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    await core.bind_surface(client_type="terminal", client_ref="tile-3",
+                            session_id=worker["id"])
+    await gateway.record_turn("terminal", "tile-3", "user", "typed")
+    await gateway.record_turn("terminal", "tile-3", "assistant", "done it")
+    await _settle(gateway)
+
+    await gateway.record_turn("terminal", "tile-3", "", "", died=True)
+    await _settle(gateway)
+    await gateway.record_turn("terminal", "tile-3", "", "", died=True)
+    await _settle(gateway)
+
+    woken = _wakes_to(mind, sender)
+    assert [("died" in w) for w in woken] == [False, True, True]
+
+
+async def test_the_first_death_after_a_watch_asked_for_after_the_fact_wakes_the_sender(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await core.bind_surface(client_type="terminal", client_ref="tile-4",
+                            session_id=worker["id"])
+    await gateway.record_turn("terminal", "tile-4", "user", "typed")
+    await gateway.record_turn("terminal", "tile-4", "assistant", "an old answer")
+    await _settle(gateway)
+    await gateway.ask_watch(
+        worker, sender, "briefed before", armed_after=await gateway.armed_after_now(worker["id"]))
+
+    await gateway.record_turn("terminal", "tile-4", "", "", died=True)
+    await _settle(gateway)
+
+    woken = _wakes_to(mind, sender)
+    assert len(woken) == 1 and "died" in woken[0]
+
 
 async def test_the_slow_check_does_not_wake_again_for_stops_whose_records_were_pruned(
         gateway, mind):
@@ -455,3 +500,85 @@ async def test_a_gateway_restart_does_not_report_a_running_terminal_turn_as_died
     await _settle(gateway)
 
     assert _wakes_to(mind, sender) == []
+
+
+async def test_a_brief_that_failed_before_it_started_leaves_the_watch_armed_for_later_stops(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await gateway.ask_watch(worker, sender, "the brief")
+    await core.update_session(worker["id"], status="suspended")   # refused before its turn is written
+    with pytest.raises(ValueError):
+        await _turn(gateway, worker["id"], brief_from=sender["id"])
+    await _settle(gateway)
+    await core.update_session(worker["id"], status="idle")
+
+    await _turn(gateway, worker["id"], "try again")
+    await _settle(gateway)
+
+    woken = _wakes_to(mind, sender)
+    assert [("died" in w) for w in woken] == [True, False]
+
+
+async def test_a_wake_whose_connection_dropped_after_the_mind_accepted_it_is_sent_once(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    mind.cut.add(sender["id"])
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert len(_wakes_to(mind, sender)) == 1
+    assert (await watches.wake_state(MIND))["owed"] == 0
+
+
+async def test_a_wake_waiting_for_a_suspended_conversation_does_not_hold_up_a_recreate(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    await watches.record_stop(worker["id"], "t1", "ended", turn_id=1)
+
+    live = await gateway.mind_idle_state(MIND)
+    await core.update_session(sender["id"], status="suspended")
+    suspended = await gateway.mind_idle_state(MIND)
+
+    assert live["owed"] == 1
+    assert suspended["owed"] == 0
+
+
+async def test_no_conversation_can_read_the_finish_capability_from_the_record(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    capability = await _watch(gateway, worker, sender)
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+
+    (woken,) = _wakes_to(mind, sender)
+    assert capability in woken                      # the owner is handed it
+    history = await gateway.get_session_turns(sender["id"])
+    assert history and all(capability not in turn["content"] for turn in history)
+    assert any("[wake]" in turn["content"] for turn in history)
+    assert await gateway.finish_watch(worker["id"], sender["id"], capability) == "finished"
+
+
+async def test_a_wake_turn_a_restart_cut_off_does_not_wake_the_watchers_of_its_conversation(
+        gateway, mind):
+    pane = await _session(gateway, OTHER)
+    watcher = await _session(gateway, MIND)
+    await _watch(gateway, pane, watcher, "the second mind's work")
+    await core.record_turn(session_id=pane["id"], role="user",
+                           content="[wake] A session you are watching stopped.",
+                           created_at=time.time() - 100)
+    gateway._started_at = time.time()
+
+    await gateway.wake_sweep()
+    await _settle(gateway)
+
+    assert _wakes_to(mind, watcher) == []

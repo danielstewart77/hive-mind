@@ -31,9 +31,10 @@ outside can do that for it.
 2. **Ask the mind to end itself.** The task is `done` by now, which has
    already ended the watch, so this brief asks for no wake and nobody is woken
    by the harvest:
-   `curl -sS -X POST -H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg c "$closing" '{content: $c}')" "$COMMS_URL/sessions/<id>/message"`
-   keeps its answer stream open until the turn ends, so run it detached and
-   discard its output: `setsid -f sh -c '...' > /dev/null 2>&1`.
+   `setsid -f sh -c 'curl -sS -N -X POST -H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg c "$1" "{content: \$c}")" "$COMMS_URL/sessions/$2/message"' _ "$closing" <id> > /dev/null 2>&1`
+   keeps its answer stream open until the turn ends, which is why it runs
+   detached with its output discarded; `$closing` is the closing turn
+   described next and `<id>` the session id.
    The closing turn says the chief of staff has verified the work landed and
    the task is closed, names the task in Daniel's words, and asks the mind to
    run its `end-session` skill now — harvest what it learned, then close the

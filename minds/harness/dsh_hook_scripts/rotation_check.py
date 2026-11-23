@@ -272,8 +272,8 @@ def report_death(event: dict, assessed: dict | None) -> bool:
 
     Only a turn typed into a browser terminal needs this: a chat turn's
     death is seen by the gateway itself. Nothing is stored for it - there is
-    no answer - and the gateway keys the stop on the turn, so a report sent
-    twice is one stop. A turn that failed only because the conversation
+    no answer - and the gateway counts each report as a stop of its own, so each failure
+    is reported once. A turn that failed only because the conversation
     overflowed is being rotated and re-sent, which is not a death: it
     reports nothing, and the re-sent turn's own end is the stop.
     """
