@@ -855,6 +855,7 @@ _BEARER_USERS = {
     console_access.CUTOVER: "cutover-check",
     console_access.BOARD: "board-bearer",
     console_access.BOARD_PLANNER: "board-planner-bearer",
+    console_access.ROLES: "roles-bearer",
 }
 
 
@@ -4497,13 +4498,18 @@ async def api_mind_skill_remove(
 
 def _role_id(value: str) -> int:
     try:
-        return int(value)
+        number = int(value)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="No such role") from exc
+    # Roles are keyed by a 64-bit id: a number outside it names no role, and
+    # the database would refuse it as a server error rather than a 404.
+    if not 0 <= number < 2 ** 63:
+        raise HTTPException(status_code=404, detail="No such role")
+    return number
 
 
 @app.get("/api/roles")
-async def api_roles(user: dict = Depends(require_auth)):
+async def api_roles(user: dict = Depends(require_admin_or_route_bearer)):
     """Every role, each marked tracked, local, differs, repo only or unreadable."""
     del user
     return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS)}
@@ -4537,7 +4543,7 @@ async def _mind_report(mind: dict) -> dict:
 
 
 @app.get("/api/roles/catalog")
-async def api_roles_catalog(user: dict = Depends(require_auth)):
+async def api_roles_catalog(user: dict = Depends(require_admin_or_route_bearer)):
     """What a role can be given: every model, skill and hook that exists.
 
     The editor ticks from this and types none of it. Models are the proxy's
@@ -4566,13 +4572,19 @@ async def api_roles_catalog(user: dict = Depends(require_auth)):
 
 
 @app.post("/api/roles")
-async def api_create_role(body: dict, user: dict = Depends(require_auth)):
+async def api_create_role(body: dict, user: dict = Depends(require_admin_or_route_bearer)):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object")
     name = body.get("name")
     if not isinstance(name, str) or not name.strip():
         raise HTTPException(status_code=400, detail="A role needs a name")
     grants = roles_data.grants_from(body)
+    if body.get("slug") is not None:
+        # The key a role is filed under (its repo copy, its listing). Left
+        # out, it is the name's, as it always was.
+        if not isinstance(body["slug"], str) or not body["slug"].strip():
+            raise HTTPException(status_code=400, detail="slug must be a name")
+        grants["slug"] = body["slug"]
     try:
         role_id = await store.create_role(name, **grants)
     except roles_data.store_conflict() as exc:
@@ -4585,7 +4597,7 @@ async def api_create_role(body: dict, user: dict = Depends(require_auth)):
 
 
 @app.put("/api/roles/{role_id}")
-async def api_update_role(role_id: str, body: dict, user: dict = Depends(require_auth)):
+async def api_update_role(role_id: str, body: dict, user: dict = Depends(require_admin_or_route_bearer)):
     rid = _role_id(role_id)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object")
@@ -4595,7 +4607,10 @@ async def api_update_role(role_id: str, body: dict, user: dict = Depends(require
             raise HTTPException(status_code=400, detail="A role needs a name")
         fields["name"] = body["name"]
     try:
-        changed = await store.update_role(rid, **fields)
+        # Under the role's lock, so a whole-list replace and a one-skill add
+        # take turns rather than one erasing the other.
+        async with store.transaction(hold=_role_lock(rid)):
+            changed = await store.update_role(rid, **fields)
     except roles_data.store_conflict() as exc:
         raise HTTPException(status_code=409,
                             detail=f"A role called {str(body.get('name')).strip()!r} already exists") from exc
@@ -4609,7 +4624,7 @@ async def api_update_role(role_id: str, body: dict, user: dict = Depends(require
 
 
 @app.delete("/api/roles/{role_id}")
-async def api_delete_role(role_id: str, user: dict = Depends(require_auth)):
+async def api_delete_role(role_id: str, user: dict = Depends(require_admin_or_route_bearer)):
     rid = _role_id(role_id)
     role = await store.role(rid)
     if role is None:
@@ -4624,22 +4639,86 @@ async def api_delete_role(role_id: str, user: dict = Depends(require_auth)):
     return {"ok": True}
 
 
+def _role_lock(role_id: int) -> str:
+    """The advisory-lock key the one-skill add and remove and the whole-list replace take.
+
+    Taking a role from the repo is a deliberate full replace and does not.
+    """
+    return f"roles:role:{role_id}"
+
+
+def _skill_name(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail="A skill needs a name")
+    return value.strip()
+
+
+@app.post("/api/roles/{role_id}/skills")
+async def api_add_role_skill(role_id: str, body: dict,
+                             user: dict = Depends(require_admin_or_route_bearer)):
+    """Add one skill to a role, leaving every other grant as it is.
+
+    Read, decided and written in one unit under the role's lock, so two
+    callers adding different skills at once both land: a whole-list replace
+    cannot do that, because the second reads the list before the first wrote.
+    A skill the role already holds changes nothing and says so.
+    """
+    rid = _role_id(role_id)
+    skill = _skill_name(body.get("skill") if isinstance(body, dict) else None)
+    async with store.transaction(hold=_role_lock(rid)):
+        role = await store.role(rid)
+        if role is None:
+            raise HTTPException(status_code=404, detail="No such role")
+        held = list(role["skills"] or [])
+        added = skill not in held
+        if added:
+            held.append(skill)
+            await store.update_role(rid, skills=held)
+    if added:
+        log_event(log, "role.skill_added", **_actor_fields(user), role_id=rid, skill=skill)
+    return {"ok": True, "changed": added, "skills": held}
+
+
+@app.delete("/api/roles/{role_id}/skills/{skill}")
+async def api_remove_role_skill(role_id: str, skill: str,
+                                user: dict = Depends(require_admin_or_route_bearer)):
+    """Take one skill off a role, leaving every other grant as it is.
+
+    Atomic for the reason the add is. A skill the role does not hold changes
+    nothing and says so.
+    """
+    rid = _role_id(role_id)
+    skill = _skill_name(skill)
+    async with store.transaction(hold=_role_lock(rid)):
+        role = await store.role(rid)
+        if role is None:
+            raise HTTPException(status_code=404, detail="No such role")
+        held = list(role["skills"] or [])
+        removed = skill in held
+        if removed:
+            held = [name for name in held if name != skill]
+            await store.update_role(rid, skills=held)
+    if removed:
+        log_event(log, "role.skill_removed", **_actor_fields(user), role_id=rid, skill=skill)
+    return {"ok": True, "changed": removed, "skills": held}
+
+
 @app.post("/api/roles/{role_id}/keep")
-async def api_keep_role(role_id: str, user: dict = Depends(require_auth)):
+async def api_keep_role(role_id: str, user: dict = Depends(require_admin_or_route_bearer)):
     result = await roles_data.keep_yours(_role_id(role_id))
     log_event(log, "role.kept", **_actor_fields(user), role_id=role_id)
     return result
 
 
 @app.post("/api/roles/{role_id}/promote")
-async def api_promote_role(role_id: str, user: dict = Depends(require_auth)):
+async def api_promote_role(role_id: str, user: dict = Depends(require_admin_or_route_bearer)):
     result = await roles_data.promote(_role_id(role_id))
     log_event(log, "role.promoted", **_actor_fields(user), role_id=role_id)
     return result
 
 
 @app.post("/api/roles/repo/{slug}/take")
-async def api_take_repo_role(slug: str, user: dict = Depends(require_auth)):
+async def api_take_repo_role(slug: str, user: dict = Depends(require_admin_or_route_bearer)):
     result = await roles_data.take_repo(slug)
     log_event(log, "role.taken_from_repo", **_actor_fields(user), slug=slug)
     return result

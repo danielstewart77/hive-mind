@@ -688,3 +688,303 @@ def test_the_board_and_the_cutover_bearer_each_admit_the_one_route_they_share(
                            headers={"Authorization": "Bearer a-cutover-token"},
                            follow_redirects=False)
     assert write.status_code in (303, 401, 403), write.text
+
+
+# ── the operator's roles bearer (feature 856, story 860) ───────────────
+
+_ROLES_GOOD = {"Authorization": "Bearer an-operator-token"}
+_ROLES_WRONG = {"Authorization": "Bearer not-the-token"}
+
+
+def _roles_in_the_listing(client, headers):
+    listing = client.get("/api/roles", headers=headers)
+    assert listing.status_code == 200, listing.text
+    return {row["slug"]: row for row in listing.json()["roles"] if row["id"]}
+
+
+def test_the_roles_bearer_is_attached_to_the_roles_page_routes_and_no_others():
+    """Read off the table itself, for the reason the cutover test gives: a
+    bearer in the wrong rule is a sessionless way into whatever that rule
+    covers. The operator may do anything to a role and nothing else on the
+    console, so a new route carrying this bearer has to be a decision here.
+    """
+    carrying = {
+        f"{method} {path}"
+        for (method, path), rule in console_access.TABLE.rules.items()
+        if console_access.ROLES in rule.bearers
+    }
+
+    assert carrying == {
+        "GET /api/roles",
+        "GET /api/roles/catalog",
+        "POST /api/roles",
+        "PUT /api/roles/{role_id}",
+        "DELETE /api/roles/{role_id}",
+        "POST /api/roles/{role_id}/skills",
+        "DELETE /api/roles/{role_id}/skills/{skill}",
+        "POST /api/roles/{role_id}/keep",
+        "POST /api/roles/{role_id}/promote",
+        "POST /api/roles/repo/{slug}/take",
+    }
+
+
+def test_the_operator_creates_changes_and_deletes_a_role_with_the_roles_bearer_and_no_session(
+        builtin_console, monkeypatch):
+    """Everything a person does on the Roles page, with no session: make a
+    role, change its name, model, skills, tools and hooks, add and remove one
+    skill, and delete it — and the listing the page reads shows each, so the
+    change is stored and not merely reported."""
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+
+    made = operator.post("/api/roles", headers=_ROLES_GOOD, json={
+        "name": "Reviewer", "slug": "reviewer", "model": "a-model", "skills": ["read"],
+        "tools": ["files"], "hooks": ["guard"]})
+    assert made.status_code == 200, made.text
+    rid = made.json()["id"]
+    role = _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]
+    assert (role["name"], role["model"], role["skills"], role["tools"],
+            role["hooks"]) == ("Reviewer", "a-model", ["read"], ["files"], ["guard"])
+
+    changed = operator.put(f"/api/roles/{rid}", headers=_ROLES_GOOD, json={
+        "name": "Chief Reviewer", "model": None, "skills": ["read", "write"],
+        "tools": ["shell", "web"], "hooks": ["guard", "audit"]})
+    assert changed.status_code == 200, changed.text
+    role = _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]
+    assert (role["name"], role["model"], role["skills"], role["tools"],
+            role["hooks"]) == ("Chief Reviewer", None, ["read", "write"],
+                               ["shell", "web"], ["guard", "audit"])
+
+    added = operator.post(f"/api/roles/{rid}/skills", headers=_ROLES_GOOD,
+                          json={"skill": "plan"})
+    assert added.status_code == 200, added.text
+    assert added.json()["changed"] is True
+    assert _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]["skills"] == [
+        "read", "write", "plan"]
+
+    again = operator.post(f"/api/roles/{rid}/skills", headers=_ROLES_GOOD,
+                          json={"skill": "plan"})
+    assert again.status_code == 200, again.text
+    assert again.json()["changed"] is False
+    assert _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]["skills"] == [
+        "read", "write", "plan"]
+
+    removed = operator.delete(f"/api/roles/{rid}/skills/write", headers=_ROLES_GOOD)
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["changed"] is True
+    role = _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]
+    assert role["skills"] == ["read", "plan"]
+    # One skill moved; every other grant stayed where the whole-list edit put it.
+    assert (role["name"], role["tools"], role["hooks"]) == (
+        "Chief Reviewer", ["shell", "web"], ["guard", "audit"])
+
+    absent = operator.delete(f"/api/roles/{rid}/skills/write", headers=_ROLES_GOOD)
+    assert absent.status_code == 200 and absent.json()["changed"] is False
+
+    gone = operator.delete(f"/api/roles/{rid}", headers=_ROLES_GOOD)
+    assert gone.status_code == 200, gone.text
+    assert "reviewer" not in _roles_in_the_listing(operator, _ROLES_GOOD)
+
+    keyed = operator.post("/api/roles", headers=_ROLES_GOOD,
+                          json={"name": "Auditor Of Things", "slug": "audit"})
+    assert keyed.status_code == 200, keyed.text
+    assert "audit" in _roles_in_the_listing(operator, _ROLES_GOOD)
+
+    catalog = operator.get("/api/roles/catalog", headers=_ROLES_GOOD)
+    assert catalog.status_code == 200, catalog.text
+
+
+def test_a_skill_added_or_removed_on_a_role_that_does_not_exist_is_a_404(
+        builtin_console, monkeypatch):
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+
+    added = operator.post("/api/roles/987654/skills", headers=_ROLES_GOOD,
+                          json={"skill": "plan"})
+    removed = operator.delete("/api/roles/987654/skills/plan", headers=_ROLES_GOOD)
+
+    assert (added.status_code, removed.status_code) == (404, 404), (added.text, removed.text)
+
+
+def test_the_keep_promote_and_take_routes_admit_the_roles_bearer_and_answer_for_the_role(
+        builtin_console, monkeypatch):
+    """Each is answered by its own handler (a 404 for a role or repo copy that
+    is not there), which only happens when the bearer was admitted: a handler
+    that still wanted a session would answer 401 to this caller."""
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+
+    kept = operator.post("/api/roles/987654/keep", headers=_ROLES_GOOD)
+    promoted = operator.post("/api/roles/987654/promote", headers=_ROLES_GOOD)
+    taken = operator.post("/api/roles/repo/no-such-role-anywhere/take", headers=_ROLES_GOOD)
+    huge = operator.post("/api/roles/99999999999999999999/skills", headers=_ROLES_GOOD,
+                         json={"skill": "plan"})
+
+    assert (kept.status_code, promoted.status_code, taken.status_code,
+            huge.status_code) == (404, 404, 404, 404), (
+        kept.text, promoted.text, taken.text, huge.text)
+
+
+def test_a_wrong_or_absent_roles_bearer_changes_no_role_on_any_roles_route(
+        builtin_console, monkeypatch):
+    """A role changes what every mind holding it may use, so the credential
+    is the guard and not merely the thing that happened to be in the header.
+    Each route is refused without it and the role is as it was."""
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+    rid = operator.post("/api/roles", headers=_ROLES_GOOD,
+                        json={"name": "Held", "skills": ["read"]}).json()["id"]
+    anonymous = builtin_console.client()
+
+    calls = (
+        ("get", "/api/roles", None),
+        ("get", "/api/roles/catalog", None),
+        ("post", "/api/roles", {"name": "Intruder"}),
+        ("put", f"/api/roles/{rid}", {"name": "Taken", "skills": []}),
+        ("post", f"/api/roles/{rid}/skills", {"skill": "evil"}),
+        ("delete", f"/api/roles/{rid}/skills/read", None),
+        ("post", f"/api/roles/{rid}/keep", None),
+        ("post", f"/api/roles/{rid}/promote", None),
+        ("post", "/api/roles/repo/anything/take", None),
+        ("delete", f"/api/roles/{rid}", None),
+    )
+    for headers in (_ROLES_WRONG, {}):
+        for method, path, body in calls:
+            refused = getattr(anonymous, method)(
+                path, headers=headers, follow_redirects=False,
+                **({"json": body} if body is not None else {}))
+            assert refused.status_code in (303, 401, 403), (method, path, refused.text)
+
+    survivors = _roles_in_the_listing(operator, _ROLES_GOOD)
+    assert (survivors["held"]["name"], survivors["held"]["skills"]) == ("Held", ["read"])
+    assert "intruder" not in survivors
+
+
+def test_an_install_that_issued_no_roles_token_admits_no_bearer_to_the_roles_routes(
+        builtin_console, monkeypatch):
+    """An unset token is not an open door, and an empty one is not matched by
+    an empty header value, nor by a house token."""
+    monkeypatch.delenv("ROLES_PUSH_TOKEN", raising=False)
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", "a-house-token")
+    anonymous = builtin_console.client()
+
+    for token in ("anything", "a-board-token", "a-house-token", ""):
+        for method, path, body in (
+            ("get", "/api/roles", None),
+            ("post", "/api/roles", {"name": "Intruder"}),
+            ("post", "/api/roles/1/skills", {"skill": "x"}),
+        ):
+            refused = getattr(anonymous, method)(
+                path, headers={"Authorization": f"Bearer {token}"},
+                follow_redirects=False,
+                **({"json": body} if body is not None else {}))
+            assert refused.status_code in (303, 401, 403), (token, path, refused.text)
+
+
+def test_the_roles_bearer_is_not_a_way_into_the_console_or_the_board(
+        builtin_console, monkeypatch):
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+
+    for path in ("/api/memory/tables", "/api/kanban/data", "/api/admin/users"):
+        refused = operator.get(path, headers=_ROLES_GOOD, follow_redirects=False)
+        assert refused.status_code in (303, 401, 403), (path, refused.text)
+
+
+def test_a_signed_in_admin_still_manages_roles_and_a_signed_in_person_still_only_reads_them(
+        people, monkeypatch):
+    """The bearer is an added door; the session's abilities are as they were."""
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    admin, sloan = people
+
+    made = admin.post("/api/roles", json={"name": "By Hand", "skills": ["a"]})
+    assert made.status_code == 200, made.text
+    rid = made.json()["id"]
+    assert admin.post(f"/api/roles/{rid}/skills", json={"skill": "b"}).status_code == 200
+    assert _roles_in_the_listing(admin, {})["by-hand"]["skills"] == ["a", "b"]
+
+    assert sloan.get("/api/roles").status_code == 200
+    for method, path, body in (
+        ("post", "/api/roles", {"name": "Nope"}),
+        ("put", f"/api/roles/{rid}", {"skills": []}),
+        ("post", f"/api/roles/{rid}/skills", {"skill": "c"}),
+        ("delete", f"/api/roles/{rid}/skills/a", None),
+        ("delete", f"/api/roles/{rid}", None),
+    ):
+        refused = getattr(sloan, method)(
+            path, follow_redirects=False,
+            **({"json": body} if body is not None else {}))
+        assert refused.status_code in (303, 401, 403), (path, refused.text)
+    assert _roles_in_the_listing(admin, {})["by-hand"]["skills"] == ["a", "b"]
+
+
+def test_skills_added_to_one_role_at_once_all_survive(
+        builtin_console, monkeypatch):
+    """Without the role's lock the second add reads the list before the first
+    wrote, and one skill is lost with both calls reporting success. Many adds
+    released together make that loss all but certain."""
+    import threading
+
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+    rid = operator.post("/api/roles", headers=_ROLES_GOOD,
+                        json={"name": "Busy"}).json()["id"]
+    names = [f"skill-{n}" for n in range(12)]
+    gate = threading.Barrier(len(names))
+    answers: dict[str, int] = {}
+
+    def add(name):
+        client = builtin_console.client()
+        gate.wait()
+        answers[name] = client.post(f"/api/roles/{rid}/skills", headers=_ROLES_GOOD,
+                                    json={"skill": name}).status_code
+
+    threads = [threading.Thread(target=add, args=(n,)) for n in names]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+
+    assert answers == {n: 200 for n in names}
+    held = _roles_in_the_listing(operator, _ROLES_GOOD)["busy"]["skills"]
+    assert sorted(held) == sorted(names), held
+
+
+def test_a_whole_list_replace_of_a_role_waits_for_whoever_holds_that_roles_lock(
+        builtin_console, monkeypatch):
+    """The PUT and the one-skill add take the same lock, so a replace cannot
+    read between an add's read and its write and erase it. Another unit holds
+    the role's lock for a while; the replace must not land before it lets go.
+    """
+    import threading
+    import time
+
+    import asyncio
+    import main
+    import store
+    from hive_site import testing
+
+    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    operator = builtin_console.client()
+    rid = operator.post("/api/roles", headers=_ROLES_GOOD,
+                        json={"name": "Contended", "skills": ["a"]}).json()["id"]
+    holding = threading.Event()
+    released_at: list[float] = []
+
+    async def hold_the_lock():
+        async with store.transaction(hold=main._role_lock(rid)):
+            holding.set()
+            await asyncio.sleep(1.0)
+            released_at.append(time.monotonic())
+
+    holder = testing.suite_portal().start_task_soon(hold_the_lock)
+    assert holding.wait(10)
+    replaced = operator.put(f"/api/roles/{rid}", headers=_ROLES_GOOD,
+                            json={"skills": ["b"]})
+    landed_at = time.monotonic()
+    holder.result(10)
+
+    assert replaced.status_code == 200, replaced.text
+    assert landed_at >= released_at[0]
+    assert _roles_in_the_listing(operator, _ROLES_GOOD)["contended"]["skills"] == ["b"]

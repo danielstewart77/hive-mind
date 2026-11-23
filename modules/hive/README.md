@@ -285,6 +285,21 @@ equal to `BOARD_PUSH_TOKEN` is that token and deletes. The mind's board tool rea
 `BOARD_PUSH_TOKEN` from its own environment, so the mind's compose file
 hands it this value under that name.
 
+`ROLES_PUSH_TOKEN` is the operator's credential for roles. A role decides
+what every mind holding it may use, so the operator, a mind made in the
+console, needs a way in that is not a signed-in browser. It admits the
+routes a person uses on the Roles page: reading the roles and the catalog,
+creating, changing and deleting a role, adding or removing one skill
+(`POST /api/roles/{role_id}/skills`, `DELETE /api/roles/{role_id}/skills/{skill}`,
+each atomic under a lock on the role so two adds at once both land), and
+the keep, promote and take-from-repo choices. Nothing on the Roles page is
+narrower for it than for a signed-in admin, and it reaches nothing else on
+the console. It has no fallback to the house tokens or to
+`BOARD_PUSH_TOKEN`, for the reason `DESIGN_PUSH_TOKEN` gives; unset, the
+routes admit no bearer. The value is the same in the console's `.env` and in
+the stack `.env`, which is what hands it, with `HIVE_SITE_URL`, to the
+operator mind; that mind's roles tool reads both from its own environment.
+
 ## Test
 
 ```

@@ -145,11 +145,34 @@ def board_planner_token() -> str:
     return os.getenv("BOARD_PLANNER_TOKEN", "")
 
 
+def roles_token() -> str:
+    """The credential the operator edits roles with.
+
+    A role decides what every mind holding it may use, so the credential that
+    changes one is the operator's and nobody else's. The operator is a mind
+    made in the console, and until now its only way into the Roles page was a
+    signed-in admin browser, which a mind does not have.
+
+    Deliberately its own, with no fallback to the house tokens, for the
+    reason `design_push_token` gives: every Mind in the hive already holds
+    `COMMS_BEARER_TOKEN` and `COMMS_ADMIN_BEARER_TOKEN`, so either as a
+    fallback would let any mind rewrite the grants of every mind, its own
+    included. Not `BOARD_PUSH_TOKEN` either: whoever works the backlog is not
+    thereby trusted with what every mind may use.
+
+    It admits every route a person uses on the Roles page and nothing else on
+    the console. Unset means those routes admit no bearer and only a session
+    reaches them, which is where an install with no operator sits.
+    """
+    return os.getenv("ROLES_PUSH_TOKEN", "")
+
+
 CANVAS = "canvas"
 DESIGN = "design"
 CUTOVER = "cutover"
 BOARD = "board"
 BOARD_PLANNER = "board_planner"
+ROLES = "roles"
 
 # ── the table ──────────────────────────────────────────────────────────
 
@@ -178,6 +201,10 @@ TABLE = RouteTable(
         ),
         BOARD_PLANNER: BearerToken(
             board_planner_token, unset_status=401,
+            unset_message="Authentication required",
+        ),
+        ROLES: BearerToken(
+            roles_token, unset_status=401,
             unset_message="Authentication required",
         ),
     },
@@ -219,7 +246,6 @@ TABLE.add(
     # person gives their own mind roles from this list; only an admin
     # changes one, since a role changes every mind holding it.
     "GET /roles",
-    "GET /api/roles",
     # A skill submission is a pull request and nothing else, whoever sends
     # it (story 10.18.8), so any signed-in person may make one and read the
     # list of what has been submitted.
@@ -231,6 +257,9 @@ TABLE.add(
     "GET /usage",
     "GET /api/usage",
 )
+# The Roles page's listing is any signed-in person's, and the operator's
+# bearer reads it too: it cannot change a role it cannot see.
+TABLE.add(Rule(USER, bearer=ROLES), "GET /api/roles")
 # The settings page is one route; only its sessions section is a user's.
 TABLE.add(
     Rule(USER, only_when=(("section", frozenset({"access", "features", "remote-access"})),)),
@@ -358,6 +387,24 @@ TABLE.add(
     "DELETE /api/kanban/{kind}/{record_id}",
 )
 
+# Roles: defining one, changing any part of one, and the three repo choices.
+# A signed-in admin reaches them as before and the operator with its own
+# bearer. Nothing here is narrower for the bearer than for the admin: the
+# operator may do anything to a role. The single-skill add and remove are the
+# operator's way to change one skill without replacing the whole list.
+TABLE.add(
+    Rule(ADMIN, bearer=ROLES),
+    "GET /api/roles/catalog",
+    "POST /api/roles",
+    "PUT /api/roles/{role_id}",
+    "DELETE /api/roles/{role_id}",
+    "POST /api/roles/{role_id}/skills",
+    "DELETE /api/roles/{role_id}/skills/{skill}",
+    "POST /api/roles/{role_id}/keep",
+    "POST /api/roles/{role_id}/promote",
+    "POST /api/roles/repo/{slug}/take",
+)
+
 # House-wide: named so the table is complete, and so nobody mistakes a
 # missing line for an oversight. Each moves when its own story scopes it.
 TABLE.add(
@@ -476,14 +523,6 @@ TABLE.add(
     "POST /api/settings/holders/{service}/{holder}/revoke",
     "GET /downloads/{filename}",
     "POST /api/voices/sample",
-    # roles: defining one, and the three repo choices
-    "GET /api/roles/catalog",
-    "POST /api/roles",
-    "PUT /api/roles/{role_id}",
-    "DELETE /api/roles/{role_id}",
-    "POST /api/roles/{role_id}/keep",
-    "POST /api/roles/{role_id}/promote",
-    "POST /api/roles/repo/{slug}/take",
     # users and groups
     "GET /api/admin/users",
     "POST /api/admin/users",
