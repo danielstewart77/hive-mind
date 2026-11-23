@@ -143,6 +143,11 @@ TABLE.add(
     # guard on every tool call and hook event. A mind's credential reaches
     # only its own: `mind_grants` holds it to the mind in the path.
     "GET /minds/{mind_id}/grants",
+    # Which minds hold a role, asked by a mind that has to know who it may
+    # hand work to. Read now, only id and name, and only the asker's own
+    # owner's minds: `role_holders` does that scoping, because the class
+    # admits every mind on the hive and the answer must not cross owners.
+    "GET /roles/{slug}/holders",
     # A bot asking who it answers, offering a message for judgement, and
     # carrying its install's existing allow-list entry across on first boot.
     # The service token, because every surface bot holds one and none of

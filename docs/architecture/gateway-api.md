@@ -22,6 +22,7 @@ The FastAPI gateway (`hive-comms`, built from `nervous-system/comms/server.py`, 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/models` | List available models |
+| `GET` | `/roles/{slug}/holders` | The minds holding a role right now: `{"role", "exists", "minds": [{"mind_id", "name"}]}`. Read live, id and name only. A mind's credential is told only the minds of its own owner; the admin credential is told all; a caller with no owner and no admin right gets an empty list. A role nobody holds, or that does not exist (`exists` false), answers 200 with an empty list |
 | `POST` | `/command` | Route slash commands (`/new`, `/clear`, `/model`, etc.) |
 | `GET` | `/linkedin/auth` | Initiate LinkedIn OAuth flow |
 | `GET` | `/linkedin/callback` | LinkedIn OAuth callback (exchanges code, stores token) |
