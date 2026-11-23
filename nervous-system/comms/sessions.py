@@ -590,6 +590,44 @@ class SessionManager:
         #: none of which the per-session observer stream provides.
         self.dashboard = LiveFeed()
         self._dashboard_sweep_task: asyncio.Task | None = None
+        self._watch_wakes: set[asyncio.Task] = set()
+
+    async def upsert_watch(
+        self, watched_session_id: str, sender_session_id: str, task: str,
+    ) -> Any:
+        """Persist a standing watch; re-registering the pair updates its task."""
+        from hive_data import watches
+        return await watches.upsert_watch(
+            watched_session_id, sender_session_id, task,
+        )
+
+    def _wake_watchers(self, session_id: str, status: str) -> None:
+        """Deliver independently of the turn and never let a wake wake another."""
+        async def deliver() -> None:
+            try:
+                from hive_data import watches
+                registered = await watches.list_watches(session_id)
+                for watch in registered:
+                    target = watch["sender_session_id"]
+                    if target == session_id:
+                        continue
+                    text = (f"Watched session {session_id} {status}. "
+                            f"Task: {watch['task']}")
+                    async def send_one(target: str, text: str) -> None:
+                        try:
+                            async for _ in self.send_message(target, text, _watch_wake=True):
+                                pass
+                        except Exception:
+                            log.exception("Watch wake to %s failed", target)
+                    wake = asyncio.create_task(send_one(target, text))
+                    self._watch_wakes.add(wake)
+                    wake.add_done_callback(self._watch_wakes.discard)
+            except Exception:
+                log.exception("Could not deliver watches for %s", session_id)
+
+        task = asyncio.create_task(deliver())
+        self._watch_wakes.add(task)
+        task.add_done_callback(self._watch_wakes.discard)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1487,6 +1525,8 @@ class SessionManager:
             # The session was ended between finding it and writing to it: a
             # kill takes no turn lock. Nothing to record the turn against.
             return {"ok": False, "error": "no active session"}
+        if role == "assistant":
+            self._wake_watchers(active["id"], "completed a turn")
         return {"ok": True, "session_id": active["id"]}
 
     async def get_carry_forward(
@@ -2082,6 +2122,7 @@ class SessionManager:
         *,
         goal_rounds: int | None = None,
         resend: bool = False,
+        _watch_wake: bool = False,
     ):
         """Send a message and yield NDJSON response events.
 
@@ -2103,25 +2144,39 @@ class SessionManager:
         # it. The conversation is replaced under this same row, so a message
         # typed meanwhile queues behind the re-send rather than overtaking it
         # onto the fresh conversation.
-        async with lock:
-            from comms import mind_maintenance
-            row = await self._get_row(session_id)
-            if row:
-                await mind_maintenance.check(row['mind_id'])
-            while True:
-                outcome: dict = {}
-                async for event in self._send_locked(
-                    session_id, content, images, goal_rounds=goal_rounds,
-                    resend=resend, outcome=outcome,
-                ):
-                    yield event
-                follow = outcome.get("next")
-                if not follow:
-                    return
-                content = follow["content"]
-                images = follow.get("images")
-                goal_rounds = follow.get("goal_rounds")
-                resend = bool(follow.get("resend"))
+        status = "died"
+        try:
+            async with lock:
+                from comms import mind_maintenance
+                row = await self._get_row(session_id)
+                if row:
+                    await mind_maintenance.check(row['mind_id'])
+                while True:
+                    outcome: dict = {}
+                    result = None
+                    async for event in self._send_locked(
+                        session_id, content, images, goal_rounds=goal_rounds,
+                        resend=resend, outcome=outcome,
+                    ):
+                        if event.get("type") == "result":
+                            result = event
+                        yield event
+                    follow = outcome.get("next")
+                    if not follow:
+                        if result is not None:
+                            reason = result.get("stop_reason") or result.get("outcome")
+                            if (not result.get("is_error") and not result.get("error_code")
+                                    and result.get("subtype") != "error"
+                                    and reason not in ("error", "failed", "cancelled", ROTATION_NEEDED)):
+                                status = "completed a turn"
+                        return
+                    content = follow["content"]
+                    images = follow.get("images")
+                    goal_rounds = follow.get("goal_rounds")
+                    resend = bool(follow.get("resend"))
+        finally:
+            if not _watch_wake:
+                self._wake_watchers(session_id, status)
 
     async def _send_locked(
         self,

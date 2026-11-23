@@ -483,8 +483,14 @@ class ImageAttachment(BaseModel):
     media_type: str  # e.g. "image/jpeg", "image/png"
 
 
+class WakeRequest(BaseModel):
+    sender_session_id: str
+    task: str
+
+
 class MessageRequest(BaseModel):
     content: str
+    wake: WakeRequest | None = None
     images: list[ImageAttachment] = []
     # Set only by a dispatch that asks for a goal: how many rounds the
     # harness may drive it for. Absent is one turn, which is every chat.
@@ -710,24 +716,11 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
-    # `owns_mind` answers a question about a person, and nine of this hive's
-    # minds answer to one. So it is no scoping between them: skippy's own
-    # credential could open a conversation on mordecai, dispatch into it, and
-    # have the turn written to mordecai's memory. A `mind` holder is held to
-    # its own mind here exactly as it is on the machinery routes; a person, a
-    # service and the admin credential are unrestricted, since a surface bot
-    # serves every mind its owner has.
-    #
-    # The refusal is this route's own, not the sibling guards' "Session not
-    # found": on a route that creates conversations, that sentence sends the
-    # operator looking for one. It is also what `owns_mind` already answers
-    # for a mind belonging to someone else, and — because a mind holder never
-    # reaches the primary-user fallback below it — for a mind that is not
-    # registered at all.
-    if not await _names_own_mind(caller, body.mind_id):
-        return JSONResponse(
-            {"error": "Mind not found"}, status_code=404
-        )
+    # A mind may brief a different registered mind owned by the same person.
+    # Do not use the ownerless legacy fallback to grant that capability.
+    if caller.role == user_access.MIND and not await _names_own_mind(caller, body.mind_id):
+        if not await user_access.owner_of_mind(body.mind_id):
+            return JSONResponse({"error": "Mind not found"}, status_code=404)
     # The bot's credential says which box is calling, not who is talking.
     # On a Telegram or Discord surface the person is the sender's account,
     # and they reach only a mind they own (story 2.1.15). Refused in the same
@@ -1265,8 +1258,32 @@ async def resume_session(session_id: str, body: ActivateRequest):
 # ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest, request: Request):
-    await _refuse_foreign_session(request, session_id)
+    caller = _caller(request)
+    target = await session_mgr._get_row(session_id)
+    if not target or not await user_access.owns_mind(caller, target['mind_id']):
+        raise HTTPException(404, "Session not found")
+    if caller.role == user_access.MIND and not await user_access.owner_of_mind(target['mind_id']):
+        raise HTTPException(404, "Session not found")
     images = [{"media_type": img.media_type, "data": img.data} for img in body.images] if body.images else None
+    if body.wake is not None:
+        sender = await _resolve_reported_conversation(body.wake.sender_session_id)
+        if not sender or caller.role != user_access.MIND:
+            raise HTTPException(404, "Session not found")
+        if not user_access.mind_is_named_in(await user_access.holder_keys(caller), sender['mind_id']):
+            raise HTTPException(404, "Session not found")
+        if sender['id'] == target['id'] or not body.wake.task.strip():
+            raise HTTPException(422, "A wake needs a task and another session")
+        await session_mgr.upsert_watch(target['id'], sender['id'], body.wake.task.strip())
+
+        async def run_brief():
+            try:
+                async for _ in session_mgr.send_message(target['id'], body.content, images=images, goal_rounds=body.goal_rounds):
+                    pass
+            except Exception:
+                log.exception("watched brief failed session=%s", target['id'])
+
+        asyncio.create_task(run_brief())
+        return JSONResponse({"accepted": True, "session_id": target['id']}, status_code=202)
     log.info("message: session=%s chars=%d", session_id, len(body.content))
     t0 = time.monotonic()
 
