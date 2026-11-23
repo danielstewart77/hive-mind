@@ -56,6 +56,7 @@ from . import memory
 from . import roles
 from . import staff
 from . import tools
+from . import watches
 from .pool import close_pool, live_pool, open_pool, run, settings_in_use
 from .rows import UNSET
 from .schema import COLUMNS
@@ -73,7 +74,7 @@ __all__ = [
     "from_environment", "graph",
     "live_pool", "memory", "run", "settings_in_use", "staff", "tools",
     "transaction",
-    "verify_schema",
+    "verify_schema", "watches",
 ]
 
 

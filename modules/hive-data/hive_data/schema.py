@@ -44,6 +44,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "mind_id", "mind_name", "client_ref", "conversation_id", "body",
         "created_at"),
     "session_turns": ("id", "session_id", "role", "content", "created_at"),
+    "session_watches": ("watched_session_id", "sender_session_id", "task"),
     "sessions": (
         "id", "conversation_id", "surface", "surface_id", "opening_line",
         "model", "created_at", "last_active", "status", "mind_id",
