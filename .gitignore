@@ -215,3 +215,10 @@ reminders/
 # secret: it never travels with the repo.
 minds/*/session_token
 .postflight-probe.json
+
+# Skills a workflow generates live in one folder on the machine: the contents
+# are this install's own and never travel. The placeholder is tracked so the
+# folder exists after any clone or pull, owned by whoever cloned it, which a
+# mind's bind mount of it would otherwise create root-owned.
+/install/workflow-skills/*
+!/install/workflow-skills/.gitkeep

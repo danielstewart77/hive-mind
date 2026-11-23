@@ -14,7 +14,9 @@ process can see a mind's harness home.
 
 **It only ever adds.** A hook the mind registered by hand is kept
 (`role_hooks.install` without ``replace``), a skill the mind has any copy of
-is not touched, and nothing is removed when a role is taken away: the guard
+is not touched (one delivered from the install's shared folder of generated
+skills is delivered the same way as one the repository ships, from a copy
+taken whole), and nothing is removed when a role is taken away: the guard
 already stops a hook no role grants, and a skill the mind has is the mind's
 to run whatever its roles list. What it does keep current is
 what the installer itself put under ``<home>/role-hooks`` and registered:
@@ -232,7 +234,11 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
             if not (copy / skills_api.SKILL_FILE).is_file():
                 done[name] = "missing"
                 if state == skills_api.STATE_LOCAL_ONLY and not kept:
-                    why = "the repository does not track it and this mind has no copy of it"
+                    why = ("neither the repository nor this install's generated skills "
+                           "hold it, and this mind has no copy of it")
+                    unreadable = skills_api.generated_problem()
+                    if unreadable:
+                        why += f" ({unreadable})"
                 elif kept:
                     why = (f"this mind keeps a copy of its own that the {h} harness cannot "
                            "load, which was left as it is")

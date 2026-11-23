@@ -20,6 +20,15 @@ harness's copy is exactly what was rendered from it. A freshly rendered copy
 is therefore `same` even though its frontmatter differs from the reference:
 each harness's copy carries only the frontmatter that harness reads.
 
+A skill can also be *generated*: `install/workflow-skills/` at the top of the
+checkout is one folder on the machine, contents ignored by git, where the
+operator's mind writes the skills a workflow document asks for. A role that
+names one has it delivered exactly as a tracked skill is. When a name is in
+both places the generated one wins and the clash is reported, on the pair and
+in the log; nothing generated is ever written into `specs/skills/`. The
+untouched as-generated copy sits in `.as-generated/` beside them and is not a
+skill (a leading dot is never a skill name).
+
 A skill is a *directory*. State compares every file in it, not just the
 `SKILL.md`, because a copy moves the whole tree — a `SKILL.md` that matched
 while a sibling script differed would report "in sync" and offer no way to
@@ -36,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import logging
+import tempfile
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
@@ -45,6 +55,8 @@ from minds import skill_reference
 from minds.runtime_api import authorize_admin
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+
+log = logging.getLogger("hive-mind.skills")
 
 SKILL_FILE = "SKILL.md"
 
@@ -79,6 +91,10 @@ class SkillConflict(SkillError):
     """An in-place edit that would overwrite a reference changed since."""
 
 
+class SkillUnstable(SkillUnavailable):
+    """A generated skill that is being written as it is read: nothing is delivered."""
+
+
 class SkillRefused(SkillError):
     """A skill no harness may be handed as written."""
 
@@ -87,9 +103,20 @@ class SkillHarnessUndeclared(SkillError):
     """The mind declares no home for this harness, so nothing is rendered there."""
 
 
+#: Where the reference a skill is delivered from lives.
+SOURCE_TRACKED = "tracked"
+SOURCE_GENERATED = "generated"
+
+
 @dataclass(frozen=True)
 class SkillPair:
-    """One skill as it exists in the repo and on this mind."""
+    """One skill as it exists in the repo and on this mind.
+
+    `repo_text` is the text of the source the skill is delivered from, named
+    by `source`: `tracked` (`specs/skills/`) or `generated` (the install's
+    own folder). When both hold the name, the generated one is the source and
+    `shadowed_text` holds what the tracked one says, so neither is hidden.
+    """
 
     name: str
     state: str
@@ -99,6 +126,8 @@ class SkillPair:
     # How the harness's copy stands against what was rendered for it:
     # `rendered`, `edited`, `stale`, `missing` or `unmanaged`.
     copy: str = "missing"
+    source: str = SOURCE_TRACKED
+    shadowed_text: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -108,6 +137,9 @@ class SkillPair:
             "installed": self.installed_text,
             "reference": self.reference_text,
             "copy": self.copy,
+            "source": self.source,
+            "shadowed": self.shadowed_text is not None,
+            "shadowed_text": self.shadowed_text,
         }
 
 
@@ -122,6 +154,16 @@ def harness_directory(harness: str) -> str:
 def repo_root(harness: str | None = None) -> Path:
     """The tracked references. One directory: a reference is harness-neutral."""
     return PROJECT_DIR / "specs" / "skills"
+
+
+def install_root() -> Path:
+    """The install's one shared folder of generated skills.
+
+    A skill in it is a complete directory with a `SKILL.md`. Its contents are
+    not tracked; a mind that mounts the checkout sees it as it is, and a mind
+    made from the console has it attached.
+    """
+    return PROJECT_DIR / "install" / "workflow-skills"
 
 
 def reference_root() -> Path:
@@ -213,25 +255,80 @@ def _names(root: Path) -> set[str]:
     return names
 
 
+_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_once(key: tuple[str, str], event: str, **fields) -> None:
+    """Say a standing condition once per process: a listing asks for every
+    skill each time the Minds page opens."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    log_event(log, event, level=logging.WARNING, **fields)
+
+
+def generated_problem() -> str | None:
+    """Why the install folder cannot be read, or None.
+
+    An absent folder is not a problem: it is every install that has no
+    generated skill. One that is there and cannot be listed is reported and
+    treated as holding nothing, so the tracked skills are still delivered.
+    """
+    try:
+        _names(install_root())
+    except SkillUnavailable as exc:
+        return str(exc)
+    return None
+
+
+def _generated_names() -> set[str]:
+    try:
+        return _names(install_root())
+    except SkillUnavailable as exc:
+        _warn_once(("unreadable", str(install_root())), "mind.skill.install_folder_unreadable",
+                   error=str(exc))
+        return set()
+
+
+def source_root(name: str) -> Path:
+    """The folder a skill is delivered from: the install's own when it holds
+    the name, the tracked one otherwise."""
+    return install_root() if name in _generated_names() else repo_root()
+
+
+def _source_of(root: Path) -> str:
+    return SOURCE_GENERATED if root == install_root() else SOURCE_TRACKED
+
+
 def list_skills(harness: str) -> list[SkillPair]:
     """Every skill this mind knows about, from any side, sorted by name."""
     h = harness_directory(harness)
-    names = _names(repo_root()) | _names(reference_root()) | _names(installed_root(h))
+    names = (_names(repo_root()) | _generated_names() | _names(reference_root())
+             | _names(installed_root(h)))
     return [_pair(h, name) for name in sorted(names)]
 
 
 def _pair(harness: str, name: str) -> SkillPair:
-    repo, reference, installed = repo_root(), reference_root(), installed_root(harness)
+    repo, reference, installed = source_root(name), reference_root(), installed_root(harness)
+    source = _source_of(repo)
     try:
         repo_text, reference_text = _read(repo, name), _read(reference, name)
         installed_text = _read(installed, name)
         repo_hash, reference_hash = _fingerprint(repo, name), _fingerprint(reference, name)
         copy = skill_reference.copy_status(skill_reference.KIND_SKILL, name, harness)
     except (SkillUnavailable, OSError, skill_reference.RecordsCorrupt):
-        return SkillPair(name, STATE_UNREADABLE, None, None)
+        return SkillPair(name, STATE_UNREADABLE, None, None, source=source)
+    shadowed = None
+    if source == SOURCE_GENERATED:
+        try:
+            shadowed = _read(repo_root(), name)
+        except SkillUnavailable:
+            shadowed = None
+        if shadowed is not None:
+            _warn_once(("clash", name), "mind.skill.generated_shadows_tracked", skill=name)
     return SkillPair(
         name, _state(repo_hash, reference_hash, copy),
-        repo_text, installed_text, reference_text, copy,
+        repo_text, installed_text, reference_text, copy, source, shadowed,
     )
 
 
@@ -252,7 +349,7 @@ def diff_skill(harness: str, name: str) -> str:
     runs, which is what a write-back would adopt.
     """
     _validate(name)
-    repo_text = _read(repo_root(), name)
+    repo_text = _read(source_root(name), name)
     mind_text = _read(reference_root(), name)
     if mind_text is None:
         mind_text = _read(installed_root(harness), name)
@@ -333,8 +430,44 @@ def _guard_size(directory: Path, name: str) -> None:
         raise SkillError(str(exc)) from exc
 
 
+def _stable_copy(name: str, staging: Path) -> tuple[Path, str]:
+    """A generated skill as it is at one moment, copied to `staging`.
+
+    The operator writes into the install folder while minds start, so a copy
+    taken as it stands can hold a half-written skill. The copy is taken only
+    when the folder's fingerprint is the same before and after it and the
+    `SKILL.md` in the copy is there and not empty; otherwise nothing is
+    delivered and the reason is said. That the markdown parses as a skill is
+    the install's own check, which refuses before anything is written.
+    """
+    origin = install_root() / name
+    try:
+        before = _fingerprint(install_root(), name)
+        _guard_size(origin, name)
+        staged = staging / name
+        skill_reference._copytree(origin, staged)
+        after = _fingerprint(install_root(), name)
+        text = (staged / SKILL_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SkillUnstable(
+            f"generated skill {name} could not be read whole ({exc}); it may be being "
+            "written, so nothing was delivered") from exc
+    if before is None or before != after:
+        raise SkillUnstable(
+            f"generated skill {name} changed while it was being read; it may be being "
+            "written, so nothing was delivered")
+    if not text.strip():
+        raise SkillUnstable(f"generated skill {name} has an empty {SKILL_FILE}; "
+                            "it may be being written, so nothing was delivered")
+    return staged, text
+
+
 def install_skill(harness: str, name: str, *, catalog=None, notify=None) -> SkillPair:
-    """Take the repo's reference onto this mind and render it.
+    """Take the source's reference onto this mind and render it.
+
+    The source is the install's own folder when it holds the name, the
+    tracked one otherwise; a generated skill is delivered from a stable copy
+    of it, never from the folder as the operator may be writing it.
 
     Apply and revert are one act for the harness named: its copy is
     replaced whatever it held. Every other harness goes through the ordinary
@@ -344,14 +477,18 @@ def install_skill(harness: str, name: str, *, catalog=None, notify=None) -> Skil
     _validate(name)
     h = harness_directory(harness)
     catalog, notify = _transports(catalog, notify)
-    origin = repo_root() / name
-    text = _read(repo_root(), name)
-    if text is None:
-        raise SkillError(f"No such skill: {name}")
-    _rendering(
-        skill_reference.install, skill_reference.KIND_SKILL, name, h, text, origin,
-        catalog=catalog, notify=notify,
-    )
+    root = source_root(name)
+    with tempfile.TemporaryDirectory(prefix="skill-stage-") as scratch:
+        if root == install_root():
+            origin, text = _stable_copy(name, Path(scratch))
+        else:
+            origin, text = root / name, _read(root, name)
+        if text is None:
+            raise SkillError(f"No such skill: {name}")
+        _rendering(
+            skill_reference.install, skill_reference.KIND_SKILL, name, h, text, origin,
+            catalog=catalog, notify=notify,
+        )
     return _pair(h, name)
 
 
@@ -375,6 +512,10 @@ def write_back_skill(harness: str, name: str, *, catalog=None, notify=None) -> S
     """
     _validate(name)
     h = harness_directory(harness)
+    if source_root(name) == install_root():
+        raise SkillRefused(
+            f"skill {name} is generated: it lives in this install's workflow-skills folder "
+            "and is never written into the tracked skills")
     catalog, notify = _transports(catalog, notify)
     if _read(reference_root(), name) is None:
         copy = installed_root(h) / name
