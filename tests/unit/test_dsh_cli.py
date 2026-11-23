@@ -1814,6 +1814,29 @@ async def test_a_finished_message_is_delivered_while_the_turn_works_on(
                for event in events if event.get("type") == "assistant")
 
 
+def test_a_tool_call_line_becomes_an_assistant_frame_the_gateway_counts():
+    """A mind that works without speaking writes only these, and the gateway
+    counts a conversation as producing only while assistant blocks arrive."""
+    routed = dsh_cli._resident_dispatch(
+        json.dumps({"tool": {"id": "call-a", "name": "bash"}}))
+
+    assert routed["kind"] == "frame"
+    assert routed["frame"] == {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "call-a", "name": "bash", "input": {}}]}}
+    # Counted, which an observer-only frame is not.
+    assert "_observer_only" not in routed["frame"]
+
+
+def test_a_tool_frame_is_not_made_from_a_report_or_a_nameless_call():
+    assert dsh_cli._tool_frame(json.dumps(
+        {"sessionId": "c1", "tool": {"id": "call-a", "name": "bash"}})) is None
+    assert dsh_cli._tool_frame(json.dumps({"tool": {"id": "call-a"}})) is None
+    assert dsh_cli._tool_frame(json.dumps({"tool": "bash"})) is None
+    assert dsh_cli._tool_frame("(node:7) ExperimentalWarning: blah") is None
+
+
 async def test_a_message_frame_is_not_made_from_a_fragment_or_a_report(
     dsh,
 ) -> None:
