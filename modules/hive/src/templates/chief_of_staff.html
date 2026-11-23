@@ -388,14 +388,50 @@
       ? tile.slice(itemId.length + 1) : tile;
   }
 
+  // A tile is as tall as its whole name needs. Cytoscape wraps a label but
+  // does not grow a fixed-size node around it, so the lines are counted
+  // here the way the label will wrap them: whole words to a line, and a
+  // word longer than a line allowed the lines it would take. The floor is
+  // the face, which stands the full height of a short tile that has one.
+  // Characters to a line: beside a face the name has the narrower column.
+  var TILE = {
+    task:    { faced: 19, bare: 29, line: 13.5 },
+    feature: { faced: 19, bare: 29, line: 13.5 },
+    story:   { faced: 21, bare: 32, line: 12.5 }
+  };
+  var TILE_MIN = 74;
+  function tileLines(text, chars) {
+    var lines = 0, used = 0;
+    String(text || '').split(/\s+/).forEach(function (word) {
+      if (!word) return;
+      if (word.length > chars) {
+        if (used) lines++;
+        lines += Math.floor(word.length / chars);
+        used = word.length % chars;
+        return;
+      }
+      if (used && used + 1 + word.length > chars) { lines++; used = 0; }
+      used += (used ? 1 : 0) + word.length;
+    });
+    return lines + (used ? 1 : 0);
+  }
+  function tileHeight(text, kind, faced) {
+    var m = TILE[kind] || TILE.task;
+    // Above the name: the row the ID and the kind icon share. Below it:
+    // the spinner's row.
+    var need = 28 + tileLines(text, faced ? m.faced : m.bare) * m.line + 22;
+    return Math.max(faced ? TILE_MIN : 0, Math.ceil(need));
+  }
+
   function elements(data) {
     var out = [];
     data.nodes.forEach(function (n) {
       // A tile says two things and no more: the work's whole-number item ID, then
-      // a few words of its name (Daniel, 2026-11-20). The ID is drawn by
-      // the decoration layer, large, and the label is the few words beneath
-      // it. The whole name and the session on the work are what a tap shows
-      // beneath the tree, not what the tile carries.
+      // its name (Daniel, 2026-11-20), whole and wrapped (Daniel,
+      // 2026-11-22: it was a few words until then). The ID is drawn by the
+      // decoration layer, large, and the label is the name beneath it. The
+      // session on the work is what a tap shows beneath the tree, not what
+      // the tile carries.
       var itemId = (n.kind === 'task' || n.kind === 'feature' || n.kind === 'story') && n.item_number
         ? String(n.item_number) : '';
       var label = n.kind === 'chief'
@@ -403,8 +439,10 @@
         : tileName(n, itemId);
       var names = n.session_names || [];
       var face = (n.minds || [])[0] || null;
+      var work = n.kind === 'task' || n.kind === 'feature' || n.kind === 'story';
       out.push({ data: {
         id: n.id, label: label, kind: n.kind, itemId: itemId,
+        h: work ? tileHeight(label, n.kind, !!face) : undefined,
         full: (n.item_number ? n.item_number + ' ' : '') + (n.kind === 'task' ? n.label : n.label.replace(/^\d+(\.\d+)* /, '')) + (names.length ? ' · ' + names[0] : ''),
         activity: n.activity || n.status || '',
         workKind: n.work_kind || '',
@@ -517,13 +555,16 @@
         'background-color': '#2e1065', 'border-color': KIND_COLOR.feature } },
     { selector: 'node[kind = "story"]', style: {
         'background-color': '#111827', 'border-color': KIND_COLOR.story,
-        'width': 156, 'height': 50, 'font-size': '10px',
-        'text-max-width': '104px' } },
-    // The ID sits across the top of a tile that has one, so the few words
-    // of the name move down to make room for it.
-    { selector: 'node[?itemId]', style: { 'text-margin-y': 6 } },
-    { selector: 'node[kind = "story"][?itemId]', style: {
-        'text-margin-y': 7 } },
+        'font-size': '10px' } },
+    // A tile of work is wide enough for its name beside the face and as
+    // tall as the whole name needs (Daniel, 2026-11-22). The name sits
+    // below the ID's row and above the spinner's; where the tile carries a
+    // face it keeps to a column on the left, clear of it.
+    { selector: 'node[h]', style: {
+        'width': 210, 'height': 'data(h)',
+        'text-max-width': '186px', 'text-margin-y': 3 } },
+    { selector: 'node[h][faceId != ""]', style: {
+        'text-max-width': '124px', 'text-margin-x': -32 } },
     // A sub-agent is its robot and nothing else: no circle, no card, no
     // face (Daniel, 2026-11-15). The node is only the robot's footprint,
     // drawn by the decoration layer, and its few words sit beneath it the
@@ -907,8 +948,9 @@
       }
       if (entry.face) {
         // Half again as large as the corner face used to be (Daniel,
-        // 2026-11-15); the chief's fills his whole circle.
-        var fs = kind === 'chief' ? w : size * 1.35 * 1.5;
+        // 2026-11-15), and then twice that (Daniel, 2026-11-22); the
+        // chief's fills his whole circle.
+        var fs = kind === 'chief' ? w : size * 1.35 * 1.5 * 2;
         entry.face.style.display = hidden ? 'none' : '';
         if (!hidden && kind === 'chief') {
           place(entry.face, box.x1, box.y1, fs);
@@ -924,8 +966,11 @@
         var idSize = (kind === 'story' ? 15 : 17) * zoom;
         entry.itemId.style.display = hidden ? 'none' : '';
         if (!hidden) {
+          // Centred over the name's column, not the whole tile: the face
+          // has the right-hand end.
+          var faceRoom = entry.face ? size * 1.35 * 1.5 * 2 + inset : 0;
           entry.itemId.style.left = box.x1 + 'px';
-          entry.itemId.style.width = w + 'px';
+          entry.itemId.style.width = Math.max(0, w - faceRoom) + 'px';
           entry.itemId.style.top = (box.y1 + 5 * zoom) + 'px';
           entry.itemId.style.fontSize = idSize + 'px';
         }

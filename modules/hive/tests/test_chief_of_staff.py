@@ -605,8 +605,8 @@ async def test_a_session_name_is_cut_to_what_a_card_can_hold():
 # ------------------------------------------------------------ what a tile says
 #
 # Daniel, 2026-11-21: a tile says the work's whole-number item ID first - the
-# ID column of the backlog, not its place in the order - then a very few
-# words of its name, and nothing else.
+# ID column of the backlog, not its place in the order - then its name, and
+# nothing else. Since 2026-11-22 the name is whole: the page wraps it.
 
 
 async def test_a_story_tile_says_its_item_id_then_its_name():
@@ -649,7 +649,7 @@ async def test_a_task_on_a_board_task_is_called_by_that_tasks_id():
     assert _by_id(tree, task["id"])["tile"] == f"{number}\nTidy the tiles"
 
 
-async def test_a_tile_keeps_only_the_first_few_words_of_a_long_name():
+async def test_a_tile_says_the_whole_of_a_long_name():
     epic = await kanban_data.create_epic("Chief of Staff")
     feature = await kanban_data.create_feature(epic["id"], "Visualization")
     story = await kanban_data.create_story(
@@ -661,10 +661,10 @@ async def test_a_tile_keeps_only_the_first_few_words_of_a_long_name():
 
     number = story["item_number"]
     assert _by_id(tree, story["id"])["tile"] == (
-        f"{number}\nShow the id and\u2026")
+        f"{number}\nShow the id and then a short name on every tile of the board")
 
 
-async def test_work_with_no_place_on_the_board_says_only_its_few_words():
+async def test_work_with_no_place_on_the_board_says_only_its_name():
     task = await _task("Fix the printer")
 
     tree = await cos.get_tree(now=NOW)
@@ -674,24 +674,16 @@ async def test_work_with_no_place_on_the_board_says_only_its_few_words():
 
 async def test_the_words_beneath_a_tiles_id_are_that_items_name_alone():
     """The page draws the ID apart from the name, so the name it is handed
-    to put beneath must not carry the ID a second time."""
+    to put beneath must not carry the ID a second time, and it is the
+    item's name, whole, not the ledger's name for the work."""
     item = await kanban_data.create_task(
         "Show the id and then a short name on every tile of the board")
     task = await _task("Ledger name for it", board_item=item["id"])
 
     tree = await cos.get_tree(now=NOW)
 
-    assert _by_id(tree, task["id"])["tile_name"] == "Show the id and\u2026"
-
-
-async def test_a_name_that_is_one_long_word_is_cut_to_what_a_tile_can_hold():
-    """Spelled out rather than read off `cos.TILE_LIMIT`: a tile's text
-    column holds about twenty characters a line."""
-    task = await _task("x" * 60)
-
-    tree = await cos.get_tree(now=NOW)
-
-    assert _by_id(tree, task["id"])["tile"] == "x" * 23 + "\u2026"
+    assert _by_id(tree, task["id"])["tile_name"] == (
+        "Show the id and then a short name on every tile of the board")
 
 
 # ------------------------------------------------------------- the chief's own

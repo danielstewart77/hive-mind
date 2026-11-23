@@ -129,14 +129,6 @@ LIVE_WITHIN = AGENT_TIMEOUT
 #: still the answer to "which session", just not all of it.
 NAME_LIMIT = 24
 
-#: How much of a name a tile draws beneath its ID: a very few words,
-#: because the ID is what Daniel calls the work by and the name is only
-#: there to say which one it is (Daniel, 2026-11-20). Whole words, never
-#: more than this many and never longer than this many characters, which is
-#: one line and a bit of a 100-pixel text column at 11px.
-TILE_WORDS = 4
-TILE_LIMIT = 24
-
 #: The root remains present to anchor the work even before a chief is chosen.
 CHIEF_ID = "chief"
 
@@ -457,27 +449,14 @@ def _cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "\u2026"
 
 
-def _few_words(text: str) -> str:
-    """The first few whole words of a name, with an ellipsis if any went."""
-    words = text.split()
-    kept: list[str] = []
-    for word in words[:TILE_WORDS]:
-        if kept and len(" ".join([*kept, word])) > TILE_LIMIT:
-            break
-        kept.append(word)
-    out = _cut(" ".join(kept), TILE_LIMIT)
-    if len(kept) < len(words) and not out.endswith("\u2026"):
-        out += "\u2026"
-    return out
-
-
 def _tile(number: Any, name: str) -> str:
     """What a tile says, and all it says: the work's whole-number item ID
     first - the ID column of the backlog, not its place in the order
-    (Daniel, 2026-11-21) - then a few words of its name on the line beneath.
-    Work with no place on the board has no ID, and says only its few
-    words."""
-    return "\n".join(part for part in (str(number or ""), _few_words(name))
+    (Daniel, 2026-11-21) - then its name on the line beneath, whole: the
+    page wraps it and grows the tile to hold it (Daniel, 2026-11-22; it was
+    a few words until then). Work with no place on the board has no ID, and
+    says only its name."""
+    return "\n".join(part for part in (str(number or ""), name.strip())
                      if part)
 
 
@@ -887,20 +866,18 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
     _lend_activity(nodes, parent)
 
     # What each tile says. A ledger task on a board item is called by that
-    # item's ID, so the few words beside it are that item's name too: an ID
-    # and a name that belong to different things would be two labels, not
-    # one. `label` stays the whole name, for the detail line.
+    # item's ID, so the name beside it is that item's name too: an ID and a
+    # name that belong to different things would be two labels, not one.
     for node_id, node in nodes.items():
         item_id = node.get("board_item") or node_id
         item = by_id.get(item_id) or board_tasks.get(item_id)
         node["item_number"] = item.get("item_number") if item else None
-        node["tile"] = (_tile(node["item_number"], item["title"])
-                        if item else _tile("", node["label"]))
-        # The few words alone, for a page that draws the ID apart from them
-        # - larger, because the ID is what the work is called by and at one
+        name = item["title"] if item else node["label"]
+        node["tile"] = _tile(node["item_number"] if item else "", name)
+        # The name alone, for a page that draws the ID apart from it -
+        # larger, because the ID is what the work is called by and at one
         # size with the name it could not be picked out (Daniel, 2026-11-21).
-        node["tile_name"] = _few_words(item["title"] if item
-                                       else node["label"])
+        node["tile_name"] = name.strip()
 
     # A story still being worked is not finished, whatever the board says:
     # the ledger is the authority on whether a task is over.
