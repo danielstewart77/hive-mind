@@ -947,6 +947,48 @@ def _delta_frame(line: str) -> dict | None:
         "type": "content_block_delta", "index": 0, "delta": inner}}
 
 
+def _tool_frame(line: str) -> dict | None:
+    """A tool-call line as the assistant frame claude's own stream makes of
+    one, or None.
+
+    A mind that works without speaking writes no delta and no message, and
+    the gateway counts a conversation as producing only while assistant
+    blocks arrive: on 22 November a build forty steps into its work was
+    dropped from the working list, read as hung and killed (Daniel: "any
+    agent that is working, I want to see it"). The runner writes one
+    ``{"tool": {"id", "name"}}`` line per call, and this is that call in the
+    one vocabulary every surface and the gateway's feed already read.
+
+    The input is empty because the runner sends none: a command is where a
+    credential rides, and nothing downstream needs it to know work is moving.
+    Not observer-only, because an observer-only frame moves neither the
+    feed nor the session's last activity, which is the whole point.
+    """
+    text = line.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    call = parsed.get("tool") if isinstance(parsed, dict) else None
+    if not isinstance(call, dict):
+        return None
+    name = call.get("name")
+    call_id = call.get("id")
+    if not isinstance(name, str) or not name or not isinstance(call_id, str) or not call_id:
+        return None
+    # The same three keys `_message_frame` refuses beside its own, for the
+    # same reason: a report, a fragment or a round carrying a `tool` key is
+    # still a report, a fragment or a round.
+    if "sessionId" in parsed or "delta" in parsed or "progress" in parsed:
+        return None
+    return {"type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "tool_use", "id": call_id,
+                                     "name": name, "input": {}}]}}
+
+
 def _message_frame(line: str) -> dict | None:
     """A completed assistant message as a whole assistant frame, or None.
 
@@ -1215,7 +1257,7 @@ def _resident_dispatch(line: str) -> dict | None:
     """What one line from a resident process is, or None for anything else.
 
     Pulled out of the reader so the routing can be read and tested without a
-    process: every line the runner writes is one of six things, and which one
+    process: every line the runner writes is one of seven things, and which one
     decides whether it reaches the turn that is waiting, the turn that asked
     for it by id, or Daniel directly because nobody asked at all.
     """
@@ -1248,6 +1290,9 @@ def _resident_dispatch(line: str) -> dict | None:
     message = _message_frame(text)
     if message is not None:
         return {"kind": "frame", "id": parsed.get("id"), "frame": message}
+    call = _tool_frame(text)
+    if call is not None:
+        return {"kind": "frame", "id": None, "frame": call}
     progress = _progress_frame(text)
     if progress is not None:
         return {"kind": "frame", "id": None, "frame": progress}
@@ -1724,6 +1769,10 @@ async def _run_one_shot_turn(sid: str, state: dict, content: str,
                         message_frame = _message_frame(decoded)
                         if message_frame is not None:
                             yield message_frame
+                            continue
+                        call_frame = _tool_frame(decoded)
+                        if call_frame is not None:
+                            yield call_frame
                             continue
                         frame = _progress_frame(decoded)
                         if frame is not None:
