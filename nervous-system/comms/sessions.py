@@ -995,14 +995,16 @@ class SessionManager:
         await self._retire_stale_agents()
         for watch in await watches.armed_watches():
             watched = watch["watched_session_id"]
+            lock = self._locks.get(watched)
+            if lock is not None and lock.locked():
+                # A chat turn is running: its reply is stored before its stop
+                # is recorded, and the stop is its own to write.
+                continue
             for turn in await watches.unrecorded_answers(
                     watched, watch["since_turn_id"]):
                 self._wake(await self._record_stop(
                     watched, f"t{turn['id']}", "ended", wake=await watches.turn_is_wake(watched),
                     turn_id=turn["id"], answer_turn_id=turn["id"]))
-            lock = self._locks.get(watched)
-            if lock is not None and lock.locked():
-                continue
             if await self._terminal_turn_open(watched):
                 continue
             trailing = await watches.trailing_user_turn(watched, watch["since_turn_id"])
@@ -2622,7 +2624,10 @@ class SessionManager:
             owed = await self._record_stop(
                 session_id, f"t{user_turn}", "ended" if ended else "died",
                 wake=is_wake, turn_id=user_turn,
-                answer_turn_id=turn.get("answer_turn_id") if ended else None)
+                # Named even when the turn died: a reply it stored before
+                # failing is part of this stop, and left unnamed the slow
+                # check would find it and announce it as a stop of its own.
+                answer_turn_id=turn.get("answer_turn_id"))
             if is_wake:
                 await watches.end_wake_turn(session_id)
             self._wake(owed)
