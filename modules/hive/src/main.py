@@ -4574,6 +4574,12 @@ async def api_create_role(body: dict, user: dict = Depends(require_admin_or_rout
     if not isinstance(name, str) or not name.strip():
         raise HTTPException(status_code=400, detail="A role needs a name")
     grants = roles_data.grants_from(body)
+    if body.get("slug") is not None:
+        # The key a role is filed under (its repo copy, its listing). Left
+        # out, it is the name's, as it always was.
+        if not isinstance(body["slug"], str) or not body["slug"].strip():
+            raise HTTPException(status_code=400, detail="slug must be a name")
+        grants["slug"] = body["slug"]
     try:
         role_id = await store.create_role(name, **grants)
     except roles_data.store_conflict() as exc:

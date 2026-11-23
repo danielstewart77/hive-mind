@@ -738,7 +738,7 @@ def test_the_operator_creates_changes_and_deletes_a_role_with_the_roles_bearer_a
     operator = builtin_console.client()
 
     made = operator.post("/api/roles", headers=_ROLES_GOOD, json={
-        "name": "Reviewer", "model": "a-model", "skills": ["read"],
+        "name": "Reviewer", "slug": "reviewer", "model": "a-model", "skills": ["read"],
         "tools": ["files"], "hooks": ["guard"]})
     assert made.status_code == 200, made.text
     rid = made.json()["id"]
@@ -784,6 +784,11 @@ def test_the_operator_creates_changes_and_deletes_a_role_with_the_roles_bearer_a
     gone = operator.delete(f"/api/roles/{rid}", headers=_ROLES_GOOD)
     assert gone.status_code == 200, gone.text
     assert "reviewer" not in _roles_in_the_listing(operator, _ROLES_GOOD)
+
+    keyed = operator.post("/api/roles", headers=_ROLES_GOOD,
+                          json={"name": "Auditor Of Things", "slug": "audit"})
+    assert keyed.status_code == 200, keyed.text
+    assert "audit" in _roles_in_the_listing(operator, _ROLES_GOOD)
 
     catalog = operator.get("/api/roles/catalog", headers=_ROLES_GOOD)
     assert catalog.status_code == 200, catalog.text
