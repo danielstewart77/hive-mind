@@ -28,9 +28,12 @@ outside can do that for it.
    terminal or Discord, and closing one of those would end a conversation
    mid-sentence under a person. Leave it, and say which and why: the chief then asks Daniel whether it may be closed, so name the surface and say the work is finished. Leaving it alone is never the final answer. A 404 is a
    session already gone: nothing to do, and not a failure.
-2. **Ask the mind to end itself**, detached, keeping the stream — a closed
-   stream cancels the turn:
-   `setsid -f curl -sS -N -X POST -H "Authorization: Bearer $COMMS_ADMIN_BEARER_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg c "$closing" '{content: $c}')" "$COMMS_URL/sessions/<id>/message" > "${DSH_SPAWN_DIR:-$HIVE_PROJECT_DIR/minds/$MIND_NAME}/data/turns/<id>.sse" 2>&1`
+2. **Ask the mind to end itself.** The task is `done` by now, which has
+   already ended the watch, so this brief asks for no wake and nobody is woken
+   by the harvest:
+   `curl -sS -X POST -H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg c "$closing" '{content: $c}')" "$COMMS_URL/sessions/<id>/message"`
+   keeps its answer stream open until the turn ends, so run it detached and
+   discard its output: `setsid -f sh -c '...' > /dev/null 2>&1`.
    The closing turn says the chief of staff has verified the work landed and
    the task is closed, names the task in Daniel's words, and asks the mind to
    run its `end-session` skill now — harvest what it learned, then close the
@@ -39,7 +42,7 @@ outside can do that for it.
    seconds for up to three minutes. A harvest is a real turn and takes as
    long as one. `404` is the session closed, which is the result you want.
 4. **Close it yourself only if it would not.** Still there after three
-   minutes: `curl -sS -X DELETE -H "Authorization: Bearer $COMMS_ADMIN_BEARER_TOKEN" "$COMMS_URL/sessions/<id>"`.
+   minutes: `curl -sS -X DELETE -H "Authorization: Bearer $COMMS_BEARER_TOKEN" "$COMMS_URL/sessions/<id>"`.
    Report that one as closed *without* a harvest, in those words. A mind
    with no `end-session` skill lands here every time, and reading it as an
    ordinary close is how that goes unnoticed for a month.
