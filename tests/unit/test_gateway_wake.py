@@ -624,9 +624,14 @@ async def test_a_wake_the_mind_never_took_leaves_no_line_and_is_delivered_once_l
     assert (await watches.wake_state(MIND))["owed"] == 0
 
 
-async def test_a_wake_sent_again_after_a_restart_and_not_taken_leaves_no_line_either(
+async def test_a_wake_sent_again_after_a_restart_and_not_taken_leaves_no_line_and_is_owed_again(
         gateway, mind):
+    worker = await _session(gateway, OTHER)
     sender = await _session(gateway)
+    await _watch(gateway, worker, sender)
+    await watches.record_stop(worker["id"], "t1", "ended", turn_id=1)
+    claimed = await watches.claim_pending(sender["id"])
+    await watches.mark_delivered([row["id"] for row in claimed])    # a wake turn was open at the restart
     mind.status[sender["id"]] = 503
 
     events = await _turn(gateway, sender["id"], "[wake] A session you are watching stopped.",
@@ -634,6 +639,36 @@ async def test_a_wake_sent_again_after_a_restart_and_not_taken_leaves_no_line_ei
 
     assert events and events[-1].get("is_error")
     assert _history_of(await gateway.get_session_turns(sender["id"]), "[wake]") == []
+    assert (await watches.wake_state(MIND))["owed"] == 1          # and it is tried again
+    await gateway.wake_sweep()
+    await _settle(gateway)
+    assert len(_history_of(await gateway.get_session_turns(sender["id"]), "[wake]")) == 1
+    assert (await watches.wake_state(MIND))["owed"] == 0
+
+
+async def test_a_message_a_person_typed_beginning_with_wake_is_kept_when_the_mind_never_took_it(
+        gateway, mind):
+    session = await _session(gateway, OTHER)
+    mind.status[session["id"]] = 503
+
+    await _turn(gateway, session["id"], "[wake] is a word I typed", resend=True)
+
+    assert _history_of(await gateway.get_session_turns(session["id"]), "I typed") == [
+        "[wake] is a word I typed"]
+
+
+async def test_a_session_whose_only_message_the_mind_never_took_counts_as_never_having_had_a_turn(
+        gateway, mind):
+    failed = await _session(gateway, OTHER)
+    answered = await _session(gateway, OTHER)
+    mind.status[failed["id"]] = 503
+
+    await _turn(gateway, failed["id"], "first try")
+    await _turn(gateway, answered["id"], "hello")
+    await _settle(gateway)
+
+    assert await gateway._had_turns(failed["id"]) is False
+    assert await gateway._had_turns(answered["id"]) is True
 
 
 async def test_a_brief_the_mind_never_took_stays_in_the_history_and_tells_its_sender_once(

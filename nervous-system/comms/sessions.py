@@ -2634,6 +2634,11 @@ class SessionManager:
             await core.delete_turn(user_turn_id, unit=unit)
             if wake_ids:
                 await watches.undeliver(wake_ids, unit=unit)
+            else:
+                # A wake sent again after a restart: the ids are gone, and the
+                # wakes it carried are the sender's delivered ones whose turn
+                # is still open.
+                await watches.undeliver_open(session_id, unit=unit)
 
         try:
             await _atomically(_undo)
@@ -2666,21 +2671,22 @@ class SessionManager:
         try:
             user_turn = turn.get("user_turn_id")
             if user_turn is not None and turn.get("unaccepted"):
+                # A wake is known by its ids, or, for one sent again after a
+                # restart (which carries none), by the sender's wake turn
+                # still being open: the gateway's own record, not the text,
+                # so a person's message that merely begins "[wake]" is never
+                # taken for one.
                 if wake_ids is not None or (
-                        turn.get("resend") and _is_wake_text(turn.get("content"))):
+                        turn.get("resend") and await watches.turn_is_wake(session_id)):
                     # A wake the mind never took was not delivered: it is no
                     # stop of this session, the row it wrote goes so the
-                    # history shows no failed attempt, and the wakes go back
-                    # to being owed for the next check. A wake is recognised
-                    # by what it is as well as by its ids, because one sent
-                    # again after a restart arrives, as a re-send, with no
-                    # ids; a person's own message that merely begins the
-                    # same way is not one.
+                    # history shows no failed attempt, and the wakes it
+                    # carried go back to being owed for the next check.
                     await self._undo_unaccepted_turn(session_id, user_turn, wake_ids)
                     return
-                # Any other message the mind never took stays in the history,
-                # as it always did, and is one turn that died: one stop under
-                # the turn's own key, which the slow check also finds and so
+                # Any other message the mind never took stays in the history
+                # (feature 2.1 had erased it) and is one turn that died: one
+                # stop under the turn's own key, which the slow check also finds and so
                 # never records a second time. A brief's watch was armed
                 # just below this row, so that stop is also the one wake its
                 # sender is owed.
@@ -4239,8 +4245,26 @@ class SessionManager:
         )
 
     async def _had_turns(self, session_id: str) -> bool:
-        """Whether this session's ledger holds any turn at all."""
-        return await core.latest_turn(session_id) is not None
+        """Whether this session's ledger holds a turn a mind took.
+
+        A message the mind never took stays in the ledger (it is history), but
+        it left no transcript behind, so a conversation holding nothing else is
+        still a new one: a harness or model switch made to get past the failure
+        must find nothing to read, not refuse for want of a transcript. Told
+        from a turn that ended by the stop recorded for it: died, with no reply.
+        """
+        newest = await core.latest_turn(session_id)
+        if newest is None:
+            return False
+        if newest["role"] == "assistant":
+            return True
+        if await core.latest_turn(session_id, role="assistant") is not None:
+            return True
+        stop = await watches.latest_stop(session_id)
+        never_took = (stop is not None and stop["outcome"] == "died"
+                      and stop["turn_id"] == newest["id"]
+                      and stop["answer_turn_id"] is None)
+        return not never_took
 
     async def _refuse_unavailable_harness(self, mind_id: str, harness: str) -> None:
         """Refuse a new conversation on a harness the mind reports unavailable.
