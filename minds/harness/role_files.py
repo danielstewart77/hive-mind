@@ -221,7 +221,13 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
             skills_api._validate(name)
             h = skills_api.harness_directory(harness)
             copy = skills_api.installed_root(harness) / name
-            state = skills_api._pair(h, name).state
+            pair = skills_api._pair(h, name)
+            state = pair.state
+            if pair.shadowed_text is not None:
+                problems.append((("skill", name, "shadow"),
+                                 f"skill {name} is in the repository and in this install's "
+                                 "generated skills; the generated one is what this mind is "
+                                 "given"))
             # Any copy at all, a dangling link included: installing replaces
             # the harness's copy whatever it held, and that is the mind's.
             kept = os.path.lexists(copy) or os.path.lexists(skills_api.reference_root() / name)

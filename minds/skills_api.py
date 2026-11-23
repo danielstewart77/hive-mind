@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import logging
+import os
 import tempfile
 
 from fastapi import FastAPI, Query, Request
@@ -201,12 +202,41 @@ def _read(root: Path, name: str) -> str | None:
     the remedy offered for absence is to overwrite the directory.
     """
     path = root / name / SKILL_FILE
+    if root == install_root():
+        _refuse_links(root / name, whole=False)
     try:
         return path.read_text()
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
         raise SkillUnavailable(f"{path} cannot be read: {exc}") from exc
+
+
+def _refuse_links(directory: Path, *, whole: bool) -> None:
+    """A generated skill holds no link: one could name a file anywhere on the
+    host and have it read into a listing or copied into a mind. Only the
+    directory and its `SKILL.md` are looked at unless `whole`, which walks
+    every file the skill would carry (what a skill builds does not travel,
+    so it is not looked into)."""
+    try:
+        if directory.is_symlink() or (directory / SKILL_FILE).is_symlink():
+            raise SkillUnstable(
+                f"generated skill {directory.name} is, or holds as its {SKILL_FILE}, a "
+                "link; nothing generated may point outside its own folder, so it was not read")
+        if not whole:
+            return
+        for here, dirnames, filenames in os.walk(directory, followlinks=False):
+            dirnames[:] = [d for d in dirnames if not skill_reference._is_built(d)]
+            for entry in [*dirnames, *(f for f in filenames if not skill_reference._is_built(f))]:
+                if (Path(here) / entry).is_symlink():
+                    raise SkillUnstable(
+                        f"generated skill {directory.name} holds a link "
+                        f"({(Path(here) / entry).relative_to(directory)}); nothing generated "
+                        "may point outside its own folder, so nothing was delivered")
+    except OSError as exc:
+        raise SkillUnstable(
+            f"generated skill {directory.name} could not be checked ({exc}); "
+            "nothing was delivered") from exc
 
 
 def _fingerprint(root: Path, name: str) -> str | None:
@@ -294,6 +324,22 @@ def source_root(name: str) -> Path:
     """The folder a skill is delivered from: the install's own when it holds
     the name, the tracked one otherwise."""
     return install_root() if name in _generated_names() else repo_root()
+
+
+def _in_install_folder(name: str) -> bool:
+    """Whether the install's folder has, or may have, an entry of this name.
+
+    Any entry counts, complete or not, a link or a directory, and a folder
+    that cannot be looked into is taken to hold it: this decides what may
+    never be written into the tracked skills, so doubt answers yes.
+    """
+    try:
+        os.lstat(install_root() / name)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _source_of(root: Path) -> str:
@@ -436,11 +482,13 @@ def _stable_copy(name: str, staging: Path) -> tuple[Path, str]:
     The operator writes into the install folder while minds start, so a copy
     taken as it stands can hold a half-written skill. The copy is taken only
     when the folder's fingerprint is the same before and after it and the
-    `SKILL.md` in the copy is there and not empty; otherwise nothing is
-    delivered and the reason is said. That the markdown parses as a skill is
-    the install's own check, which refuses before anything is written.
+    `SKILL.md` in the copy is a whole one (see `_not_a_whole_skill`) and the
+    skill holds no link; otherwise nothing is delivered and the reason is
+    said. A file written after `SKILL.md` cannot be told from one that was
+    never meant to be there, so a sibling still to come is not detected.
     """
     origin = install_root() / name
+    _refuse_links(origin, whole=True)
     try:
         before = _fingerprint(install_root(), name)
         _guard_size(origin, name)
@@ -456,10 +504,33 @@ def _stable_copy(name: str, staging: Path) -> tuple[Path, str]:
         raise SkillUnstable(
             f"generated skill {name} changed while it was being read; it may be being "
             "written, so nothing was delivered")
-    if not text.strip():
-        raise SkillUnstable(f"generated skill {name} has an empty {SKILL_FILE}; "
-                            "it may be being written, so nothing was delivered")
+    why = _not_a_whole_skill(name, text)
+    if why:
+        raise SkillUnstable(f"generated skill {name} has a {SKILL_FILE} that {why}; it may "
+                            "be being written, so nothing was delivered")
     return staged, text
+
+
+def _not_a_whole_skill(name: str, text: str) -> str | None:
+    """Why this `SKILL.md` is not yet a whole one, or None. A write cut short
+    is not an empty file but one whose frontmatter never closes, so a stable
+    folder is not enough: it must open and close its frontmatter, name the
+    skill it sits in, and describe it."""
+    if not text.strip():
+        return "is empty"
+    if not text.startswith("---\n"):
+        return "has no frontmatter"
+    if "\n---\n" not in text[3:] and not text.endswith("\n---"):
+        return "has frontmatter that never closes"
+    try:
+        frontmatter, _body = skill_reference.split_frontmatter(text)
+    except skill_reference.RenderError as exc:
+        return f"has frontmatter that cannot be read ({exc})"
+    if frontmatter.get("name") != name:
+        return f"names {frontmatter.get('name')!r}, not {name!r}"
+    if not str(frontmatter.get("description") or "").strip():
+        return "has no description"
+    return None
 
 
 def install_skill(harness: str, name: str, *, catalog=None, notify=None) -> SkillPair:
@@ -512,7 +583,7 @@ def write_back_skill(harness: str, name: str, *, catalog=None, notify=None) -> S
     """
     _validate(name)
     h = harness_directory(harness)
-    if source_root(name) == install_root():
+    if _in_install_folder(name):
         raise SkillRefused(
             f"skill {name} is generated: it lives in this install's workflow-skills folder "
             "and is never written into the tracked skills")
