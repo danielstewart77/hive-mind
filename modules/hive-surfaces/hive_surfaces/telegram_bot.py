@@ -2523,6 +2523,35 @@ async def _proactive_poll_source() -> None:
             )
 
 
+#: Voice notes being synthesised for unprompted turns. Held here because the
+#: event loop keeps only a weak reference to a task, and one nothing else
+#: holds can be collected before it has spoken.
+_voice_tasks: set = set()
+
+
+async def _speak_unprompted(bot, chat_id: int, text: str) -> None:
+    """Say a turn nobody asked for, after its text has landed.
+
+    A reply to a message is followed by a voice note; a turn the mind took on
+    its own - woken because a session it briefed stopped, a scheduled fire, a
+    background agent finishing - was posted as text and never sent to the
+    voice server at all (Daniel, 2026-11-23: the chief of staff's reports
+    arrived silent while his answers were spoken). Those are the long ones,
+    and the ones that arrive when nobody is looking at the screen.
+
+    Best effort, exactly like the voice note after a reply: the text is the
+    delivery and has already arrived, so a voice server that is down costs
+    the sound and nothing else. Never retried, never re-queued.
+    """
+    if not text.strip():
+        return
+    try:
+        ogg = await _tts(text)
+        await bot.send_voice(chat_id=chat_id, voice=io.BytesIO(ogg))
+    except Exception:
+        log.warning("Voice for an unprompted turn failed", exc_info=True)
+
+
 async def _proactive_consumer(app) -> None:
     """Drain the proactive queue and post unsolicited turns to Telegram.
 
@@ -2541,6 +2570,13 @@ async def _proactive_consumer(app) -> None:
             while sent < len(chunks):
                 await app.bot.send_message(chat_id=chat_id, text=chunks[sent])
                 sent += 1
+            if ALWAYS_VOICE:
+                # Detached, for the reason the reply path detaches its own:
+                # synthesis can take a while and the next queued turn must
+                # not wait behind it.
+                task = asyncio.create_task(_speak_unprompted(app.bot, chat_id, text))
+                _voice_tasks.add(task)
+                task.add_done_callback(_voice_tasks.discard)
             continue
         except asyncio.CancelledError:
             # The item was taken off the queue and lives only in this frame, so

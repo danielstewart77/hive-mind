@@ -45,6 +45,70 @@ async def test_consumer_posts_item_to_correct_chat():
     app.bot.send_message.assert_awaited_once_with(chat_id=4242, text="unsolicited turn")
 
 
+class _VoiceServer:
+    """The voice server's transport: records what it was asked to say."""
+
+    def __init__(self, status=200, audio=b"OGG-AUDIO"):
+        self.status, self.audio, self.asked = status, audio, []
+
+    def post(self, url, json=None, **_):
+        self.asked.append((url, json))
+        server = self
+
+        class _Response:
+            status = server.status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def read(self):
+                return server.audio
+
+            async def text(self):
+                return "voice server is down"
+
+        return _Response()
+
+
+async def test_an_unprompted_turn_is_spoken_to_the_chat_it_was_posted_to(monkeypatch):
+    """A turn the mind took on its own is followed by a voice note, as a
+    reply is: Daniel, 2026-11-23, the chief of staff's wake reports arrived
+    silent while his answers were spoken."""
+    server = _VoiceServer(audio=b"SPOKEN")
+    monkeypatch.setattr(telegram_bot, "http", server)
+    monkeypatch.setattr(telegram_bot, "ALWAYS_VOICE", True)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock()
+    app.bot.send_voice = AsyncMock()
+    proactive.enqueue(4242, "Mordecai has finished the plan.")
+
+    await _run_consumer_until_drained(app)
+
+    assert [asked["text"] for _, asked in server.asked] == ["Mordecai has finished the plan."]
+    call = app.bot.send_voice.await_args
+    assert call.kwargs["chat_id"] == 4242
+    assert call.kwargs["voice"].read() == b"SPOKEN"
+
+
+async def test_a_voice_server_that_is_down_costs_the_sound_and_not_the_text(monkeypatch):
+    """The text is the delivery. A failed voice note must not put the turn
+    back on the queue, where it would be posted a second time."""
+    monkeypatch.setattr(telegram_bot, "http", _VoiceServer(status=503))
+    monkeypatch.setattr(telegram_bot, "ALWAYS_VOICE", True)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock()
+    app.bot.send_voice = AsyncMock()
+    proactive.enqueue(7, "the report")
+
+    await _run_consumer_until_drained(app)
+
+    app.bot.send_message.assert_awaited_once_with(chat_id=7, text="the report")
+    assert proactive._queue.empty()
+
+
 async def test_consumer_splits_long_messages():
     app = MagicMock()
     app.bot.send_message = AsyncMock()
