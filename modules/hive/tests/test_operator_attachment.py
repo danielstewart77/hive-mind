@@ -7,6 +7,7 @@ side of the socket (Hive Tools, which holds the docker socket) and the
 registry's answer to who a mind is: nothing else.
 """
 
+import json
 import os
 import sys
 from unittest.mock import AsyncMock
@@ -55,6 +56,10 @@ services:
 """
 
 
+#: The same fragment without the console address somebody set by hand.
+CLEAN = OLDER.replace("      - HIVE_SITE_URL=http://elsewhere:1\n", "")
+
+
 def _volumes(path, name="atlas"):
     return yaml.safe_load(path.read_text())["services"][name]["volumes"]
 
@@ -80,6 +85,12 @@ def _fragment(minds, text=OLDER, name="atlas"):
     path.parent.mkdir(parents=True)
     path.write_text(text)
     return path
+
+
+def _no_env_block(text):
+    return text.replace(
+        "    environment:\n      - MIND_NAME=atlas\n      # Its own key, never another mind's.\n"
+        "      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n", "")
 
 
 def _made(minds, name="atlas"):
@@ -150,6 +161,173 @@ def test_the_mounts_page_keeps_the_skills_folder_line_as_infrastructure_when_it_
 
     assert f"{HOST}:{FOLDER}:rw" in _volumes(path)
     assert any(row["spec"] == f"{HOST}:{FOLDER}:rw" for row in state["infrastructure"])
+
+
+def _written(path):
+    with open(path, encoding="utf-8", newline="") as stream:
+        return stream.read()
+
+
+# What reconcile refuses or leaves alone: nothing is written.
+
+REFUSED = {
+    "an anchored list": CLEAN.replace("    volumes:\n", "    volumes: &mounts\n"),
+    "a flow list": CLEAN.replace(
+        "    environment:\n      - MIND_NAME=atlas\n      # Its own key, never another mind's.\n"
+        "      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n", "    environment: [MIND_NAME=atlas]\n"),
+    "a mapping of variables": CLEAN.replace(
+        "      - MIND_NAME=atlas\n      # Its own key, never another mind's.\n"
+        "      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n", "      MIND_NAME: atlas\n"),
+    "the folder mounted some other way": CLEAN.replace(
+        "    restart:", "      - /elsewhere:/usr/src/app/install/workflow-skills:ro,z\n    restart:"),
+    "an anchored line that is the folder's own": CLEAN.replace(
+        "      - ${HOST_PROJECT_DIR:-.}/minds/atlas/container:/usr/src/app/minds/atlas/container:ro\n",
+        "      - ${HOST_PROJECT_DIR:-.}/minds/atlas/container:/usr/src/app/minds/atlas/container:ro\n"
+        "      - &skills ${HOST_PROJECT_DIR:-.}/install/workflow-skills:"
+        "/usr/src/app/install/workflow-skills:ro\n"),
+    "a literal credential": CLEAN.replace(
+        "      - MIND_NAME=atlas\n", "      - MIND_NAME=atlas\n      - ROLES_PUSH_TOKEN=abc123\n"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(REFUSED))
+def test_a_fragment_in_a_shape_it_cannot_edit_with_certainty_is_refused_and_written_not_at_all(
+        minds, shape):
+    path = _fragment(minds, REFUSED[shape])
+    os.utime(path, (5, 5))
+
+    with pytest.raises(operator_attachment.AttachmentRefused):
+        operator_attachment.reconcile("atlas", True)
+
+    assert _written(path) == REFUSED[shape]
+    assert path.stat().st_mtime == 5
+
+
+def test_a_mind_this_console_did_not_make_is_left_alone_and_the_answer_says_so(minds):
+    text = OLDER.replace("target: locked-mind", "target: something-else")
+    path = _fragment(minds, text)
+
+    answer = operator_attachment.reconcile("atlas", True)
+
+    assert answer["applicable"] is False and answer["changed"] is False
+    assert "not made by this console" in answer["detail"]
+    assert _written(path) == text
+
+
+def test_a_fragment_that_is_a_link_is_not_one_this_console_wrote_and_is_left_alone(minds, tmp_path):
+    real = tmp_path / "elsewhere.yaml"
+    real.write_text(OLDER)
+    link = minds / "atlas" / "container" / "compose.yaml"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+
+    answer = operator_attachment.reconcile("atlas", True)
+
+    assert answer["applicable"] is False and answer["changed"] is False
+    assert real.read_text() == OLDER and link.is_symlink()
+
+
+def test_a_container_defined_by_a_different_compose_file_than_the_one_this_console_wrote_is_not_touched(
+        minds, tmp_path, monkeypatch):
+    mine = _fragment(minds)
+    other = tmp_path / "their-project" / "compose.yaml"
+    other.parent.mkdir()
+    other.write_text(OLDER)
+    monkeypatch.setenv("MIND_COMPOSE_TARGETS", json.dumps(
+        {"atlas": {"fragment": str(other), "project_path": "/theirs", "service": "atlas"}}))
+
+    answer = operator_attachment.reconcile("atlas", True)
+
+    assert answer["applicable"] is False and answer["changed"] is False
+    assert "did not write" in answer["detail"]
+    assert _written(mine) == OLDER and _written(other) == OLDER
+
+
+def test_the_fragments_mode_survives_the_replacement(minds):
+    path = _fragment(minds, CLEAN)
+    os.chmod(path, 0o640)
+    inode = path.stat().st_ino
+
+    assert operator_attachment.reconcile("atlas", True)["changed"] is True
+
+    assert path.stat().st_mode & 0o7777 == 0o640
+    assert path.stat().st_ino != inode  # it was replaced, not rewritten in place
+
+
+COMMENTED = (CLEAN
+             .replace("      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n",
+                      "      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n"
+                      "      - ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}  # the operator's own\n"
+                      "      - HIVE_SITE_URL=http://hive-site:8710 # where the console is\n")
+             .replace("/usr/src/app/minds/atlas/container:ro\n",
+                      "/usr/src/app/minds/atlas/container:ro\n"
+                      "      - ${HOST_PROJECT_DIR:-.}/install/workflow-skills:"
+                      "/usr/src/app/install/workflow-skills:rw  # the skills\n"))
+
+
+def test_an_operators_lines_that_carry_a_trailing_comment_are_still_taken_away_with_the_role(minds):
+    path = _fragment(minds, COMMENTED)
+
+    answer = operator_attachment.reconcile("atlas", False)
+
+    assert answer["changed"] is True
+    assert f"{HOST}:{FOLDER}:ro" in _volumes(path)
+    assert not any(e.startswith(("ROLES_PUSH_TOKEN=", "HIVE_SITE_URL=")) for e in _environment(path))
+    # The comment on the line that stays is the operator's still.
+    assert "# the skills" in _written(path)
+
+
+HALF_HANDED = CLEAN.replace(
+    "      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n",
+    "      - COMMS_BEARER_TOKEN=${COMMS_TOKEN_ATLAS}\n"
+    "      - HIVE_SITE_URL=http://hive-site:8710  # where the console is\n")
+
+
+def test_giving_the_operator_role_keeps_a_console_address_line_that_already_carries_a_comment(minds):
+    path = _fragment(minds, HALF_HANDED)
+
+    answer = operator_attachment.reconcile("atlas", True)
+
+    assert answer["changed"] is True
+    environment = _environment(path)
+    assert environment.count(CONSOLE) == 1 and CREDENTIAL in environment
+    assert "  # where the console is" in _written(path)
+
+
+NO_LISTS = [
+    ("no environment block", _no_env_block(CLEAN)),
+    ("an empty environment list", _no_env_block(CLEAN).replace(
+        "    volumes:", "    environment: []\n    volumes:")),
+    ("no volumes block", CLEAN.replace(
+        "    volumes:\n      # Its own folder, and nothing else of the host.\n"
+        "      - ${HOST_PROJECT_DIR:-.}/minds/atlas:/usr/src/app/minds/atlas:rw\n"
+        "      - ${HOST_PROJECT_DIR:-.}/minds/atlas/container:/usr/src/app/minds/atlas/container:ro\n", "")),
+]
+
+
+@pytest.mark.parametrize("shape,text", NO_LISTS, ids=[n for n, _ in NO_LISTS])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_fragment_with_no_such_list_is_given_one_for_the_operator_and_loses_it_again(
+        minds, shape, text, newline):
+    text = text.replace("\n", newline)
+    path = _fragment(minds, text)
+    path.write_bytes(text.encode())
+
+    promoted = operator_attachment.reconcile("atlas", True)
+
+    assert promoted["changed"] is True
+    assert f"{HOST}:{FOLDER}:rw" in _volumes(path)
+    assert CREDENTIAL in _environment(path) and CONSOLE in _environment(path)
+    written = path.read_bytes().decode()
+    # Every line this edit added ends as the file's own lines do.
+    assert written.count("\r\n") == written.count("\n") * (1 if newline == "\r\n" else 0)
+    assert yaml.safe_load(written)["services"]["atlas"]["restart"] == "unless-stopped"
+
+    demoted = operator_attachment.reconcile("atlas", False)
+
+    assert demoted["changed"] is True
+    assert f"{HOST}:{FOLDER}:ro" in _volumes(path)
+    assert not any(e.startswith(("ROLES_PUSH_TOKEN=", "HIVE_SITE_URL=")) for e in _environment(path))
 
 
 # The roles route re-makes the mind.
@@ -226,3 +404,91 @@ def test_a_mind_made_before_the_folder_existed_is_re_made_once_when_given_any_ro
 
 
 
+
+
+def _hive_tools_calls():
+    return main_mod._hive_tools_request.await_count
+
+
+def test_a_re_make_waiting_on_approval_is_reported_as_waiting_and_the_roles_stay_saved(
+        console, monkeypatch):
+    main_mod._hive_tools_request.return_value = {"hitl_request_id": "op-1", "status": "pending"}
+    recorded = []
+
+    async def record(result, user):
+        recorded.append(result["hitl_request_id"])
+
+    monkeypatch.setattr(main_mod.console_access, "record_operation_from", record)
+
+    response = console.put("/api/minds/atlas/roles", json={"role_ids": [_role_id("operator")]})
+
+    assert response.status_code == 200, response.text
+    attachments = response.json()["attachments"]
+    assert attachments["recreated"] is False and attachments["operation_id"] == "op-1"
+    assert "waiting on your approval" in attachments["detail"]
+    assert recorded == ["op-1"]
+    held = console.get("/api/minds/atlas/roles").json()["roles"]
+    assert "operator" in [r["slug"] for r in held]
+
+
+@pytest.mark.parametrize("how", ["an error answer", "a raised failure"])
+def test_a_re_make_that_did_not_happen_says_so_and_the_roles_stay_saved(console, how):
+    from fastapi import HTTPException
+    if how == "an error answer":
+        main_mod._hive_tools_request.return_value = {"status": "error", "error": "boom"}
+    else:
+        main_mod._hive_tools_request.side_effect = HTTPException(status_code=502, detail="tools down")
+
+    response = console.put("/api/minds/atlas/roles", json={"role_ids": [_role_id("operator")]})
+
+    assert response.status_code == 200, response.text
+    attachments = response.json()["attachments"]
+    assert attachments["changed"] is True and attachments["recreated"] is False
+    assert ("boom" if how == "an error answer" else "tools down") in attachments["detail"]
+    assert "did not happen" in attachments["detail"]
+    held = console.get("/api/minds/atlas/roles").json()["roles"]
+    assert "operator" in [r["slug"] for r in held]
+
+
+def test_saving_the_same_roles_a_second_time_does_not_re_make_the_mind_again(console):
+    body = {"role_ids": [_role_id("operator")]}
+    console.put("/api/minds/atlas/roles", json=body)
+    assert _hive_tools_calls() == 1
+
+    second = console.put("/api/minds/atlas/roles", json=body)
+
+    assert second.status_code == 200
+    assert second.json()["attachments"]["changed"] is False
+    assert _hive_tools_calls() == 1
+
+
+def test_a_fragment_that_cannot_be_edited_still_saves_the_roles_says_so_and_re_makes_nothing(console):
+    console.fragment.write_text(REFUSED["an anchored list"])
+
+    response = console.put("/api/minds/atlas/roles", json={"role_ids": [_role_id("operator")]})
+
+    assert response.status_code == 200, response.text
+    attachments = response.json()["attachments"]
+    assert attachments["changed"] is False and attachments["recreated"] is False
+    assert "roles are saved" in attachments["detail"] and "not changed" in attachments["detail"]
+    assert _hive_tools_calls() == 0
+    assert console.fragment.read_text() == REFUSED["an anchored list"]
+    held = console.get("/api/minds/atlas/roles").json()["roles"]
+    assert "operator" in [r["slug"] for r in held]
+
+
+def test_deleting_the_operator_role_takes_the_folder_back_to_read_only_and_re_makes_each_holder(console):
+    operator = _role_id("operator")
+    console.put("/api/minds/atlas/roles", json={"role_ids": [operator]})
+    assert f"{HOST}:{FOLDER}:rw" in _volumes(console.fragment)
+    main_mod._hive_tools_request.reset_mock()
+
+    response = console.delete(f"/api/roles/{operator}")
+
+    assert response.status_code == 200, response.text
+    assert f"{HOST}:{FOLDER}:ro" in _volumes(console.fragment)
+    assert not any(e.startswith(("ROLES_PUSH_TOKEN=", "HIVE_SITE_URL="))
+                   for e in _environment(console.fragment))
+    assert response.json()["attachments"]["atlas"]["recreated"] is True
+    assert _hive_tools_calls() == 1
+    assert main_mod._hive_tools_request.await_args.kwargs["params"]["service"] == "atlas"

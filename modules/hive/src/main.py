@@ -4625,9 +4625,26 @@ async def api_delete_role(role_id: str, user: dict = Depends(require_auth)):
             status_code=409,
             detail="The general role cannot be deleted: every agent under role "
                    "management holds it. It can be edited.")
+    # Read before the delete, which takes the holdings with it: the minds
+    # that held the operator role lose what it attached.
+    holders = (await store.role_holders(rid)
+               if role["slug"] == operator_attachment.OPERATOR_ROLE_SLUG else [])
     await store.delete_role(rid)
     log_event(log, "role.deleted", **_actor_fields(user), role_id=rid, slug=role["slug"])
-    return {"ok": True}
+    answer: dict = {"ok": True}
+    if holders:
+        names = {str(m.get("mind_id") or m.get("id") or ""): str(m.get("name") or "")
+                 for m in await _broker_minds_safe()}
+        answer["attachments"] = {}
+        for mind_id in holders:
+            if names.get(mind_id):
+                answer["attachments"][names[mind_id]] = (
+                    await _attach_for_roles(names[mind_id], mind_id, user))["attachments"]
+            else:
+                answer["attachments"][mind_id] = {
+                    "changed": False, "recreated": False,
+                    "detail": "This mind is not in the registry, so its attachments were not changed."}
+    return answer
 
 
 @app.post("/api/roles/{role_id}/keep")

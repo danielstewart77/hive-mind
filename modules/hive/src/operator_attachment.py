@@ -18,6 +18,10 @@ The fragment is edited a line at a time, the way `mind_mounts.save_mounts`
 does it. Every other line and comment stays exactly as it was; the result is
 parsed and compared with what was asked for before it replaces the file, and
 anything this module is not sure of refuses the whole edit and writes nothing.
+A fragment with no `volumes` or `environment` list, or an empty one, is given
+one; a list written any other way than a block of plain lines is refused.
+A fragment that is a link is not one this console wrote (see
+`configuration_data._own_service`), so it is left alone rather than followed.
 """
 
 from __future__ import annotations
@@ -58,6 +62,8 @@ def _entries(document: Any, name: str, key: str) -> list[str]:
     if not isinstance(service, dict):
         raise AttachmentRefused(f"this fragment declares no service named {name}")
     listed = service.get(key)
+    if listed is None:
+        return []
     if not isinstance(listed, list) or not all(isinstance(item, str) for item in listed):
         raise AttachmentRefused(
             f"this mind's {key} are not written as a block list of plain lines, which is "
@@ -65,10 +71,11 @@ def _entries(document: Any, name: str, key: str) -> list[str]:
     return list(listed)
 
 
-def _block(lines: list[str], name: str, key: str) -> tuple[int, int, str]:
-    """The half-open line range of one service's `key:` entries, and their indent."""
+def _service(lines: list[str], name: str) -> tuple[int, int, int, int]:
+    """The service's key line, the end of its lines, its keys' indent and its
+    own indent, all in line numbers and columns."""
     services_at = next((i for i, line in enumerate(lines)
-                        if re.fullmatch(r"services:\s*", line.rstrip("\n"))), None)
+                        if re.fullmatch(r"services:\s*", line.rstrip("\r\n"))), None)
     if services_at is None:
         raise AttachmentRefused("this fragment has no services block")
     service_at, child_indent = None, None
@@ -81,12 +88,12 @@ def _block(lines: list[str], name: str, key: str) -> tuple[int, int, str]:
             break
         if child_indent is None:
             child_indent = indent
-        if indent == child_indent and re.fullmatch(rf"\s+{re.escape(name)}:\s*", line.rstrip("\n")):
+        if indent == child_indent and re.fullmatch(rf"\s+{re.escape(name)}:\s*", line.rstrip("\r\n")):
             service_at = index
             break
     if service_at is None:
         raise AttachmentRefused(f"this fragment declares no service named {name}")
-    key_at, key_indent = None, None
+    end, key_indent = service_at + 1, None
     for index in range(service_at + 1, len(lines)):
         line = lines[index]
         if not line.strip() or line.lstrip().startswith("#"):
@@ -96,13 +103,36 @@ def _block(lines: list[str], name: str, key: str) -> tuple[int, int, str]:
             break
         if key_indent is None:
             key_indent = indent
-        if indent == key_indent and re.fullmatch(rf"{key}:\s*", line.strip()):
+        end = index + 1
+    if key_indent is None:
+        raise AttachmentRefused(f"this fragment's service {name} holds nothing to edit")
+    return service_at, end, key_indent, child_indent
+
+
+def _block(lines: list[str], name: str, key: str):
+    """Where one service's `key:` entries are: `(start, end, indent, header)`,
+    the half-open line range of the entries and the indent they take. A key
+    that is absent, or written `key: []`, has no entries yet: the range is
+    empty and `header` says what to do about the key itself, `("add", pad)`
+    or `("replace", line, pad)`; otherwise it is None."""
+    service_at, service_end, key_indent, _child = _service(lines, name)
+    key_at = None
+    for index in range(service_at + 1, service_end):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == key_indent and re.fullmatch(rf"{key}:(\s*(\[\s*\])?)?(\s+#.*)?", line.strip()):
             key_at = index
             break
+        if indent == key_indent and re.match(rf"{key}:", line.strip()):
+            raise AttachmentRefused(
+                f"this mind's {key} are not written as a block list of plain lines, which "
+                "is the only shape this can edit — edit the fragment by hand")
+    pad = " " * key_indent
     if key_at is None:
-        raise AttachmentRefused(
-            f"this mind's {key} are not written as a block list under the service, which "
-            "is the only shape this can edit — edit the fragment by hand")
+        return service_end, service_end, pad + "  ", ("add", pad)
+    flow_empty = re.search(r"\[\s*\]", lines[key_at]) is not None
     end, entry_indent = key_at + 1, ""
     for index in range(key_at + 1, len(lines)):
         line = lines[index]
@@ -118,22 +148,42 @@ def _block(lines: list[str], name: str, key: str) -> tuple[int, int, str]:
         if line.lstrip().startswith("-") and not entry_indent:
             entry_indent = line[: len(line) - len(line.lstrip())]
         end = index + 1
-    return key_at + 1, end, entry_indent or " " * (key_indent + 2)
+    if flow_empty and end > key_at + 1:
+        raise AttachmentRefused(
+            f"this mind's {key} are written both as an empty list and as lines; "
+            "edit the fragment by hand")
+    return (key_at + 1, end, entry_indent or pad + "  ",
+            ("replace", key_at, pad) if flow_empty else None)
 
 
 def _plain(line: str) -> str | None:
     """The value a list line declares, or None when it is not a plain one
     (anchored, aliased, a flow collection or a comment): such a line is kept
-    as it is, and never matched."""
-    stripped = line.lstrip()
+    as it is, and never matched. A comment after the value is not part of it."""
+    stripped = line.strip()
     if not stripped.startswith("-"):
         return None
     value = stripped[1:].strip()
     if value.startswith(("&", "*", "<<", "{", "[", "#")):
         return None
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        value = value[1:-1]
-    return value
+    if value[:1] in {'"', "'"}:
+        closing = value.find(value[0], 1)
+        if closing < 0:
+            return None
+        return value[1:closing]
+    return re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+
+
+def _comment(line: str) -> str:
+    """The `# ...` a list line ends with, with the space before it, or ''."""
+    value = line.strip()[1:].strip()
+    if value[:1] in {'"', "'"}:
+        rest = value[value.find(value[0], 1) + 1:]
+    else:
+        match = re.search(r"\s+#", value)
+        rest = value[match.start():] if match else ""
+    comment = re.fullmatch(r"\s*(#.*)", rest)
+    return f"  {comment.group(1)}" if comment else ""
 
 
 def _skills_line(spec: str) -> bool:
@@ -141,11 +191,14 @@ def _skills_line(spec: str) -> bool:
     return len(fields) >= 2 and fields[1].rstrip("/") == configuration_data.WORKFLOW_SKILLS_CONTAINER_PATH
 
 
-def _edit_block(lines: list[str], name: str, key: str, change, append: list[str]) -> list[str]:
+def _edit_block(lines: list[str], name: str, key: str, change, append: list[str],
+                newline: str) -> list[str]:
     """`lines` with one list's plain entries passed through `change(value)`
     (the new value, or None to drop the line), and `append` added after the
-    last entry. Every other line, comments included, is kept as it is."""
-    start, end, indent = _block(lines, name, key)
+    last entry, the list being made first when the fragment has none. Every
+    other line, comments included, is kept as it is, and what is added ends
+    as the file's own lines do."""
+    start, end, indent, header = _block(lines, name, key)
     kept: list[str] = []
     for line in lines[start:end]:
         value = _plain(line)
@@ -155,12 +208,25 @@ def _edit_block(lines: list[str], name: str, key: str, change, append: list[str]
         replaced = change(value)
         if replaced is None:
             continue
-        kept.append(line if replaced == value else f"{indent}- {replaced}\n")
+        kept.append(line if replaced == value
+                    else f"{indent}- {replaced}{_comment(line)}{newline}")
     at = len(kept)
     while at > 0 and not kept[at - 1].strip():
         at -= 1
-    kept[at:at] = [f"{indent}- {value}\n" for value in append]
-    return lines[:start] + kept + lines[end:]
+    kept[at:at] = [f"{indent}- {value}{newline}" for value in append]
+    head = lines[:start]
+    if start > 0 and not any(line.lstrip().startswith("-") for line in kept) and not (
+            header and header[0] == "add"):
+        # Nothing is left in the list: say so as `key: []`, not as a bare key
+        # (which reads as null), and keep any comment that was in it.
+        pad = " " * (len(head[start - 1]) - len(head[start - 1].lstrip()))
+        head[start - 1] = f"{pad}{key}: []{newline}"
+        return head + kept + lines[end:]
+    if header and header[0] == "add":
+        kept.insert(0, f"{header[1]}{key}:{newline}")
+    elif header:
+        head[header[1]] = f"{header[2]}{key}:{newline}"
+    return head + kept + lines[end:]
 
 
 def _wanted(volumes: list[str], environment: list[str], operator: bool) -> tuple[list[str], list[str]]:
@@ -217,21 +283,24 @@ def _rewrite(original: str, name: str, operator: bool) -> str:
         return original
 
     lines = original.splitlines(keepends=True)
+    # What is added ends as this file's own lines do.
+    newline = "\r\n" if original.count("\r\n") * 2 > original.count("\n") else "\n"
     if lines and not lines[-1].endswith(("\n", "\r")):
-        lines[-1] += "\n"
+        lines[-1] += newline
 
     if want_volumes != volumes:
         line = next(spec for spec in want_volumes if _skills_line(spec))
         lines = _edit_block(lines, name, "volumes",
                             lambda value: line if _skills_line(value) else value,
-                            [] if any(_skills_line(spec) for spec in volumes) else [line])
+                            [] if any(_skills_line(spec) for spec in volumes) else [line],
+                            newline)
     if want_environment != environment:
         owned = (CREDENTIAL_VARIABLE, CONSOLE_VARIABLE)
         lines = _edit_block(
             lines, name, "environment",
             lambda value: (None if value.split("=", 1)[0] in owned
                            and value not in want_environment else value),
-            [item for item in want_environment if item not in environment])
+            [item for item in want_environment if item not in environment], newline)
     candidate = "".join(lines)
 
     try:
@@ -241,8 +310,11 @@ def _rewrite(original: str, name: str, operator: bool) -> str:
     except (yaml.YAMLError, AttachmentRefused) as exc:
         raise AttachmentRefused(f"that edit would leave the fragment unreadable: {exc}") from exc
     expected = yaml.safe_load(original)
-    expected["services"][name]["volumes"] = want_volumes
-    expected["services"][name]["environment"] = want_environment
+    # A list the edit emptied is left as a bare key, which reads as null.
+    for key, wanted in (("volumes", want_volumes), ("environment", want_environment)):
+        expected["services"][name][key] = wanted
+        if not wanted and parsed["services"][name].get(key) is None:
+            parsed["services"][name][key] = wanted
     if (after_volumes != want_volumes or after_environment != want_environment
             or parsed != expected):
         raise AttachmentRefused(
@@ -252,11 +324,13 @@ def _rewrite(original: str, name: str, operator: bool) -> str:
 
 
 def _write(path: Path, expected: str, candidate: str) -> None:
-    """Replace the fragment, through a link rather than over it, keeping its
-    owner and mode, and only if it is still what was read."""
-    path = path.resolve()
+    """Replace the fragment atomically, keeping its owner and mode, and only
+    if it is still what was read. A link never gets here: a fragment that is
+    one is not a file this console wrote."""
     state = path.stat()
-    if path.read_text(encoding="utf-8") != expected:
+    with open(path, encoding="utf-8", newline="") as stream:
+        current = stream.read()
+    if current != expected:
         raise AttachmentRefused("this mind's compose file changed while it was being edited; "
                                 "nothing was written")
     handle = tempfile.NamedTemporaryFile(
@@ -302,7 +376,9 @@ def reconcile(name: str, operator: bool) -> dict[str, Any]:
         return answer
     answer["applicable"] = True
     try:
-        original = path.read_text(encoding="utf-8")
+        # `newline=""`: a CRLF file is read, compared and written as it is.
+        with open(path, encoding="utf-8", newline="") as stream:
+            original = stream.read()
         candidate = _rewrite(original, name, operator)
         if candidate != original:
             _write(path, original, candidate)

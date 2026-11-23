@@ -285,14 +285,7 @@ equal to `BOARD_PUSH_TOKEN` is that token and deletes. The mind's board tool rea
 `BOARD_PUSH_TOKEN` from its own environment, so the mind's compose file
 hands it this value under that name.
 
-`ROLES_PUSH_TOKEN` is the credential the operator mind changes roles with
-(the Roles page's routes, nothing else). It has no fallback to any other
-token. Set it, to one value, in the console's `.env` and in the stack `.env`
-that compose substitutes for the minds: a mind holding the operator role is
-given `ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}` in its compose file, so the
-value is read from the stack's `.env` when its container is made and is never
-written into the file. Unset, the Roles routes admit no bearer and the
-operator mind has nothing to change roles with.
+A mind holding the operator role is given `ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}` in its compose file (`src/operator_attachment.py`), so the value must be set, the same, in the stack `.env` that compose substitutes for minds as well as in the console's.
 
 ## Test
 
