@@ -23,7 +23,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import hive_data
-from hive_data import core, roles, sessions_ops, watches
+from hive_data import core, roles, sessions_ops, staff, watches
 from hive_data.errors import MissingReference
 from hive_data.rows import UNSET
 
@@ -812,6 +812,24 @@ class SessionManager:
             return False
         return True
 
+    async def mind_idle_state(self, mind_id: str, *, since: float | None = None) -> dict:
+        """What a mind would lose if its container went down now.
+
+        `mid_turn` names the conversations of the mind that are producing; the
+        gateway's own answer, the same one that holds a wake for a busy
+        sender. `owed` counts wakes waiting for the mind, and
+        `delivered_since` lists wakes handed to it after `since`, which a
+        restart in that window may have cut off. Read only.
+        """
+        mid_turn = []
+        for row in await sessions_ops.find_sessions(
+                mind_id=mind_id, statuses_excluded=_RETIRED):
+            if await self._sender_busy(row["id"]):
+                mid_turn.append(row["id"])
+        wakes = await watches.wake_state(mind_id, since=since)
+        return {"mind_id": mind_id, "mid_turn": mid_turn, "owed": wakes["owed"],
+                "delivered_since": wakes["delivered_since"]}
+
     async def _sender_busy(self, sender_id: str) -> bool:
         lock = self._locks.get(sender_id)
         if lock is not None and lock.locked():
@@ -943,6 +961,27 @@ class SessionManager:
                 log.exception("Wake sweep failed")
             await asyncio.sleep(self.WAKE_SWEEP_INTERVAL_SECONDS)
 
+    #: How long a sub-agent record that belongs to no conversation may stay
+    #: open before its ending is written. Longer than any turn this hive
+    #: allows, because retiring a live child records work as abandoned that
+    #: was not, and nothing afterwards can say it was wrong. Moved here from
+    #: the old watch, the only thing that used to do this.
+    AGENT_GRACE_SECONDS = float(os.environ.get("STAFF_AGENT_GRACE") or 4 * 60 * 60)
+
+    async def _retire_stale_agents(self) -> None:
+        """Close the sub-agent records whose child died with its turn.
+
+        The Chief of Staff page reads these, and only the old watch ever
+        closed them. A record whose conversation is still producing output is
+        left alone; the grace window is only for records that name none.
+        """
+        try:
+            alive = {entry["session_id"] for entry in self.dashboard.live()}
+            await staff.retire_stale_agents(
+                now=time.time(), timeout=self.AGENT_GRACE_SECONDS, alive=alive)
+        except Exception:
+            log.exception("could not retire stale sub-agent records")
+
     async def wake_sweep(self) -> int:
         """One pass of the slow check. Returns how many senders it nudged.
 
@@ -953,6 +992,7 @@ class SessionManager:
         update.
         """
         await watches.release_stale_claims(time.time() - self.WAKE_CLAIM_STALE_SECONDS)
+        await self._retire_stale_agents()
         for watch in await watches.armed_watches():
             watched = watch["watched_session_id"]
             for turn in await watches.unrecorded_answers(
