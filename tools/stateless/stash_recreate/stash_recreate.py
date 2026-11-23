@@ -373,9 +373,10 @@ def check_idle() -> list[str]:
     return reasons
 
 
-def _gateway(path: str, *, payload: dict | None = None,
+def _gateway_request(path: str, *, payload: dict | None = None,
              timeout: float = 30.0) -> Any:
-    """One call to the gateway from inside the chief's container."""
+    """The request for one call to the gateway from inside the chief's
+    container, and the timeout to make it with. Nothing is sent here."""
     url = (os.environ.get("COMMS_URL") or "").strip().rstrip("/")
     token = (os.environ.get("COMMS_ADMIN_BEARER_TOKEN") or "").strip()
     if not url or not token:
@@ -394,7 +395,7 @@ def _gateway_check(since: float | None) -> dict:
     """Run inside the chief's container: the gateway's word about the chief."""
     mind_id = (os.environ.get("MIND_ID") or "").strip() or STASH_MIND_ID
     suffix = "" if since is None else f"?since={since}"
-    request, timeout = _gateway(f"/minds/{mind_id}/wake-state{suffix}")
+    request, timeout = _gateway_request(f"/minds/{mind_id}/wake-state{suffix}")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as answer:
             return json.loads(answer.read().decode())
@@ -696,7 +697,7 @@ def _deliver_inside(text: str) -> dict:
     conversation Daniel last used. The gateway runs a turn only while a reader
     holds its stream, so this reads it to the end."""
     mind_id = (os.environ.get("MIND_ID") or "").strip() or STASH_MIND_ID
-    request, timeout = _gateway("/sessions/live")
+    request, timeout = _gateway_request("/sessions/live")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as answer:
             live = json.loads(answer.read().decode())
@@ -706,7 +707,7 @@ def _deliver_inside(text: str) -> dict:
     if session is None:
         return {"delivered": False,
                 "error": "the chief has no idle conversation to report into"}
-    request, _ = _gateway(f"/sessions/{session}/message",
+    request, _ = _gateway_request(f"/sessions/{session}/message",
                           payload={"content": text})
     last: dict = {}
     try:

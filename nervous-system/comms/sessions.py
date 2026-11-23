@@ -202,6 +202,22 @@ def _session_row(row: dict | None) -> dict | None:
     return session
 
 
+_FINISH_CAPABILITY = re.compile(r"finish capability: [0-9a-f]{64}")
+_CAPABILITY_WITHHELD = "finish capability: (withheld from the record)"
+
+
+def _without_capability(content: str) -> str:
+    """A wake as the record and the observers' feed show it.
+
+    The capability that ends a watch goes to the mind in the turn it is woken
+    with and nowhere else: the ledger is readable through the history route
+    by any caller of the same mind, and the live feed by anyone watching the
+    session. Requirement 7 says no other conversation can end the watch, so
+    the one place the secret travels is the turn handed to its owner.
+    """
+    return _FINISH_CAPABILITY.sub(_CAPABILITY_WITHHELD, content)
+
+
 def _storable(value: Any) -> Any:
     """Text Postgres will take. A NUL character is refused by a `text`
     column where SQLite stored it, and conversation text carries raw tool
@@ -800,9 +816,9 @@ class SessionManager:
         answer = None
         if stop["outcome"] == "ended":
             turn_id = stop["answer_turn_id"] or stop["turn_id"]
-            for turn in await core.list_turns(sid):
-                if turn["id"] == turn_id and turn["role"] == "assistant":
-                    answer = turn["content"]
+            turn = await watches.turn_row(sid, turn_id) if turn_id else None
+            if turn is not None and turn["role"] == "assistant":
+                answer = turn["content"]
         return {"session_id": sid, "state": "idle", "outcome": stop["outcome"],
                 "answer": answer, "stop_key": stop["stop_key"],
                 "stopped_at": stop["stopped_at"]}
@@ -1043,7 +1059,10 @@ class SessionManager:
                 turn = await core.latest_turn(watched)
                 if turn and turn["id"] == trailing["id"] and turn["created_at"] < self._started_at:
                     self._wake(await self._record_stop(
-                        watched, f"u{trailing['id']}", "died", wake=False,
+                        watched, f"u{trailing['id']}", "died",
+                        # A wake turn the restart cut off ends a wake turn,
+                        # which wakes nobody (a wake never causes a wake).
+                        wake=str(trailing.get("content") or "").startswith("[wake]"),
                         turn_id=trailing["id"]))
         owed = await watches.senders_owed()
         self._wake(owed)
@@ -1895,16 +1914,20 @@ class SessionManager:
     async def _record_terminal_death(self, session_id: str) -> dict:
         """A terminal turn that died: no answer to store, but a stop to tell of.
 
-        Keyed on the newest turn, so the one failure reported twice is one
-        stop. A turn failing only because the conversation overflowed and is
-        being re-sent never reaches here: the hook reports nothing for it.
+        A failed terminal turn leaves no row behind it - the hook ledgers only
+        turns that finished - so there is nothing to key the death on, and the
+        newest row is some earlier turn's. Keyed on that, a second death with
+        nothing recorded between the two collided with the first and woke
+        nobody, and a first death right after a watch was asked for after the
+        fact counted as older than the watch. So a death is a stop of its own
+        with no turn behind it: it owes every armed watch, once per report.
+        The hook reports each failure once. A turn failing only because the
+        conversation overflowed and is being re-sent never reaches here: the
+        hook reports nothing for it.
         """
-        latest = await core.latest_turn(session_id)
-        turn_id = latest["id"] if latest else None
-        key = f"d{turn_id}" if turn_id is not None else f"d{uuid.uuid4().hex}"
         is_wake = await watches.turn_is_wake(session_id)
         owed = await self._record_stop(
-            session_id, key, "died", wake=is_wake, turn_id=turn_id)
+            session_id, f"d{uuid.uuid4().hex}", "died", wake=is_wake, turn_id=None)
         if is_wake:
             await watches.end_wake_turn(session_id)
         self._wake(owed)
@@ -2800,9 +2823,13 @@ class SessionManager:
         # Mark this conversation active and running for the duration
         await _update_session(session_id, last_active=time.time(), status="running")
 
+        # What the ledger and the live feed hold of this message. A wake's
+        # capability reaches the mind in `stamped_content` and goes no further.
+        recorded = _without_capability(content)
+
         # Update summary + seed context on first message
         if session["opening_line"] == "New session":
-            await _update_session(session_id, opening_line=content[:100].strip())
+            await _update_session(session_id, opening_line=recorded[:100].strip())
 
             # Memory-3: prepend relevant past memories to first message
             loop = asyncio.get_event_loop()
@@ -2818,14 +2845,14 @@ class SessionManager:
                 "session_id": session_id,
                 "message": {
                     "role": "user",
-                    "content": [{"type": "text", "text": content}],
+                    "content": [{"type": "text", "text": recorded}],
                 },
             },
         )
 
         async def _ledger(unit) -> int:
             turn = await core.record_turn(
-                session_id=session_id, role="user", content=_storable(content),
+                session_id=session_id, role="user", content=_storable(recorded),
                 created_at=time.time(), unit=unit,
             )
             if resend:
@@ -3135,7 +3162,12 @@ class SessionManager:
                         else:
                             return  # stream exhausted
             except aiohttp.ClientError as exc:
-                if not _turn_events:
+                # Not taken only while the mind never answered. Once it has
+                # said 200 it took the turn and may still be running it, so
+                # the turn stays on the record and ends as a death: undoing
+                # it would owe the wake again and a second copy would go out
+                # beside the first.
+                if not _turn_events and outcome.get("unaccepted") is not False:
                     outcome["unaccepted"] = True
                 log.error("Mind container %s unreachable for session %s: %s", mind_url, session_id, exc)
                 if resend:
