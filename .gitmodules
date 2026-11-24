@@ -8,11 +8,6 @@
 	url = https://github.com/danielstewart77/hive-tools.git
 	branch = master
 	ignore = all
-[submodule "modules/hive-data"]
-	path = modules/hive-data
-	url = https://github.com/danielstewart77/hive-data.git
-	branch = main
-	ignore = all
 [submodule "modules/hive"]
 	path = modules/hive
 	url = https://github.com/danielstewart77/hive.git
