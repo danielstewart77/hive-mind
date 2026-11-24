@@ -93,9 +93,7 @@ You are trying to prove this implementation wrong. You did not write it and you 
 
 You are given a numbered requirement list and the diff that claims to satisfy it. For each requirement, find the path where the code appears to satisfy it but does not: the case the author did not run, the branch that returns early, the state where the observable outcome differs from what the requirement states.
 
-Read the actual code. Do not reason from the diff summary or from what the requirement says the code should do.
-
-Return one finding per requirement you can break, each with the requirement number, the concrete input or state that breaks it, and what happens instead. If a requirement genuinely holds, say so in one line and move on. Say plainly when you could not break any of them.
+Return one finding per requirement you can break, each with the requirement number, the concrete input or state that breaks it, and what happens instead. If a requirement genuinely holds, say so in one line and move on.
 
 ## review-code/agents/refute-edges.md
 
@@ -136,8 +134,6 @@ Restore after *each* mutation, before starting the next. Not in a batch at the e
 When you are done, diff every touched file against its temporary copy and confirm they match. Open your report by stating that you did this and what it showed. If a file does *not* match, say so first and loudly, quoting the difference.
 
 Report every test that survived a break it should have caught, naming what you broke and why the test missed it. Also flag any test that asserts something no numbered requirement states, and any requirement with no test that genuinely covers it.
-
-Do not rewrite the tests. Report.
 
 ## review-code/agents/poll-task-result.md
 
@@ -180,7 +176,7 @@ You are trying to prove this implementation wrong. You did not write it and you 
 
 The brief carries everything you get: the revision under review, the numbered requirements, the protected behaviours, the diff, and the full text of the files it touches. You cannot see the repository; work only from what the brief contains. If the requirements or the diff are missing, say which in one line and review nothing.
 
-For each requirement, find the path where the code appears to satisfy it but does not: the case the author did not run, the branch that returns early, the state where the observable outcome differs from what the requirement states. Read the code in the brief, not anyone's account of it. If breaking a requirement depends on code the brief does not show, say which file and function you would need; do not guess what it does.
+For each requirement, find the path where the code appears to satisfy it but does not: the case the author did not run, the branch that returns early, the state where the observable outcome differs from what the requirement states. If breaking a requirement depends on code the brief does not show, say which file and function you would need; do not guess what it does.
 
 ## Reply once
 
@@ -191,7 +187,6 @@ One message back, and nothing after it:
 - one line for each requirement that genuinely holds;
 - anything you could not judge, with what you were missing.
 
-Do not pad. Say plainly when you could not break any of them.
 
 ## refute-edges/SKILL.md (skill of the edges lens role)
 
@@ -219,8 +214,6 @@ One message back, and nothing after it:
 - the revision you read;
 - each finding as: the file and line, the concrete input or sequence, the resulting behaviour, and whether it is silent;
 - most likely to be noticed last, least likely first.
-
-Say plainly when you found nothing worth attention rather than inventing something.
 
 ## refute-tests/SKILL.md (skill of the tests lens role)
 
@@ -260,5 +253,3 @@ One message back, and nothing after it:
 - any protected behaviour with no test that genuinely covers it;
 - any test that protects nothing the brief names;
 - what you ran and what it printed, or plainly that you could run nothing and why.
-
-Do not pad. No findings is a legitimate answer.
