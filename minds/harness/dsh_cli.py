@@ -406,6 +406,7 @@ PANE_CONVERSATION_ENV: dict[str, dict[str, str]] = {}
 def _pane_env(
     model: str, client_ref: str | None, surface: str | None, surface_id: str | None,
     conversation_env: dict[str, str] | None = None, session_id: str = "",
+    effort: str | None = None,
 ) -> dict[str, str]:
     """Environment the tmux pane needs for this conversation and model."""
     env = {k: str(v) for k, v in RUNTIME_ENV.items()}
@@ -421,6 +422,8 @@ def _pane_env(
     env.update(conversation_env or {})
     env.update(_model_env(model, _pane_window(
         model, (conversation_env or {}).get("HIVE_MODEL_CONTEXT_WINDOW"))))
+    env.pop(EFFORT_ENV, None)
+    env.update(_effort_env(effort))
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     env["HIVE_SURFACE"] = "terminal"
@@ -463,7 +466,7 @@ def _spawn_pty(
     if extra_env:
         PANE_CONVERSATION_ENV[session_id] = dict(extra_env)
     pane_env = _pane_env(model, client_ref, surface, surface_id,
-                         PANE_CONVERSATION_ENV.get(session_id), session_id)
+                         PANE_CONVERSATION_ENV.get(session_id), session_id, effort)
     context_file: Path | None = None
     as_turn = False
     if not TERMINALS.alive(session_id):
@@ -528,7 +531,8 @@ def _rotate_pty(
             _terminal_argv(new_conversation_id, context_file,
                            context_as_turn=bool(user_prompt) and context_file is not None),
             env_overrides=_pane_env(model, client_ref, surface, surface_id,
-                                    PANE_CONVERSATION_ENV.get(session_id), session_id),
+                                    PANE_CONVERSATION_ENV.get(session_id), session_id,
+                                    effort),
         )
     except Exception:
         if context_file is not None:
@@ -697,6 +701,28 @@ def _pane_window(model: str, conversation_window: str | int | None) -> int | Non
         return pool.submit(asyncio.run, _turn_window(model, None)).result()
 
 
+#: The reasoning levels dsh knows, in escalation order. The hive profile reads
+#: the level from the environment into its one provider route, so it is what
+#: every model request of the process carries: the mind's and its sub-agents'.
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_ENV = "DSH_REASONING_EFFORT"
+
+
+def _effort_env(effort: object) -> dict[str, str]:
+    """The conversation's reasoning effort as the hive profile reads it.
+
+    Until 2026-11-24 the effort a conversation named was accepted here and
+    dropped, so a dsh mind's model was never told how hard to think, and a
+    sub-agent reviewing a plan spent 550,000 hidden reasoning tokens in
+    seventy-five minutes. Nothing for an unset effort: the model keeps its
+    own default, as on the other harnesses. Nothing for a word dsh does not
+    know either, because the profile refuses one and a process that cannot
+    read its profile does not start.
+    """
+    level = str(effort or "").strip().lower()
+    return {EFFORT_ENV: level} if level in EFFORT_LEVELS else {}
+
+
 def _model_env(model: str, window: str | int | None) -> dict[str, str]:
     """The model, its provider route, that route's endpoint and its credential.
 
@@ -851,6 +877,7 @@ async def start_session(body: dict) -> Any:
         "surface_label": chat_surface(body),
         "opening_turn": body.get("opening_turn") or "",
         "conversation_env": dict(body.get("conversation_env") or {}),
+        "effort": body.get("effort") or None,
     })
     state.setdefault("proc", None)
     log.info("%s session %s initialised (model=%s conversation=%s persisted=%s)",
@@ -1107,6 +1134,10 @@ async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
         (state.get("conversation_env") or {}).get("HIVE_MODEL_CONTEXT_WINDOW"),
     )
     env.update(_model_env(state["model"], window))
+    # Popped first: this starts from the mind server's own environment, and a
+    # level left there would follow every conversation that names none.
+    env.pop(EFFORT_ENV, None)
+    env.update(_effort_env(state.get("effort")))
     env["HIVE_SESSION_ID"] = sid
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
