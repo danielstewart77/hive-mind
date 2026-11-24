@@ -269,8 +269,8 @@ Two things the page draws that a description cannot carry:
 - `ledger edit <task> --board-item <id>` the moment the task has a board
   item. The page expands a task that names a feature into its stories and an
   epic into features and their stories; with no id it is a single node
-  however large the work is. The id, not the number: `f1deb69399136e16d`,
-  which the board gives you when you create or find the item.
+  however large the work is. The id, not the number, which the board
+  gives you when you create or find the item.
 - `ledger edit <task> --question "<the one thing>"` whenever you take
   something to the owner, and `ledger edit <task> --answered` the moment he
   answers. A task holding a question draws a bubble that rises to you, and
@@ -818,7 +818,7 @@ blocker, or a status you moved.
 
 Feedback from the owner about how you do your job is an instruction to update
 your skills, not a remark to acknowledge. Write it into the skill it
-concerns (here, take-a-task, or the install's routing preferences) in the
+concerns (here, take-a-task) in the
 same turn, and tell him it is written.
 
 ## Every wait on the owner is a bubble
