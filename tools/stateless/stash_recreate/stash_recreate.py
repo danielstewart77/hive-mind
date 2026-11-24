@@ -516,7 +516,7 @@ def preflight(run: Run, build: bool) -> tuple[str, str]:
                      "everything the ledger tool calls", not behind,
                      behind or "nothing missing"):
         raise Refused(f"hive_data at {source} is behind the ledger tool "
-                      f"({'; '.join(behind)}); pull hive-data on the host")
+                      f"({'; '.join(behind)}); pull hive-mind on the host (modules/hive-data is in it)")
     return source, image
 
 
@@ -815,7 +815,7 @@ def recreate(record: Run, build: bool, deadline: float,
             record.state("waiting for idle")
             wait(record, max(0.0, ends - clock()))
             # Again after the wait: it can be hours, and a peer can move the
-            # host's hive-data checkout in that time.
+            # host's hive-mind checkout in that time.
             behind = probe_image(image, source)
             if not record.check("hive_data still level at the recreate",
                                 not behind, behind or "nothing missing"):

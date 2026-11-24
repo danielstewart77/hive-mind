@@ -110,12 +110,14 @@ CMD ["/opt/venv/bin/python3", "server.py"]
 # ledger tool (tools/stateless/staff_ledger) reaches its own Postgres schema
 # through. A target of its own, so no other mind carries a database driver it
 # has no use for, and so their builds never ask for the `hive_data` context.
-# From a build context rather than git because the repository is private;
-# asyncpg is its one dependency. Built with `target: mind-ledger` and
-# `additional_contexts: hive_data:` in that mind's compose fragment.
+# From a named build context, `hive_data`, that the mind's compose fragment
+# points at this checkout's modules/hive-data (named, because this image's own
+# context excludes modules/ in .dockerignore and a named context is not read
+# through it); asyncpg is its one dependency. Built with `target: mind-ledger`
+# and `additional_contexts: hive_data:` in that mind's compose fragment.
 #
 # The baked copy is for the dependencies and the metadata, not the code the
-# container runs: the fragment mounts the host's hive-data/hive_data
+# container runs: the fragment mounts the checkout's modules/hive-data/hive_data
 # read-only over /opt/venv/lib/python3.12/site-packages/hive_data, as comms
 # does. The ledger tool is bind-mounted live from this checkout, so a baked
 # library stands still while the tool moves; on 2026-11-15 that left Stash

@@ -19,9 +19,14 @@ DEFAULT_HOME = "~/hive"
 #: `modules/<name>` and brought to the latest of its branch by
 #: scripts/modules.sh. All public, so no token is needed.
 REPOS = (
-    "hive-mind", "hive-data", "hive", "terminal", "inference-proxy",
+    "hive-mind", "hive", "terminal", "inference-proxy",
     "hive-tools", "hive-harness-dsh", "hive-surfaces",
 )
+#: Repositories that became ordinary folders of hive-mind and are no longer
+#: cloned. `Home.repo(name)` still answers `modules/<name>` for them, so a
+#: build context is the same line it always was; the name is kept here only so
+#: a clone an earlier install left beside hive-mind is named as unused.
+MOVED_IN = ("hive-data",)
 #: Where hive-mind keeps its modules, relative to its own checkout.
 MODULES = "modules"
 REPO_BASE = os.environ.get("HIVE_REPO_BASE", "https://github.com/danielstewart77")

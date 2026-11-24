@@ -196,8 +196,8 @@ def clone_repos(ctx: Ctx):
     # An install made before the manifest cloned each repository beside
     # hive-mind. Those clones are no longer built from or updated; any work in
     # them is the operator's to move, so they are named and left alone.
-    from installer.paths import REPOS
-    stale = [f"{ctx.home.repos / r} is no longer used" for r in REPOS
+    from installer.paths import MOVED_IN, REPOS
+    stale = [f"{ctx.home.repos / r} is no longer used" for r in (*REPOS, *MOVED_IN)
              if r != name and (ctx.home.repos / r).exists()]
     return ", ".join([f"{name}@{head}", *modules, *stale])
 
