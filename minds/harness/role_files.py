@@ -251,6 +251,7 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
     done: dict[str, str] = {}
     problems: list[Problem] = []
     for name in names:
+        update_failed = False
         try:
             skills_api._validate(name)
             h = skills_api.harness_directory(harness)
@@ -271,6 +272,7 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
             elif kept and state != skills_api.STATE_UNREADABLE:
                 state, found = _update(harness, name, h, state)
                 problems += found
+                update_failed = any(key[2] == "update" for key, _text in found)
             done[name] = state
             # Whatever happened above, the grant is met only when the harness
             # has a skill of that name to load.
@@ -282,6 +284,9 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
                     unreadable = skills_api.generated_problem()
                     if unreadable:
                         why += f" ({unreadable})"
+                elif update_failed:
+                    why = ("the copy this mind had is gone: a newer one could not be "
+                           "delivered and the old one could not be put back")
                 elif kept:
                     why = (f"this mind keeps a copy of its own that the {h} harness cannot "
                            "load, which was left as it is")
