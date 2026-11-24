@@ -46,7 +46,14 @@ class FakeMind:
         self.cut: set[str] = set()
         self.app = web.Application()
         self.app.router.add_post("/sessions/{sid}/message", self._message)
+        #: what the gateway handed this mind for its surface to deliver.
+        self.handed: list[dict] = []
+        self.app.router.add_post("/sessions/{sid}/proactive", self._proactive)
         self.server = TestServer(self.app)
+
+    async def _proactive(self, request: web.Request) -> web.Response:
+        self.handed.append({"sid": request.match_info["sid"], **await request.json()})
+        return web.json_response({"queued": True})
 
     async def _message(self, request: web.Request) -> web.StreamResponse:
         sid = request.match_info["sid"]
@@ -842,3 +849,44 @@ async def test_a_turn_the_mind_took_then_lost_the_connection_on_still_counts_as_
     await _settle(gateway)
 
     assert await gateway._had_turns(session["id"]) is True
+
+
+def _says(text: str) -> list[dict]:
+    return [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
+        {"type": "result", "result": "ok"},
+    ]
+
+
+async def test_what_a_mind_on_telegram_says_when_woken_is_handed_to_its_surface(
+        gateway, mind):
+    """Daniel, 2026-11-24: a planner's question reached the chief of staff
+    in a wake turn and never reached Telegram. Nobody reads that turn."""
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await core.update_session(sender["id"], surface=f"telegram:{MIND}",
+                              surface_id="5550001")
+    await _watch(gateway, worker, sender, "plan the thing")
+    mind.script[sender["id"]] = _says("The planner asks: home, work, or both?")
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+
+    assert mind.handed == [{"sid": sender["id"], "chat_id": 5550001,
+                            "text": "The planner asks: home, work, or both?"}]
+
+
+async def test_what_a_mind_says_when_woken_on_a_surface_with_no_chat_is_handed_nowhere(
+        gateway, mind):
+    worker = await _session(gateway, OTHER)
+    sender = await _session(gateway)
+    await core.update_session(sender["id"], surface="discord:x",
+                              surface_id="1556059743968039065")
+    await _watch(gateway, worker, sender, "plan the thing")
+
+    await _turn(gateway, worker["id"])
+    await _settle(gateway)
+
+    assert len(_wakes_to(mind, sender)) == 1
+    assert mind.handed == []
+
