@@ -416,6 +416,10 @@ EVENT_WORKING = "working"
 EVENT_ENDED = "ended"
 _EVENTS = (SPAWNED, EVENT_WORKING, EVENT_ENDED)
 
+#: How long after a reported ending an activity report must arrive to mean
+#: the child was woken, rather than being the tail of the run that ended.
+REOPEN_AFTER_SECONDS = 30.0
+
 #: How an event lands on a row that already exists.
 #:
 #: Written as one statement rather than a read and a write, because the two
@@ -440,7 +444,18 @@ _EVENTS = (SPAWNED, EVENT_WORKING, EVENT_ENDED)
 #: only ever guessed that the child was dead; a harness saying it is still
 #: producing work is the one piece of evidence that outranks the guess, and
 #: discarding it left `WORKING` unreachable for the rest of that child's
-#: life. A reported ending is never reopened this way - only the sweep's.
+#: life.
+#:
+#: A *reported* ending is reopened by an activity report too, but only one
+#: that arrives well after it. A harness can wake a child it already ended:
+#: dsh sends a finished sub-agent a message and it works again under the
+#: same id, which is how a reviewer's findings go back to the builder. On
+#: 2026-11-23 a builder two rounds into review fixes was drawn as finished
+#: for an hour, and Daniel watching the page saw nothing working at all. A
+#: start never reopens anything, and nor does an activity report within
+#: `REOPEN_AFTER_SECONDS` of the ending: the reporters are detached, and a
+#: report of the last thing the child did can land a moment after the
+#: report that it stopped.
 _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
     "agent_type" = CASE WHEN "agents"."agent_type" = ''
         THEN EXCLUDED."agent_type" ELSE "agents"."agent_type" END,
@@ -459,6 +474,10 @@ _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
     "finished_at" = CASE
         WHEN EXCLUDED."active_at" IS NOT NULL
              AND "agents"."outcome" = '{OUTCOME_ABANDONED}' THEN NULL
+        WHEN EXCLUDED."active_at" IS NOT NULL
+             AND "agents"."finished_at" IS NOT NULL
+             AND EXCLUDED."active_at"
+                 > "agents"."finished_at" + {REOPEN_AFTER_SECONDS} THEN NULL
         WHEN EXCLUDED."finished_at" IS NULL THEN "agents"."finished_at"
         WHEN "agents"."finished_at" IS NULL
              OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
@@ -467,6 +486,10 @@ _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
     "outcome" = CASE
         WHEN EXCLUDED."active_at" IS NOT NULL
              AND "agents"."outcome" = '{OUTCOME_ABANDONED}' THEN ''
+        WHEN EXCLUDED."active_at" IS NOT NULL
+             AND "agents"."finished_at" IS NOT NULL
+             AND EXCLUDED."active_at"
+                 > "agents"."finished_at" + {REOPEN_AFTER_SECONDS} THEN ''
         WHEN EXCLUDED."finished_at" IS NULL THEN "agents"."outcome"
         WHEN "agents"."finished_at" IS NULL
              OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
