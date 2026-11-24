@@ -6,7 +6,6 @@ argument-hint:
 harness:
   claude:
     user-invocable: true
-    model: opus
     tools: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch
 ---
 
