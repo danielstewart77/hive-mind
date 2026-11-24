@@ -40,9 +40,9 @@ Read the top document, then every stage document beside it.
 ## 2. Roles
 
 Run `roles list`. Create each role the documents name that is missing, with
-`roles create`, including the three lens roles for the three lenses the
-review document names (requirements, tests, edges): a stage cannot be given a
-model, a skill or a holder before its role exists. You create roles; the
+`roles create`, including the three lens roles the review document calls
+for, one each for the requirements, tests and edges lenses: a stage cannot be
+given a model, a skill or a holder before its role exists. You create roles; the
 owner gives minds their roles.
 
 ## 3. Ask, and record
