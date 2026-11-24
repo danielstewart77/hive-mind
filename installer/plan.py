@@ -39,12 +39,12 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
     Piece("postgres", "Database (Postgres + pgvector)", required=True,
           modes=(HERE, EXISTING)),
     Piece("comms", "Comms (gateway, broker, sessions)", required=True,
-          needs=("postgres",), repos=("hive-mind", "hive-data")),
+          needs=("postgres",), repos=("hive-mind",)),
     # Lucent embeds through the proxy. The local models (Ollama) are only the
     # backend of a proxy installed here: never ticked, installed exactly when
     # it needs them (`installed`).
     Piece("lucent", "Lucent (memory and knowledge graph)", required=True,
-          needs=("postgres", "proxy"), repos=("hive-mind", "hive-data")),
+          needs=("postgres", "proxy"), repos=("hive-mind",)),
     Piece("embeddings", "Local models for the proxy installed here (Ollama)",
           modes=(HERE, EXISTING)),
     Piece("proxy", "Inference proxy", required=True, needs=("postgres",),
@@ -55,14 +55,14 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
     # The terminal is built from the console's shared site code (hive_site),
     # which lives in the console's repository — not from the console service.
     Piece("terminal", "Browser terminal (chat with your mind)", default=True, needs=("comms",),
-          repos=("terminal", "hive", "hive-data")),
+          repos=("terminal", "hive")),
     Piece("console", "Hive site (settings and admin)", needs=("comms", "lucent"),
-          repos=("hive", "hive-data")),
+          repos=("hive",)),
     Piece("voice", "Voice server", needs=("comms",), repos=("hive-mind",),
           modes=(NONE, HERE, EXISTING)),
     # Its model calls go through the proxy, like every other service's.
     Piece("tools", "Tools service", needs=("postgres", "proxy"),
-          repos=("hive-tools", "hive-data")),
+          repos=("hive-tools",)),
     # A bot is claimed by its person on the console, which mints the pass
     # phrase it is claimed with; without the console nobody can claim it.
     Piece("telegram", "Telegram bot", needs=("comms", "console", "mind"),

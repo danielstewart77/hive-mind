@@ -21,6 +21,36 @@ main() {
     exit 1
   }
 
+  # A module that has become ordinary tracked files of hive-mind (hive-data;
+  # the others follow) cannot be pulled over while a git clone of it sits at
+  # the same path: git refuses, naming the files it would overwrite. So before
+  # the pull, once the update is fetched and shown to carry the module as
+  # files, a clone that holds nothing unsaved is moved beside itself (same
+  # folder, so its link back to hive-mind's .git still resolves) and left for
+  # the operator to delete. A clone with uncommitted work, or commits no
+  # remote has, is never moved: the install stops and says so.
+  make_room_for_moved_modules() {
+    local repo="$1" name path stamp
+    for name in hive-data; do
+      path="modules/$name"
+      [ -e "$repo/$path/.git" ] || continue
+      git -C "$repo" ls-tree HEAD -- "$path" | grep -q '^160000 ' || continue
+      git -C "$repo" fetch --quiet \
+        || fail "could not fetch $repo" "check the network (and any web proxy), then run again"
+      git -C "$repo" ls-tree '@{u}' -- "$path" | grep -q '^040000 ' || continue
+      [ -z "$(git -C "$repo/$path" status --porcelain)" ] \
+        || fail "$repo/$path has uncommitted changes, and $name now lives inside hive-mind" \
+                "commit or discard them there (or copy them into $repo/$path after the update), then run again"
+      [ -z "$(git -C "$repo/$path" log --branches --not --remotes --oneline)" ] \
+        || fail "$repo/$path has commits that no remote has, and $name now lives inside hive-mind" \
+                "git -C $repo/$path push, or keep them elsewhere, then run again"
+      stamp="$(date +%Y%m%d%H%M%S)"
+      mv "$repo/$path" "$repo/modules/.$name.moved-aside-$stamp" \
+        || fail "could not move $repo/$path aside" "move it away by hand, then run again"
+      echo "$name is now part of hive-mind: the old clone was moved to $repo/modules/.$name.moved-aside-$stamp (safe to delete)."
+    done
+  }
+
   command -v git >/dev/null 2>&1 || fail "git is not installed" "sudo apt-get install -y git"
   command -v python3 >/dev/null 2>&1 || fail "python3 is not installed" "sudo apt-get install -y python3"
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
@@ -127,6 +157,7 @@ PY
   chmod 700 "$HIVE_HOME/state"
   local repo="$HIVE_HOME/repos/hive-mind"
   if [ -d "$repo/.git" ]; then
+    make_room_for_moved_modules "$repo"
     git -C "$repo" pull --ff-only --quiet \
       || fail "could not update $repo" "git -C $repo status — commit or discard local changes, then run again"
   else
