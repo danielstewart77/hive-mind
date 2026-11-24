@@ -576,9 +576,11 @@ def install_skill(harness: str, name: str, *, catalog=None, notify=None,
 
 #: What `update_skill` found.
 UPDATE_OWN = "own"          # nothing was delivered from the install's folder: the mind's own
-UPDATE_CURRENT = "current"  # the source is what was delivered
+UPDATE_CURRENT = "current"  # the source is what the mind has
 UPDATE_DONE = "updated"     # the source moved and the mind had changed nothing: it has the new text
 UPDATE_KEPT = "changed"     # the source moved and the mind had changed its copy: left as it is
+UPDATE_MISSING = "missing"  # the source moved and a copy the mind was given is gone: left as it is
+UPDATE_NO_HOME = "no_home"  # the source moved and a harness it was given to has no home now
 
 
 def update_skill(harness: str, name: str, *, catalog=None, notify=None) -> str:
@@ -587,25 +589,40 @@ def update_skill(harness: str, name: str, *, catalog=None, notify=None) -> str:
 
     Only a copy delivered from the install's folder, and recorded as such, is
     ever touched: one the mind has always had, and every tracked skill, is the
-    mind's own and is left exactly as it is. The delivered-from record is the
-    fingerprint of the source the copy was given from; when the source's is
-    different, the copy is replaced only if the mind's reference and every
-    harness's copy are exactly what that delivery left. An edit waiting in
-    another harness's copy is the mind's change too. Returns one of the
-    `UPDATE_*` words; raises only what reading or writing raises.
+    mind's own and is left exactly as it is, and so is a copy that was given
+    from the install's folder when that folder no longer holds the name. The
+    delivered-from record is the fingerprint of the source the copy was given
+    from; when the source's is different, the copy is replaced only if the
+    mind's reference and every harness's copy are exactly what that delivery
+    left. An edit waiting in another harness's copy is the mind's change too,
+    and so is a harness with no home declared, where the update could not
+    land. The update is all or nothing for the mind (see `skill_reference.install`).
+    A mind that has made its copy the new source itself is current.
+    Returns one of the `UPDATE_*` words; raises what reading or writing raises,
+    including `SkillError` when the update could not be completed and was undone.
     """
     _validate(name)
     h = harness_directory(harness)
     if source_root(name) != install_root():
         return UPDATE_OWN
     records = _rendering(skill_reference.load_records)
-    recorded, changed = skill_reference.delivery(records, skill_reference.KIND_SKILL, name, h)
+    recorded, stopped = skill_reference.delivery(records, skill_reference.KIND_SKILL, name, h)
     if recorded is None:
         return UPDATE_OWN
-    if _fingerprint(install_root(), name) == recorded:
+    source = _fingerprint(install_root(), name)
+    if source == recorded:
         return UPDATE_CURRENT
-    if changed:
-        return UPDATE_KEPT
+    if stopped:
+        if (stopped[0] == skill_reference.CHANGED_EDITED
+                and _pair(h, name).state == STATE_SAME):
+            # The mind has made its copy exactly the new source: nothing
+            # differs, so nothing is reported and the next change is judged
+            # from here.
+            _rendering(skill_reference.refresh_delivery, skill_reference.KIND_SKILL, name,
+                       source)
+            return UPDATE_CURRENT
+        return {skill_reference.CHANGED_MISSING: UPDATE_MISSING,
+                skill_reference.CHANGED_UNAVAILABLE: UPDATE_NO_HOME}.get(stopped[0], UPDATE_KEPT)
     try:
         install_skill(h, name, catalog=catalog, notify=notify, only_if_unchanged=True)
     except SkillConflict:

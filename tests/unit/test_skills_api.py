@@ -411,3 +411,54 @@ def test_a_generated_skill_past_the_size_limit_is_not_delivered(mind, monkeypatc
     assert response.status_code == 404
     assert "larger than a skill should be" in response.json()["error"]
     assert not (installed / "made-here").exists()
+
+
+# --- install_skill(only_if_unchanged): the update the install makes of a delivered skill ---
+
+GEN = "gen-skill"
+GEN_TEXT = "---\nname: gen-skill\ndescription: generated\n---\nFirst.\n"
+
+
+def _delivered(mind, tmp_path):
+    """A generated skill delivered through the real install, as a mind is given it."""
+    client, repo, installed = mind
+    folder = _install_folder(repo)
+    _write_skill(folder, GEN, GEN_TEXT)
+    skills_api.install_skill("claude_cli", GEN)
+    return folder, installed
+
+
+def test_an_update_install_replaces_a_copy_the_mind_has_not_touched(mind, tmp_path):
+    folder, installed = _delivered(mind, tmp_path)
+    _write_skill(folder, GEN, GEN_TEXT.replace("First.", "Second."))
+
+    skills_api.install_skill("claude_cli", GEN, only_if_unchanged=True)
+
+    assert "Second." in (installed / GEN / "SKILL.md").read_text()
+
+
+def test_an_update_install_refuses_a_copy_the_mind_edited_and_changes_nothing(mind, tmp_path):
+    folder, installed = _delivered(mind, tmp_path)
+    (installed / GEN / "SKILL.md").write_text("---\nname: gen-skill\ndescription: mine\n---\nMine.\n")
+    _write_skill(folder, GEN, GEN_TEXT.replace("First.", "Second."))
+
+    with pytest.raises(skills_api.SkillConflict):
+        skills_api.install_skill("claude_cli", GEN, only_if_unchanged=True)
+
+    assert "Mine." in (installed / GEN / "SKILL.md").read_text()
+    assert "Second." not in (skills_api.reference_root() / GEN / "SKILL.md").read_text()
+
+
+def test_an_update_install_refuses_a_copy_with_no_delivery_recorded(mind, tmp_path):
+    client, repo, installed = mind
+    folder = _install_folder(repo)
+    _write_skill(folder, GEN, GEN_TEXT)
+    # What every copy at home today is: rendered, with nothing said of what from.
+    skill_reference.install("skill", GEN, "claude", GEN_TEXT, folder / GEN,
+                            catalog=lambda h: None, notify=lambda text: None)
+    _write_skill(folder, GEN, GEN_TEXT.replace("First.", "Second."))
+
+    with pytest.raises(skills_api.SkillConflict):
+        skills_api.install_skill("claude_cli", GEN, only_if_unchanged=True)
+
+    assert "First." in (installed / GEN / "SKILL.md").read_text()
