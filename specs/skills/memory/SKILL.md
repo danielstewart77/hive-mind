@@ -38,7 +38,7 @@ AUTH="Authorization: Bearer $LUCENT_BEARER_TOKEN"
 
 ```bash
 curl -s -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"names": ["Alex"], "depth": 1}' \
+  -d '{"names": ["<entity name>"], "depth": 1}' \
   "$LUCENT_URL_SELF/graph/query" | jq '.results[0]'
 ```
 
@@ -48,10 +48,10 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' \
 curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
   "$LUCENT_URL_SELF/graph/upsert" -d '{
     "entity_type": "Person",
-    "name": "Alex",
-    "properties": {"role": "chef-aspirant"},
-    "relation": "SON_OF",
-    "target_name": "<user-name>",
+    "name": "<entity name>",
+    "properties": {"<key>": "<value>"},
+    "relation": "<RELATION>",
+    "target_name": "<target entity name>",
     "target_type": "Person",
     "mind_id": "'"$MIND_ID"'",
     "data_class": "current-state",
