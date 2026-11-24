@@ -519,11 +519,11 @@ def _dsh_skill_log(path: Path, arguments: str) -> Path:
 
 
 @pytest.mark.parametrize("arguments,counted", [
-    ('{"name": "take-a-task"}', {"take-a-task"}),
+    ('{"name": "backlog"}', {"backlog"}),
     ('{"name": "hivemind:planka"}', set()),
-    ('{"name": "Take_A_Task"}', set()),
+    ('{"name": "Backlog"}', set()),
     ('{"name": ', set()),
-    ('"take-a-task"', set()),
+    ('"backlog"', set()),
     ('[' * 100_000, set()),
     ('{"name": 5}', set()),
 ], ids=["bare", "namespaced-refused", "pattern-refused", "not-json",
