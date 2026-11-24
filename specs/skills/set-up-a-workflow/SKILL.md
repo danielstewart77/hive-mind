@@ -27,7 +27,7 @@ shape, run it with `--help` and use the shape it shows exactly.
 ## Test mode
 
 If you are told to write into a test folder, touch no role: no `roles` call,
-no write into the install folder, no write of the install file. Steps 3 and 4
+no write into the install folder, no write of the install file. Steps 4 and 5
 and the install file all go under that folder, laid out like the install
 folder: skills at `<folder>/<skill>/`, copies at `<folder>/.as-generated/`,
 the install file at `<folder>/.install/chief-of-staff.md`. Each test run
@@ -37,7 +37,15 @@ writes to a new, empty folder; refuse one that is not empty.
 
 Read the top document, then every stage document beside it.
 
-## 2. Ask, and record
+## 2. Roles
+
+Run `roles list`. Create each role the documents name that is missing, with
+`roles create`, including the three lens roles for the three lenses the
+review document names (requirements, tests, edges): a stage cannot be given a
+model, a skill or a holder before its role exists. You create roles; the
+owner gives minds their roles.
+
+## 3. Ask, and record
 
 Ask the owner which of this install's models serves each tier: extra high,
 high, medium, low. Set it on each role with `roles update ROLE --model M`,
@@ -45,11 +53,12 @@ using the tier the top document gives that role. Then ask everything the
 documents say to ask: the deployment document above all, and each role's
 needs as the top document lists them. Record the answers in the install's own
 file, `install/workflow-skills/.install/chief-of-staff.md`, in the four
-sections the top document names, every line dated. Write it atomically (write
+sections the top document names, every line dated. Record the slugs of the three lens roles in its Routing preferences.
+Write it atomically (write
 a dot-named file beside it, then rename it into place). Never record who
 holds a role: that is asked of the gateway when needed.
 
-## 3. Write each role's skills
+## 4. Write each role's skills
 
 For each skill a stage document names, in the file's own order: write the
 document's text for that skill, with this install's specifics put back from
@@ -69,43 +78,42 @@ Write each skill whole in a scratch place inside your own folder. Then copy
 it into a dot-named staging name inside `install/workflow-skills/` and rename
 it to `install/workflow-skills/<skill>/` only if that name does not exist, so
 no mind is handed half a skill. A skill that exists is not written again: see
-step 6. Add it to its role last.
+step 7. Give it to its role last (step 6).
 
-## 4. The as-generated copy
+## 5. The as-generated copy
 
-When the skill is final, copy it byte for byte to
+When the skill is final, copy it to
 `install/workflow-skills/.as-generated/<skill>/` (staged and renamed the same
-way), and add one file to that copy, `.generated.json`, with exactly these
-five keys:
+way), and add one file to that copy, `.generated.json`, with these keys:
 
     {"workflow": "chief-of-staff",
      "document": "<stage document, relative to the checkout root>",
      "document_version": "<sha256 hex of that document's bytes>",
      "top_document": "<top document, relative to the checkout root>",
-     "top_version": "<sha256 hex of the top document's bytes>"}
+     "top_version": "<sha256 hex of the top document's bytes>",
+     "document_commit": "<commit that last changed the stage document>",
+     "top_commit": "<commit that last changed the top document>"}
 
-Compute each version with `sha256sum <file>`. Paths are relative to the
-checkout root, never absolute, never with `..`.
+Compute each version with `sha256sum <file>` and each commit with
+`git log -1 --format=%H -- <file>`. Paths are relative to the checkout root,
+never absolute, never with `..`. The copy is never tuned: it stays as the
+skill was generated.
 
-## 5. Roles
+## 6. Give the skills to the roles
 
-Create a role that is missing with `roles create`. Add each skill to its role
-with `roles add-skill`, never `update --skills`, so no other grant is lost.
-Mark each role you changed with `roles keep ROLE`. Never `take` (it replaces
-the role's skills with the shipped list and drops every generated name) and
-never `promote` (it writes this install's names into the tracked file).
-Review needs three lens holders: create the three lens roles the review
-document names (you create roles; the owner gives minds their roles) and
-record their slugs in the install file's Routing preferences.
+Add each skill to its role with `roles add-skill`. Mark each role you changed
+with `roles keep ROLE`, so a later pull leaves it alone.
 
-## 6. Updating
+## 7. Updating
 
-When a stage document has been updated, read what changed: a diff of the
-recorded `document_version` against the document now (and the top document
-the same way). Apply that change to the existing skill. Never regenerate a
-skill that exists: wording it afresh would discard this install's tuning and
-bury the real change. Then refresh the as-generated copy and its record: the
-skill's files as they are now, and the new versions.
+When a stage document has been updated, read what changed: the recorded
+`document_commit` names the text the skill was written from, so run
+`git diff <document_commit> -- <document>` (and the same for the top
+document with `top_commit`). Apply that change to the existing skill. Never
+regenerate a skill that exists: wording it afresh would discard this
+install's tuning and bury the real change. Then apply the same change to the
+as-generated copy, never copying the skill over it, so the copy stays
+untuned, and record the new versions and commits.
 
 ## Safety
 
@@ -116,5 +124,4 @@ document says to ask, ask the owner; do not assume the answer.
 ## An install that predates this skill
 
 Roles are seeded once; a pull does not add this skill to the operator role.
-A person takes the shipped operator role once on the Roles page to receive
-it.
+A person adds this skill to the operator role once on the Roles page.
