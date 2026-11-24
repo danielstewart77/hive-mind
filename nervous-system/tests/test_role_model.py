@@ -3,8 +3,10 @@
 Protected behaviours 1 and 2 of Role Management for the one grant the
 gateway decides: a DSH mind under role management runs only on a model one
 of its roles names, and a role changed between two turns is obeyed on the
-second. The roles are real rows in the scratch database, read through the
-same `hive_data.roles` the console writes them with.
+second. A managed mind whose roles name no model runs the model it is
+configured with (the shipped roles name none). The roles are real rows in the
+scratch database, read through the same `hive_data.roles` the console writes
+them with.
 """
 # ruff: noqa: F811 - pytest fixtures are imported, then named as parameters
 from __future__ import annotations
@@ -74,15 +76,16 @@ def test_a_role_changed_between_turns_moves_the_next_turn_onto_its_model(comms_d
     _run(scenario())
 
 
-def test_a_managed_dsh_mind_whose_roles_name_no_model_is_refused_a_turn(comms_db):
+def test_a_managed_mind_whose_roles_name_no_model_runs_the_model_it_is_configured_with(comms_db):
     async def scenario():
         mgr = await make_manager()
-        mind = await _mind()
-        await roles.set_mind_roles(mind, [await _role(None)])
+        mind = await _mind(default="claude-sonnet-5-5")
+        await roles.set_mind_roles(mind, [await _role(None), await _role(None)])
         await seed_session("s3", mind_id=mind, harness="dsh", model="claude-haiku-5-5")
+        row = await mgr._get_row("s3")
 
-        with pytest.raises(ValueError, match="names a model"):
-            await mgr.role_model(await mgr._get_row("s3"))
+        assert await mgr.role_model(row) == "claude-haiku-5-5"
+        assert await mgr.role_model(row, wanted="gpt-6.1-terra") == "gpt-6.1-terra"
         await close_manager(mgr)
 
     _run(scenario())
@@ -160,18 +163,24 @@ def test_a_turn_on_a_model_no_role_names_runs_on_the_role_model_and_the_row_says
     _run(scenario())
 
 
-def test_a_turn_refused_for_want_of_a_model_says_why_in_the_stream(comms_db):
+def test_a_turn_of_a_managed_mind_whose_roles_name_no_model_runs_on_its_own_model(comms_db):
     async def scenario():
         mgr = await make_manager()
         mind = await _mind()
         await roles.set_mind_roles(mind, [await _role(None)])
         await seed_session("s8", mind_id=mind, harness="dsh", model="claude-haiku-5-5",
                            surface_id="126")
-        with patch.object(mgr, "_spawn", new=AsyncMock()) as spawned:
-            events = [e async for e in mgr.send_message("s8", "hello")]
-        assert spawned.await_count == 0
-        assert events[-1]["is_error"] is True
-        assert "names a model" in events[-1]["errors"][0]
+        with patch.object(mgr, "mind_model_row", new=AsyncMock(return_value=None)), \
+                patch.object(mgr, "_kill_process", new=AsyncMock()), \
+                patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
+                patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+            # The mind itself is not reachable from a test; the turn ends there,
+            # after the spawn this asserts on.
+            with pytest.raises(ValueError, match="No mind container URL"):
+                async for _event in mgr.send_message("s8", "hello"):
+                    pass
+        assert spawned.await_args.args[1] == "claude-haiku-5-5"
+        assert (await mgr._get_row("s8"))["model"] == "claude-haiku-5-5"
         await close_manager(mgr)
 
     _run(scenario())

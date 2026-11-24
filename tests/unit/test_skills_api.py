@@ -319,3 +319,146 @@ def test_every_route_requires_the_admin_bearer(mind):
         lambda: client.post("/skills/memory/resolve?from=claude"),
     ):
         assert call().status_code == 401
+
+
+# ---- generated skills: the install's own folder (story 858) -----------------
+
+GENERATED_TEXT = "---\nname: made-here\ndescription: made on this install\n---\nGenerated body.\n"
+
+
+def _install_folder(repo):
+    """`install/workflow-skills` of the project the fixture built."""
+    folder = repo.parents[1] / "install" / "workflow-skills"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def test_the_skills_route_lists_a_generated_skill_and_says_where_it_comes_from(mind):
+    client, repo, installed = mind
+    _write_skill(repo, "tracked-only", "tracked body\n")
+    _write_skill(repo, "made-here", "---\nname: made-here\ndescription: tracked\n---\nTracked body.\n")
+    _write_skill(_install_folder(repo), "made-here", GENERATED_TEXT)
+    _write_skill(_install_folder(repo), "only-generated", GENERATED_TEXT.replace("made-here", "only-generated"))
+    (_install_folder(repo) / ".as-generated" / "made-here").mkdir(parents=True)
+
+    body = client.get("/skills", headers=_auth()).json()
+
+    rows = {row["name"]: row for row in body["skills"]}
+    assert set(rows) == {"tracked-only", "made-here", "only-generated"}
+    assert rows["tracked-only"]["source"] == "tracked" and rows["tracked-only"]["shadowed"] is False
+    assert rows["only-generated"]["source"] == "generated"
+    assert rows["only-generated"]["state"] == skills_api.STATE_NOT_INSTALLED
+    assert rows["made-here"]["source"] == "generated" and rows["made-here"]["shadowed"] is True
+    assert "Generated body." in rows["made-here"]["repo"]
+    assert "Tracked body." in rows["made-here"]["shadowed_text"]
+
+
+def test_the_diff_route_compares_a_generated_skill_not_the_tracked_one_of_that_name(mind):
+    client, repo, installed = mind
+    _write_skill(repo, "made-here", "---\nname: made-here\ndescription: tracked\n---\nTracked body.\n")
+    _write_skill(_install_folder(repo), "made-here", GENERATED_TEXT)
+    _write_skill(installed, "made-here", GENERATED_TEXT.replace("Generated body.", "Edited by the mind."))
+
+    diff = client.get("/skills/made-here/diff", headers=_auth()).json()["diff"]
+
+    assert "-Generated body." in diff and "+Edited by the mind." in diff
+    assert "Tracked body." not in diff
+
+
+def test_a_generated_skill_is_never_written_back_into_the_tracked_folder(mind):
+    client, repo, installed = mind
+    _write_skill(_install_folder(repo), "made-here", GENERATED_TEXT)
+    _write_skill(installed, "made-here", GENERATED_TEXT)
+    client.post("/skills/made-here/install", headers=_auth())
+
+    response = client.post("/skills/made-here/write-back", headers=_auth())
+
+    assert response.status_code == 422
+    assert "generated" in response.json()["error"]
+    assert list(repo.iterdir()) == []
+
+
+@pytest.mark.parametrize("shape", ["incomplete", "link", "unreadable folder"])
+def test_a_generated_name_is_never_written_back_even_when_its_folder_is_not_a_whole_skill(
+        mind, shape):
+    client, repo, installed = mind
+    folder = _install_folder(repo)
+    _write_skill(installed, "made-here", GENERATED_TEXT)
+    if shape == "incomplete":
+        (folder / "made-here").mkdir()
+    elif shape == "link":
+        (folder / "made-here").symlink_to(repo)
+    else:
+        folder.chmod(0o000)
+
+    try:
+        response = client.post("/skills/made-here/write-back", headers=_auth())
+    finally:
+        folder.chmod(0o755)
+
+    assert response.status_code == 422
+    assert list(repo.iterdir()) == []
+
+
+def test_a_generated_skill_past_the_size_limit_is_not_delivered(mind, monkeypatch):
+    client, repo, installed = mind
+    _write_skill(_install_folder(repo), "made-here", GENERATED_TEXT)
+    (_install_folder(repo) / "made-here" / "blob").write_bytes(b"x" * 2048)
+    monkeypatch.setattr(skill_reference, "MAX_SKILL_BYTES", 1024)
+
+    response = client.post("/skills/made-here/install", headers=_auth())
+
+    assert response.status_code == 404
+    assert "larger than a skill should be" in response.json()["error"]
+    assert not (installed / "made-here").exists()
+
+
+# --- install_skill(only_if_unchanged): the update the install makes of a delivered skill ---
+
+GEN = "gen-skill"
+GEN_TEXT = "---\nname: gen-skill\ndescription: generated\n---\nFirst.\n"
+
+
+def _delivered(mind, tmp_path):
+    """A generated skill delivered through the real install, as a mind is given it."""
+    client, repo, installed = mind
+    folder = _install_folder(repo)
+    _write_skill(folder, GEN, GEN_TEXT)
+    skills_api.install_skill("claude_cli", GEN)
+    return folder, installed
+
+
+def test_an_update_install_replaces_a_copy_the_mind_has_not_touched(mind, tmp_path):
+    folder, installed = _delivered(mind, tmp_path)
+    _write_skill(folder, GEN, GEN_TEXT.replace("First.", "Second."))
+
+    skills_api.install_skill("claude_cli", GEN, only_if_unchanged=True)
+
+    assert "Second." in (installed / GEN / "SKILL.md").read_text()
+
+
+def test_an_update_install_refuses_a_copy_the_mind_edited_and_changes_nothing(mind, tmp_path):
+    folder, installed = _delivered(mind, tmp_path)
+    (installed / GEN / "SKILL.md").write_text("---\nname: gen-skill\ndescription: mine\n---\nMine.\n")
+    _write_skill(folder, GEN, GEN_TEXT.replace("First.", "Second."))
+
+    with pytest.raises(skills_api.SkillConflict):
+        skills_api.install_skill("claude_cli", GEN, only_if_unchanged=True)
+
+    assert "Mine." in (installed / GEN / "SKILL.md").read_text()
+    assert "Second." not in (skills_api.reference_root() / GEN / "SKILL.md").read_text()
+
+
+def test_an_update_install_refuses_a_copy_with_no_delivery_recorded(mind, tmp_path):
+    client, repo, installed = mind
+    folder = _install_folder(repo)
+    _write_skill(folder, GEN, GEN_TEXT)
+    # What every copy at home today is: rendered, with nothing said of what from.
+    skill_reference.install("skill", GEN, "claude", GEN_TEXT, folder / GEN,
+                            catalog=lambda h: None, notify=lambda text: None)
+    _write_skill(folder, GEN, GEN_TEXT.replace("First.", "Second."))
+
+    with pytest.raises(skills_api.SkillConflict):
+        skills_api.install_skill("claude_cli", GEN, only_if_unchanged=True)
+
+    assert "First." in (installed / GEN / "SKILL.md").read_text()

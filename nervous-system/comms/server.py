@@ -2326,6 +2326,38 @@ async def mind_grants(mind_id: str, request: Request):
     return await roles.grants_for(mind["mind_id"])
 
 
+@app.get("/roles/{slug}/holders")
+async def role_holders(slug: str, request: Request):
+    """The minds that hold a role right now, as far as the asker may know.
+
+    Read from the roles tables at the moment of the call, so a role given or
+    taken on the console is a changed answer on the next ask. Only a mind's
+    id and name come back. A mind's credential, like any person's, is told
+    the minds of its own owner and no other owner's; the admin sees every
+    holder; a caller with no owner and no admin right is told nobody. A role
+    that nobody holds and a role that does not exist both answer an empty
+    list (the second with `exists` false), never an error.
+    """
+    from hive_data import roles
+
+    caller = _caller(request)
+    role = await roles.role_by_slug(slug)
+    if role is None:
+        return {"role": slug, "exists": False, "minds": []}
+    everything = caller.sees_everything()
+    asker = user_access.normalize_username(caller.username)
+    minds: list[dict] = []
+    if everything or asker:
+        for held in await roles.holders(role["id"]):
+            mind = await core.get_mind_by_id_or_name(held)
+            if not mind:
+                continue
+            if not everything and user_access.normalize_username(mind["owner"]) != asker:
+                continue
+            minds.append({"mind_id": mind["mind_id"], "name": mind["name"]})
+    return {"role": slug, "exists": True, "minds": minds}
+
+
 @app.get("/broker/minds")
 async def broker_get_minds():
     """Return all registered minds from the broker database.
