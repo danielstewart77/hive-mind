@@ -98,7 +98,7 @@ def test_reading_the_page_and_a_repo_update_leave_a_differing_role_as_it_was(rep
 
 
 def test_keep_yours_leaves_both_copies_and_the_role_still_differs(repo, monkeypatch):
-    _write(repo, "planner", name="Planner", model=None, tools=[], skills=["plan-feature"], hooks=[])
+    _write(repo, "planner", name="Planner", model=None, tools=[], skills=["design-spec"], hooks=[])
     role_id = testing.run(store.create_role("Planner", slug="planner", skills=["brainstorm"]))
     client = _client(monkeypatch)
 
@@ -107,20 +107,20 @@ def test_keep_yours_leaves_both_copies_and_the_role_still_differs(repo, monkeypa
     row = _row(client, "planner")
     assert row["state"] == "differs" and row["kept"] is True
     assert testing.run(store.role(role_id))["skills"] == ["brainstorm"]
-    _write(repo, "planner", name="Planner", model=None, tools=[], skills=["plan-feature", "x"], hooks=[])
+    _write(repo, "planner", name="Planner", model=None, tools=[], skills=["design-spec", "x"], hooks=[])
     assert _row(client, "planner")["kept"] is False
 
 
 def test_take_the_repo_update_replaces_the_role_with_the_repo_copy(repo, monkeypatch):
     _write(repo, "planner", name="Planner", model="claude-fable-5-2", tools=["web"],
-           skills=["plan-feature"], hooks=[])
+           skills=["design-spec"], hooks=[])
     role_id = testing.run(store.create_role("Planner", slug="planner", skills=["brainstorm"]))
     client = _client(monkeypatch)
 
     assert client.post("/api/roles/repo/planner/take").status_code == 200
 
     hive = testing.run(store.role(role_id))
-    assert (hive["skills"], hive["tools"], hive["model"]) == (["plan-feature"], ["web"], "claude-fable-5-2")
+    assert (hive["skills"], hive["tools"], hive["model"]) == (["design-spec"], ["web"], "claude-fable-5-2")
     assert _row(client, "planner")["state"] == "tracked"
 
 
