@@ -64,7 +64,7 @@ mkdir -p $CLAUDE_CONFIG_DIR/skills/my-skill
 cp /tmp/my-skill.md $CLAUDE_CONFIG_DIR/skills/my-skill/SKILL.md
 ```
 
-The canonical (version-controlled) copy goes in `specs/skills/`:
+The canonical (version-controlled) copy goes in `specs/skills/` only when the skill is identical on every install: it names no mind, no person and no install. A skill that is personal to a mind, or that a workflow document generates, stays in that mind's own skills folder and is never tracked there.
 
 ```bash
 mkdir -p /usr/src/app/specs/skills/my-skill

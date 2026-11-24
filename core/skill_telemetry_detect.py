@@ -19,8 +19,8 @@ the bare name is whatever follows the last ``:``.
 
 **dsh**, read through ``dsh_transcript``'s translation into the Claude shape.
 Its skill tool is ``skill`` and its arguments arrive as the JSON text the
-model wrote, ``{"name": "take-a-task"}``, so the translated block is
-``{"type":"tool_use","name":"skill","input":"{\"name\": \"take-a-task\"}"}``.
+model wrote, ``{"name": "backlog"}``, so the translated block is
+``{"type":"tool_use","name":"skill","input":"{\"name\": \"backlog\"}"}``.
 Arguments that are not JSON, and a name dsh's own pattern refuses (a
 ``namespace:`` prefix, capitals), name no skill: dsh loaded nothing.
 
