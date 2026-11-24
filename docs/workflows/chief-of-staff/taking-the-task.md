@@ -67,8 +67,7 @@ talking to the owner, and editing the install's file or a skill. Those are yours
    preferences, are read where the top document says, before routing. Its id
    is the `id` of its row in `GET /broker/minds`. Weigh subscription pressure
    when choosing between minds on different providers: the provider-pressure
-   tool
-   (read-only, sub-second, same figures as the dashboard). `used_percent` is
+   tool (read-only, sub-second, same figures as the dashboard). `used_percent` is
    how much of that provider's 5h or 7d allowance is spent; `band` is `ok`
    under 60, `warn` 60 to 85 (approaching the limit), `hot` over 85. Read
    `worst` and `approaching`; a provider in `unknown` has no current reading,
