@@ -165,7 +165,11 @@ Planning ends with rows on the board, not with a document. `board` below is
 the install's board tool, used with its write credential. A feature needs an epic to hang from —
 if the owner has not named one, ask which, and ask nothing else in that turn.
 
-The coder runs autonomously from what this skill wrote down — so a requirement left vague here
+This is where the specification is agreed. There are exactly two stops, both
+here: the requirements read-back in phase 2 and the protected-behaviour list
+in phase 3.
+The coder runs autonomously from what this skill wrote down and comes back to
+the owner only on a problem it cannot decide — so a requirement left vague here
 is a requirement nobody asks about before it is built.
 
 **Plan from what the owner says, not from the code.** This skill does not read
@@ -181,7 +185,10 @@ Two consequences worth saying out loud. A plan agreed here can turn out to
 disagree with the code, and it will also be **incomplete** — a mind that
 cannot read the code cannot know about the migration, the caller or the
 failure path the module's own conventions demand. Neither is a defect in
-this skill and neither is a reason to guess. Do not pad the list here with speculation to cover for it.
+this skill and neither is a reason to guess. The coder's first phase completes
+the list from the code, decides what the approved requirements already
+determine, and takes back to the owner only what genuinely changes or widens
+what was approved. Do not pad the list here with speculation to cover for it.
 
 ## 1. Interrogate the requirements
 
@@ -222,7 +229,8 @@ If a requirement needs a technical word to state, it is two requirements or
 it is an implementation detail that does not belong on the list.
 
 **Stop here and wait for the owner's approval.** Nothing goes on the board and
-no test is described until the list is signed off.
+no test is described until the list is signed off. This is the first
+of exactly two stops, and both of them are in this skill.
 
 ## 3. Name the behaviours tests must protect
 
@@ -231,7 +239,9 @@ short, high-level list of behaviours worth protecting against future change,
 the owner approves that list, and the coder turns each one into whatever test
 actually protects it. Judging a test is reading the code — can it import and
 call the thing, would it fail if the behaviour broke, does it pass for the
-wrong reason — and none of that is answerable from here.
+wrong reason — and none of that is answerable from here. The test standard
+lives inside the coder's skill, in that skill's own directory, because the coder is the
+only place tests are designed; it is not this skill's to read or to apply.
 
 A protected behaviour is a statement about what the system does that you can
 believe has a code path behind it: something looked up, decided, selected,
@@ -264,7 +274,8 @@ running it and reports at ship time.
 When a change warrants no protected behaviours at all — a skill, a document,
 a configuration value, a removal — say so in a sentence with the reason.
 
-**Stop here and wait for the owner's approval.** The coder may
+**Stop here and wait for the owner's approval.** This is the second and last
+stop in the whole build; nothing after it asks the owner anything. The coder may
 later report that a behaviour on this list cannot be reached by a test. That
 is a legitimate answer and it is reported at ship time, not a defect in this
 list — but a test protecting a behaviour never approved does not get
@@ -324,7 +335,10 @@ story writes a plausible row, and the board is what gets built from.
 Report the feature's backlog number, its stories in build order, and which
 of them can start immediately.
 
-The only stories the coder may hand back are the ones this plan marks as needing the owner, and
+Approving this plan authorises the whole feature. The coder then builds every
+story in it, to merged and pulled, without asking again — a story is not a
+separate permission, it is part of the thing already agreed. The only
+stories it may hand back are the ones this plan marks as needing the owner, and
 those come back as a list of exact questions once the rest is built.
 
 ## plan-feature/briefs/write-a-story.md
