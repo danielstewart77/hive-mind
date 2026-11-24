@@ -239,3 +239,423 @@ no worker is active. Reconciliation validates the full graph/ownership, preserve
 starting base/worktree and dirty edits, and clears candidate/review evidence. An active job
 remains blocked until explicitly unblocked. Re-plan against the new approved source; do not
 overwrite revisions merely to make stale reviews match.
+
+## feature/scripts/swarm.py
+
+```python
+"""Local, serialized manifest/worktree operations. No remote or agent side effects."""
+import argparse
+from contextlib import contextmanager
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+class Error(Exception):
+    pass
+
+
+STATES = {'pending', 'starting', 'active', 'candidate', 'reviewed', 'integrated'}
+
+
+def git(repo, *args):
+    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True)
+    if result.returncode:
+        raise Error(result.stderr.strip() or 'Git command failed')
+    return result.stdout.strip()
+
+
+def oid(repo, value):
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
+        raise Error('An exact full commit SHA is required')
+    if git(repo, 'rev-parse', '--verify', value + '^{commit}') != value:
+        raise Error('Commit SHA did not resolve exactly')
+    return value
+
+
+def ancestor(repo, older, newer):
+    result = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', older, newer],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Error('Expected starting/review commit is not an ancestor')
+
+
+def inside(root, path):
+    root, path = Path(root).resolve(), Path(path).resolve()
+    if path == root or root not in path.parents:
+        raise Error('Worktree must remain strictly inside workspace_root')
+    return path
+
+
+def ownership(value):
+    if not isinstance(value, str) or not value or '\\' in value:
+        raise Error('Ownership must be a nonempty slash-separated relative path')
+    if value == '.':
+        return value
+    if value.startswith('/') or any(x in value for x in '*?[]:'):
+        raise Error('Ownership globs and absolute paths are unsupported')
+    parts = value.rstrip('/').split('/')
+    if any(x in ('', '.', '..') for x in parts):
+        raise Error('Ownership path is not normalized')
+    return '/'.join(parts).casefold()
+
+
+def overlap(left, right):
+    return left == '.' or right == '.' or left == right or left.startswith(right + '/') or right.startswith(left + '/')
+
+
+def validate(data):
+    if data.get('version', 1) != 1:
+        raise Error('Unsupported manifest version')
+    for key in ('feature_id', 'repo', 'feature_branch', 'workspace_root', 'stories'):
+        if key not in data:
+            raise Error('Missing manifest field: ' + key)
+    if type(data['feature_id']) is not int or data['feature_id'] <= 0:
+        raise Error('feature_id must be a positive integer')
+    if not isinstance(data['feature_branch'], str) or not data['feature_branch']:
+        raise Error('feature_branch is required')
+    if not isinstance(data['stories'], list):
+        raise Error('stories must be a list')
+    ids = set()
+    for story in data['stories']:
+        if type(story.get('id')) is not int or story['id'] <= 0 or story['id'] in ids:
+            raise Error('Story IDs must be unique positive integers')
+        ids.add(story['id'])
+        if type(story.get('revision')) is not int or story['revision'] < 1:
+            raise Error('Story revision must be a positive integer')
+        if type(story.get('ready')) is not bool or not isinstance(story.get('owns'), list) or not story['owns']:
+            raise Error('Each story needs boolean ready and nonempty owns')
+        story['owns'] = [ownership(x) for x in story['owns']]
+        if not isinstance(story.get('predecessors'), list) or any(type(x) is not int for x in story['predecessors']):
+            raise Error('predecessors must be integer story IDs')
+        if story.get('status', 'pending') not in STATES:
+            raise Error('Unknown story state')
+    graph = {s['id']: s['predecessors'] for s in data['stories']}
+    visiting, visited = set(), set()
+    def visit(item):
+        if item not in graph:
+            raise Error('Missing predecessor: ' + str(item))
+        if item in visiting:
+            raise Error('Predecessor cycle detected')
+        if item in visited:
+            return
+        visiting.add(item)
+        for predecessor in graph[item]:
+            visit(predecessor)
+        visiting.remove(item)
+        visited.add(item)
+    for item in graph:
+        visit(item)
+    return data
+
+
+@contextmanager
+def manifest_lock(path):
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name(path.name + '.lock')
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise Error(f'Manifest locked: {lock}. Inspect owner before recovering a stale lock.')
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump({'pid': os.getpid()}, stream)
+        yield
+    finally:
+        lock.unlink()
+
+
+def save(path, data):
+    validate(data)
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def initialize(path, config):
+    with manifest_lock(path):
+        if Path(path).exists():
+            raise Error('Manifest already exists; resume using existing manifest')
+        data = validate(copy.deepcopy(config))
+        data['repo'] = str(Path(data['repo']).resolve())
+        data['workspace_root'] = str(Path(data['workspace_root']).resolve())
+        data['version'] = 1
+        git(data['repo'], 'check-ref-format', '--branch', data['feature_branch'])
+        git(data['repo'], 'rev-parse', '--verify', 'refs/heads/' + data['feature_branch'])
+        for story in data['stories']:
+            if any(k in story for k in ('base_sha', 'candidate_sha', 'worktree', 'review')) or story.get('status', 'pending') != 'pending':
+                raise Error('Initial configuration cannot import execution state')
+            story['status'] = 'pending'
+        save(path, data)
+        return data
+
+
+def queue(data):
+    integrated = {s['id'] for s in data['stories'] if s['status'] == 'integrated'}
+    reservations = [s for s in data['stories'] if s['status'] not in ('pending', 'integrated')]
+    result = []
+    for story in sorted(data['stories'], key=lambda s: s['id']):
+        if story['status'] != 'pending' or story.get('blocked') or not story['ready'] or not set(story['predecessors']) <= integrated:
+            continue
+        if any(overlap(a, b) for other in reservations for a in story['owns'] for b in other['owns']):
+            continue
+        result.append(story['id'])
+        reservations.append(story)
+    return result
+
+
+def paths(data, story):
+    name = f"feature-{data['feature_id']}-story-{story['id']}"
+    return inside(data['workspace_root'], Path(data['workspace_root']) / name), 'swarm/' + name
+
+
+def verify_tree(data, story, clean=False):
+    path, branch = paths(data, story)
+    if story.get('worktree') != str(path) or story.get('branch') != branch:
+        raise Error('Recorded worktree/branch differs from deterministic assignment')
+    if Path(git(path, 'rev-parse', '--show-toplevel')).resolve() != path:
+        raise Error('Unexpected worktree root')
+    common = Path(git(data['repo'], 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
+    if Path(git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve() != common:
+        raise Error('Worktree belongs to another repository')
+    if git(path, 'symbolic-ref', '--short', 'HEAD') != branch:
+        raise Error('Worktree branch changed')
+    ancestor(path, oid(path, story['base_sha']), git(path, 'rev-parse', 'HEAD'))
+    if clean and git(path, 'status', '--porcelain', '--untracked-files=all'):
+        raise Error('Worktree is dirty; preserve and reconcile its changes')
+    return path
+
+
+def current_candidate(data, story):
+    path = verify_tree(data, story, clean=True)
+    candidate = oid(path, story.get('candidate_sha'))
+    if git(path, 'rev-parse', 'HEAD') != candidate:
+        raise Error('Candidate is stale; record and review the new commit')
+    return path, candidate
+
+
+def evidence(path):
+    raw = Path(path).read_bytes()
+    value = json.loads(raw)
+    checks = value.get('checks')
+    if not isinstance(checks, list) or not checks or any(not isinstance(c, dict) or not c.get('command') or type(c.get('exit_code')) is not int or c['exit_code'] != 0 for c in checks):
+        raise Error('Evidence must contain nonempty successful command/exit_code checks')
+    return value, {'path': str(Path(path).resolve()), 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def execute(manifest, command, story_id=None, **args):
+    with manifest_lock(manifest):
+        data = validate(json.loads(Path(manifest).read_text(encoding='utf-8')))
+        if command == 'queue':
+            return queue(data)
+        story = next((s for s in data['stories'] if s['id'] == story_id), None)
+        if story is None:
+            raise Error('Unknown story')
+        repo = data['repo']
+        if command == 'start':
+            if story.get('blocked') or story['status'] == 'integrated':
+                raise Error('Story blocked or already integrated')
+            if story['status'] == 'pending':
+                if story_id not in queue(data):
+                    raise Error('Story is not eligible: dependency, readiness, or ownership')
+                path, branch = paths(data, story)
+                if path.exists():
+                    raise Error('Assigned worktree path already exists')
+                if 'refs/heads/' + branch in git(repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/' + branch).splitlines():
+                    raise Error('Assigned story branch already exists; refuse to adopt unrelated work')
+                base = git(repo, 'rev-parse', '--verify', 'refs/heads/' + data['feature_branch'])
+                story.update(status='starting', base_sha=base, worktree=str(path), branch=branch)
+                save(manifest, data)  # Persist intent before Git mutation; retry can recover.
+            if story['status'] == 'starting' and not Path(story['worktree']).exists():
+                Path(data['workspace_root']).mkdir(parents=True, exist_ok=True)
+                branches = git(repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/' + story['branch']).splitlines()
+                if 'refs/heads/' + story['branch'] in branches:
+                    if git(repo, 'rev-parse', story['branch']) != story['base_sha']:
+                        raise Error('Existing branch differs from recorded starting commit')
+                    git(repo, 'worktree', 'add', story['worktree'], story['branch'])
+                else:
+                    git(repo, 'worktree', 'add', '-b', story['branch'], story['worktree'], story['base_sha'])
+            verify_tree(data, story)
+            if story['status'] == 'starting':
+                story['status'] = 'active'
+        elif command == 'block':
+            if story['status'] == 'integrated' or not args.get('reason'):
+                raise Error('Cannot block integrated story; reason is required')
+            story['blocked'] = args['reason']
+        elif command == 'unblock':
+            integrated = {s['id'] for s in data['stories'] if s['status'] == 'integrated'}
+            if not story['ready'] or not set(story['predecessors']) <= integrated:
+                raise Error('Story readiness or dependencies still block resumption')
+            story.pop('blocked', None)
+        elif command == 'reconcile':
+            if not args.get('stopped') or story.get('mutation_worktree') or story['status'] in ('starting', 'integrated'):
+                raise Error('Reconciliation requires stopped worker, released mutation tree, and nonintegrated story')
+            replacement = json.loads(Path(args['source']).read_text(encoding='utf-8'))
+            keys = {'id', 'revision', 'predecessors', 'ready', 'owns'}
+            if set(replacement) != keys or replacement['id'] != story_id or type(replacement['revision']) is not int or replacement['revision'] < story['revision']:
+                raise Error('Source must contain exact story fields and a nondecreasing revision')
+            if story['status'] != 'pending':
+                verify_tree(data, story)
+            story.update(replacement)
+            validate(data)
+            if story['status'] != 'pending' and any(overlap(a, b) for other in data['stories']
+                if other['id'] != story_id and other['status'] not in ('pending', 'integrated')
+                for a in story['owns'] for b in other['owns']):
+                raise Error('Updated ownership overlaps another reserved story')
+            for key in ('candidate_sha', 'review_base_sha', 'review', 'integration_sha', 'integration_evidence'):
+                story.pop(key, None)
+            if story['status'] != 'pending':
+                story['status'] = 'active'
+                story['blocked'] = 'Source reconciled; replan and explicitly unblock before dispatch'
+        elif command == 'candidate':
+            if story['status'] not in ('active', 'candidate', 'reviewed') or story.get('mutation_worktree') or story.get('blocked'):
+                raise Error('Story cannot change candidate in its current state')
+            path = verify_tree(data, story, clean=True)
+            base, head = oid(repo, args.get('base')), oid(repo, args.get('head'))
+            if git(path, 'rev-parse', 'HEAD') != head:
+                raise Error('Candidate must equal story branch HEAD')
+            ancestor(repo, base, head)
+            ancestor(repo, story['base_sha'], base)
+            if base != git(repo, 'rev-parse', 'refs/heads/' + data['feature_branch']):
+                raise Error('Review base must equal current feature branch tip')
+            if base == head:
+                raise Error('Candidate has no changes from review base')
+            story.update(status='candidate', candidate_sha=head, review_base_sha=base)
+            story.pop('review', None)
+        elif command == 'review-record':
+            if story['status'] not in ('candidate', 'reviewed') or story.get('mutation_worktree') or story.get('blocked'):
+                raise Error('Story is not ready for review recording')
+            _, head = current_candidate(data, story)
+            value, artifact = evidence(args['evidence'])
+            pins = dict(base_sha=story['review_base_sha'], candidate_sha=head, story_revision=story['revision'])
+            if args.get('base') != pins['base_sha'] or args.get('head') != head or any(value.get(k) != v for k, v in pins.items()):
+                raise Error('Review evidence pins differ from current story')
+            if value.get('verdict') != 'APPROVED' or value.get('unresolved_findings') != []:
+                raise Error('Review has unresolved findings or lacks approval')
+            story.update(status='reviewed', review={**pins, 'evidence': artifact})
+        elif command == 'mutation-create':
+            if story['status'] not in ('candidate', 'reviewed') or story.get('blocked'):
+                raise Error('Mutation review requires a candidate')
+            _, head = current_candidate(data, story)
+            path = inside(data['workspace_root'], Path(data['workspace_root']) / f"mutation-{data['feature_id']}-{story_id}-{head}")
+            if story.get('mutation_worktree') not in (None, str(path)):
+                raise Error('Another mutation worktree is still assigned')
+            if path.exists() and not story.get('mutation_worktree'):
+                raise Error('Unowned mutation path exists')
+            story['mutation_worktree'] = str(path)
+            save(manifest, data)
+            if not path.exists():
+                git(repo, 'worktree', 'add', '--detach', str(path), head)
+            verify_mutation(data, story, clean=False)
+        elif command == 'mutation-remove':
+            if not story.get('mutation_worktree'):
+                return story
+            path = inside(data['workspace_root'], story['mutation_worktree'])
+            registered = [Path(field[len('worktree '):]).resolve()
+                          for field in git(repo, 'worktree', 'list', '--porcelain', '-z').split('\0')
+                          if field.startswith('worktree ')]
+            if not (story.get('mutation_removing') and not path.exists() and path not in registered):
+                path = verify_mutation(data, story, clean=True)
+                story['mutation_removing'] = True
+                save(manifest, data)
+                git(repo, 'worktree', 'remove', str(path))
+            story.pop('mutation_worktree')
+            story.pop('mutation_removing', None)
+        elif command == 'record-integrated':
+            if story['status'] not in ('reviewed', 'integrated') or story.get('blocked') or story.get('mutation_worktree'):
+                raise Error('Story must be reviewed and mutation worktree released')
+            _, head = current_candidate(data, story)
+            pins = dict(base_sha=story['review_base_sha'], candidate_sha=head, story_revision=story['revision'])
+            if any(story.get('review', {}).get(k) != v for k, v in pins.items()):
+                raise Error('Review is stale')
+            validated = oid(repo, args.get('validated_head'))
+            if validated != head:
+                raise Error('Integration must fast-forward to the reviewed candidate exactly')
+            if git(repo, 'rev-parse', 'refs/heads/' + data['feature_branch']) != validated:
+                raise Error('Feature branch differs from validated integration commit')
+            for record in git(repo, 'worktree', 'list', '--porcelain', '-z').split('\0\0'):
+                fields = record.split('\0')
+                if 'branch refs/heads/' + data['feature_branch'] in fields:
+                    feature_path = next(f[len('worktree '):] for f in fields if f.startswith('worktree '))
+                    if git(feature_path, 'status', '--porcelain', '--untracked-files=all'):
+                        raise Error('Feature checkout is dirty; validation must match the committed candidate')
+            ancestor(repo, head, validated)
+            value, artifact = evidence(args['evidence'])
+            if value.get('validated_head') != validated:
+                raise Error('Integration evidence is stale')
+            story.update(status='integrated', integration_sha=validated, integration_evidence=artifact)
+        else:
+            raise Error('Unknown command')
+        save(manifest, data)
+        return story
+
+
+def verify_mutation(data, story, clean):
+    path = inside(data['workspace_root'], story['mutation_worktree'])
+    expected = Path(data['workspace_root']) / f"mutation-{data['feature_id']}-{story['id']}-{story['candidate_sha']}"
+    if path != expected.resolve() or Path(git(path, 'rev-parse', '--show-toplevel')).resolve() != path:
+        raise Error('Unexpected mutation worktree path')
+    common = git(data['repo'], 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    if Path(git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve() != Path(common).resolve():
+        raise Error('Mutation worktree belongs to another repository')
+    if git(path, 'rev-parse', '--abbrev-ref', 'HEAD') != 'HEAD' or git(path, 'rev-parse', 'HEAD') != story['candidate_sha']:
+        raise Error('Mutation worktree is not detached at candidate commit')
+    if clean and git(path, 'status', '--porcelain', '--untracked-files=all'):
+        raise Error('Mutation worktree is dirty; restore only owned mutations before removal')
+    return path
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manifest', required=True)
+    commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('init').add_argument('--config', required=True)
+    commands.add_parser('queue')
+    for name in ('start', 'candidate', 'review-record', 'mutation-create', 'mutation-remove', 'record-integrated', 'block', 'unblock', 'reconcile'):
+        command = commands.add_parser(name)
+        command.add_argument('story', type=int)
+        if name in ('candidate', 'review-record'):
+            command.add_argument('--base', required=True)
+            command.add_argument('--head', required=True)
+        if name in ('review-record', 'record-integrated'):
+            command.add_argument('--evidence', required=True)
+        if name == 'record-integrated':
+            command.add_argument('--validated-head', required=True)
+        if name == 'block':
+            command.add_argument('--reason', required=True)
+        if name == 'reconcile':
+            command.add_argument('--source', required=True)
+            command.add_argument('--stopped', action='store_true', required=True)
+    args = vars(parser.parse_args())
+    try:
+        if args['command'] == 'init':
+            result = initialize(args['manifest'], json.loads(Path(args['config']).read_text(encoding='utf-8')))
+        else:
+            manifest, command, story = args.pop('manifest'), args.pop('command'), args.pop('story', None)
+            result = execute(manifest, command, story, **args)
+        print(json.dumps(result, indent=2))
+    except (Error, OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({'error': str(exc)}), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+```
