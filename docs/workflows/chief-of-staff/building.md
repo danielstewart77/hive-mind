@@ -659,3 +659,147 @@ def main():
 if __name__ == '__main__':
     sys.exit(main())
 ```
+
+## story/SKILL.md
+
+---
+name: story
+description: Deliver one complete software story against its accepted criteria. Use for implementation of the whole user outcome, not a board read or edit, a bounded fix, or feature-wide delivery.
+---
+
+Follow the [skill announcement contract](../task/references/observability.md) for entry, handoff and exit.
+
+Announce `story` before acting. Resolve the accepted criteria from the story's row on the board (`backlog` skill: `board show <id>`) or from material you were handed; a local story is sufficient when there is no row. The story's description carries what it delivers, what "done" means, what it must leave alone, what it waits on, and the **protected behaviours** the owner approved. Freeze the complete criterion IDs, the required checks and the review requirement before implementation. Never silently drop a criterion.
+
+Read the codebase the story lands in before writing. The plan was written as behaviour and may be incomplete or disagree with the code (top document, rule 5). Stop and report through the mind that briefed you, without building past it, only when a question is allowed by the top document, rule 4, or existing behaviour collides with a criterion in a way the plan does not resolve, a gap has more than one defensible answer, or the honest answer widens the story.
+
+Tests: top document, rule 20; the standard is [the test standard](references/test-standard.md). A story whose row says "nothing to protect" gets no new tests; verify it by running it.
+
+Use `task` for separable bounded changes only when useful; completing tasks is not acceptance.
+
+Verify every criterion against the final candidate. Review is required for every story: have an independent thread that did not write the change (`refute-requirements`, `refute-tests`, `refute-edges`) read the pinned candidate against the criteria and protected behaviours, record the revision it approved, and treat that approval as void after any further change. Use the [shared gate](../task/references/completion.md) before claiming acceptance. Report remaining criteria if blocked.
+
+A story ends as a committed, reviewed candidate on its own branch. Integration belongs to `feature`, or to the brief that handed you a single story.
+
+## story/references/test-standard.md
+
+# The test standard
+
+## The standard
+
+A test may only be written when it depends on code external to the test to
+pass or fail.
+
+A test must name and guard one specific behaviour against unintentional code
+changes. That is only possible when the behaviour is controlled by code
+external to the test, and that code is what the test depends on to pass or
+fail.
+
+A test must import the code it protects — not copy it, not impersonate it —
+and must literally call it.
+
+If that cannot reasonably be done, no test is needed. Say so and move on.
+Never substitute a test that asserts something adjacent.
+
+## Applying it
+
+Name the edit that would break the test — a specific change to a specific
+live function. If the only edit you can name is "someone deletes this line",
+there is nothing external behind the test and it does not get written.
+
+Assert on what the called code produced: the returned value, the stored row,
+the file, the request that went out. Not on a value the test computed, a
+constant, or a stub's own call log.
+
+Constructing an input is allowed — a dict, a fixed clock, a temp file. What
+is asserted on must come from the import.
+
+A stub belongs only where the process stops being ours: the transport, the
+clock, the filesystem root. Never on the code the behaviour lives in.
+
+A test that already passes against unchanged HEAD proves nothing about the
+change.
+
+Never assert a constant against itself. If the test says fifteen minutes, it
+says `15 * 60`.
+
+## Code whose job is to write into production
+
+The doctrine is that existing code is tested by wrapping it: import it, call
+it, assert on what it produced. That holds only while calling it is safe.
+When the job of the code is to insert something into production (a line in
+the live compose file, a key in the live env file, a mind registered on the
+live gateway, anything written where the running system reads it), a test
+that wraps it performs that insertion every time the suite runs. Such a test
+is not written (top document, rule 19).
+
+Do not decide that a redirect, a stand-in or a temporary folder makes it
+safe. Until the owner has answered, the behaviour is reported as
+unprotected, never covered by a test asserting something adjacent.
+
+Why: a suite once registered three fixture minds on the live gateway, and run
+inside another container it would have added a fixture mind to the live stack
+file and token lines to the live env file. It redirected some of what the
+code writes and not the rest, and which was which depended on where the suite
+happened to run.
+
+## Scope
+
+Coverage is judged against the requirement set as a whole, never counted per
+requirement. Read all of them, decide whether any test is warranted at all,
+and then decide which tests the set needs. There is no quota: a requirement
+may carry several tests, one test may guard behaviour several requirements
+describe, and a whole change may warrant none.
+
+Plenty of work warrants none. A skill, a document, a configuration value, a
+file move, a removal — none of these have code external to a test deciding
+whether it passes. Say so and move on.
+
+Where tests are warranted, each one still has to clear the standard above on
+its own, and every test name states the behaviour it guards.
+
+Tests land with the code, never as a follow-up.
+
+A removal earns no test. Delete the old tests and stop. Where a removal
+leaves real behaviour behind, that behaviour is the requirement and it gets
+the test.
+
+A one-time data migration earns no test. Moving data from one store to
+another is not a behaviour of the software — nothing runs it again, nothing
+regresses it, and there is no future edit a test could catch. What it gets
+instead is verification of the run itself: the counts and contents it loaded,
+compared against the source, reported per table. That is not a test suite and
+it does not live in one. The same holds for a one-off backfill, a schema
+cutover and any other job whose whole life is a single execution.
+
+Constraints stated for clarity — "don't break the terminal" — are not
+requirements and get no tests. The behaviours they name already have theirs.
+
+Model output is judged by reading it, never by asserting on it.
+
+## Disposal
+
+A test that fails this standard is deleted the moment it is encountered, as
+part of the change in hand. Not logged, not proposed, not deferred.
+
+Deletion is per test. Never sweep a suite.
+
+## Gates and oracles
+
+The install's own suite is a gate: zero failures, always. A test referencing deleted code is
+deleted; a test reflecting correct new behaviour is patched. No failure is
+punted for being unrelated to the work in hand.
+
+A forked upstream's suite is an oracle and is never deleted. Run it on the
+files a change touches; triage failures into "ours broke it", "we changed it
+deliberately", or "environmental".
+
+## The reviewer
+
+`refute-tests` edits real source to prove which tests pass regardless of
+whether the behaviour they name is correct. Lock the working tree before
+spawning it and check `git status` after it reports — it leaves mutations
+behind.
+
+Kill a finding only when the claim is checked and wrong. What survives gets
+the test struck along with its requirement.
