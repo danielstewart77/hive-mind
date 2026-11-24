@@ -7,9 +7,6 @@ tools:
 skills:
   - backlog
   - brainstorm
-  - plan-feature
-  - take-a-task
-  - tend-the-ledger
 hooks:
   - auto_remember
   - contextual_retrieval
