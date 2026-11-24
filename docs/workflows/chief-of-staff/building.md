@@ -803,3 +803,99 @@ behind.
 
 Kill a finding only when the claim is checked and wrong. What survives gets
 the test struck along with its requirement.
+
+## task/SKILL.md
+
+---
+name: task
+description: Implement one bounded code change or bug fix and verify its result, even when the request references a story. Not for editing board items or delivering a whole story or feature.
+---
+
+Follow the [skill announcement contract](references/observability.md) for entry, handoff and exit.
+
+Announce `task` before acting. Own only the requested behaviour. Route a board lookup or edit to `backlog`, and whole-story acceptance to `story`, before writing. Do not require a board item, create a branch, or enlist another thread just because this is a task.
+
+Identify the observable result and the required verification before editing. For a bug, establish the failure where practical; implement the fix and verify the affected behaviour. Keep expected checks even if they cannot run. Before reporting completion use the [shared gate](references/completion.md). Report the outcome and any verification gap. Do not close a parent item.
+
+A passing gate does not authorise a push, a pull request, a board change or a deployment. Do those only when the brief you were given says to.
+
+## task/references/completion.md
+
+# Delivery gate
+
+Run `python <task-skill>/scripts/gate.py task|story|feature` with one JSON object on stdin (or give its path as the second argument). Use a pipe for a small task; no permanent manifest required. For a story/feature, derive the required IDs and checks from the previously agreed scope, not just the checks that passed. Preserve evidence in the story artifacts/feature manifest. A failed, skipped, stale or missing check is not done. A gate pass checks structure and reported evidence, not the truth of a free-text assertion. Verify the actual output, revision and target first. Never infer authorization from a pass.
+
+All routes require `checks` (nonempty unique list of expected IDs), `passed` (map from passed check IDs to concrete evidence), and `result` (observed outcome). Story also requires `criteria` (expected IDs), `accepted` (map from satisfied IDs to evidence), `candidate` (current revision), and boolean `review_required`; when true, `approved_revision` must equal `candidate` after an actual approved review. Feature requires `stories` (ordered IDs) and `integrated` (map from accepted and integrated IDs to evidence identifying the candidate and verified target). Use string IDs. Before reporting done or invoking an authorized closing helper, run the gate on current evidence; on nonzero exit do not perform the action. This gate writes nothing to the board.
+
+Example task input: `{"result":"Typo corrected in the rendered heading","checks":["heading"],"passed":{"heading":"Focused render check passed on the edited checkout"}}`.
+
+## task/references/observability.md
+
+# Skill observability
+
+When you actually begin using any skill (including a helper, a delegated skill or a later re-entry), announce it in user-visible commentary before its first action. Use one standalone line per invocation, in this exact format:
+
+Skill: `skill-name` — short reason this skill owns the requested outcome.
+
+Use the invoked skill name. Never announce a catalogue listing, a file inspection, an example, or mere consideration as an invocation. Do not announce again for each step or for returning from a helper. If routing changes, announce the new skill with the reason. When a running skill finishes, emit one standalone commentary line `Skill end: ` followed by its backtick-quoted name, a space, and `done`, `blocked`, `unverified`, `failed`, or `rerouted`. Use the same name as at start. Do not include sensitive identifiers or prompt excerpts. Announcements are observational: they never authorise work or replace evidence.
+
+For code delivery, prefer the smallest matching route: `task` for a bounded change, `story` for acceptance of one complete story, `feature` for an entire feature or an ordered list of stories. A read or edit of a board item alone is not code delivery.
+
+## task/scripts/gate.py
+
+```python
+import argparse
+import json
+from pathlib import Path
+import sys
+
+
+def text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def missing(scope, record):
+    if not isinstance(record, dict):
+        return ['expected an evidence object']
+    errors = [] if text(record.get('result')) else ['missing observed result']
+    groups = [('checks', 'passed')]
+    if scope == 'story':
+        groups.append(('criteria', 'accepted'))
+        if not text(record.get('candidate')):
+            errors.append('missing candidate revision')
+        if type(record.get('review_required')) is not bool:
+            errors.append('missing review decision')
+        elif record['review_required'] and record.get('approved_revision') != record.get('candidate'):
+            errors.append('current candidate lacks approved review')
+    if scope == 'feature':
+        groups.append(('stories', 'integrated'))
+    for expected, observed in groups:
+        ids = record.get(expected)
+        if not isinstance(ids, list) or not ids or not all(text(item) for item in ids) or len(set(ids)) != len(ids):
+            errors.append(f'{expected}: need nonempty unique string IDs')
+            continue
+        evidence = record.get(observed, {})
+        if not isinstance(evidence, dict):
+            errors.append(f'{observed}: expected an evidence map')
+            continue
+        for item in ids:
+            if not text(evidence.get(item)):
+                errors.append(f'{observed}: missing evidence for {item}')
+        if evidence.keys() - set(ids):
+            errors.append(f'{observed}: evidence outside agreed scope')
+    return errors
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Check reported delivery evidence; never modifies external state.')
+    parser.add_argument('scope', choices=['task', 'story', 'feature'])
+    parser.add_argument('file', type=Path, nargs='?')
+    args = parser.parse_args()
+    try:
+        record = json.loads(args.file.read_text(encoding='utf-8-sig')) if args.file else json.load(sys.stdin)
+        errors = missing(args.scope, record)
+    except (ValueError, OSError) as exc:
+        errors = [str(exc)]
+    print(json.dumps({'eligible': not errors, 'missing': errors}))
+    sys.exit(int(bool(errors)))
+```
