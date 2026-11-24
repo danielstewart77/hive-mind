@@ -225,12 +225,17 @@ def _update(harness: str, name: str, directory: str, state: str) -> tuple[str, l
         outcome = skills_api.update_skill(harness, name)
         if outcome == skills_api.UPDATE_DONE:
             return "updated", []
-        if outcome == skills_api.UPDATE_KEPT:
+        why = {
+            skills_api.UPDATE_KEPT: "this mind has changed its own copy since it was given",
+            skills_api.UPDATE_MISSING: "a copy this mind was given of it is no longer there",
+            skills_api.UPDATE_NO_HOME: "a harness this mind was given it for has no home "
+                                       "declared now, so none was updated",
+        }.get(outcome)
+        if why:
             return skills_api._pair(directory, name).state, [(
                 ("skill", name, "changed"),
-                f"skill {name} has changed in this install's generated skills, and this "
-                "mind has changed its own copy since it was given; its copy was left as "
-                "it is and now differs")]
+                f"skill {name} has changed in this install's generated skills, and {why}; "
+                "its copy was left as it is and now differs")]
     except Exception as exc:  # noqa: BLE001 - never a reason a conversation does not start
         return state, [(("skill", name, "update"),
                         f"skill {name} has a newer copy in this install's generated skills "
@@ -263,8 +268,7 @@ def _skills(harness: str, names: list[str]) -> tuple[dict, list[Problem]]:
             if state == skills_api.STATE_NOT_INSTALLED and not kept:
                 skills_api.install_skill(harness, name)
                 state = "installed"
-            elif kept and pair.source == skills_api.SOURCE_GENERATED \
-                    and state != skills_api.STATE_UNREADABLE:
+            elif kept and state != skills_api.STATE_UNREADABLE:
                 state, found = _update(harness, name, h, state)
                 problems += found
             done[name] = state
