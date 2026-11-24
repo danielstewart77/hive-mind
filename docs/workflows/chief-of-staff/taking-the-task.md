@@ -817,8 +817,9 @@ blocker, or a status you moved.
 
 Feedback from the owner about how you do your job is an instruction to update
 your skills, not a remark to acknowledge. Write it into the skill it
-concerns (here, take-a-task) in the
-same turn, and tell the owner it is written.
+concerns (here, take-a-task, or the install file's standing preferences, which
+the operator records: hand it to the operator) in the same turn, and tell the
+owner it is written.
 
 ## Every wait on the owner is a bubble
 
