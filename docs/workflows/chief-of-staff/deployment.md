@@ -39,7 +39,12 @@ Every reply is read aloud. A restart armed on a short fuse while a long reply is
 
 1. Arm the restart in the background first, with a generous timer. Never in the foreground — a foreground restart kills the turn that issued it.
 
-2. Reply with **one short sentence**. Nothing else. No summary of what changed, no caveats, no what-to-do-if. Every extra clause is speech still playing when the service drops.
+```
+nohup bash -c 'sleep <seconds>; <restart command for the service> > <log file> 2>&1; \
+  date >> <log file>' >/dev/null 2>&1 &
+```
+
+2. Reply with **one short sentence**. "Restarting <service>, back in a minute." Nothing else. No summary of what changed, no caveats, no what-to-do-if. Every extra clause is speech still playing when the service drops.
 
 3. Stop. Do not start another tool call, another check, another anything. The turn is over.
 
