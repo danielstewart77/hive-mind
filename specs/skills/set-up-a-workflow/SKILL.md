@@ -55,7 +55,13 @@ For each skill a stage document names, in the file's own order: write the
 document's text for that skill, with this install's specifics put back from
 the install file. Each skill carries, near its top, the declaration the top
 document gives, in its exact wording, and carries its sub-mind briefs and
-helper files inside its own folder. Write in the harness-neutral reference
+helper files inside its own folder. A mind runs its skill, never the top
+document, and a sub-mind brief or a lens never sees it: so wherever the
+document says "top document, rule N", write the full text of that rule from
+the top document into the skill there, and into each sub-mind brief and lens
+that the rule binds (a rule that binds every brief, such as never printing a
+key, goes into every brief). Leave no pointer to the top document in any
+skill. Write in the harness-neutral reference
 format, as the skills in `specs/skills/` are: `name` and `description`
 frontmatter, and never the name of a harness's own spawning tool.
 
