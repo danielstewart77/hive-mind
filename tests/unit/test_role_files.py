@@ -994,10 +994,8 @@ def test_an_update_is_skipped_whole_while_a_harness_it_was_given_to_has_no_home(
     result = _provide(harness, mind, [GENERATED])
 
     for each in HARNESSES:
-        assert "Do the generated thing." in _delivered_text(mind, each) or each == away \
-            or not (mind[each] / "skills" / GENERATED).exists()
-        assert "newer generated thing" not in (
-            mind[each] / "skills" / GENERATED / "SKILL.md").read_text()
+        assert "Do the generated thing." in _delivered_text(mind, each)
+        assert "newer generated thing" not in _delivered_text(mind, each)
     assert [text for text in result["problems"]] == [
         f"skill {GENERATED} has changed in this install's generated skills, and a harness this "
         "mind was given it for has no home declared now, so none was updated; its copy was "
