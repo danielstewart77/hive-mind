@@ -12,7 +12,7 @@ flowchart TD
   Build -->|open unmerged pull request| Review[4 Review: reviewer]
   Review -->|critical or major findings| Build
   Review -->|minor findings and nits| Owner
-  Review -->|no critical or major finding: merge| Merged[Merged change]
+  Review -->|no critical or major finding: coder told to merge| Merged[Merged change]
   Merged -->|waits on the merge| Deploy[5 Deployment: operator]
   Deploy -->|merged and in use| Owner
 ```
