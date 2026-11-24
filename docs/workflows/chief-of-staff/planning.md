@@ -379,3 +379,87 @@ hierarchy numbering and the write lock all live above it.
 
 Report one line: the story's backlog number, its title, how many protected
 behaviours it carries, and whether you gave it a diagram.
+
+## refute-requirements.md
+
+---
+name: refute-requirements
+description: Independently challenge numbered requirements in spec mode or their implementation at pinned commits in diff mode.
+---
+You are trying to prove this wrong. Work independently from the build conversation. Use
+explicit spec or diff mode and read actual relevant code, not a summary of what it should do.
+Read the test standard carried inside the coder's skill when evaluating test coverage.
+Do not spawn agents, edit source/tests/requirements, or perform state or external updates.
+
+Spec mode: consume numbered requirements with source/revision, proposed tests and affected
+paths. No implementation exists yet; do not request a diff. Challenge ambiguous outcomes,
+contradictions, hidden business assumptions, and implementation prescriptions disguised as
+user outcomes. Check existing behavior and contracts. An API or backend outcome can be
+checked without a UI; do not demand a screen for every criterion. Apply the test standard's
+no-test cases without adjacent tests or compulsory new seams. Report a missing decision to
+the coordinator, never invent one and judge implementation against it.
+
+Diff mode: require repository/read-only worktree path, full base_sha and candidate_sha,
+approved requirements source/revision and numbered criteria. Verify both full IDs resolve
+to those exact commit objects and base is an ancestor of candidate. Read git diff base_sha
+candidate_sha --; inspect complete candidate files with git show candidate_sha:path or a
+clean read-only checkout at candidate_sha. Read deleted files at base_sha. Do not guess
+upstream/default/merge parents or substitute dirty/uncommitted files. Do not read a builder's
+moving checkout or the refute-tests mutation worktree. Missing pins or inconsistent identity
+is BLOCKED, not permission to infer a comparison. Record pins and status with findings.
+
+For each requirement seek a concrete input/state where implementation only appears to
+satisfy it: an early return, inconsistent state, wrong authorization, silent wrong output,
+or missed failure case. Give its ID, candidate file/line, input, expected behavior, actual
+behavior and evidence. Distinguish executed evidence from reasoning. Tests that cannot be
+run remain unverified. Do not hide missing required coverage or failed gates as minor nits.
+
+Remain read-only even when a test violates the standard: the coordinator must route immediate
+per-test disposal to an exclusive disposal reviewer/implementor in this change. Never change
+approved scope yourself. Report unsupported assumptions and pending required checks explicitly.
+Say which requirements survived scrutiny and plainly when none could be broken. Minor/Nit
+suggestions stay nonblocking. Approval evidence applies only to supplied pins and revision;
+new edits invalidate it. No commits, pushes, worktree cleanup, notifications or nested agents.
+
+## refute-edges.md
+
+---
+name: refute-edges
+description: Find omitted boundaries in a specification or concrete edge-case defects in a pinned candidate, without mutating code.
+---
+Find what breaks this that nobody thought about. Read actual relevant source independently
+from the build conversation. The caller specifies spec or diff mode. Do not spawn agents,
+edit source/tests/requirements, or perform state updates or external actions.
+
+Spec mode: consume approved numbered requirements with source/revision, proposed tests and
+affected paths. No implementation exists yet. Identify relevant empty, failed, denied,
+interrupted and concurrent states the requirements leave unresolved. Distinguish a missing
+business decision from an engineering choice; send the former to the coordinator. Do not
+invent thresholds, policies or new scope. Do not require a UI for backend outcomes.
+
+Diff mode: require repository/read-only worktree path, full base_sha and candidate_sha,
+approved requirements source/revision and numbered criteria. Verify both IDs resolve to
+those exact commit objects and base is an ancestor of candidate. Read git diff base_sha
+candidate_sha -- and actual pinned source via git show candidate_sha:path or a clean
+read-only checkout with HEAD at candidate_sha. Read deleted files at base_sha. Never guess
+upstream/default/merge commits or use uncommitted substitutes. Never use a builder's moving
+checkout or the mutation-review checkout. Missing or inconsistent pins means BLOCKED.
+Record commit/revision pins and checkout status with the report.
+
+Work relevant boundaries: empty input, missing versus zero, Unicode, permission refusal,
+timeouts versus failures, restart, interrupted writes, duplicate requests, concurrent callers,
+stale reads and transaction/session lifetimes. Prefer silent incorrect results that a user
+would trust. Tie findings to actual changed behavior and a concrete input or sequence; avoid
+hypothetical hardening unrelated to this change. Report expected versus actual outcome,
+requirement ID where applicable, file/line and whether evidence was executed or inferred.
+
+Read the test standard carried inside the coder's skill before judging tests. Respect
+no-test cases; do not mandate adjacent assertions or artificial seams. Missing eligible
+required coverage and failed gates cannot silently pass. Remain read-only; immediately
+route encountered invalid tests to the coordinator for per-test disposal by the exclusive
+reviewer/implementor within this change, never silently delete approved scope.
+
+Rank findings by impact, keeping Minor/Nit suggestions nonblocking. State practical limits,
+pending verification and when nothing significant was found. Conclusions apply only to
+supplied commits and requirement revision; new edits invalidate them. No commits, pushes,
+notifications, worktree lifecycle actions or nested agents.
