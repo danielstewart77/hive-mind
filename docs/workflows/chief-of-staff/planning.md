@@ -41,7 +41,7 @@ auditing the codebase.
 
 ## What is not a question
 
-(Top document, rules 2 to 4 and 7.) Do not ask about a workflow nobody uses.
+(Top document, rules 2 to 4 and 7.) Do not ask about a workflow nobody uses. Write no status names in a question.
 
 ## 1. Research
 
@@ -93,9 +93,7 @@ Put every story in a **wave**. Two stories share a wave only when both of
 these hold: neither needs the other's outcome to be
 verifiable, and they do not change the same file. A wave is a promise that
 its stories can be built at the same moment, and the coder queues any two
-that touch one file; a plan once drew two stories and then four
-side by side that all landed in the same gateway files, so they were built
-one at a time and the picture was wrong. From your research, write on each
+that touch one file. From your research, write on each
 story **Files:** the files it will change or add, by path, and check every
 pair in a wave against that. Two that collide go in separate waves, the
 later one waiting on the earlier with the reason "same file: <path>" - or,
@@ -167,9 +165,6 @@ Planning ends with rows on the board, not with a document. `board` below is
 the install's board tool, used with its write credential. A feature needs an epic to hang from —
 if the owner has not named one, ask which, and ask nothing else in that turn.
 
-This is where the specification is agreed. There are exactly two stops, both
-here: the requirements read-back in phase 2 and the protected-behaviour list
-in phase 3.
 The coder runs autonomously from what this skill wrote down — so a requirement left vague here
 is a requirement nobody asks about before it is built.
 
@@ -186,10 +181,7 @@ Two consequences worth saying out loud. A plan agreed here can turn out to
 disagree with the code, and it will also be **incomplete** — a mind that
 cannot read the code cannot know about the migration, the caller or the
 failure path the module's own conventions demand. Neither is a defect in
-this skill and neither is a reason to guess. The coder's first phase completes the
-list from the code, decides what the approved requirements already
-determine, and takes back to the owner only what genuinely changes or widens
-what was approved. Do not pad the list here with speculation to cover for it.
+this skill and neither is a reason to guess. Do not pad the list here with speculation to cover for it.
 
 ## 1. Interrogate the requirements
 
@@ -230,8 +222,7 @@ If a requirement needs a technical word to state, it is two requirements or
 it is an implementation detail that does not belong on the list.
 
 **Stop here and wait for the owner's approval.** Nothing goes on the board and
-no test is described until the list is signed off. This is the first
-of exactly two stops, and both of them are in this skill.
+no test is described until the list is signed off.
 
 ## 3. Name the behaviours tests must protect
 
@@ -273,8 +264,7 @@ running it and reports at ship time.
 When a change warrants no protected behaviours at all — a skill, a document,
 a configuration value, a removal — say so in a sentence with the reason.
 
-**Stop here and wait for the owner's approval.** This is the second and last
-stop in the whole build; nothing after it asks the owner anything. The coder may
+**Stop here and wait for the owner's approval.** The coder may
 later report that a behaviour on this list cannot be reached by a test. That
 is a legitimate answer and it is reported at ship time, not a defect in this
 list — but a test protecting a behaviour never approved does not get
@@ -463,3 +453,70 @@ Rank findings by impact, keeping Minor/Nit suggestions nonblocking. State practi
 pending verification and when nothing significant was found. Conclusions apply only to
 supplied commits and requirement revision; new edits invalidate them. No commits, pushes,
 notifications, worktree lifecycle actions or nested agents.
+
+## refute-tests.md
+
+---
+name: refute-tests
+description: Refute proposed tests or prove candidate tests miss broken behavior using an exclusive disposable mutation worktree.
+---
+Read the test standard carried inside the coder's skill first. Find tests that pass
+when their named behavior is broken. Use the explicitly supplied spec or diff mode.
+Do not spawn agents, rewrite/delete tests, change approved story criteria, or ship changes.
+The coordinator/implementation or exclusive disposal reviewer applies required per-test
+disposal in the same change; mutation review itself never alters the tests being measured.
+
+## Spec mode
+
+Consume numbered requirements with their approved revision, proposed tests and source paths.
+No implementation exists yet: read relevant existing code, but do not mutate it or run
+nonexistent tests. Identify adjacent assertions, copied behavior, fake fixtures, unsupported
+expected results, uncovered independently breakable behaviors, and tests with no requirement.
+Apply standard exemptions: if the production code cannot reasonably be imported and called,
+state no test needed and why. Do not demand artificial seams or refactors. Removals and
+model output do not earn automated assertions; retain required live/manual verification.
+Report uncertainty as uncertainty, not proof a test is impossible.
+
+## Diff mode: required isolation
+
+Require repository identity, full base_sha and candidate_sha, approved requirements revision,
+numbered requirement/test map, baseline gate commands, isolated environment, and an exclusive
+disposable mutation worktree. The caller must explicitly assign exclusive ownership: no
+builder or reader may access that checkout until release. A story or feature checkout is
+not an acceptable mutation workspace. Do not create nested reviewers or share a mutation tree.
+
+Verify both SHAs resolve to those exact commit object IDs; verify base_sha is an ancestor of
+candidate_sha. Verify worktree HEAD equals candidate_sha and git status --porcelain is empty
+(including untracked files). Read git diff base_sha candidate_sha -- and pinned source. Missing
+pins, dirty tree, wrong HEAD, unclear ownership or shared test resources means stop and report
+BLOCKED. Never guess upstream/default/merge commits or review an uncommitted substitute.
+
+1. Record HEAD and status. Run the supplied baseline gate; all our required tests must pass
+   before mutation. If baseline fails, report the failure and perform no mutation.
+2. Select one named behavior and a specific real production function change that breaks it.
+   Mutate one source file at a time. Do not edit tests, fixtures or requirements to force a result.
+3. Run the corresponding targeted test(s). Capture mutation, command, exit code and observed
+   failure/pass. Collection/import/syntax failures do not prove behavioral sensitivity. A killed
+   mutation must fail for the intended assertion; a surviving mutation is a coverage finding.
+4. Restore only that mutated tracked path from candidate_sha using
+   git restore --source=<candidate_sha> --worktree -- <path>.
+   Validate restoration and rerun the targeted baseline before attempting another mutation.
+5. Finally, restore any outstanding mutation even on error; rerun the baseline gate. Verify
+   HEAD is unchanged, git diff is empty, and git status --porcelain is clean. Report generated
+   or unexplained files; do not broad-delete them. If restoration or baseline fails, label the
+   checkout DIRTY/BLOCKED prominently and keep its ownership lock until the caller resolves it.
+
+Never stash, reset, switch branches, commit mutations, or mutate the main/story checkout.
+The coordinator owns worktree removal after verifying clean restoration and evidence handoff.
+
+## Report
+
+Include mode, pins/revision, worktree, before/after status, baseline commands/results, each
+mutation and test result, and practical coverage limits. Store reports outside the mutation
+checkout. Distinguish BEHAVIOR DEFECT, UNPROTECTED ELIGIBLE BEHAVIOR, NO TEST NEEDED, and
+BLOCKED VERIFICATION. Missing required eligible coverage is blocking, not an optional backlog;
+a standard exemption is not missing coverage. Minor/Nit suggestions remain nonblocking.
+Reference AC/REQ IDs and candidate file/line. Dismiss findings only with checked contrary
+evidence. Report honestly when no meaningful mutation was performed; that is not a mutation
+pass. Struck proposed tests/requirements go to the coordinator; approved scope is never
+silently removed or claimed delivered. Never return clean success with mutations left behind.
