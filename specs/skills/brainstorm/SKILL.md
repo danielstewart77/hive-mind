@@ -1,18 +1,17 @@
 ---
 name: brainstorm
-description: Interrogate a new idea one question at a time — provoke, refute, hunt edge cases, dependencies and oversights a dreamer skips — and fold every answer into a living document as it lands. Trigger when Daniel is thinking out loud about a new idea, project or feature and wants it stress-tested rather than built.
+description: Interrogate a new idea one question at a time — provoke, refute, hunt edge cases, dependencies and oversights a dreamer skips — and fold every answer into a living document as it lands. Trigger when the owner is thinking out loud about a new idea, project or feature and wants it stress-tested rather than built.
 argument-hint:
 - the idea, or a path to its doc
 harness:
   claude:
     user-invocable: true
-    model: opus
     tools: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch
 ---
 
 # /brainstorm
 
-Daniel brings the idea. This skill brings the objections.
+The owner brings the idea. This skill brings the objections.
 
 Nothing is built here. The output is a document that survived being
 argued with.
@@ -20,7 +19,7 @@ argued with.
 ## The one rule
 
 **One question per turn.** Not two. Not "and also". Not a numbered list of
-five with an invitation to answer whichever he likes.
+five with an invitation to answer whichever the owner likes.
 
 A dreamer answers a batch by picking the easy one and skipping the one that
 would have killed the idea. One question at a time is the entire mechanism —
@@ -46,7 +45,7 @@ Say the exact path once, when it is first written, then stop mentioning it.
 
 From then on every answer goes to **that same location**. It is fixed for
 the rest of the session — do not re-decide it, do not split across files, do
-not ask him to confirm it. If it turns out to be wrong, move the file and
+not ask the owner to confirm it. If it turns out to be wrong, move the file and
 carry on.
 
 ## 1. The loop
@@ -87,14 +86,14 @@ reads as an attack, and the dependencies never get asked.
   user, the person who inherits it.
 - **Scope boundary** — what is explicitly *not* being built. An idea with no
   stated non-goals has no shape.
-- **Abandonment** — what makes him stop using it in month three. Usually the
+- **Abandonment** — what makes the owner stop using it in month three. Usually the
   most useful question in the set.
 - **Sequencing** — what is the smallest thing worth having on its own.
 
 ## 3. Push back properly
 
 - Refute an answer **once** if it does not hold. Make the counter-case in
-  full, then accept his call and move on. Two rounds is a debate; this is
+  full, then accept the owner's call and move on. Two rounds is a debate; this is
   not a debate.
 - Overruled objections are **recorded in the document as risks**, not
   re-litigated in conversation. That is what the doc is for.
@@ -106,11 +105,11 @@ reads as an attack, and the dependencies never get asked.
 
 Written continuously, not at the end. Sections it grows into:
 
-- **The idea** — one paragraph, in his words, rewritten as it sharpens.
+- **The idea** — one paragraph, in the owner's words, rewritten as it sharpens.
 - **Decisions** — what was settled, and the reasoning that settled it.
 - **Non-goals** — what this is not.
 - **Open questions** — asked and unanswered.
-- **Risks** — including every objection he overruled, stated plainly.
+- **Risks** — including every objection the owner overruled, stated plainly.
 - **Prior art** — with the reason each one is or is not this.
 
 Rewrite in place. No SUPERSEDED stickers, no changelog of the conversation,
@@ -120,10 +119,10 @@ had always been that.
 ## 5. Stopping
 
 Stop when three consecutive questions produce no change to the document, or
-when Daniel says stop.
+when the owner says stop.
 
 Then, in one short message: the path, what is still open, and the single
-biggest unresolved risk. Do not summarize what was decided — he was there,
+biggest unresolved risk. Do not summarize what was decided — the owner was there,
 and it is in the file.
 
-Do not offer to start building. If he wants that, `/code` exists.
+Do not offer to start building. If the owner wants that, building is a separate piece of work.

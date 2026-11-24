@@ -5,7 +5,6 @@ description: |
 harness:
   claude:
     user-invocable: true
-    model: sonnet
 ---
 
 # always-remember

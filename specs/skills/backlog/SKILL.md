@@ -1,7 +1,7 @@
 ---
 name: backlog
 description: |
-  Read, create and order work on the hive Kanban board — epics, features and stories. Trigger when Daniel asks what is next, what a feature contains, or in what order its stories are worked; when work is to be added to the backlog; and whenever a story's lane has to move as work starts or finishes.
+  Read, create and order work on the hive Kanban board — epics, features and stories. Trigger when the owner asks what is next, what a feature contains, or in what order its stories are worked; when work is to be added to the backlog; and whenever a story's lane has to move as work starts or finishes.
 harness:
   claude:
     user-invocable: true
@@ -78,7 +78,7 @@ whose description does not name its stories in order is incomplete and gets
 fixed before any of its stories is worked.
 
 **Story** — one instruction, complete enough to implement from. Never an
-open question: ask Daniel, then write the decided story. A decision recorded
+open question: ask the owner, then write the decided story. A decision recorded
 in a story is labelled `DECIDED` with its date and who made it.
 
 ## Answering "what's next"
@@ -101,7 +101,7 @@ invisible to the question above.
 
 ## Moving work
 
-A story's lane is how Daniel follows it: `committed` once its requirements
+A story's lane is how the owner follows it: `committed` once its requirements
 are signed off, `in_progress` when implementation starts, `done` only once
 merged and pulled. You move a lane because work actually started or
 finished, never to tidy the board.
@@ -109,7 +109,7 @@ finished, never to tidy the board.
 ## When it refuses
 
 - *refused this mind's board credential* — `BOARD_PUSH_TOKEN` is unset or
-  is not the value the console holds. Not yours to rotate: tell Daniel.
+  is not the value the console holds. Not yours to rotate: tell the owner.
 - *does not reach ...* — that operation is not on this token, by design.
   Say so plainly rather than looking for another way round it.
 - *has ... under it* — the delete would take more than the row. Read what
