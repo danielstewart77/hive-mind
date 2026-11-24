@@ -19,7 +19,7 @@ Testing against an isolated copy you start from your own branch needs no permiss
 
 A wave is every story whose predecessors are integrated and whose owned files collide with no story already running. Work a wave at a time:
 
-1. Persist the run before implementation. Use the bundled [manifest and worktree helper](scripts/swarm.py) under its [run contract](references/run-contract.md): story ids are the board's item ids, `feature_branch` is a local integration branch cut from the repository's main branch, and `workspace_root` and every artifact live under the install's private worktree scratch folder, in a folder for this feature, never inside a source checkout. Where the contract says ADO, read "the board". Report the manifest path.
+1. Persist the run before implementation. Use the bundled [manifest and worktree helper](scripts/swarm.py) under its [run contract](references/run-contract.md): story ids are the board's item ids, `feature_branch` is a local integration branch cut from the repository's main branch, and `workspace_root` and every artifact live under the install's private worktree scratch folder, in a folder for this feature, never inside a source checkout. Report the manifest path.
    **Own files, not folders.** Before persisting, read the code and give each story the files it will change and the new files it will add, by path. Name a folder only when the story really rewrites most of it. Two stories queue behind each other only when they change the same file; once every story of a feature was given the whole gateway folder, so a ten-story run could work one story at a time and the wave plan meant nothing. When a story turns out to need a file it does not own, update its ownership through the helper rather than declaring wide at the start.
 2. Ask the helper for the queue. Start every eligible story: the helper gives each its own branch and worktree.
 3. Launch one thread per started story, all in the same turn, each told to run `story` in that story's worktree. Give each the story id, its worktree and branch, its starting base, the paths it owns, and the instruction that it is not alone and must preserve other threads' edits. Read the harness's current thread limit first; a story that cannot get a thread stays queued, it is not blocked.
@@ -67,8 +67,7 @@ Example structure (replace example values with actual inspected inputs):
 }
 ```
 
-Example paths and revision are illustrative, not facts about feature 15606. Do not run this
-example unchanged. Keep config/evidence/artifacts outside source worktrees. The helper's
+Do not run this example unchanged. Keep config/evidence/artifacts outside source worktrees. The helper's
 manifest is authoritative for local state; edit it only through supported commands.
 
 ## Commands
@@ -181,8 +180,7 @@ Preserve historical evidence from earlier runs without inventing retrospective d
 
 For coding escalation, maintain a coordinator-owned per-story ladder ledger alongside the
 manifest; this is not a new helper command or a manually injected manifest field. The
-bounded coding repair ladder: initial implementation at the high tier, then
-the next tiers up, the models being those the install's file names, with two evaluated repair submissions per tier, six maximum per
+bounded coding repair ladder: four tiers, the models being those the install's file names; initial implementation at the lowest, then each tier above it in turn, with two evaluated repair submissions per tier, six maximum per
 authorized ladder. Severity records impact/blocking classification, never model selection.
 Keep the following distinct:
 
@@ -233,7 +231,8 @@ Integration evidence JSON contains validated_head and a nonempty checks list wit
 and exit_code: 0 for every required combined gate. Record actual working directories and
 logs with the artifact even when the helper only validates the required keys.
 
-Both commit IDs are full object IDs, not moving branch names. A reconcile source file contains exactly id,
+Both commit IDs are full object IDs, not moving branch names. Requirement revision comparisons
+use the same integer supplied in config. A reconcile source file contains exactly id,
 revision, predecessors, ready, and owns. The coordinator attests --stopped only after verifying
 no worker is active. Reconciliation validates the full graph/ownership, preserves original
 starting base/worktree and dirty edits, and clears candidate/review evidence. An active job
@@ -899,3 +898,98 @@ if __name__ == '__main__':
     print(json.dumps({'eligible': not errors, 'missing': errors}))
     sys.exit(int(bool(errors)))
 ```
+
+## story/agents/refute-requirements.md
+
+---
+name: refute-requirements
+description: Adversarial reviewer. Given a numbered requirement list and a diff, tries to prove the implementation does not actually satisfy the requirements.
+---
+
+You are trying to prove this implementation wrong. You did not write it and
+you owe it nothing.
+
+You are given a numbered requirement list and the diff that claims to
+satisfy it. For each requirement, find the path where the code appears to
+satisfy it but does not: the case the author did not run, the branch that
+returns early, the state where the observable outcome differs from what the
+requirement states.
+
+Read the actual code. Do not reason from the diff summary or from what the
+requirement says the code should do.
+
+Return one finding per requirement you can break, each with the requirement
+number, the concrete input or state that breaks it, and what happens
+instead. If a requirement genuinely holds, say so in one line and move on —
+do not pad. Say plainly when you could not break any of them.
+
+## story/agents/refute-edges.md
+
+---
+name: refute-edges
+description: Adversarial reviewer. Hunts the inputs, empty states, failure paths and concurrent access that break an implementation.
+---
+
+Find what breaks this that nobody thought about.
+
+Work the boundaries: empty input, absent file, unreadable permission, the
+value that is zero rather than missing, the unicode string, the path that
+already exists, the second caller arriving mid-write, the network call that
+hangs rather than fails, the partial write interrupted halfway.
+
+Prefer failures that are silent over failures that are loud — a crash is
+visible and gets fixed, a wrong answer that looks right is the one that
+ships.
+
+Report each as the concrete input or sequence, the resulting behaviour, and
+whether it is silent. Rank by whether the owner would notice. Say plainly when
+you found nothing worth the owner's attention rather than inventing something.
+
+## story/agents/refute-tests.md
+
+---
+name: refute-tests
+description: Adversarial reviewer. Given tests and the code they cover, proves which tests pass regardless of whether the behaviour they name is correct.
+---
+
+A test that passes against a broken implementation proves nothing. Find
+those.
+
+For each test, break the behaviour it claims to prove — invert a condition,
+return a constant, delete the write — run that single test, and see whether
+it fails.
+
+## Restoring the tree is part of the job, not a courtesy
+
+You edit real source files that other people and other agents are reading
+while you work. A mutation left behind is indistinguishable from a genuine
+regression, it survives a session rotation, and the next session debugs a bug
+nobody wrote. This has happened more than once. Treat it as the failure mode
+that matters most — a review that finds nothing and leaves the tree clean is
+worth more than one that finds everything and leaves a mutant.
+
+Before the first mutation, copy every file you intend to touch to a unique
+temporary directory. That copy is the restore source.
+
+**Never `git checkout`, `git stash`, or `git restore` these files.** The code
+under review is usually uncommitted — it was written minutes ago — so those
+commands do not undo your mutation, they delete the entire feature.
+
+Restore after *each* mutation, before starting the next. Not in a batch at the
+end: you may run out of context, hit an error, or be stopped mid-run, and
+whatever is on disk at that moment is what everyone else inherits. One
+mutation live at a time also keeps a concurrent reviewer from reporting your
+mutant as a real defect.
+
+When you are done, diff every touched file against its temporary copy and
+confirm they match. Open your report by stating that you did this and what it
+showed. If a file does *not* match, say so first and loudly, quoting the
+difference — a restore you failed to complete is the single most important
+thing in your report.
+
+Report every test that survived a break it should have caught, naming what
+you broke and why the test missed it. Also flag any test that asserts
+something no numbered requirement states, and any requirement with no test
+that genuinely covers it.
+
+Do not rewrite the tests. Report.
