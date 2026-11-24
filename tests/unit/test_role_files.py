@@ -1068,3 +1068,162 @@ def test_a_generated_skill_taken_out_of_the_install_folder_does_not_become_the_r
     _provide(harness, mind, [SKILL])
 
     assert "Do the generated thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+
+
+# --- The records are part of the update: an update that cannot record itself did not happen ---
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_whose_records_cannot_be_saved_leaves_every_copy_and_the_records_as_they_were(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    broken = [True]
+    real_save = skill_reference.save_records
+
+    def disk_full_once(records, mind_name=None):
+        if broken[0]:
+            broken[0] = False
+            raise OSError("no space left on device")
+        real_save(records, mind_name)
+
+    monkeypatch.setattr(skill_reference, "save_records", disk_full_once)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert broken == [False]
+    _the_mind_is_as_it_was(mind, "Do the generated thing.")
+    assert len(result["problems"]) == 1
+    assert "no space left on device" in result["problems"][0]
+    assert "changed its own copy" not in result["problems"][0]
+
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    for each in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, each)
+        assert _provide(each, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_where_one_harness_write_did_not_land_is_undone_everywhere(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    lost = mind["codex"] / "skills" / GENERATED
+    real_swap = skill_reference._swap_in
+
+    def swap_that_does_not_land(staged, target):
+        if Path(target) != lost:
+            real_swap(staged, target)
+
+    monkeypatch.setattr(skill_reference, "_swap_in", swap_that_does_not_land)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    _the_mind_is_as_it_was(mind, "Do the generated thing.")
+    assert len(result["problems"]) == 1
+    assert "could not be delivered to this mind" in result["problems"][0]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_that_cannot_be_undone_says_which_copy_and_never_leaves_one_deleted(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    failing_write = mind["dsh"] / "skills" / GENERATED
+    unrestorable = mind["claude"] / "skills"
+    real_swap = skill_reference._swap_in
+    real_copytree = skill_reference.shutil.copytree
+
+    def swap_raising_for_dsh(staged, target):
+        if Path(target) == failing_write:
+            raise OSError("no space left on device")
+        real_swap(staged, target)
+
+    def copytree_failing_when_putting_claude_back(source, target, *args, **kwargs):
+        if ".restore." in Path(target).name and Path(target).parent == unrestorable:
+            raise OSError("input/output error")
+        return real_copytree(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(skill_reference, "_swap_in", swap_raising_for_dsh)
+    monkeypatch.setattr(skill_reference.shutil, "copytree", copytree_failing_when_putting_claude_back)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    # The other two are back as they were; the one that could not be put back is
+    # still a whole skill, not a deleted one.
+    for each in ("codex", "dsh"):
+        assert "Do the generated thing." in _delivered_text(mind, each)
+    assert (mind["claude"] / "skills" / GENERATED / "SKILL.md").is_file()
+    assert len(result["problems"]) == 1
+    sentence = result["problems"][0]
+    assert f"skill {GENERATED} has a newer copy" in sentence
+    assert "could not be undone for" in sentence
+    assert str(mind["claude"] / "skills" / GENERATED) in sentence
+    assert "input/output error" in sentence
+    assert "keeps a copy of its own" not in sentence
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_that_leaves_a_copy_gone_says_it_is_gone_and_not_that_the_mind_keeps_one(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    target = mind[harness] / "skills" / GENERATED
+    real_rename = os.rename
+
+    def rename_that_cannot_land_on_the_copy(source, destination, *args, **kwargs):
+        if Path(destination) == target:
+            raise OSError("input/output error")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(skill_reference.os, "rename", rename_that_cannot_land_on_the_copy)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not target.exists()
+    sentences = result["problems"]
+    assert any("could not be undone" in text and str(target) in text for text in sentences)
+    assert (f"skill {GENERATED} is granted by a role and is not there to use: the copy this "
+            "mind had is gone: a newer one could not be delivered and the old one could not "
+            "be put back") in sentences
+    assert not any("keeps a copy of its own" in text for text in sentences)
+
+
+def test_a_failed_update_puts_back_a_copy_of_a_harness_it_was_never_given_to_as_the_link_it_was(
+        monkeypatch, mind, proxy, tmp_path):
+    # Codex had no home when the skill was delivered; the mind has since given
+    # it one, with a link of its own where the skill would go.
+    monkeypatch.delenv("CODEX_HOME")
+    skill = _generate(tmp_path, GENERATED, MODELLED)
+    assert _provide("claude", mind, [GENERATED])["problems"] == []
+    monkeypatch.setenv("CODEX_HOME", str(mind["codex"]))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_text("---\nname: generated-skill\ndescription: d\n---\nlinked\n")
+    link = mind["codex"] / "skills" / GENERATED
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere)
+    (skill / "SKILL.md").write_text(MODELLED_NEWER)
+    proxy.offered = None
+
+    result = _provide("claude", mind, [GENERATED])
+
+    assert link.is_symlink() and os.readlink(link) == str(elsewhere)
+    assert "Do the generated thing." in _delivered_text(mind, "claude")
+    assert len(result["problems"]) == 1
+    assert "could not be delivered to this mind" in result["problems"][0]
+    assert "could not be undone" not in result["problems"][0]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_whose_records_cannot_be_read_is_not_updated_and_is_not_blamed_for_it(
+        mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    (skill_reference.reference_root() / ".rendered.json").write_text("{ not json")
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert result["skills"][GENERATED] == "unreadable"
+    assert not any("newer copy" in text for text in result["problems"])

@@ -1373,20 +1373,34 @@ class _Snapshot:
             raise
 
     def restore(self) -> list[str]:
-        """Put everything back; the paths that could not be."""
+        """Put everything back; the paths that could not be.
+
+        Each saved copy is built beside its target and swapped in, so a restore
+        that fails leaves the target as the update left it, never deleted. A
+        path that did not exist before is removed.
+        """
         failed = []
-        for path, was in self.saved.items():
+        for index, (path, was) in enumerate(self.saved.items()):
             try:
-                _replace(path)
-                if isinstance(was, str):
-                    os.symlink(was, path)
-                elif was is not None:
-                    shutil.copytree(was, path, symlinks=True)
+                if was is None:
+                    _replace(path)
+                    continue
+                staged = _aside(path, "restore")
+                try:
+                    if isinstance(was, str):
+                        os.symlink(was, staged)
+                    else:
+                        shutil.copytree(was, staged, symlinks=True)
+                    _swap_in(staged, path)
+                finally:
+                    if staged.exists() or staged.is_symlink():
+                        _replace(staged)
             except Exception as exc:  # noqa: BLE001 - say every one that stays wrong
                 failed.append(f"{path} ({exc})")
         self.records.clear()
         self.records.update(copy.deepcopy(self.saved_records))
-        self.discard()
+        if not failed:
+            self.discard()
         return failed
 
     def discard(self) -> None:
@@ -1395,12 +1409,18 @@ class _Snapshot:
 
 def _require_whole(
     item: dict, kind: str, name: str, harnesses: set[str], outcome: Outcome,
-    mind_name: str | None,
+    mind_name: str | None, written: str | None,
 ) -> None:
     """Every harness an update was to reach now holds the new reference's copy,
     or the update is not done: some other copy was left as it was (the proxy
     could not be asked, or no longer offers the model; a refusal; a conflict)."""
     ref_hash = fingerprint(reference_path(kind, name, mind_name))
+    if ref_hash != written:
+        # A copy that did not land reads as an edit, and the pass that follows
+        # merges it back over the reference: the update undid itself.
+        raise RenderRolledBack(
+            f"{kind} {name}: the new text did not stay the reference; the skill was left "
+            "exactly as it was")
     for h in sorted(harnesses):
         entry = item.get(h)
         if (isinstance(entry, dict) and entry.get("reference") == ref_hash
@@ -1475,6 +1495,7 @@ def install(
             verbatim = text if excluded == _excluded(new) else None
             new = _with_excluded(new, excluded)
             _write_reference(new, source_dir, mind_name, verbatim)
+            written = fingerprint(reference_path(kind, name, mind_name))
             item = records[kind].setdefault(name, {})
             item.pop(h, None)
             _render_into(new, item, outcome, catalog=catalog, notify=notify,
@@ -1482,22 +1503,28 @@ def install(
             _sync_item(kind, name, records, outcome, catalog=catalog, notify=notify,
                        mind_name=mind_name)
             if snapshot is not None:
-                _require_whole(item, kind, name, reach, outcome, mind_name)
+                _require_whole(item, kind, name, reach, outcome, mind_name, written)
             if kind == KIND_SKILL:
                 _record_delivery(item, kind, name, delivered_from, mind_name)
+            if snapshot is not None:
+                # Inside the guard: records that cannot be saved are an update
+                # that did not happen, and the copies go back with them.
+                save_records(records, mind_name)
         except BaseException as exc:
             if snapshot is not None:
                 failed = snapshot.restore()
                 if failed:
                     raise RenderRolledBack(
                         f"{kind} {name}: an update failed ({exc}) and could not be undone "
-                        f"for {', '.join(failed)}") from exc
+                        f"for {', '.join(failed)}; what the skill was is kept in "
+                        f"{snapshot.dir}") from exc
             raise
         else:
             if snapshot is not None:
                 snapshot.discard()
         finally:
-            save_records(records, mind_name)
+            if snapshot is None:
+                save_records(records, mind_name)
     return outcome
 
 
