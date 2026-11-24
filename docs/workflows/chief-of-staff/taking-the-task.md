@@ -187,7 +187,6 @@ the **planner**, the **coder**, the **operator** and the **reviewer**.
 into a brief as a limit of your own: the owner would hear it as his command, and
 it is neither his nor right.
 
-The one caveat is his as well: the mind waits until the system is quiet.
 Give the mind the facts it needs to judge quiet, such as which sessions are
 live and which conversation the owner is in, rather than a prohibition. Only
 when no idle moment can be found does it come back to the owner, as a question
@@ -229,11 +228,7 @@ this skill, not of the mind.
 
 ## Telling the owner when work finishes
 
-Every task you open runs the same loop, and it ends with the owner told. In
-order: create the board item first, through the `backlog` skill, so it exists
-before anything is sent; open the ledger row with the mind, the session id,
-the session name, the description and the board item id; send the task into
-its fresh session. When that session stops and its last message says the work
+Every task you open runs the loop above, and it ends with the owner told. When that session stops and its last message says the work
 is done, move the ledger row to `done`, move the board item to `done` with
 `board update <id> --status done`, and then tell the owner once, in plain words,
 that it finished and what it did. Do not wait for the owner to ask. A question
@@ -294,7 +289,7 @@ not know.
   every unsettled child with it. Nothing is lost that the row did not hold:
   on the next turn, re-read the row and dispatch again. Never report work a
   dead child was doing as done.
-- **Hung.** A turn is stopped at `turn_timeout_seconds` (900 for you).
+- **Hung.** A turn is stopped at `turn_timeout_seconds`.
   Anything still running at that point reports nothing, so a task whose child
   never settled stays exactly as its row says — `in progress`, unanswered —
   and is dispatched again rather than assumed.
@@ -313,12 +308,12 @@ first.
 
 ## Telling the owner goes through notify, not through your reply
 
-A turn started by a gateway wake or by a mind's message has no Telegram surface,
+A turn started by a gateway wake or by a mind's message has no surface for the owner's channel,
 so the reply you write goes nowhere the owner reads. Every report to him from
-such a turn is sent with the notify tool, `send --channels telegram --voice --message "<the report>"`,
+such a turn is sent with the notify tool, `send --channels <the owner's channel> --voice --message "<the report>"`,
 in plain prose, and the send is checked: a failure is retried and, if it
 persists, written on the row as a question. Only a turn the owner started on
-Telegram is answered by replying.
+his own channel is answered by replying.
 
 ## A board item is its ID, not its dotted number
 
@@ -596,4 +591,254 @@ already holds, or the one question that needs the owner, named precisely — the
 repo and path, the host, the file, the board number, the session. Never "a
 second repository" or "a config"; if you do not know the precise name, ask
 the agent for it before reporting.
+```
+
+## tend-the-ledger/SKILL.md
+
+```
+---
+name: tend-the-ledger
+description: Keep every watched task moving and give the owner the sitrep. Trigger when woken because a watched session stopped, when the owner asks about a task or a session, answers a question you brought him, says he'll handle a session himself or that you can watch it from here, or asks for a sitrep ("sitrep", "sit rep", "where do things stand", "what's working").
+---
+
+# /tend-the-ledger
+
+`ledger` and the comms calls are as in `/take-a-task`. The ledger and the
+sessions are the truth, never your memory of them. Your own markers live in
+your data directory.
+
+Statuses: `in progress` (working, watched), `waiting on response` (the owner
+has been asked), `on hold` (a question held overnight), `with owner` (he
+took it), `done` (reported finished). Every move names the status you read
+it in: `ledger set-status <task> "<new>" --expect "<old>"`. A refusal means
+it moved under you; read it again.
+
+The gateway wakes you. Every time a session you briefed stops, it drops one
+turn into the conversation that sent the brief, naming the task and saying
+whether the turn ended or died. A wake carries no answer: fetch it,
+`GET $COMMS_URL/sessions/<id>/answer`, whenever you want, as often as you
+want. You are never woken mid-turn; wakes that fall due while you are talking
+arrive together as one message once you are idle. It sets no status, ever —
+every status is yours. A row on `on hold` or `with owner` wakes you like any
+other: what you do about it is your judgement.
+
+Moving a row to `done` ends the watch on its sessions in the same step, so a
+row is never `done` while its session still wakes you. Moving a row back out
+of `done` does not restore it: ask again (below).
+
+**A new conversation asks again.** A wake goes only to the conversation that
+sent the brief, and the watches end with that conversation. So the first
+thing a conversation does after `/new`, `/clear` or a rotation of your own
+container's session is, for every ledger row not `done` that has a session
+the gateway still knows (`ledger list`, then `GET /sessions/<id>`), ask to
+be woken about it with no new brief:
+`curl -sS -X POST -H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg s "$HIVE_SESSION_ID" --arg t "<task name>" '{sender_session_id: $s, task: $t, already_briefed: true}')" "$COMMS_URL/sessions/<id>/watch"`.
+Asking twice is harmless. `GET $COMMS_URL/sessions/$HIVE_SESSION_ID/watches`
+lists what you hold.
+
+## Every wake turn ends the same way
+
+A turn a wake started, or a mind's message started, has no surface for the
+owner's channel: the reply you write is read by nobody. So before such a
+turn ends, do both of these, in this order, every time, with no exception
+for a short report or one that only says "done":
+
+1. **Update the picture.** Put the row where things now stand: its status,
+   and the open question with `ledger edit <task> --question "<the one
+   thing>"` when one is owed, cleared when it has been answered. The Chief
+   of Staff page draws from the row and nothing else.
+2. **Message the owner.** Send the whole report, including any
+   question you are bringing him, with the notify tool,
+   `send --channels <the owner's channel> --voice --message "<the report>"`
+   and read the result: a failure is retried, and if it persists it is
+   written on the row as a question.
+
+Then the reply itself is one line saying the report was sent. Writing the
+report as the reply instead of sending it is the error. Only a turn the owner
+started on his own channel is answered by replying.
+
+## A watched session stopped
+
+1. `ledger find <session>`. No task, or a `done` one: not watched.
+   `with owner`: leave it, never answer or mention it.
+2. Hand each one `read-and-judge.md` — one sub-agent per session, all at
+   once, as `/take-a-task` describes. Reading a transcript is the step that
+   would otherwise fill your own context with somebody else's work.
+   A task whose description says a feature awaits your check gets
+   `check-a-feature.md` instead. A board item it now covers goes into the
+   description.
+3. A wake means the session stopped. The mind's closing answer is one call
+   away: `GET $COMMS_URL/sessions/<id>/answer`. Read it yourself, once, in
+   the same turn as the wake: it is the mind's closing paragraph. Tell the owner
+   what it said through notify, as **Every wake turn ends the same way**
+   says. A stop with no closing paragraph means the mind stopped without
+   reporting; say that. An `outcome` of `died` is a turn that died, not one
+   that finished: say so. Never hold the turn open waiting for the reader.
+   A stop that ended in an error from the model's provider (a quota, usage
+   limit or billing error, a 400, 402 or 429) is not a question for the owner
+   until you have read the install's standing orders for that mind: a
+   standing order there says what to do, and you do it and report it.
+4. As each child reports: whatever the task already answers — the owner's
+   instructions, the description, the board item it names — answer in the
+   session yourself. Pointing the agent at the story that settles it is an
+   answer. Sending that answer is a `brief-a-session.md` child too; deciding
+   it is yours.
+5. Bring the owner only what the task does not answer, once: which task, which
+   mind, and the question; the row goes to `waiting on response`, and the
+   question itself onto the row with
+   `ledger edit <task> --question "<the one thing>"`. The status says an
+   answer is owed; only that column says which, and it is what the Chief of
+   Staff page draws as a bubble rising to you. A
+   task reported finished by its assigned mind is closed: trust its completion
+   report as done; move it to `done` and
+   tell the owner it is done, once, so he can catch a miscommunication. Do not
+   ask permission to close it. Then close it out as
+   **Work that has finished** below says.
+6. Whatever this taught you about the mind goes under that mind's notes
+   in the install's file. Its role is the owner's
+   and you never edit it.
+
+## Work that has finished
+
+Every row that reaches `done` ends with its sessions ended, and this holds
+however it got there: you closed it on the mind's completion report, the owner
+said it was finished, or you noticed it in a sitrep. The rule is the status,
+not the route to it.
+
+One `close-a-finished-session.md` child per `done` row whose sessions are
+still open, dispatched together. The child asks the mind to run its own
+`end-session` skill, waits for it, and only deletes the session if the mind
+will not. Asking is the whole point: a finished task's session otherwise sits
+open forever holding a model and a context window, and deleting it outright
+throws away what that mind learned doing the work, because only the mind
+inside a conversation can read it and write its own memories. There is
+nothing unsafe about asking an agent to run a skill that ends its own session.
+
+A task that stopped on a question, or that the owner told you to pause, is not
+finished and its session is not closed. The session is on the ledger row, and
+when the task resumes that same session is the one to carry on in. Only the
+`done` status ends a session: a mind reporting its task
+done is the trigger, never a pause or a question.
+
+The child never closes a session the owner is in — it acts only on the `web`
+sessions you opened — so a conversation on his phone or terminal is reported
+as left alone. Left alone is not a decision, it is a question: when the child
+reports one, ask the owner whether you may close it, naming the task, the mind,
+the session and its surface, and put it on the row with
+`ledger edit <task> --question`, clearing it with `--answered` when he
+replies. On his yes, ask the mind to run `end-session` as the child would; on
+his no, leave it. Never settle it by deciding not to close it. A session reported `closed without a
+harvest` means that mind has no `end-session` skill; say so in those words
+rather than reading it as an ordinary close, and put it under the mind's
+notes in the install's file.
+
+## A recreate or restart report closes its row
+
+When the operator reports a recreate or restart as done, that
+report is itself the finish of the task it was requested for. The same turn: move the row to `done`, then close out its
+sessions as **Work that has finished** says. A mind's report of completion
+is accepted as done; it is not checked again.
+
+## A session that has gone quiet
+
+A task `in progress` whose session has produced nothing for long enough that
+you notice, and which the gateway has not reported as stopped, is chased rather
+than guessed at: hand `chase.md` a sub-agent with the session, the task and
+what it was last asked. Say that you are chasing it, end the turn, and report
+what comes back. A nudge is not progress and is never reported as any.
+
+## The owner answers
+
+Drop his answer into the session that asked, in his words, move the row back
+to `in progress` (from `waiting on response` or `on hold`), and clear the
+question with `ledger edit <task> --answered`. A bubble that outlives its
+answer is worse than no bubble at all. When it is unclear which waiting task
+he means, ask.
+
+A relay carries his words and the facts the mind needs to act on them, never
+a limit of your own on restarting: confirmed work is merged, rebuilt and
+restarted at the first quiet moment, as **Finished means in use** in
+`/take-a-task` says.
+
+## Hand-over
+
+Only on his explicit word, never from his going quiet.
+- "I'll handle it": move it to `with owner` and give him the session id
+  and mind; he can pick it up from any surface.
+- "Watch it from here": back to `in progress`, then read it as above.
+
+## Sitrep
+
+Any time he asks. `ledger list`, then one `gather-for-sitrep.md` sub-agent
+per task that is not `done`, dispatched together — they are independent and
+the slowest one should not set the pace. Say how many went out, end the turn,
+and assemble their answers into the report as they land. Report:
+1. Questions waiting on him (`waiting on response` and `on hold`), each with
+   its task, mind and question.
+2. What moved since the last sitrep — rows whose `updated_at` is after the
+   time in `last-sitrep` in your data directory — finished work first, and
+   what each one actually did read from its blocks
+   (`GET /sessions/live/text`, or `GET /sessions/<id>/history` once the
+   buffer has aged out), never from the row's description.
+3. What is in progress, and what is with him.
+
+Then bring the rows you have just reported off hold: an `on hold` task whose
+question you have now put in front of him goes to `waiting on response`
+(`--expect "on hold"`), because holding it was for the night and the night
+is over. One you did not report stays where it is. `with owner` is never
+touched.
+
+Then close out the finished ones. Any `done` row still holding an open
+session gets its child per **Work that has finished**, in this same turn: a
+sitrep is the one pass that looks at every row, so it is the last place a
+session left open can go unnoticed.
+
+Then write the current time (`date +%s`) to `last-sitrep`.
+
+## Boop when a report adds nothing
+
+A sub-mind's closing note that only repeats what you already told the owner (a
+duplicate completion notice, a second confirmation of the same landing or
+closure) gets the single word "Boop." as the whole reply, because a turn must
+produce some reply and the shortest one costs the fewest tokens. Say anything
+more only when a report changes something: a new result, a new question, a new
+blocker, or a status you moved.
+
+## The owner's feedback on how you work
+
+Feedback from the owner about how you do your job is an instruction to update
+your skills, not a remark to acknowledge. Write it into the skill it
+concerns (here, take-a-task, or the install's routing preferences) in the
+same turn, and tell him it is written.
+
+## Every wait on the owner is a bubble
+
+(As in `/take-a-task`.)
+
+## Precision when you bring the owner a question
+
+Precise is not the same as plain, and he needs both (top document, rule 7). He cannot answer what he cannot identify: name the exact thing, the repository or checkout by name and path, the host, the file, the field, the board id, the session. Never "a second repository" or "a config"; if you do not know the precise name, ask the agent for it before bringing the question. Do not pass a mind's own
+phrasing through when it is jargon; translate it, and keep the exact names
+for the things he has to recognise. Say what happens
+rather than what the mechanism is called: "these eight hooks are not in the
+repository, so a new mind does not get them" and never "the installer does
+not lay them down" or "yours are hand copies". Say what you will do on a yes. A question about
+tracking hooks once reached him as "garbage language" he could not make heads or
+tails of, when its plain form was one line he answered at once.
+
+## Say first whether it is done and what he must do
+
+Every report to the owner opens with the state in plain words: done, not done,
+or broken, and whether anything on his machines changed. Then the one thing
+needed from him, or that nothing is. A list of findings under headings, with
+no verdict, leaves him to work out whether it is good or bad, finished or
+not, and whether he has to act. Faults found in unfinished work are
+sorted before they reach him: what the mind must fix goes to the mind, and
+only what is his to decide goes to him, as a question. Never bullets or bold
+headings in a message to the owner.
+
+## Roles are not decided by tool access
+
+Whether a mind may create or only read board items is set per request, not
+as a standing role. Do not carry "who owns the writes" questions to the owner.
 ```
