@@ -31,6 +31,16 @@ install that made it.
 
 ## Decisions
 
+- **A stage document is the skills' own text with the install's specifics
+  removed: DECIDED** (Daniel, 2026-11-24): "these shouldn't be bigger than the skills
+  themselves." Made by taking the tuned skill's text and removing lines,
+  never by describing the skill in new words; one short top document and
+  the setup skill carry what no skill states.
+- **Where a generated skill lives: DECIDED** (Daniel, 2026-11-23: "Yes, every mind
+  and the workflow will run on the same machine."). One shared folder on that
+  machine, ignored by git so a pull never touches it, attached read-only to
+  each mind and writable to the operator's mind. The operator is a mind
+  created in the console, and the operator may do anything to a role.
 - **Home-specific content comes out of a skill before it ships** (Daniel,
   2026-11-23). A shipped skill holds only instructions true on any install.
   What belongs to one install — the list of its minds, their models and
@@ -53,11 +63,9 @@ install that made it.
   package is updated.
 - **A workflow is a specification that skills are generated from, not a
   bundle of skill files** (Daniel, 2026-11-23). The package holds no
-  `SKILL.md`. It holds a state diagram of how the work moves and what is
-  decided at each point for each scenario, and every detail that makes the
-  skills work, as specific as it needs to be: where a bullet point would
-  not carry it, the full paragraphs go in. A recommended model for each
-  mind is given as a tier - extra high, high, medium, low - never a named
+  `SKILL.md`. (REVISED 2026-11-24: it holds the skills' own text with the
+  install's specifics removed; no state diagram, no full paragraphs
+  added.) A recommended model for each mind is given as a tier - extra high, high, medium, low - never a named
   model. An install's operator is handed the document and told "I have
   created these five minds, put these skills on them", and writes each
   mind's skills from it. Reasons: a copied skill is not the skill the mind
@@ -82,7 +90,9 @@ install that made it.
   intends to have his planner at work produce several adversarial review
   designs and keep the best), and that should replace one document and
   move nothing else.
-- **Each stage document states its contract with its neighbours** (Skippy):
+- **REVISED 2026-11-24: no contract section in a stage document; the
+  hand-offs are the one diagram in the top document.** Was: each stage
+  document states its contract with its neighbours (Skippy):
   what it is handed, what it hands back and to whom, in what form. A stage
   can be swapped for any design that keeps the contract; that is the only
   thing that makes the pieces independent. Review, for example: handed an
@@ -92,8 +102,9 @@ install that made it.
   every generated skill carries them - for example that an approved
   requirement is the answer and is never re-asked. Stated per stage they
   would drift apart.
-- **A stage document also lists what its mind needs besides the skill**
-  (Skippy): model tier, tools, and credentials with the access they need.
+- **What a role's mind needs besides the skill is listed in the top
+  document** (Skippy; moved there from the stage documents 2026-11-24):
+  model tier, tools, and credentials with the access they need.
   On 23 November the coder could not finish because her GitHub token could
   write to one repository of the three the feature touched.
 - **A workflow is proven at home before it ships** (Daniel, 2026-11-23:
@@ -188,10 +199,7 @@ install that made it.
 
 ## Open questions
 
-- Where a generated skill lives on an install so that a role can deliver
-  it. A role is a list of skill names; the text behind the names comes
-  today from the tracked `specs/skills` folder, which a pull overwrites.
-  Skippy to trace and settle.
+None.
 
 
 ## Risks
