@@ -684,6 +684,50 @@ async def test_a_real_ending_replaces_a_swept_one_and_never_a_reported_one(
     assert again["finished_at"] == clock + 1805
 
 
+async def test_a_child_woken_after_it_ended_is_working_again_until_it_ends_again(
+        a_reporting_mind, connected, clock):
+    """dsh sends a finished child a message and it works again under the
+    same id. On 2026-11-23 a builder fixing review findings was drawn as
+    finished for an hour."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 600)
+
+    woken_at = clock + 600 + staff.REOPEN_AFTER_SECONDS + 1
+    woken = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind, now=woken_at)
+
+    assert staff.agent_state(woken, now=woken_at,
+                             fresh_within=60.0) == staff.WORKING
+
+    done = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind,
+        outcome="error", now=woken_at + 300)
+
+    assert done["finished_at"] == woken_at + 300
+    assert done["outcome"] == "error"
+
+
+async def test_the_tail_of_a_run_that_just_ended_does_not_reopen_it(
+        a_reporting_mind, connected, clock):
+    """The reporters are detached: word of the last thing a child did can
+    land a moment after word that it stopped."""
+    await staff.record_agent_event(
+        "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind, now=clock)
+    await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_ENDED, mind_id=a_reporting_mind, outcome="ok",
+        now=clock + 600)
+
+    tail = await staff.record_agent_event(
+        "a1b2c3", staff.EVENT_WORKING, mind_id=a_reporting_mind,
+        now=clock + 600 + staff.REOPEN_AFTER_SECONDS - 1)
+
+    assert tail["finished_at"] == clock + 600
+    assert tail["outcome"] == "ok"
+
+
 async def test_an_ending_is_never_stamped_before_the_child_started(
         a_reporting_mind, connected, clock):
     """Two hosts, two clocks: the recorder's own is the only shared one, and
