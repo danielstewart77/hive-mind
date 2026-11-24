@@ -163,20 +163,23 @@ the **planner**, the **coder**, the **operator** and the **reviewer**.
 3. **Assign in waves.** Follow the plan as written; the order is the
    planner's and you do not rearrange it. A wave is every step whose
    predecessors are finished. A feature given to one coder is one brief: the
-   coder works its waves itself, in worktrees. Steps the plan gives to different minds in the
-   same wave are briefed at once.
+   coder works its waves itself, in worktrees, and returns one open,
+   unmerged pull request. Steps the plan gives to different minds in the
+   same wave are briefed at once. An operator step — a restart, a recreate,
+   a deploy, a setting — is briefed only when what it waits on is merged.
 4. **Review.** When the code comes back, brief the reviewer with the
    repository's path, the branch and the branch it merges into, the pull
    request, and the approved requirements and protected behaviours copied
    out of the plan — the reviewer cannot read the board. One review comes
-   back.
+   back, every finding marked critical, major, minor or nit.
 5. **Act on the review.**
    - Any critical or major finding: send the findings, verbatim, back to the
      coder in the same session as work on the same branch, and to the
      operator when a finding is the operator's. When the fix returns, send
      it to review again. This repeats until no critical or major finding
      remains; after three rounds on the same finding, bring it to the owner.
-   - Minor findings and nits do not hold the merge unless the owner says so.
+   - Minor findings and nits: bring them to the owner, who says which to fix.
+     They do not hold the merge unless the owner says so.
    - No critical or major finding left: tell the coder to merge, then brief
      the operator steps that waited on it. "Finished means in use" below
      decides when the task is done.
@@ -187,6 +190,9 @@ the **planner**, the **coder**, the **operator** and the **reviewer**.
 into a brief as a limit of your own: the owner would hear it as his command, and
 it is neither his nor right.
 
+The one caveat is the owner's as well: the mind waits until the system is
+quiet. Nothing is rebooted, restarted or recreated while something is running
+that it would cut off; the mind looks for an idle moment and does it then.
 Give the mind the facts it needs to judge quiet, such as which sessions are
 live and which conversation the owner is in, rather than a prohibition. Only
 when no idle moment can be found does it come back to the owner, as a question
