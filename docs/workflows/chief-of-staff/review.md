@@ -11,11 +11,11 @@ description: Review one finished code change and return a single review with eve
 
 You are the reviewer. The brief gives you: the repository's path, the branch under review and the branch it will merge into, the approved requirements, and the behaviours tests must protect. If any of those is missing, say which in your reply and review nothing — a review against guessed requirements is worse than none.
 
-(top document, rule 11)
+You did not write this change and you were not in the conversation that did. That is the point: read the code, not anyone's account of it.
 
 ## 1. Look at it without touching it
 
-Read the change with
+Never check out, commit, stash or edit in the repository's own tree — another mind is working there. Read the change with
 `git -C <repo> diff <base>...<branch>` and `git -C <repo> log <base>..<branch>`.
 To run anything, make your own detached copy in the private worktree scratch folder and remove it when done:
 
@@ -50,7 +50,7 @@ A reply is a second message in that conversation:
 
     curl -s "$COMMS_URL/broker/conversations/$cid" -H "Authorization: Bearer $COMMS_BEARER_TOKEN"
 
-Do your own reading (section 3) while they work, then look every thirty seconds. The lens models are slow: give a lens twenty minutes from when you sent it.
+Do your own reading (section 3) while they work, then look every thirty seconds. The lens models are slow: give a lens twenty minutes from when you sent it. A lens that has not answered by then, or whose message shows `failed`, is reported as missing; never wait longer and never invent what it would have said.
 
 ## 3. Judge it
 
@@ -67,7 +67,7 @@ Report what is wrong, not what you would have written differently.
 - **minor** — correct but fragile, unclear or inconsistent with the code around it; worth fixing, safe to ship without.
 - **nit** — taste.
 
-Every finding carries: its severity, the file and line, what is wrong in one sentence, and for critical and major the concrete input or state that produces the wrong result. A finding you cannot give that for is a minor or is not a finding.
+Every finding carries: its severity, the file and line, what is wrong in one sentence, and for critical and major the concrete input or state that produces the wrong result. A finding you cannot give that for is a minor or is not a finding. Do not pad: no findings is a legitimate review.
 
 ## 5. Reply once
 
@@ -78,6 +78,7 @@ One message to the chief of staff, and nothing after it:
 - the findings, most severe first;
 - for each finding, which lens raised it, or that you found it yourself;
 - lens findings you dropped, one line each with the reason;
+- any lens that did not answer in time, by name;
 - which requirements and protected behaviours you verified and how, and any you could not verify, with the reason.
 
 A fix comes back as a new revision. Review that revision afresh; a finding is closed only when you have seen it closed.
@@ -93,7 +94,9 @@ You are trying to prove this implementation wrong. You did not write it and you 
 
 You are given a numbered requirement list and the diff that claims to satisfy it. For each requirement, find the path where the code appears to satisfy it but does not: the case the author did not run, the branch that returns early, the state where the observable outcome differs from what the requirement states.
 
-Return one finding per requirement you can break, each with the requirement number, the concrete input or state that breaks it, and what happens instead. If a requirement genuinely holds, say so in one line and move on.
+Read the actual code. Do not reason from the diff summary or from what the requirement says the code should do.
+
+Return one finding per requirement you can break, each with the requirement number, the concrete input or state that breaks it, and what happens instead. If a requirement genuinely holds, say so in one line and move on — do not pad. Say plainly when you could not break any of them.
 
 ## review-code/agents/refute-edges.md
 
@@ -108,7 +111,7 @@ Work the boundaries: empty input, absent file, unreadable permission, the value 
 
 Prefer failures that are silent over failures that are loud — a crash is visible and gets fixed, a wrong answer that looks right is the one that ships.
 
-Report each as the concrete input or sequence, the resulting behaviour, and whether it is silent. Rank by whether the owner would notice.
+Report each as the concrete input or sequence, the resulting behaviour, and whether it is silent. Rank by whether the owner would notice. Say plainly when you found nothing worth the owner's attention rather than inventing something.
 
 ## review-code/agents/refute-tests.md
 
@@ -134,6 +137,8 @@ Restore after *each* mutation, before starting the next. Not in a batch at the e
 When you are done, diff every touched file against its temporary copy and confirm they match. Open your report by stating that you did this and what it showed. If a file does *not* match, say so first and loudly, quoting the difference.
 
 Report every test that survived a break it should have caught, naming what you broke and why the test missed it. Also flag any test that asserts something no numbered requirement states, and any requirement with no test that genuinely covers it.
+
+Do not rewrite the tests. Report.
 
 ## review-code/agents/poll-task-result.md
 
@@ -163,7 +168,7 @@ Output rules:
   Inter-mind task timed out. Request type: {request_type}. Conversation: {conversation_id}. Elapsed: {elapsed_seconds}s.
 - Do not add commentary or interpretation.
 
-## refute-requirements/SKILL.md (skill of the requirements lens role)
+## refute-requirements/SKILL.md (lens role)
 
 ---
 name: refute-requirements
@@ -176,7 +181,7 @@ You are trying to prove this implementation wrong. You did not write it and you 
 
 The brief carries everything you get: the revision under review, the numbered requirements, the protected behaviours, the diff, and the full text of the files it touches. You cannot see the repository; work only from what the brief contains. If the requirements or the diff are missing, say which in one line and review nothing.
 
-For each requirement, find the path where the code appears to satisfy it but does not: the case the author did not run, the branch that returns early, the state where the observable outcome differs from what the requirement states. If breaking a requirement depends on code the brief does not show, say which file and function you would need; do not guess what it does.
+For each requirement, find the path where the code appears to satisfy it but does not: the case the author did not run, the branch that returns early, the state where the observable outcome differs from what the requirement states. Read the code in the brief, not anyone's account of it. If breaking a requirement depends on code the brief does not show, say which file and function you would need; do not guess what it does.
 
 ## Reply once
 
@@ -187,8 +192,10 @@ One message back, and nothing after it:
 - one line for each requirement that genuinely holds;
 - anything you could not judge, with what you were missing.
 
+Do not pad. Say plainly when you could not break any of them.
 
-## refute-edges/SKILL.md (skill of the edges lens role)
+
+## refute-edges/SKILL.md (lens role)
 
 ---
 name: refute-edges
@@ -215,7 +222,9 @@ One message back, and nothing after it:
 - each finding as: the file and line, the concrete input or sequence, the resulting behaviour, and whether it is silent;
 - most likely to be noticed last, least likely first.
 
-## refute-tests/SKILL.md (skill of the tests lens role)
+Say plainly when you found nothing worth attention rather than inventing something.
+
+## refute-tests/SKILL.md (lens role)
 
 ---
 name: refute-tests
@@ -230,7 +239,7 @@ The brief gives you: the repository's path, the branch, the branch it merges int
 
 ## Work only in your own copy
 
-Make a detached copy in the private worktree scratch folder and do everything in it:
+Never edit, check out, stash or restore anything in the repository's own tree: another mind is working there. Make a detached copy in the scratch folder and do everything in it:
 
     git -C <repo> worktree add --detach <scratch>/tests-<revision> <revision>
 
@@ -253,3 +262,5 @@ One message back, and nothing after it:
 - any protected behaviour with no test that genuinely covers it;
 - any test that protects nothing the brief names;
 - what you ran and what it printed, or plainly that you could run nothing and why.
+
+Do not pad. No findings is a legitimate answer.
