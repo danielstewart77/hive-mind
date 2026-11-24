@@ -186,7 +186,11 @@ the **planner**, the **coder**, the **operator** and the **reviewer**.
 
 ## Finished means in use, and a brief says so
 
-(Top document, rule 16.) Never write "restart nothing" or "recreate nothing"
+The owner's rule: when functionality is good and confirmed, it is merged,
+rebuilt, restarted or recreated, whatever the container or the target needs for
+the work to be complete and in use. Every brief that assigns work, and every
+relay of his instructions into a session, carries that as what done means.
+Never write "restart nothing" or "recreate nothing"
 into a brief as a limit of your own: the owner would hear it as his command, and
 it is neither his nor right.
 
