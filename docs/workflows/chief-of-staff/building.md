@@ -23,6 +23,8 @@ A wave is every story whose predecessors are integrated and whose owned files co
    **Own files, not folders.** Before persisting, read the code and give each story the files it will change and the new files it will add, by path. Name a folder only when the story really rewrites most of it. Two stories queue behind each other only when they change the same file; once every story of a feature was given the whole gateway folder, so a ten-story run could work one story at a time and the wave plan meant nothing. When a story turns out to need a file it does not own, update its ownership through the helper rather than declaring wide at the start.
 2. Ask the helper for the queue. Start every eligible story: the helper gives each its own branch and worktree.
 3. Launch one thread per started story, all in the same turn, each told to run `story` in that story's worktree. Give each the story id, its worktree and branch, its starting base, the paths it owns, and the instruction that it is not alone and must preserve other threads' edits. Read the harness's current thread limit first; a story that cannot get a thread stays queued, it is not blocked.
+   **Every thread says which story it is for.** Whatever you launch for a story — its builder, each reviewer, a re-review, a thread started through a workflow script — gets a one-line description, and its brief names the story by its board id (the `s…` id) in the brief's own text, not only inside a file the brief points to. The board draws a thread on a story from that and nothing else: once a wave ran for three hours with twenty-three of twenty-six threads naming no story, most of them with no description at all, and the owner watching the board saw nothing working.
+   **Wait on the result, never on the clock.** A thread's finish reaches you only at your next step, and a `sleep` is a step that cannot end early. Once each wait was one fixed sleep of seven to fourteen minutes, and a thread that finished four seconds into one was not noticed for eight minutes; over the wave that was most of an hour of nothing. Wait in one command that checks every few seconds for the thing you are waiting on — the new commit on the story's branch, the review file, the report — and returns the moment it appears, with a ceiling of a few minutes after which you look at the thread itself. Never a bare `sleep` longer than a minute.
 4. As each story returns an accepted, reviewed candidate, record it and integrate it into the feature branch — one story at a time, never two at once. Verify the candidate is in the feature branch's history before recording it integrated.
 5. When the wave is integrated, run the affected checks on the feature branch, then ask for the queue again. Repeat until no story is pending.
 
@@ -180,7 +182,7 @@ Preserve historical evidence from earlier runs without inventing retrospective d
 
 For coding escalation, maintain a coordinator-owned per-story ladder ledger alongside the
 manifest; this is not a new helper command or a manually injected manifest field. The
-bounded coding repair ladder: four tiers, the models being those the install's file names; initial implementation at the lowest, then each tier above it in turn, with two evaluated repair submissions per tier, six maximum per
+bounded coding repair ladder: initial implementation by the lowest of the install's models, then the next model above it, one per step, in order from lowest to highest, with two evaluated repair submissions per tier, six maximum per
 authorized ladder. Severity records impact/blocking classification, never model selection.
 Keep the following distinct:
 
@@ -217,6 +219,33 @@ PLANNING-RESULT.md, IMPLEMENTATION-RESULT.md, CODE-REVIEW.md, plus refutation an
 Result lines remain RESULT: PASS or RESULT: FAIL | reason for compatibility, but documents
 and exact pins determine eligibility. The gate cannot have failed or unrun checks.
 
+Cost artifacts are coordinator-owned and separate from the manifest: preserve immutable rate snapshots and deduplicated
+response usage, then emit STORY-COSTS.json/CSV/Markdown with source revision/points,
+stage/model totals, repair history and explicit completeness/billing limits. Record parent
+and child thread IDs for attribution. Link the final report in story delivery evidence;
+retain interim snapshots rather than overwriting historical estimates.
+
+## Board transition evidence
+
+The coordinator performs the planning-start and approved-code-review lane moves on the board. They are external operations, not swarm.py commands. Record each attempt
+in `board-transitions.jsonl`: story, event, timestamp, project/team/board, actual field and
+destination, before/after item revisions, verified outcome or error, and the triggering
+planning dispatch or approved base/candidate/report. Keep before/after source snapshots for
+successful writes. A failed or queued dispatch is not planning start; a stale or rejected
+candidate is not approved code. Already-at-destination is a verified no-op, not another update.
+
+Source checks retain the approved requirement revision in the manifest and reports. Also
+record the latest observed board revision. A revision mismatch is acceptable only when a complete
+recorded chain from the approved snapshot to that live revision proves exclusively our intended
+status/board transitions and their server-generated audit changes, with all requirement-bearing
+fields and relations unchanged. Fetch relations when checking this. Do not call reconcile,
+replace snapshots, or relabel reviews solely for that proven board-only change. Missing chain,
+unexpected edits, or actual source changes still invalidate acceptance and require reconciliation.
+The same content comparison may reconcile board-order-only rank changes using a separate
+`source-metadata-transitions.jsonl` chain. Verify each intervening revision changed only rank and
+server audit metadata; retain snapshots and identify them as observed external changes, not writes
+performed by this run. This does not exempt priorities, dependencies, scope, or other source edits.
+
 ## Machine-readable attestations
 
 Review evidence JSON contains base_sha, candidate_sha, story_revision, verdict (APPROVED),
@@ -232,7 +261,8 @@ and exit_code: 0 for every required combined gate. Record actual working directo
 logs with the artifact even when the helper only validates the required keys.
 
 Both commit IDs are full object IDs, not moving branch names. Requirement revision comparisons
-use the same integer supplied in config. A reconcile source file contains exactly id,
+use the same integer supplied in config; observed board revisions follow the board-only exception
+above. A reconcile source file contains exactly id,
 revision, predecessors, ready, and owns. The coordinator attests --stopped only after verifying
 no worker is active. Reconciliation validates the full graph/ownership, preserves original
 starting base/worktree and dirty edits, and clears candidate/review evidence. An active job
@@ -678,7 +708,7 @@ Use `task` for separable bounded changes only when useful; completing tasks is n
 
 Verify every criterion against the final candidate. Review is required for every story: have an independent thread that did not write the change (`refute-requirements`, `refute-tests`, `refute-edges`) read the pinned candidate against the criteria and protected behaviours, record the revision it approved, and treat that approval as void after any further change. Use the [shared gate](../task/references/completion.md) before claiming acceptance. Report remaining criteria if blocked.
 
-A story ends as a committed, reviewed candidate on its own branch. Integration belongs to `feature`, or to the brief that handed you a single story.
+A story ends as a committed, reviewed candidate on its own branch. Never merge it into the main branch, close its board row, or deploy it yourself: integration belongs to `feature`, or to the brief that handed you a single story.
 
 ## story/references/test-standard.md
 
