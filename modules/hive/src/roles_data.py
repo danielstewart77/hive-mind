@@ -351,9 +351,15 @@ def catalog(reports: list[dict[str, Any]], community: set[str]) -> dict[str, Any
                 name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
                 if not name:
                     continue
-                row = skills.setdefault(name, {"name": name, "repo": False, "minds": [],
-                                               "community": name in community})
-                if item.get("repo") is not None:
+                row = skills.setdefault(name, {"name": name, "repo": False, "generated": False,
+                                               "minds": [], "community": name in community})
+                # A generated skill is in the install's own folder, not the
+                # repository's; one that hides a tracked copy is both.
+                if item.get("source") == "generated":
+                    row["generated"] = True
+                    if item.get("shadowed"):
+                        row["repo"] = True
+                elif item.get("repo") is not None:
                     row["repo"] = True
                 if item.get("installed") is not None and mind not in row["minds"]:
                     row["minds"].append(mind)

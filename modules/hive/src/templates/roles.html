@@ -3,7 +3,7 @@
 {% block content %}
 <main class="page" data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}">
     <header class="page-header">
-        <div class="page-header-copy"><p class="page-eyebrow">Role management</p><h1 class="page-title">Roles</h1><p class="page-description">A role is a named set of skills, hooks, a model and the built-in tools an agent may use. An agent under role management holds the general role and any others it is given, and may use exactly what they grant together. Anything no role grants is not allowed.</p></div>
+        <div class="page-header-copy"><p class="page-eyebrow">Role management</p><h1 class="page-title">Roles</h1><p class="page-description">A role is a named set of skills, hooks, a model and the built-in tools an agent may use. An agent under role management holds the general role and any others it is given, and may use exactly what they grant together. Anything no role grants is not allowed, except the model: when no role an agent holds names one, it runs the model it is configured with.</p></div>
         <div class="page-actions"><a class="button button-quiet" href="/skills/submit"><i data-lucide="git-pull-request"></i>Submit a skill</a>{% if current_user.is_admin %}<button class="button button-primary" type="button" id="role-new"><i data-lucide="plus"></i>New role</button>{% endif %}</div>
     </header>
     <div id="roles-status" class="event-hints"></div>
@@ -114,7 +114,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         const span = kind === "skills" ? 2 : 1;
         const body = listed.map(function (r) {
             const minds = h.escapeHtml((r.minds || []).join(", ") || "none");
-            return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.repo ? "present" : "absent") : "") + '</td><td>' + minds);
+            return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.generated ? (r.repo ? "generated here (and in the repo)" : "generated here") : (r.repo ? "present" : "absent")) : "") + '</td><td>' + minds);
         }).concat(unseen.map(function (name) { return cells(name, '</td><td colspan="' + span + '">' + missing); }));
         document.getElementById("role-" + kind).innerHTML = body.join("") || '<tr><td colspan="' + (span + 2) + '">' + (asked - silent.length > 0 ? "No Mind reported any." : "No Mind answered.") + '</td></tr>';
         const notes = [];

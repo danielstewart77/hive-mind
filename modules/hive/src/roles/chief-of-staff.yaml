@@ -1,5 +1,4 @@
 name: Chief of Staff
-model: claude-fable-5-2
 tools:
   - shell
   - files

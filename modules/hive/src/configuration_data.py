@@ -331,6 +331,21 @@ def _lucent_variable(name: str) -> str:
 NEW_MIND_ROTATION_THRESHOLD_PERCENT = 30
 
 
+#: Where a mind sees the install's one shared folder of generated skills, and
+#: where that folder is on the host. Attached to every mind made here, read
+#: only; `operator_attachment` makes it writable for the one that holds the
+#: operator role. A mind made here otherwise sees only its own folder and a
+#: copy of the published code, so a skill a role names that is generated on
+#: this install could not reach it.
+WORKFLOW_SKILLS_CONTAINER_PATH = "/usr/src/app/install/workflow-skills"
+WORKFLOW_SKILLS_HOST_PATH = "${HOST_PROJECT_DIR:-.}/install/workflow-skills"
+
+
+def workflow_skills_volume(writable: bool = False) -> str:
+    mode = "rw" if writable else "ro"
+    return f"{WORKFLOW_SKILLS_HOST_PATH}:{WORKFLOW_SKILLS_CONTAINER_PATH}:{mode}"
+
+
 def scaffold_internal_mind(
     name: str,
     *,
@@ -493,6 +508,8 @@ def scaffold_internal_mind(
                     f"{host}:{own}:rw",
                     f"{host}/container:{own}/container:ro",
                     f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
+                    # The install's generated skills, which a role may name.
+                    workflow_skills_volume(),
                 ],
                 "restart": "unless-stopped",
                 "extra_hosts": ["host.docker.internal:host-gateway"],
