@@ -50,7 +50,7 @@ were mid-turn when sessions stopped you were not interrupted: they arrive
 together, as one message, once you are idle. It does not carry the answer.
 
 The stop of a session you did not brief for yourself wakes you too: every stop
-of a watched session does, including a turn Daniel started in it himself.
+of a watched session does, including a turn the owner started in it himself.
 
 ## 3. Fetch the answer
 

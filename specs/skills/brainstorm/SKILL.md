@@ -1,6 +1,6 @@
 ---
 name: brainstorm
-description: Interrogate a new idea one question at a time — provoke, refute, hunt edge cases, dependencies and oversights a dreamer skips — and fold every answer into a living document as it lands. Trigger when Daniel is thinking out loud about a new idea, project or feature and wants it stress-tested rather than built.
+description: Interrogate a new idea one question at a time — provoke, refute, hunt edge cases, dependencies and oversights a dreamer skips — and fold every answer into a living document as it lands. Trigger when the owner is thinking out loud about a new idea, project or feature and wants it stress-tested rather than built.
 argument-hint:
 - the idea, or a path to its doc
 harness:
@@ -12,7 +12,7 @@ harness:
 
 # /brainstorm
 
-Daniel brings the idea. This skill brings the objections.
+The owner brings the idea. This skill brings the objections.
 
 Nothing is built here. The output is a document that survived being
 argued with.
@@ -120,10 +120,10 @@ had always been that.
 ## 5. Stopping
 
 Stop when three consecutive questions produce no change to the document, or
-when Daniel says stop.
+when the owner says stop.
 
 Then, in one short message: the path, what is still open, and the single
 biggest unresolved risk. Do not summarize what was decided — he was there,
 and it is in the file.
 
-Do not offer to start building. If he wants that, `/code` exists.
+Do not offer to start building. If he wants that, building is a separate piece of work.
