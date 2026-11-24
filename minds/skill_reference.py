@@ -65,6 +65,7 @@ sent only when the notifier says it went.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -72,6 +73,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import uuid
 from collections.abc import Callable, Iterable
@@ -1339,9 +1341,107 @@ def merge_copy(
     return outcome
 
 
+class RenderRolledBack(RenderError):
+    """An update that could not reach every copy; the mind is as it was."""
+
+
+class _Snapshot:
+    """A skill as it stands on this mind: its reference, every declared
+    harness's copy and the render records, so an update that cannot finish can
+    put it all back exactly. Restoring never goes through the swap that may
+    have failed."""
+
+    def __init__(self, kind: str, name: str, records: dict, mind_name: str | None):
+        self.records = records
+        self.saved_records = copy.deepcopy(records)
+        self.dir = Path(tempfile.mkdtemp(prefix="skill-snapshot-"))
+        self.paths = [reference_path(kind, name, mind_name)]
+        self.paths += [copy_path(kind, name, h) for h in HARNESSES
+                       if undeclared_reason(h) is None]
+        self.saved: dict[Path, Path | str | None] = {}
+        try:
+            for index, path in enumerate(self.paths):
+                if path.is_symlink():
+                    self.saved[path] = os.readlink(path)
+                elif path.is_dir():
+                    shutil.copytree(path, self.dir / str(index), symlinks=True)
+                    self.saved[path] = self.dir / str(index)
+                else:
+                    self.saved[path] = None
+        except BaseException:
+            self.discard()
+            raise
+
+    def restore(self) -> list[str]:
+        """Put everything back; the paths that could not be.
+
+        Each saved copy is built beside its target and swapped in, so a restore
+        that fails leaves the target as the update left it, never deleted. A
+        path that did not exist before is removed.
+        """
+        failed = []
+        for index, (path, was) in enumerate(self.saved.items()):
+            try:
+                if was is None:
+                    _replace(path)
+                    continue
+                staged = _aside(path, "restore")
+                try:
+                    if isinstance(was, str):
+                        os.symlink(was, staged)
+                    else:
+                        shutil.copytree(was, staged, symlinks=True)
+                    _swap_in(staged, path)
+                finally:
+                    if staged.exists() or staged.is_symlink():
+                        _replace(staged)
+            except Exception as exc:  # noqa: BLE001 - say every one that stays wrong
+                failed.append(f"{path} ({exc})")
+        self.records.clear()
+        self.records.update(copy.deepcopy(self.saved_records))
+        if not failed:
+            self.discard()
+        return failed
+
+    def discard(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def _require_whole(
+    item: dict, kind: str, name: str, harnesses: set[str], outcome: Outcome,
+    mind_name: str | None, written: str | None,
+) -> None:
+    """Every harness an update was to reach now holds the new reference's copy,
+    or the update is not done: some other copy was left as it was (the proxy
+    could not be asked, or no longer offers the model; a refusal; a conflict)."""
+    ref_hash = fingerprint(reference_path(kind, name, mind_name))
+    if ref_hash != written:
+        # A copy that did not land reads as an edit, and the pass that follows
+        # merges it back over the reference: the update undid itself.
+        raise RenderRolledBack(
+            f"{kind} {name}: the new text did not stay the reference; the skill was left "
+            "exactly as it was")
+    for h in sorted(harnesses):
+        entry = item.get(h)
+        if (isinstance(entry, dict) and entry.get("reference") == ref_hash
+                and entry.get("fingerprint") == copy_fingerprint(kind, name, h)):
+            continue
+        why = next((str(row.get("reason") or row.get("model") or "")
+                    for rows in (outcome.blocked, outcome.conflicts, outcome.errors,
+                                 outcome.skipped)
+                    for row in rows
+                    if row.get("harness") == h or h in (row.get("harnesses") or [])), "")
+        raise RenderRolledBack(
+            f"{kind} {name}: the {h} copy could not be brought to the new text"
+            + (f" ({why})" if why else
+               " (a model its copy names could not be confirmed as offered, or it was refused)")
+            + "; the skill was left exactly as it was")
+
+
 def install(
     kind: str, name: str, harness: str, text: str, source_dir: Path | None, *,
     catalog: Catalog, notify: Notifier, mind_name: str | None = None,
+    delivered_from: str | None = None, only_if_unchanged: bool = False,
 ) -> Outcome:
     """Make `text` the reference and render it, overwriting only `harness`.
 
@@ -1351,6 +1451,12 @@ def install(
     overwrite; every other copy goes through the ordinary pass, so a tuned
     copy elsewhere is a conflict, not a casualty. Installing for a harness
     the mind had excluded puts it back.
+
+    `delivered_from` names what a skill from the install's own folder is
+    delivered from; it is recorded with every copy this renders (see
+    `delivery`). `only_if_unchanged` makes the install an update: under the
+    lock that writes, it refuses with a conflict unless a delivery was
+    recorded and the reference and every copy are still as it left them.
     """
     _validate(name)
     h = normalize_harness(harness)
@@ -1365,22 +1471,60 @@ def install(
     outcome = Outcome()
     with _locked(mind_name):
         records = _load_records_or_report(notify, mind_name)
-        old = load_reference(kind, name, mind_name)
-        excluded = (_excluded(old) if old else set()) - {h}
-        # Written as shipped unless the mind's own exclusions must ride along,
-        # so a fresh install compares equal to the repo's copy.
-        verbatim = text if excluded == _excluded(new) else None
-        new = _with_excluded(new, excluded)
-        _write_reference(new, source_dir, mind_name, verbatim)
-        item = records[kind].setdefault(name, {})
-        item.pop(h, None)
+        snapshot = None
+        reach: set[str] = set()
+        if only_if_unchanged:
+            recorded, stopped = delivery(records, kind, name, h, mind_name)
+            if recorded is None or stopped:
+                raise RenderConflict(
+                    f"{kind} {name}: " + (stopped[1] if stopped else "no delivery is recorded")
+                    + "; nothing was overwritten")
+            # All or nothing: whatever happens from here, the mind ends with
+            # the new text in every copy it was delivered to, or exactly as it
+            # was. Nobody is told of a half-way state that is then undone.
+            notify = lambda _message: None  # noqa: E731
+            snapshot = _Snapshot(kind, name, records, mind_name)
+            item = records[kind][name]
+            reach = {o for o in HARNESSES if isinstance(item.get(o), dict)
+                     and item[o].get("fingerprint")} | {h}
         try:
+            old = load_reference(kind, name, mind_name)
+            excluded = (_excluded(old) if old else set()) - {h}
+            # Written as shipped unless the mind's own exclusions must ride along,
+            # so a fresh install compares equal to the repo's copy.
+            verbatim = text if excluded == _excluded(new) else None
+            new = _with_excluded(new, excluded)
+            _write_reference(new, source_dir, mind_name, verbatim)
+            written = fingerprint(reference_path(kind, name, mind_name))
+            item = records[kind].setdefault(name, {})
+            item.pop(h, None)
             _render_into(new, item, outcome, catalog=catalog, notify=notify,
                          mind_name=mind_name, only={h}, force={h})
             _sync_item(kind, name, records, outcome, catalog=catalog, notify=notify,
                        mind_name=mind_name)
+            if snapshot is not None:
+                _require_whole(item, kind, name, reach, outcome, mind_name, written)
+            if kind == KIND_SKILL:
+                _record_delivery(item, kind, name, delivered_from, mind_name)
+            if snapshot is not None:
+                # Inside the guard: records that cannot be saved are an update
+                # that did not happen, and the copies go back with them.
+                save_records(records, mind_name)
+        except BaseException as exc:
+            if snapshot is not None:
+                failed = snapshot.restore()
+                if failed:
+                    raise RenderRolledBack(
+                        f"{kind} {name}: an update failed ({exc}) and could not be undone "
+                        f"for {', '.join(failed)}; what the skill was is kept in "
+                        f"{snapshot.dir}") from exc
+            raise
+        else:
+            if snapshot is not None:
+                snapshot.discard()
         finally:
-            save_records(records, mind_name)
+            if snapshot is None:
+                save_records(records, mind_name)
     return outcome
 
 
@@ -1489,6 +1633,108 @@ def forget_record(kind: str, name: str, mind_name: str | None = None) -> None:
         records = load_records(mind_name)
         records[kind].pop(name, None)
         save_records(records, mind_name)
+
+
+#: Why a delivered skill is not as it was left: the mind changed something,
+#: a copy that was delivered is gone, or a harness that was delivered to has no
+#: home declared now, so an update could not reach all of them.
+CHANGED_EDITED = "edited"
+CHANGED_MISSING = "missing"
+CHANGED_UNAVAILABLE = "unavailable"
+
+
+def delivery(
+    records: dict, kind: str, name: str, harness: str, mind_name: str | None = None,
+) -> tuple[str | None, tuple[str, str] | None]:
+    """What this harness's copy of a skill was delivered from, and whether it
+    can still be brought up to date as one.
+
+    A skill the install hands over from its own folder is recorded on each
+    harness's entry as `delivered`: a fingerprint of that source and the
+    fingerprint of the mind's reference, as they were when the delivery
+    finished. Nothing that merges an edit or resolves a conflict rewrites it,
+    so a reference that moved since is the mind's change. The reference is
+    compared against what was delivered and never against the source: it
+    differs from its source with no edit once the mind excluded a harness or
+    a harness's model block rode along.
+
+    Returns `(source, stopped)`. `source` is None when nothing was delivered
+    from anywhere (a copy the mind has always had, a tracked skill).
+    `stopped` is None when the reference and every copy a render wrote are as
+    they were left and every one of those harnesses has a home to write to;
+    otherwise `(why, clause)`: a copy that was delivered is gone
+    (`missing`), a harness delivered to has no home declared (`unavailable`,
+    so an update would leave the others moved and this one stuck), or the mind
+    changed its reference or a copy (`edited`; a copy edited in another
+    harness and not yet merged counts, updating would discard it).
+    """
+    h = normalize_harness(harness)
+    item = records[kind].get(name)
+    item = item if isinstance(item, dict) else {}
+    own = item.get(h)
+    delivered = own.get("delivered") if isinstance(own, dict) else None
+    if not isinstance(delivered, dict) or not isinstance(delivered.get("from"), str):
+        return None, None
+    source = delivered["from"]
+    edited = None
+    for other in HARNESSES:
+        entry = item.get(other)
+        if not isinstance(entry, dict) or not entry.get("fingerprint"):
+            continue
+        if undeclared_reason(other):
+            return source, (CHANGED_UNAVAILABLE,
+                            f"no {other} home is declared for this mind, and a copy was "
+                            f"delivered to it")
+        current = copy_fingerprint(kind, name, other)
+        if current is None:
+            return source, (CHANGED_MISSING, f"the {other} copy that was delivered is gone")
+        if current != entry["fingerprint"]:
+            edited = edited or (CHANGED_EDITED, f"the {other} copy is not as it was rendered")
+    if edited is not None:
+        return source, edited
+    if fingerprint(reference_path(kind, name, mind_name)) != delivered.get("reference"):
+        return source, (CHANGED_EDITED, "the reference has changed since it was delivered")
+    return source, None
+
+
+def refresh_delivery(
+    kind: str, name: str, source: str, mind_name: str | None = None,
+) -> None:
+    """The mind's copies now are the source: record that, so a source that is
+    the same as the mind's copy is no longer a difference to report."""
+    _validate(name)
+    with _locked(mind_name):
+        records = load_records(mind_name)
+        item = records[kind].get(name)
+        if not isinstance(item, dict):
+            return
+        ref_hash = fingerprint(reference_path(kind, name, mind_name))
+        for h in HARNESSES:
+            entry = item.get(h)
+            if (isinstance(entry, dict) and entry.get("fingerprint") and not undeclared_reason(h)
+                    and entry.get("reference") == ref_hash
+                    and copy_fingerprint(kind, name, h) == entry["fingerprint"]
+                    and isinstance(entry.get("delivered"), dict)):
+                entry["delivered"] = {"from": source, "reference": ref_hash}
+        save_records(records, mind_name)
+
+
+def _record_delivery(
+    item: dict, kind: str, name: str, source: str | None, mind_name: str | None,
+) -> None:
+    """Record, on every copy this pass has just rendered, what the skill was
+    delivered from; or that it was delivered from nothing (a tracked skill)."""
+    ref_hash = fingerprint(reference_path(kind, name, mind_name))
+    for h in HARNESSES:
+        entry = item.get(h)
+        if not isinstance(entry, dict) or not entry.get("fingerprint") or undeclared_reason(h):
+            continue
+        if entry.get("reference") != ref_hash or copy_fingerprint(kind, name, h) != entry["fingerprint"]:
+            continue  # a copy this pass did not put there keeps whatever it had
+        if source is None:
+            entry.pop("delivered", None)
+        else:
+            entry["delivered"] = {"from": source, "reference": ref_hash}
 
 
 def copy_status(kind: str, name: str, harness: str, mind_name: str | None = None) -> str:

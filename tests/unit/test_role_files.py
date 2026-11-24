@@ -69,6 +69,7 @@ def mind(monkeypatch, tmp_path):
     # What this process has already said, and its error feed, belong to
     # whichever test ran last: each test reads only its own mind's lines.
     monkeypatch.setattr(role_files, "_SAID", {})
+    monkeypatch.setattr(skills_api, "_WARNED", set())
     monkeypatch.setattr(hive_logging, "_ERRORS", deque(maxlen=100))
     return homes
 
@@ -469,3 +470,760 @@ def test_an_install_that_cannot_be_started_at_all_says_so(monkeypatch, mind, har
 
     assert any("the hooks and skills this mind's roles grant were not put in place: "
                "RuntimeError: can't start new thread" in line for line in _said(harness))
+
+
+GENERATED = "generated-skill"
+GENERATED_TEXT = ("---\nname: generated-skill\ndescription: a skill a workflow generated\n---\n"
+                  "Do the generated thing.\n")
+
+
+def _install_folder(tmp_path: Path) -> Path:
+    return tmp_path / "project" / "install" / "workflow-skills"
+
+
+def _generate(tmp_path: Path, name: str, text: str, **siblings: str) -> Path:
+    skill = _install_folder(tmp_path) / name
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(text)
+    for filename, content in siblings.items():
+        (skill / filename).write_text(content)
+    return skill
+
+
+def _provide(harness: str, mind: dict, skills: list[str]) -> dict:
+    return role_files.provision(
+        harness, mind[harness],
+        {"managed": True, "roles": ["general"], "hooks": [], "skills": skills,
+         "models": [], "tools": []})
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_role_naming_a_generated_skill_delivers_it_from_the_installs_folder_beside_a_tracked_one(
+        mind, tmp_path, harness):
+    _generate(tmp_path, GENERATED, GENERATED_TEXT, **{"helper.sh": "echo helper\n"})
+    # The untouched as-generated copy sits beside it and is never a skill.
+    kept = _install_folder(tmp_path) / ".as-generated"
+    (kept / GENERATED).mkdir(parents=True)
+    (kept / GENERATED / "SKILL.md").write_text(GENERATED_TEXT.replace("generated thing", "kept thing"))
+    (kept / "SKILL.md").write_text("---\nname: x\n---\nnot a skill\n")
+
+    result = _provide(harness, mind, [GENERATED, SKILL])
+    names = {pair.name for pair in skills_api.list_skills(harness)}
+    assert ".as-generated" not in names
+    assert "kept thing" not in (mind[harness] / "skills" / GENERATED / "SKILL.md").read_text()
+
+    assert result["problems"] == []
+    delivered = mind[harness] / "skills" / GENERATED
+    assert "Do the generated thing." in (delivered / "SKILL.md").read_text()
+    assert (delivered / "helper.sh").read_text() == "echo helper\n"
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_with_a_copy_of_its_own_keeps_it_when_the_install_folder_holds_that_skill(
+        mind, tmp_path, harness):
+    _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    own = mind[harness] / "skills" / GENERATED
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text("---\nname: generated-skill\n---\nThe mind's own.\n")
+
+    _provide(harness, mind, [GENERATED])
+
+    assert "The mind's own." in (own / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_install_with_no_generated_skills_delivers_the_tracked_ones_as_before(
+        mind, tmp_path, harness):
+    assert not _install_folder(tmp_path).exists()
+
+    absent = _provide(harness, mind, [SKILL, GENERATED])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    assert not _install_folder(tmp_path).exists()
+    assert absent["skills"][SKILL] == "installed"
+    assert any(f"skill {GENERATED} is granted by a role and is not there to use" in text
+               for text in absent["problems"])
+    assert len(absent["problems"]) == 1
+
+    _install_folder(tmp_path).mkdir(parents=True)
+    (_install_folder(tmp_path) / ".gitkeep").write_text("")
+    empty = _provide(harness, mind, [SKILL, GENERATED])
+
+    assert empty["skills"] == {SKILL: "same", GENERATED: "missing"}
+    assert len(empty["problems"]) == 1
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_unreadable_install_folder_still_delivers_the_tracked_skills_and_is_named(
+        mind, tmp_path, harness):
+    folder = _install_folder(tmp_path)
+    folder.parent.mkdir(parents=True)
+    folder.write_text("a file where the folder should be\n")
+
+    result = _provide(harness, mind, [SKILL, GENERATED])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert any(f"skill {GENERATED} is granted by a role" in text and "cannot be listed" in text
+               for text in result["problems"])
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_skill_in_both_places_is_delivered_from_the_install_folder_and_the_clash_is_reported(
+        mind, tmp_path, harness, caplog):
+    _generate(tmp_path, SKILL, SKILL_TEXT.replace("Do the thing.", "Do the generated thing."))
+    caplog.set_level("WARNING", logger="hive-mind.skills")
+
+    result = _provide(harness, mind, [SKILL])
+
+    delivered = (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert "Do the generated thing." in delivered
+    # Said in the feed too, one sentence for the clash, not only in the log.
+    assert [text for text in result["problems"]] == [
+        f"skill {SKILL} is in the repository and in this install's generated skills; "
+        "the generated one is what this mind is given"]
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[SKILL].as_dict()
+    assert row["source"] == "generated"
+    assert row["shadowed"] is True
+    assert "Do the generated thing." in row["repo"]
+    assert "Do the thing." in row["shadowed_text"]
+    assert any(record.getMessage() == "mind.skill.generated_shadows_tracked"
+               for record in caplog.records)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_tracked_skill_alone_reports_its_source_as_tracked(mind, harness):
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[SKILL].as_dict()
+
+    assert row["source"] == "tracked"
+    assert row["shadowed"] is False
+    assert "Do the thing." in row["repo"]
+
+
+TRUNCATED = [
+    ("frontmatter cut off", "---\nname: generated-skill\ndescription: a skill a work", "never closes"),
+    ("no frontmatter", "Do the generated thing.\n", "has no frontmatter"),
+    ("another name", "---\nname: some-other\ndescription: d\n---\nbody\n", "names 'some-other'"),
+    ("no description", "---\nname: generated-skill\n---\nbody\n", "has no description"),
+]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("case,text,said", TRUNCATED, ids=[c[0] for c in TRUNCATED])
+def test_a_generated_skill_whose_markdown_is_stable_but_not_whole_is_not_delivered(
+        mind, tmp_path, harness, case, text, said):
+    _generate(tmp_path, GENERATED, text)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    assert any(said in line and "nothing was delivered" in line for line in result["problems"])
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("where", ["SKILL.md", "a folder", "a file inside"])
+def test_a_generated_skill_holding_a_link_is_not_delivered_nor_read_through(
+        mind, tmp_path, harness, where):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(GENERATED_TEXT.replace("generated thing", "host file"))
+    (outside / "secret.txt").write_text("host secret\n")
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    if where == "SKILL.md":
+        (skill / "SKILL.md").unlink()
+        (skill / "SKILL.md").symlink_to(outside / "SKILL.md")
+    elif where == "a folder":
+        (skill / "notes").symlink_to(outside)
+    else:
+        (skill / "secret.txt").symlink_to(outside / "secret.txt")
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    # A linked SKILL.md is not read at all, so the grant is named as unreadable;
+    # a link further in is named as the reason nothing was delivered.
+    said = "could not be read on this mind (unreadable)" if where == "SKILL.md" else "holds a link"
+    assert any(said in line for line in result["problems"])
+    listed = {pair.name: pair for pair in skills_api.list_skills(harness)}[GENERATED]
+    assert "host file" not in (listed.repo_text or "")
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("written", ["no markdown yet", "empty markdown", "changes mid-copy"])
+def test_a_generated_skill_that_is_being_written_is_not_delivered_in_part(
+        monkeypatch, mind, tmp_path, harness, written):
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT, **{"helper.sh": "echo helper\n"})
+    if written == "no markdown yet":
+        (skill / "SKILL.md").unlink()
+    elif written == "empty markdown":
+        (skill / "SKILL.md").write_text("")
+    else:
+        # The operator writes another file into the folder after the copy has
+        # begun: the real copy runs, and the source moves under it.
+        real_copy = skill_reference._copytree
+
+        def copy_while_written(source, target):
+            real_copy(source, target)
+            (source / "second-file.md").write_text("written a moment later\n")
+
+        monkeypatch.setattr(skill_reference, "_copytree", copy_while_written)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not (mind[harness] / "skills" / GENERATED).exists()
+    assert not (mind[harness] / "skills" / GENERATED / "SKILL.md").exists()
+    assert any(f"skill {GENERATED} is granted by a role" in text for text in result["problems"])
+    if written != "no markdown yet":
+        assert any("nothing was delivered" in text for text in result["problems"])
+
+
+# --- A change to the install's copy of a generated skill reaches the minds that were given it ---
+
+NEWER_TEXT = GENERATED_TEXT.replace("Do the generated thing.", "Do the newer generated thing.")
+EDITED = "---\nname: generated-skill\ndescription: tuned\n---\nThe mind tuned this.\n"
+
+
+def _first_delivery(harness: str, mind: dict, tmp_path: Path, **siblings: str) -> Path:
+    """The role names a generated skill and the mind is given it by provision itself."""
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT, **siblings)
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    return skill
+
+
+def _delivered_text(mind: dict, harness: str) -> str:
+    return (mind[harness] / "skills" / GENERATED / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_still_holding_what_it_was_given_gets_the_newer_copy_of_a_generated_skill(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path, **{"helper.sh": "echo one\n"})
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    (skill / "helper.sh").write_text("echo two\n")
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the newer generated thing." in _delivered_text(mind, harness)
+    assert (mind[harness] / "skills" / GENERATED / "helper.sh").read_text() == "echo two\n"
+    assert result["problems"] == []
+    assert result["skills"][GENERATED] == "updated"
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[GENERATED]
+    assert row.state == "same"
+    # The next conversation finds nothing more to do.
+    assert _provide(harness, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+def test_every_harness_of_a_mind_gets_the_newer_copy_whichever_conversation_starts_first(
+        mind, tmp_path):
+    skill = _first_delivery("claude", mind, tmp_path)
+    for other in ("codex", "dsh"):
+        assert _provide(other, mind, [GENERATED])["problems"] == []
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+
+    assert _provide("codex", mind, [GENERATED])["problems"] == []
+
+    for harness in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, harness)
+        assert _provide(harness, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_newer_generated_skill_is_delivered_though_each_harness_copy_differs_from_the_source(
+        mind, tmp_path, harness):
+    # Every harness's copy carries only the frontmatter that harness reads, so
+    # none of them is the source byte for byte, and none of them was edited.
+    rich = GENERATED_TEXT.replace(
+        "description: a skill a workflow generated\n",
+        "description: a skill a workflow generated\nargument-hint: <what>\n"
+        "harness:\n  dsh: {whenToUse: when asked}\n")
+    skill = _generate(tmp_path, GENERATED, rich)
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    assert _delivered_text(mind, harness) != rich
+
+    (skill / "SKILL.md").write_text(rich.replace("Do the generated thing.", "Do the newer thing."))
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the newer thing." in _delivered_text(mind, harness)
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("where", ["the harness copy", "another harness's copy", "the reference"])
+def test_a_mind_that_changed_its_own_copy_keeps_it_and_is_told_the_two_differ(
+        mind, tmp_path, harness, where):
+    skill = _first_delivery(harness, mind, tmp_path)
+    for other in HARNESSES:
+        _provide(other, mind, [GENERATED])
+    elsewhere = next(h for h in HARNESSES if h != harness)
+    if where == "the harness copy":
+        edited = mind[harness] / "skills" / GENERATED / "SKILL.md"
+    elif where == "another harness's copy":
+        edited = mind[elsewhere] / "skills" / GENERATED / "SKILL.md"
+    else:
+        edited = skill_reference.reference_path("skill", GENERATED) / "SKILL.md"
+    edited.write_text(EDITED)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert edited.read_text() == EDITED
+    for h in HARNESSES:
+        assert "newer generated thing" not in _delivered_text(mind, h)
+    assert "newer generated thing" not in (
+        skill_reference.reference_path("skill", GENERATED) / "SKILL.md").read_text()
+    assert result["skills"][GENERATED] == "differs"
+    assert result["problems"] == [
+        f"skill {GENERATED} has changed in this install's generated skills, and this mind "
+        "has changed its own copy since it was given; its copy was left as it is and now "
+        "differs"]
+    row = {pair.name: pair for pair in skills_api.list_skills(harness)}[GENERATED]
+    assert row.state == "differs"
+    assert "newer generated thing" in row.repo_text
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_edit_merged_into_the_reference_is_still_the_minds_when_the_install_copy_changes(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path)
+    (mind[harness] / "skills" / GENERATED / "SKILL.md").write_text(EDITED)
+    # The mind's own start-up pass merges an in-place edit into its reference.
+    skill_reference.check(catalog=lambda h: None, notify=lambda text: None)
+    assert "The mind tuned this." in (
+        skill_reference.reference_path("skill", GENERATED) / "SKILL.md").read_text()
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "The mind tuned this." in _delivered_text(mind, harness)
+    assert "newer generated thing" not in _delivered_text(mind, harness)
+    assert result["skills"][GENERATED] == "differs"
+    assert len(result["problems"]) == 1
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_changed_sibling_file_counts_as_the_minds_edit_not_only_the_markdown(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path, **{"helper.sh": "echo one\n"})
+    (mind[harness] / "skills" / GENERATED / "helper.sh").write_text("echo mine\n")
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert (mind[harness] / "skills" / GENERATED / "helper.sh").read_text() == "echo mine\n"
+    assert "newer generated thing" not in _delivered_text(mind, harness)
+    assert result["skills"][GENERATED] == "differs"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_generated_skill_the_mind_already_had_before_deliveries_were_recorded_is_left_alone(
+        mind, tmp_path, harness):
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    # How every copy at home today got there: rendered, with nothing said of
+    # what it was rendered from.
+    skill_reference.install(
+        "skill", GENERATED, harness, GENERATED_TEXT, skill,
+        catalog=lambda h: None, notify=lambda text: None)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_copy_the_mind_made_itself_is_left_alone_when_the_install_copy_changes(
+        mind, tmp_path, harness):
+    skill = _generate(tmp_path, GENERATED, GENERATED_TEXT)
+    own = mind[harness] / "skills" / GENERATED
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text(EDITED)
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    result = _provide(harness, mind, [GENERATED])
+
+    assert (own / "SKILL.md").read_text() == EDITED
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_tracked_skill_is_not_updated_when_the_repository_changes_it(mind, tmp_path, harness):
+    assert _provide(harness, mind, [SKILL])["problems"] == []
+    tracked = tmp_path / "project" / "specs" / "skills" / SKILL / "SKILL.md"
+    tracked.write_text(SKILL_TEXT.replace("Do the thing.", "Do the newer thing."))
+
+    result = _provide(harness, mind, [SKILL])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_newer_generated_skill_that_cannot_be_delivered_leaves_the_mind_its_copy_and_is_named(
+        mind, tmp_path, harness):
+    skill = _first_delivery(harness, mind, tmp_path)
+
+    (skill / "SKILL.md").write_text("---\nname: generated-skill\ndescription: a skill a work")
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert any(f"skill {GENERATED} has a newer copy" in text and "nothing was delivered" in text
+               for text in result["problems"])
+
+    # Once the operator has finished writing it, the mind has it.
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    assert "Do the newer generated thing." in _delivered_text(mind, harness)
+
+
+# --- An update reaches every harness of the mind or none, and never strands one ---
+
+MODELLED = GENERATED_TEXT.replace(
+    "description: a skill a workflow generated\n",
+    "description: a skill a workflow generated\nharness:\n  claude: {model: custom-model}\n")
+MODELLED_NEWER = MODELLED.replace("Do the generated thing.", "Do the newer generated thing.")
+
+
+class _Proxy:
+    """The proxy's model listing, the transport the update asks: what it offers
+    each harness, or that it cannot be asked."""
+
+    def __init__(self, offered):
+        self.offered = offered
+
+    def __call__(self, *_args):
+        def catalog(_harness):
+            if self.offered is None:
+                raise OSError("the proxy is down")
+            return list(self.offered)
+        return catalog
+
+
+@pytest.fixture()
+def proxy(monkeypatch, mind):
+    proxy = _Proxy(["custom-model"])
+    monkeypatch.setattr(skill_reference, "proxy_catalog", proxy)
+    return proxy
+
+
+def _record_of(harness: str) -> dict | None:
+    entry = skill_reference.load_records()["skill"].get(GENERATED, {}).get(harness) or {}
+    return entry.get("delivered")
+
+
+def _delivered_to_every_harness(mind: dict, tmp_path: Path, text: str) -> Path:
+    skill = _generate(tmp_path, GENERATED, text)
+    for harness in HARNESSES:
+        assert _provide(harness, mind, [GENERATED])["problems"] == []
+    return skill
+
+
+def _the_mind_is_as_it_was(mind: dict, old: str) -> None:
+    for harness in HARNESSES:
+        assert old in _delivered_text(mind, harness)
+        assert "newer generated thing" not in _delivered_text(mind, harness)
+        assert _record_of(harness) is not None
+    assert "newer generated thing" not in (
+        skill_reference.reference_path("skill", GENERATED) / "SKILL.md").read_text()
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+@pytest.mark.parametrize("fault", ["the proxy is down", "the proxy no longer offers the model"])
+def test_an_update_the_proxy_stops_leaves_every_copy_the_reference_and_the_records_as_they_were(
+        mind, proxy, tmp_path, harness, fault):
+    skill = _delivered_to_every_harness(mind, tmp_path, MODELLED)
+    (skill / "SKILL.md").write_text(MODELLED_NEWER)
+    proxy.offered = None if fault == "the proxy is down" else ["some-other-model"]
+
+    result = _provide(harness, mind, [GENERATED])
+
+    _the_mind_is_as_it_was(mind, "Do the generated thing.")
+    assert len(result["problems"]) == 1
+    assert "could not be delivered to this mind" in result["problems"][0]
+    assert "changed its own copy" not in result["problems"][0]
+
+    proxy.offered = ["custom-model"]
+    retried = _provide(harness, mind, [GENERATED])
+
+    assert retried["problems"] == []
+    for each in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, each)
+        assert _provide(each, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_whose_write_fails_partway_leaves_every_copy_as_it_was_and_is_retried(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    broken = [True]
+    real_swap = skill_reference._swap_in
+    codex_copy = mind["codex"] / "skills" / GENERATED
+
+    def disk_full_for_codex(staged, target):
+        if broken[0] and Path(target) == codex_copy:
+            raise OSError("no space left on device")
+        real_swap(staged, target)
+
+    monkeypatch.setattr(skill_reference, "_swap_in", disk_full_for_codex)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    _the_mind_is_as_it_was(mind, "Do the generated thing.")
+    assert len(result["problems"]) == 1
+    assert "no space left on device" in result["problems"][0]
+    assert "changed its own copy" not in result["problems"][0]
+
+    broken[0] = False
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    for each in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, each)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_is_skipped_whole_while_a_harness_it_was_given_to_has_no_home(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    away = next(h for h in ("codex", "dsh") if h != harness)
+    variable = {"codex": "CODEX_HOME", "dsh": "DSH_HOME"}[away]
+    monkeypatch.delenv(variable)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    for each in HARNESSES:
+        assert "Do the generated thing." in _delivered_text(mind, each)
+        assert "newer generated thing" not in _delivered_text(mind, each)
+    assert [text for text in result["problems"]] == [
+        f"skill {GENERATED} has changed in this install's generated skills, and a harness this "
+        "mind was given it for has no home declared now, so none was updated; its copy was "
+        "left as it is and now differs"]
+
+    monkeypatch.setenv(variable, str(mind[away]))
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    for each in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, each)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_copy_the_mind_deleted_is_named_as_missing_and_not_as_an_edit(mind, tmp_path, harness):
+    import shutil
+
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    gone = next(h for h in HARNESSES if h != harness)
+    shutil.rmtree(mind[gone] / "skills" / GENERATED)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert result["problems"] == [
+        f"skill {GENERATED} has changed in this install's generated skills, and a copy this "
+        "mind was given of it is no longer there; its copy was left as it is and now differs"]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_that_made_its_copy_exactly_the_newer_source_is_told_nothing_and_follows_the_next_change(
+        mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (mind[harness] / "skills" / GENERATED / "SKILL.md").write_text(NEWER_TEXT)
+    skill_reference.check(catalog=lambda h: None, notify=lambda text: None)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+
+    for _conversation in range(2):
+        result = _provide(harness, mind, [GENERATED])
+        assert result["problems"] == []
+        assert result["skills"][GENERATED] == "same"
+
+    (skill / "SKILL.md").write_text(NEWER_TEXT.replace("newer generated", "newest generated"))
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    for each in HARNESSES:
+        assert "Do the newest generated thing." in _delivered_text(mind, each)
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_skill_first_delivered_from_the_repository_is_the_minds_own_when_a_generated_one_of_the_name_appears(
+        mind, tmp_path, harness):
+    assert _provide(harness, mind, [SKILL])["problems"] == []
+    _generate(tmp_path, SKILL, SKILL_TEXT.replace("Do the thing.", "Do the generated thing."))
+
+    result = _provide(harness, mind, [SKILL])
+
+    assert "Do the thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+    assert all("generated skills; the generated one is what" in text for text in result["problems"])
+    assert len(result["problems"]) == 1
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_generated_skill_taken_out_of_the_install_folder_does_not_become_the_repositorys_copy(
+        mind, tmp_path, harness):
+    import shutil
+
+    skill = _generate(tmp_path, SKILL, SKILL_TEXT.replace("Do the thing.", "Do the generated thing."))
+    assert _provide(harness, mind, [SKILL])["skills"][SKILL] == "installed"
+    shutil.rmtree(skill)
+
+    _provide(harness, mind, [SKILL])
+
+    assert "Do the generated thing." in (mind[harness] / "skills" / SKILL / "SKILL.md").read_text()
+
+
+# --- The records are part of the update: an update that cannot record itself did not happen ---
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_whose_records_cannot_be_saved_leaves_every_copy_and_the_records_as_they_were(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    broken = [True]
+    real_save = skill_reference.save_records
+
+    def disk_full_once(records, mind_name=None):
+        if broken[0]:
+            broken[0] = False
+            raise OSError("no space left on device")
+        real_save(records, mind_name)
+
+    monkeypatch.setattr(skill_reference, "save_records", disk_full_once)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert broken == [False]
+    _the_mind_is_as_it_was(mind, "Do the generated thing.")
+    assert len(result["problems"]) == 1
+    assert "no space left on device" in result["problems"][0]
+    assert "changed its own copy" not in result["problems"][0]
+
+    assert _provide(harness, mind, [GENERATED])["problems"] == []
+    for each in HARNESSES:
+        assert "Do the newer generated thing." in _delivered_text(mind, each)
+        assert _provide(each, mind, [GENERATED])["skills"][GENERATED] == "same"
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_where_one_harness_write_did_not_land_is_undone_everywhere(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    lost = mind["codex"] / "skills" / GENERATED
+    real_swap = skill_reference._swap_in
+
+    def swap_that_does_not_land(staged, target):
+        if Path(target) != lost:
+            real_swap(staged, target)
+
+    monkeypatch.setattr(skill_reference, "_swap_in", swap_that_does_not_land)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    _the_mind_is_as_it_was(mind, "Do the generated thing.")
+    assert len(result["problems"]) == 1
+    assert "could not be delivered to this mind" in result["problems"][0]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_that_cannot_be_undone_says_which_copy_and_never_leaves_one_deleted(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    failing_write = mind["dsh"] / "skills" / GENERATED
+    unrestorable = mind["claude"] / "skills"
+    real_swap = skill_reference._swap_in
+    real_copytree = skill_reference.shutil.copytree
+
+    def swap_raising_for_dsh(staged, target):
+        if Path(target) == failing_write:
+            raise OSError("no space left on device")
+        real_swap(staged, target)
+
+    def copytree_failing_when_putting_claude_back(source, target, *args, **kwargs):
+        if ".restore." in Path(target).name and Path(target).parent == unrestorable:
+            raise OSError("input/output error")
+        return real_copytree(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(skill_reference, "_swap_in", swap_raising_for_dsh)
+    monkeypatch.setattr(skill_reference.shutil, "copytree", copytree_failing_when_putting_claude_back)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    # The other two are back as they were; the one that could not be put back is
+    # still a whole skill, not a deleted one.
+    for each in ("codex", "dsh"):
+        assert "Do the generated thing." in _delivered_text(mind, each)
+    assert (mind["claude"] / "skills" / GENERATED / "SKILL.md").is_file()
+    assert len(result["problems"]) == 1
+    sentence = result["problems"][0]
+    assert f"skill {GENERATED} has a newer copy" in sentence
+    assert "could not be undone for" in sentence
+    assert str(mind["claude"] / "skills" / GENERATED) in sentence
+    assert "input/output error" in sentence
+    assert "keeps a copy of its own" not in sentence
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_an_update_that_leaves_a_copy_gone_says_it_is_gone_and_not_that_the_mind_keeps_one(
+        monkeypatch, mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    target = mind[harness] / "skills" / GENERATED
+    real_rename = os.rename
+
+    def rename_that_cannot_land_on_the_copy(source, destination, *args, **kwargs):
+        if Path(destination) == target:
+            raise OSError("input/output error")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(skill_reference.os, "rename", rename_that_cannot_land_on_the_copy)
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert not target.exists()
+    sentences = result["problems"]
+    assert any("could not be undone" in text and str(target) in text for text in sentences)
+    assert (f"skill {GENERATED} is granted by a role and is not there to use: the copy this "
+            "mind had is gone: a newer one could not be delivered and the old one could not "
+            "be put back") in sentences
+    assert not any("keeps a copy of its own" in text for text in sentences)
+
+
+def test_a_failed_update_puts_back_a_copy_of_a_harness_it_was_never_given_to_as_the_link_it_was(
+        monkeypatch, mind, proxy, tmp_path):
+    # Codex had no home when the skill was delivered; the mind has since given
+    # it one, with a link of its own where the skill would go.
+    monkeypatch.delenv("CODEX_HOME")
+    skill = _generate(tmp_path, GENERATED, MODELLED)
+    assert _provide("claude", mind, [GENERATED])["problems"] == []
+    monkeypatch.setenv("CODEX_HOME", str(mind["codex"]))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_text("---\nname: generated-skill\ndescription: d\n---\nlinked\n")
+    link = mind["codex"] / "skills" / GENERATED
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere)
+    (skill / "SKILL.md").write_text(MODELLED_NEWER)
+    proxy.offered = None
+
+    result = _provide("claude", mind, [GENERATED])
+
+    assert link.is_symlink() and os.readlink(link) == str(elsewhere)
+    assert "Do the generated thing." in _delivered_text(mind, "claude")
+    assert len(result["problems"]) == 1
+    assert "could not be delivered to this mind" in result["problems"][0]
+    assert "could not be undone" not in result["problems"][0]
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_a_mind_whose_records_cannot_be_read_is_not_updated_and_is_not_blamed_for_it(
+        mind, tmp_path, harness):
+    skill = _delivered_to_every_harness(mind, tmp_path, GENERATED_TEXT)
+    (skill / "SKILL.md").write_text(NEWER_TEXT)
+    (skill_reference.reference_root() / ".rendered.json").write_text("{ not json")
+
+    result = _provide(harness, mind, [GENERATED])
+
+    assert "Do the generated thing." in _delivered_text(mind, harness)
+    assert result["skills"][GENERATED] == "unreadable"
+    assert not any("newer copy" in text for text in result["problems"])
