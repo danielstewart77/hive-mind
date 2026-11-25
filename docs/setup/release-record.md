@@ -18,7 +18,7 @@ In a state directory under the install, for example `<install>/state/release-rec
 
 ## Fields
 
-`identity` is the release's name: `hive_mind_commit` (full commit id of the checkout), `image_ids_hash` (sha256 over the sorted lines `project/service=image id`) and `string`, the two joined with a plus. It never holds a branch name. `complete` is false and `string` is null when no commit or no image id could be read, so a failed run never looks like a release. Read this key back to compare two releases.
+`identity` is the release's name: `hive_mind_commit` (full commit id of the checkout), `image_ids_hash` (sha256 over the sorted lines `project/service=image id`) and `string`, the two joined with a plus. It never holds a branch name. `complete` is false and `string` is null when the commit, a compose config or any service's image id could not be read, so a failed run never looks like a release. Read this key back to compare two releases.
 
 `information_only.branch` is the branch checked out, a label for people only.
 
