@@ -29,7 +29,12 @@ GATEWAY = "http://nagatha.local:8421"
 
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
     user = accounts.make_user("daniel", "secret-pass", is_admin=True,
                               replace=True)
     client = TestClient(main_mod.app)
@@ -76,7 +81,7 @@ class StubMind:
             raise httpx.ConnectError("connection refused")
         path = url[len(GATEWAY):]
         # Every route is guarded on a real Mind, reads included.
-        if (headers or {}).get("Authorization") != "Bearer admin-token":
+        if (headers or {}).get("Authorization") != "Bearer the-minds-own-key":
             return httpx.Response(401, json={"error": "unauthorized"})
 
         if method == "GET" and path == "/skills":

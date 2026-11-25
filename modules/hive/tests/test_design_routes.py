@@ -299,7 +299,12 @@ async def test_a_mind_with_no_symbols_route_is_reported_as_out_of_date(tmp_path,
 
     import mind_symbols
 
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
 
     async def route_missing(url, headers=None, params=None):
         return httpx.Response(404, json={"detail": "Not Found"})
@@ -330,7 +335,13 @@ async def test_a_mind_refusing_a_repository_is_passed_through_as_a_404(monkeypat
 
     import mind_symbols
 
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+
 
     class _Client:
         async def __aenter__(self):

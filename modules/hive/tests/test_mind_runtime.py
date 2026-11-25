@@ -76,7 +76,12 @@ def _response(status: int, json_body=None, text: str = "") -> httpx.Response:
 
 @pytest.fixture(autouse=True)
 def admin_token(monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
 
 
 def _run(coro):
@@ -106,7 +111,7 @@ def test_push_sends_the_admin_bearer(monkeypatch):
         method, url, kwargs = client.calls[0]
         assert (method, url) == ("PATCH", "http://bob:8420/runtime")
         assert kwargs["json"] == {"default_model": "opus"}
-        assert kwargs["headers"]["Authorization"] == "Bearer admin-token"
+        assert kwargs["headers"]["Authorization"] == "Bearer the-minds-own-key"
 
     _run(scenario())
 
@@ -137,7 +142,7 @@ def test_a_mind_without_the_route_says_so(monkeypatch):
     _run(scenario())
 
 
-def test_a_rejected_write_keeps_its_status(monkeypatch):
+def test_a_mind_refusing_its_own_key_is_a_502_so_the_operator_is_not_signed_out(monkeypatch):
     async def scenario():
         monkeypatch.setattr(
             httpx, "AsyncClient", _Client(_response(401, text="unauthorized"))
@@ -146,7 +151,7 @@ def test_a_rejected_write_keeps_its_status(monkeypatch):
         with pytest.raises(HTTPException) as exc:
             await mind_runtime.push_default_model("http://bob:8420", "opus")
 
-        assert exc.value.status_code == 401
+        assert exc.value.status_code == 502
 
     _run(scenario())
 
@@ -161,9 +166,14 @@ def test_a_mind_with_no_gateway_url_is_a_bad_request():
     _run(scenario())
 
 
-def test_no_admin_token_refuses_the_write(monkeypatch):
+def test_a_mind_whose_key_is_not_held_here_refuses_the_write(monkeypatch):
     async def scenario():
-        monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
+        import configuration_data
+
+        async def no_key(url):
+            return None
+
+        monkeypatch.setattr(configuration_data, "own_credential_for", no_key)
         monkeypatch.setattr(
             httpx, "AsyncClient", _Client(_response(200, {"configuration": {}}))
         )
@@ -264,7 +274,7 @@ def test_saving_a_voice_patches_the_mind_it_names(monkeypatch):
         method, url, kwargs = calls[0]
         assert (method, url) == ("PATCH", "http://cypher:8420/runtime")
         assert kwargs["json"] == {"voice": "bm_george"}
-        assert kwargs["headers"]["Authorization"] == "Bearer admin-token"
+        assert kwargs["headers"]["Authorization"] == "Bearer the-minds-own-key"
 
     _run(scenario())
 
@@ -569,7 +579,7 @@ def test_the_settings_read_asks_the_mind_and_carries_the_admin_bearer(monkeypatc
         assert body["settings"][0]["value"] == 40
         method, url, kwargs = calls[0]
         assert (method, url) == ("GET", "http://mind:8420/runtime/settings")
-        assert kwargs["headers"]["Authorization"] == "Bearer admin-token"
+        assert kwargs["headers"]["Authorization"] == "Bearer the-minds-own-key"
 
     _run(scenario())
 
@@ -656,7 +666,7 @@ def test_a_save_carries_the_admin_bearer_the_mind_demands(monkeypatch):
             _Client(_response(200, _SETTINGS_BODY), calls=calls),
         )
         await mind_runtime.push_settings("http://mind:8420", {"goal_rounds": 1})
-        assert calls[0][2]["headers"]["Authorization"] == "Bearer admin-token"
+        assert calls[0][2]["headers"]["Authorization"] == "Bearer the-minds-own-key"
 
     _run(scenario())
 

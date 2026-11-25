@@ -37,7 +37,12 @@ GATEWAY = "http://stash.local:8420"
 
 def _client(monkeypatch, *, admin=True, username="daniel"):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
     user = accounts.make_user(username, "secret-pass", is_admin=admin, replace=True)
     client = TestClient(main_mod.app)
     client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))

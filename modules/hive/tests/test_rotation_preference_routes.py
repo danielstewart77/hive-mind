@@ -65,7 +65,7 @@ def _use_mind_transport(monkeypatch, handler):
     async def transport(request):
         if request.url.host == "hive-comms":
             assert (request.method, request.url.path) == ("GET", "/broker/minds")
-            assert request.headers["authorization"] == "Bearer rotation-admin-token"
+            assert request.headers["authorization"] == "Bearer the-minds-own-key"
             return httpx.Response(200, json=[], request=request)
         return await handler(request)
 
@@ -78,7 +78,12 @@ def _use_mind_transport(monkeypatch, handler):
 
 
 def test_console_percentage_write_targets_only_requested_mind(tmp_path, monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "rotation-admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
     _broker_rows(monkeypatch)
     requests = []
 
@@ -105,7 +110,7 @@ def test_console_percentage_write_targets_only_requested_mind(tmp_path, monkeypa
     assert (request.method, request.url.host, request.url.path) == (
         "PATCH", "bob", "/runtime/settings"
     )
-    assert request.headers["authorization"] == "Bearer rotation-admin-token"
+    assert request.headers["authorization"] == "Bearer the-minds-own-key"
     assert json.loads(request.content) == {
         "settings": {"rotation_threshold_percent": 40}
     }
@@ -114,7 +119,12 @@ def test_console_percentage_write_targets_only_requested_mind(tmp_path, monkeypa
 def test_console_rotation_write_preserves_the_minds_validation_refusal(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "rotation-admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
     _broker_rows(monkeypatch)
     requests = []
 
@@ -149,7 +159,12 @@ def test_console_rotation_write_preserves_the_minds_validation_refusal(
 def test_console_settings_read_retains_the_saved_percent_and_capacity_state(
     tmp_path, monkeypatch, window, threshold, status
 ):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "rotation-admin-token")
+    import configuration_data
+
+    async def own_key(url):
+        return "the-minds-own-key"
+
+    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
     _broker_rows(monkeypatch)
     requests = []
 
