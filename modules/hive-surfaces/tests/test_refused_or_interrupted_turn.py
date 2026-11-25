@@ -301,3 +301,80 @@ async def test_telegram_stop_reports_a_gateway_that_could_not_be_reached():
         await tb.cmd_stop(update, MagicMock())
 
     assert "Could not interrupt" in update.message.reply_text.await_args.args[0]
+
+
+def _split_client(chunks: list[bytes]) -> GatewayClient:
+    client = _client()
+
+    async def iter_any():
+        for c in chunks:
+            yield c
+
+    client.http.post.return_value.__aenter__.return_value.content.iter_any = iter_any
+    return client
+
+
+@pytest.mark.asyncio
+async def test_telegram_connection_break_midstream_is_marked_interrupted(monkeypatch):
+    client = _client()
+
+    async def iter_any():
+        yield _sse(_text("Half an answ"))
+        raise ConnectionError("reset")
+
+    client.http.post.return_value.__aenter__.return_value.content.iter_any = iter_any
+    monkeypatch.setattr(tb, "gateway", client)
+    bubbles: list = []
+    with pytest.raises(ConnectionError):
+        await tb._stream_to_message(_TgMessage(bubbles, "\u2026"), 1, 2, "hi", edit_interval=0)
+    shown = bubbles[0].edits[-1]
+    assert "Half an answ" in shown and "Interrupted" in shown
+
+
+@pytest.mark.asyncio
+async def test_dsh_stopped_turn_is_interrupted_not_failed():
+    client = _client(_sse(_text("Half"), {"type": "result", "stop_reason": "stopped", "is_error": False}))
+    sent, _s, _p = await _run_discord_skill(client)
+    assert "Interrupted" in sent.edit.await_args.kwargs["content"]
+
+
+@pytest.mark.parametrize("result", [
+    {"type": "result", "is_error": False, "error_code": "MIND_MISCONFIGURED", "error": "bad key"},
+    {"type": "result", "is_error": False, "stop_reason": "error", "error": "bad key"},
+])
+@pytest.mark.asyncio
+async def test_error_code_results_are_not_answers_and_keep_their_reason(result):
+    client = _client(_sse(_text("Half"), result))
+    sent, speak, play = await _run_discord_skill(client)
+    shown = sent.edit.await_args.kwargs["content"]
+    assert "bad key" in shown and "Error" in shown
+    assert speak.call_count == 0 and play.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_multibyte_character_split_across_chunks_is_not_an_interruption():
+    raw = "".join(
+        f"data: {json.dumps(e, ensure_ascii=False)}\n\n"
+        for e in (_text("caf\u00e9 \U0001f600 done"), {"type": "result", "result": "x"})
+    ).encode()
+    cut = raw.index("\U0001f600".encode()) + 2
+    client = _split_client([raw[:cut], raw[cut:]])
+    sent, speak, _p = await _run_discord_skill(client)
+    assert sent.edit.await_args.kwargs["content"] == "caf\u00e9 \U0001f600 done"
+    speak.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_finished_turn_with_no_text_is_not_spoken(monkeypatch):
+    client = _client(_sse({"type": "result", "result": ""}))
+    sent, speak, play = await _run_discord_skill(client)
+    assert "ERROR" in sent.edit.await_args.kwargs["content"]
+    assert speak.call_count == 0 and play.await_count == 0
+
+    spoken = []
+    monkeypatch.setattr(tb, "gateway", _client(_sse({"type": "result", "result": ""})))
+    monkeypatch.setattr(tb, "_tts", AsyncMock(side_effect=lambda t: spoken.append(t) or b"x"))
+    chat = MagicMock(send_voice=AsyncMock())
+    await tb._stream_to_message(_TgMessage([], "\u2026"), 1, 2, "hi", edit_interval=0, voice=True, chat=chat)
+    await __import__("asyncio").sleep(0.01)
+    assert spoken == []

@@ -22,7 +22,7 @@ from hive_surfaces import (
 )
 from hive_surfaces.config import config
 from hive_surfaces.gateway_client import (
-    GatewayClient, TURN_INTERRUPTED, TurnOutcome, turn_marker,
+    GatewayClient, TURN_FAILED, TURN_INTERRUPTED, TurnOutcome, turn_marker,
 )
 from hive_surfaces.bot_utils import get_lock, time_ago
 from hive_surfaces.skills import get_skills
@@ -458,6 +458,8 @@ async def _stream_to_message(
             outcome, bool(accumulated),
         )
     elif not accumulated:
+        # Not an answer: callers check outcome.finished before speaking.
+        outcome.status, outcome.reason = TURN_FAILED, "mind stream closed with no text output"
         accumulated = (
             "ERROR: mind stream closed with no text output. "
             "Check the mind container logs for the real failure."

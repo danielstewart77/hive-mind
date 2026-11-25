@@ -581,6 +581,7 @@ async def _stream_to_message(
         )
         voice = False
     elif not accumulated:
+        voice = False  # the notice below is not an answer and is never spoken
         # The gateway forwards mind errors as a result event, which arrives
         # via query_stream's result fallback — so an empty stream here means
         # nothing was reported at all.

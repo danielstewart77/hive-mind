@@ -5,6 +5,7 @@ and per-chat asyncio primitives (``bots/bot_utils.py``) used to live
 here and were split out in Phase B7.
 """
 
+import codecs
 import json
 import logging
 import time
@@ -53,9 +54,10 @@ class GatewayTurnError(RuntimeError):
 
 def _result_reason(event: dict) -> str:
     """The reason an error result carries, in ``result`` or in ``errors``."""
-    reason = event.get("result")
-    if isinstance(reason, str) and reason.strip():
-        return reason.strip()
+    for key in ("result", "error"):
+        reason = event.get(key)
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
     errors = event.get("errors")
     if isinstance(errors, list):
         joined = "; ".join(str(e) for e in errors if e)
@@ -388,8 +390,9 @@ class GatewayClient:
                 need = len(BLOCK_SEPARATOR) - tail_newlines
                 return "\n" * need if need > 0 else ""
 
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             async for chunk in resp.content.iter_any():
-                buf += chunk.decode()
+                buf += decoder.decode(chunk)
                 while "\n" in buf:
                     raw_line, buf = buf.split("\n", 1)
                     raw_line = raw_line.strip()
@@ -480,10 +483,13 @@ class GatewayClient:
                         stopped = event.get("stop_reason") in ("stopped", "cancelled") or (
                             event.get("error_code") == "TURN_INCOMPLETE"
                         )
-                        if event.get("is_error") or stopped or event.get("subtype") in ("error", "interrupted"):
+                        failed = bool(event.get("error_code")) or event.get("stop_reason") in (
+                            "error", "failed",
+                        )
+                        if event.get("is_error") or failed or stopped or event.get("subtype") in ("error", "interrupted"):
                             error_reason = (
                                 "the turn was stopped before it finished" if stopped
-                                and not event.get("is_error") else _result_reason(event)
+                                and not event.get("is_error") and not failed else _result_reason(event)
                             )
                             if stopped or event.get("subtype") == "interrupted":
                                 error_status = TURN_INTERRUPTED
