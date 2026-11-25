@@ -28,6 +28,28 @@ migration damages a hive it was asked to finish.
 
 `check` writes nothing. `apply` runs `check` first and writes nothing when it
 reports a problem.
+
+The step rule. The previous release must keep starting against a database
+that carries the new steps, because going back a release does not un-migrate
+the database and a release starts only if `schema.verify` passes and its own
+writes still land. So a step only adds:
+
+* a new table, schema, index, function, trigger or role is fine;
+* `ADD COLUMN` is fine when the column is nullable or has a DEFAULT (or is an
+  identity): an old release writing a row that does not name it must still
+  succeed, so a NOT NULL column with no default is refused;
+* `SET NOT NULL` on an existing column is fine only when the same step gives
+  that column a default or an identity, for the same reason;
+* nothing is dropped, renamed or retyped (`DROP TABLE|COLUMN|SCHEMA|TYPE`,
+  `RENAME`, `ALTER COLUMN ... TYPE`), and nothing is truncated: the old
+  release names those columns and tables in every read.
+
+`rule_violations(step)` is that rule as code, and the suite runs it over every
+step the package ships. It reads the statements; it cannot see a trigger or a
+new CHECK or UNIQUE constraint that would refuse an old release's row, so a
+step adding one says in its header why the previous release's writes still
+pass. A step that has to break the rule is a two-release change: release one
+stops using the column, release two removes it.
 """
 
 from __future__ import annotations
@@ -105,6 +127,137 @@ def steps(directory: Path | None = None) -> list[Step]:
     if versions != sorted(set(versions)):
         raise ValueError(f"step versions must be unique and ordered: {versions}")
     return out
+
+
+def _statements(sql: str) -> list[str]:
+    """Top-level statements of a step, comments gone. Dollar-quoted bodies
+    (function and DO blocks) are kept whole, so their inner semicolons do not
+    split them and their contents are not read as statements."""
+    text = _code(sql)
+    out: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    quote = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            buffer.append(char)
+            if text.startswith(quote, i) and (len(quote) > 1 or char == quote):
+                buffer.append(quote[1:])
+                i += len(quote) - 1
+                quote = None
+        elif char == "'":
+            quote = "'"
+            buffer.append(char)
+        elif char == "$":
+            tag = re.match(r"\$[A-Za-z_]*\$", text[i:])
+            if tag:
+                quote = tag[0]
+                buffer.append(tag[0])
+                i += len(tag[0]) - 1
+            else:
+                buffer.append(char)
+        elif char == ";" :
+            out.append("".join(buffer).strip())
+            buffer = []
+        else:
+            buffer.append(char)
+        i += 1
+    out.append("".join(buffer).strip())
+    return [s for s in out if s]
+
+
+def _clauses(alter: str) -> list[str]:
+    """The comma-separated actions of one ALTER TABLE, outside brackets."""
+    out, depth, start = [], 0, 0
+    for index, char in enumerate(alter):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            out.append(alter[start:index])
+            start = index + 1
+    out.append(alter[start:])
+    return [c.strip() for c in out if c.strip()]
+
+
+_ALTER_TABLE = re.compile(
+    r"^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\S+)\s+(.*)$",
+    re.IGNORECASE | re.DOTALL)
+_ADD_COLUMN = re.compile(
+    r"^ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"\"?([A-Za-z_][A-Za-z0-9_]*)\"?\s+(.*)$", re.IGNORECASE | re.DOTALL)
+_ADD_OTHER = re.compile(r"^ADD\s+(CONSTRAINT|PRIMARY|UNIQUE|CHECK|FOREIGN|EXCLUDE)\b",
+                        re.IGNORECASE)
+_ALTER_COLUMN = re.compile(
+    r"^ALTER\s+(?:COLUMN\s+)?\"?([A-Za-z_][A-Za-z0-9_]*)\"?\s+(.*)$",
+    re.IGNORECASE | re.DOTALL)
+_BANNED = (
+    (re.compile(r"^DROP\s+(TABLE|SCHEMA|TYPE)\b", re.IGNORECASE),
+     "drops a {0}"),
+    (re.compile(r"^TRUNCATE\b", re.IGNORECASE), "truncates a table"),
+    (re.compile(r"^ALTER\s+(?:TABLE|SCHEMA|INDEX|SEQUENCE|TYPE)\b.*?\bRENAME\b",
+                re.IGNORECASE | re.DOTALL), "renames something"),
+)
+
+
+def rule_violations(step: Step) -> list[str]:
+    """What in this step would stop the previous release starting or writing.
+
+    Empty when the step only adds (see the module docstring). Reads the
+    step's statements, not a database.
+    """
+    found: list[str] = []
+    statements = _statements(step.sql)
+    defaulted: set[str] = set()
+    for statement in statements:
+        match = _ALTER_TABLE.match(statement)
+        if not match:
+            continue
+        for clause in _clauses(match[2]):
+            col = _ALTER_COLUMN.match(clause)
+            if col and re.match(r"^(SET\s+DEFAULT|ADD\s+GENERATED)\b",
+                                col[2], re.IGNORECASE):
+                defaulted.add(col[1].lower())
+    for statement in statements:
+        for pattern, why in _BANNED:
+            hit = pattern.match(statement)
+            if hit:
+                found.append(why.format(*(g.lower() for g in hit.groups())))
+        match = _ALTER_TABLE.match(statement)
+        if not match:
+            continue
+        table = match[1]
+        for clause in _clauses(match[2]):
+            if re.match(r"^DROP\s+COLUMN\b", clause, re.IGNORECASE) or (
+                    re.match(r"^DROP\s+(?!CONSTRAINT\b|NOT\b|DEFAULT\b)\S",
+                             clause, re.IGNORECASE)):
+                found.append(f"{table}: drops a column ({clause})")
+            elif re.match(r"^RENAME\b", clause, re.IGNORECASE):
+                found.append(f"{table}: renames something ({clause})")
+            add = _ADD_COLUMN.match(clause)
+            if add and not _ADD_OTHER.match(clause):
+                rest = add[2]
+                if (re.search(r"\bNOT\s+NULL\b", rest, re.IGNORECASE)
+                        and not re.search(r"\b(DEFAULT|GENERATED)\b", rest,
+                                          re.IGNORECASE)):
+                    found.append(
+                        f"{table}: adds column {add[1]} NOT NULL with no "
+                        "default, so the previous release's inserts fail")
+                continue
+            col = _ALTER_COLUMN.match(clause)
+            if col:
+                action = col[2]
+                if re.match(r"^(SET\s+DATA\s+)?TYPE\b", action, re.IGNORECASE):
+                    found.append(f"{table}: retypes column {col[1]}")
+                elif (re.match(r"^SET\s+NOT\s+NULL\b", action, re.IGNORECASE)
+                        and col[1].lower() not in defaulted):
+                    found.append(
+                        f"{table}: sets {col[1]} NOT NULL without giving it "
+                        "a default or identity in the same step")
+    return found
 
 
 _CREATES_TABLE = re.compile(
