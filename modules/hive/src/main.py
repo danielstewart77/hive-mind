@@ -4065,6 +4065,37 @@ async def api_mind_proxy_key_update(
     }
 
 
+@app.get("/api/minds/{name}/cut-off")
+async def api_mind_cut_off_status(name: str, user: dict = Depends(require_auth)):
+    """Where this mind's inference is cut off, for the mind's page."""
+    return {"inference": await holder_credentials.inference_cut_off_step(name)}
+
+
+@app.post("/api/minds/{name}/cut-off")
+async def api_mind_cut_off(name: str, user: dict = Depends(require_auth)):
+    """Cut a mind off from the hive: its key is refused by the gateway, the
+    memory store and the tools from their next request.
+
+    200 when all three refuse it; 207 with the per-service answer when any
+    does not, so a retry finishes the job. Nothing is deleted and the proxy is
+    not called."""
+    row = await core.get_mind_by_id_or_name(name)
+    if not row:
+        raise HTTPException(status_code=404, detail="Mind not found")
+    result = await holder_credentials.cut_off_mind(str(row["name"]))
+    log_event(
+        log, "mind.cut_off", **_actor_fields(user), mind=result["mind"],
+        ok=result["ok"],
+        services={r["service"]: r["status"] for r in result["services"]},
+    )
+    credential_registry.forget_all()
+    try:
+        result["inference"] = await holder_credentials.inference_cut_off_step(result["mind"])
+    except Exception:  # noqa: BLE001 - the cut-off landed; never mask it
+        result["inference"] = None
+    return JSONResponse(result, status_code=200 if result["ok"] else 207)
+
+
 @app.patch("/api/minds/{name}/configuration")
 async def api_mind_configuration_update(
     name: str, request: Request, user: dict = Depends(require_auth)

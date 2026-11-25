@@ -1394,7 +1394,10 @@ async def recover_replacements() -> list[dict[str, Any]]:
         try:
             async with _ROTATION_LOCK:
                 if not key_journal.is_open(record):
-                    continue  # finished by a replacement since the snapshot was taken
+                    # Settled while this waited for the lock (a replacement
+                    # finished, or a cut-off cleared it): re-applying the
+                    # stored key would bring a cut-off mind back.
+                    continue
                 location = stored_key_location(holder)
                 if location is None:
                     raise MintRefused(
@@ -1424,6 +1427,98 @@ async def recover_replacements() -> list[dict[str, Any]]:
                 pass
             handled.append({"mind": holder, "recovered": False, "detail": _failure_sentence(exc)})
     return handled
+
+
+async def cut_off_mind(name: str) -> dict[str, Any]:
+    """Refuse a mind's key on the gateway, the memory store and the tools.
+
+    One action, each service on its own: a service that cannot be reached or
+    refuses does not stop the others being cut off, and the answer says which
+    one still accepts the key. Each revocation keeps the holder's row marked
+    revoked (nothing is deleted, the key stays burned for every other mind)
+    and lands on the service's next request, so nothing is restarted. The
+    stored key lines stay, so the page can still say where the mind reads,
+    and pasting a key for the mind again brings it back. Revoking a holder
+    already cut off is a success. The proxy is never called here: cutting off
+    inference belongs to whoever runs the proxy and is its own step.
+
+    `ok` is true only when every service answered that the holder is cut off.
+    """
+    holder = name.strip().lower()
+    results: list[dict[str, Any]] = []
+    async with _ROTATION_LOCK:
+        for service in _one_key_services():
+            entry: dict[str, Any] = {"service": service.key, "label": service.label}
+            if service.key == "tools" and holder in TOOLS_RESERVED_HOLDERS:
+                entry.update(
+                    status="shared token",
+                    detail="the tools know this name by the shared service token, which is not cut off here")
+                results.append(entry)
+                continue
+            try:
+                response = await _request(service, "DELETE", f"/credentials/{holder}")
+                if response.status_code >= 400:
+                    entry.update(
+                        status="still accepting",
+                        detail=f"{service.label} answered {response.status_code} to the cut-off")
+                else:
+                    try:
+                        revoked = bool(response.json().get("revoked"))
+                    except (ValueError, AttributeError):
+                        revoked = False
+                    if revoked:
+                        entry.update(status="cut off")
+                    else:
+                        # Nothing was live: either already cut off, or this
+                        # service never held a key for the mind.
+                        row = await _holder_row(service, holder)
+                        if row is not None and row.get("live") is False:
+                            entry.update(status="cut off")
+                        elif row is None:
+                            entry.update(
+                                status="no key here",
+                                detail=f"{service.label} holds no key for this mind, so "
+                                       "it may reach it by another credential")
+                        else:
+                            entry.update(status="still accepting",
+                                         detail=f"{service.label} did not revoke it")
+            except Exception as exc:  # noqa: BLE001 - reported per service, the rest still runs
+                entry.update(status="unreachable", detail=str(exc)[:300] or type(exc).__name__)
+            results.append(entry)
+        if any(r["status"] == "cut off" for r in results):
+            try:
+                # A replacement left unfinished must not be re-applied on the next
+                # start and quietly bring this mind back.
+                key_journal.clear(holder)
+            except OSError as exc:
+                results.append({
+                    "service": "journal", "label": "the key journal",
+                    "status": "still accepting",
+                    "detail": f"an unfinished key replacement could not be cleared ({exc.__class__.__name__}); "
+                              "the next console start could bring this mind back"})
+    if not any(r["service"] == "tools" for r in results):
+        results.append({"service": "tools", "label": SERVICES["tools"].label,
+                        "status": "not held", "detail": "this hive has no tools configured"})
+    return {
+        "mind": holder,
+        "ok": all(r["status"] in ("cut off", "not held") for r in results),
+        "services": results,
+    }
+
+
+async def inference_cut_off_step(name: str) -> dict[str, Any]:
+    """Where this mind's inference is cut off, for the page to say.
+
+    `offered` is true when the mind runs on this hive's proxy and this console
+    holds the proxy's key-management credential, so the page may offer the
+    proxy revoke as its own button; otherwise `where` names who to ask."""
+    import provider_data
+    connection = await provider_data.connection_for_mind(name.strip().lower())
+    if connection and connection["id"] != "hive-proxy":
+        return {"offered": False, "where": str(connection.get("name") or "its provider")}
+    if not SERVICES["proxy"].admin_token():
+        return {"offered": False, "where": "whoever runs the inference proxy"}
+    return {"offered": True, "where": "the inference proxy"}
 
 
 async def _service_url(service: Service) -> str:
