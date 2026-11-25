@@ -95,6 +95,11 @@ class _Recorder:
                         "ok": False, "upserted": True, "code": "missing_reference",
                         "detail": "the node landed and the CREATED_BY edge did not",
                     }, status_code=409)
+            if request.method == "DELETE" and path.startswith("credentials/"):
+                # As the real services answer a request to remove a row.
+                removing = request.query_params.get("remove") == "true"
+                return JSONResponse({"holder": path.split("/")[-1],
+                                     **({"removed": True} if removing else {"revoked": True})})
             if self.listing and request.method == "GET":
                 return JSONResponse([])
             if self.hitl:

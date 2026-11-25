@@ -81,6 +81,8 @@ def service(monkeypatch):
             return httpx.Response(200, json=state["holders"])
         if request.method == "DELETE":
             sent.append({"method": "DELETE", "url": str(request.url)})
+            if "remove=true" in str(request.url) and state.get("honours_remove"):
+                return httpx.Response(200, json={"holder": "x", "removed": True})
             return httpx.Response(200, json={"holder": "x", "revoked": True})
         import json as _json
 
@@ -98,6 +100,9 @@ def service(monkeypatch):
         if status in (301, 302, 307, 308):
             return httpx.Response(status, headers={"location": "https://elsewhere/"})
         if status >= 400:
+            if state.get("echo"):
+                # FastAPI's 422 shape: no `error`, and the input echoed back.
+                return httpx.Response(status, json={"detail": [{"input": body}]})
             return httpx.Response(status, json={"error": state.get("error", "refused")})
         return httpx.Response(200, json={"holder": body.get("username")})
 
@@ -495,3 +500,27 @@ def test_a_name_another_holder_already_has_is_named_as_taken(hive, service):
 
     assert taken == holder_credentials.SERVICES["comms"].label
     assert free is None
+
+
+def test_a_service_that_only_revokes_is_reported_as_not_having_freed_the_key(hive, service):
+    """A service older than the console ignores `remove=true` and answers with
+    a plain revoke; the undo must not call that a clean removal."""
+    failures = _run(holder_credentials.unprovision_mind("quokka"))
+
+    assert any("did not remove it" in f for f in failures)
+
+
+def test_a_services_refusal_body_that_echoes_the_pasted_key_never_reaches_the_error(hive, service):
+    service["state"]["status"] = 422
+    service["state"]["echo"] = True
+    with pytest.raises(holder_credentials.MintRefused) as raised:
+        _run(holder_credentials.mint(
+            holder_credentials.SERVICES["comms"], "ada", "daniel", role="mind",
+            value=PASTED, location=holder_credentials.Location("hive_mind", "COMMS_TOKEN_ADA")))
+    assert PASTED not in str(raised.value)
+
+
+def test_a_service_that_removes_is_reported_clean(hive, service):
+    service["state"]["honours_remove"] = True
+
+    assert _run(holder_credentials.unprovision_mind("quokka")) == []

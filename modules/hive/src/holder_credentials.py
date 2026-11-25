@@ -382,11 +382,14 @@ async def _put(
     # http-to-https hop gives, httpx does not follow one on a PUT, and taking
     # it for a mint writes the file a value the service never saw.
     if response.status_code not in (200, 201):
+        # Only the service's own `error` sentence. Its whole body can echo
+        # the request, and the request carries the pasted key.
         detail = ""
         try:
-            detail = response.json().get("error") or response.text
-        except ValueError:
-            detail = response.text
+            error = response.json().get("error")
+            detail = error if isinstance(error, str) else ""
+        except (ValueError, AttributeError):
+            detail = ""
         raise MintRefused(
             f"{service.label} refused the mint for {holder!r} "
             f"({response.status_code}): {detail}"
@@ -942,6 +945,19 @@ async def unprovision_mind(name: str) -> list[str]:
                 failures.append(
                     f"{service.label} still accepts {holder}'s credential "
                     f"(it answered {response.status_code} to the revocation)")
+            elif response is not None and response.status_code != 404:
+                try:
+                    answered = response.json()
+                except ValueError:
+                    answered = None
+                if not isinstance(answered, dict) or "removed" not in answered:
+                    # A service older than this console ignores the request
+                    # to remove and merely revokes, which leaves the pasted
+                    # key refused for every other mind.
+                    failures.append(
+                        f"{service.label} revoked {holder}'s credential but "
+                        "did not remove it, so the key stays refused for other "
+                        "minds; update that service")
         except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
             failures.append(
                 f"{service.label} could not be asked to revoke {holder}'s "
