@@ -719,7 +719,11 @@ def _effort_env(effort: object) -> dict[str, str]:
     know either, because the profile refuses one and a process that cannot
     read its profile does not start.
     """
-    level = str(effort or "").strip().lower()
+    # A conversation that names no effort runs at the mind's own, when its
+    # runtime.yaml names one (`default_effort`). Conversations are opened for
+    # a mind by whoever briefs it, and none of them sets a level: without
+    # this a coder's every build ran at the model's default, which is high.
+    level = str(effort or RUNTIME.get("default_effort") or "").strip().lower()
     return {EFFORT_ENV: level} if level in EFFORT_LEVELS else {}
 
 
