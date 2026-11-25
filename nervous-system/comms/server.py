@@ -1431,6 +1431,8 @@ async def get_mind_wake_state(request: Request, mind_id: str, since: float | Non
         row = await core.get_mind_by_id_or_name(mind_id)
         if not row or not user_access.mind_is_named_in(keys, row["mind_id"]):
             raise HTTPException(404, "No such mind")
+        # Asked by name, answered by the id its sessions are stored under.
+        mind_id = row["mind_id"]
     return await session_mgr.mind_idle_state(mind_id, since=since)
 
 

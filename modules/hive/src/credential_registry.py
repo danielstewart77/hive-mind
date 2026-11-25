@@ -168,7 +168,9 @@ class SharedProbe:
 #: against, so its row reports as much rather than being probed.
 SHARED_PROBES: dict[str, SharedProbe] = {
     "comms_admin_bearer_token": SharedProbe(
-        "GATEWAY_API_URL", "http://hive-comms:8424", "/sessions/live"
+        "GATEWAY_API_URL", "http://hive-comms:8424",
+        # Still administrator-only: a mind's own key opens /sessions/live now.
+        "/sessions/live/text?session_id=credential-probe",
     ),
     "lucent_admin_bearer_token": SharedProbe(
         "LUCENT_API_URL", "http://hive-lucent:8424", "/graph/schema"

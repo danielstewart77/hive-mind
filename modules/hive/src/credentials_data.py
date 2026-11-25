@@ -312,11 +312,12 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
         "label": "Hive Comms admin token",
         "rotatable": False,
         "manual_reason": (
-            "Held by more files than this page can see — every containerised "
-            "mind's compose interpolates it, and this console presents it on "
-            "every admin call it makes. Rotating the three locations below "
-            "would blind the console and stop every mind re-registering, so "
-            "it is rotated by hand until nothing needs it but the console."
+            "Held by the gateway and this console, which presents it on every "
+            "admin call it makes. No mind is given it any more (feature 834); "
+            "the skippy and mordecai lines below, and any line left in a real "
+            "mind's compose file, are removed from each mind on the host "
+            "(item 842). Rotating it from here would blind the console "
+            "mid-rotation, so it is rotated by hand."
         ),
         "locations": [
             ("nervous_system", "COMMS_ADMIN_BEARER_TOKEN"),

@@ -119,10 +119,17 @@ async def _broker(operation, action):
 async def _runtime(operation, name):
     """Verify actual runtime identity before committing or releasing recovery."""
     target = f'http://{name}:8420'
-    try:
-        headers = await mind_runtime.admin_headers(target)
-    except HTTPException:
-        raise ValueError('This Mind’s runtime credential could not be read') from None
+    # The registry still names the mind by its old name until the rename is
+    # committed, so no row claims the new address yet: the mind's own key is
+    # looked up by the names it is known by, not by the address.
+    key = None
+    for known in (operation['old'], operation['new']):
+        key = await asyncio.to_thread(configuration_data.key_held_for, known)
+        if key:
+            break
+    if not key:
+        raise ValueError('This Mind’s runtime credential could not be read')
+    headers = {'Authorization': f'Bearer {key}'}
     for attempt in range(30):
         try:
             result = await _request('GET', target + '/runtime', headers)

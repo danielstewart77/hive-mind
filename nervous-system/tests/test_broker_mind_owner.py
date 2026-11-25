@@ -269,8 +269,35 @@ def test_a_mind_reads_only_its_own_live_sessions_and_wake_state(app_client) -> N
     assert own.status_code == 200 and own.json()["mind_id"] == "arnold"
     other = app_client.get(f"/minds/{MIND_A}/wake-state", headers=kid)
     assert other.status_code == 404
-    assert app_client.get("/sessions/live", headers=kid).status_code == 200
-    assert app_client.get("/sessions/live").status_code == 200  # the admin credential
+    from comms import server as server_module
+
+    board = {"sessions": [{"session_id": "s-own", "mind_id": "arnold"},
+                          {"session_id": "s-other", "mind_id": MIND_A}],
+             "idle": [{"session_id": "i-own", "mind_id": "arnold"},
+                      {"session_id": "i-other", "mind_id": MIND_A}],
+             "observed_at": 1.0}
+
+    async def _board():
+        return board
+
+    server_module.session_mgr.live_dashboard = _board  # the feed is outside what is tested
+    mine = app_client.get("/sessions/live", headers=kid).json()
+    assert [r["session_id"] for r in mine["sessions"]] == ["s-own"]
+    assert [r["session_id"] for r in mine["idle"]] == ["i-own"]
+    everything = app_client.get("/sessions/live").json()  # the admin credential
+    assert len(everything["sessions"]) == 2 and len(everything["idle"]) == 2
+
+
+def test_a_person_or_a_surface_service_is_refused_the_chiefs_two_reads(app_client) -> None:
+    from comms import user_access
+
+    asyncio.run(put_credential_row(
+        holder="a-bot", username="sloan", role=user_access.SERVICE,
+        token_sha=user_access.digest("bot-credential"),
+    ))
+    bot = {"Authorization": "Bearer bot-credential"}
+    assert app_client.get("/sessions/live", headers=bot).status_code == 401
+    assert app_client.get(f"/minds/{MIND_A}/wake-state", headers=bot).status_code == 401
 
 
 def test_a_mind_cannot_rename_itself(app_client) -> None:

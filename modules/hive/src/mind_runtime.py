@@ -42,6 +42,18 @@ async def admin_headers(target_url: str) -> dict[str, str]:
     )
 
 
+def _refused_key(response: httpx.Response) -> None:
+    """A mind answering 401 to the key this console presented is a problem with
+    that mind's key, not with the person's sign-in: passed on as 401 it would
+    log the operator out of the console (the layout redirects any 401)."""
+    if response.status_code == 401:
+        raise HTTPException(
+            status_code=502,
+            detail="this mind refused its own key as the console presented it; "
+            "the key it holds may have been replaced (paste it again, or recreate the mind)",
+        )
+
+
 def _endpoint(gateway_url: str) -> str:
     url = (gateway_url or "").strip().rstrip("/")
     if not url:
@@ -57,6 +69,7 @@ def _unwrap(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the /runtime API",
         )
+    _refused_key(response)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     body = response.json()
@@ -175,6 +188,7 @@ def _unwrap_surface_token(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the surface-token API",
         )
+    _refused_key(response)
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -286,6 +300,7 @@ def _unwrap_github_token(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the GitHub-token API",
         )
+    _refused_key(response)
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -479,6 +494,7 @@ def _unwrap_settings(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the settings API",
         )
+    _refused_key(response)
     if response.status_code >= 400:
         detail = response.text
         try:

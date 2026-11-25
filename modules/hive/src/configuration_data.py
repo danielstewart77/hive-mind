@@ -987,15 +987,21 @@ async def own_credential_for(url: str) -> str | None:
     if len(whose) != 1:
         return None
     ((_, name),) = whose
-    if not name:
-        return None
+    return key_held_for(name) if name else None
+
+
+def key_held_for(name: str) -> str | None:
+    """The one key this console holds for the mind called `name`, or None.
+
+    None for a mind whose key is not kept here (another machine), kept in two
+    files, or in a file that cannot be read: nothing is sent in its place."""
+    import holder_credentials
+
     service = holder_credentials.SERVICES["comms"]
     try:
         location = holder_credentials.locate(service, name)
         return (holder_credentials._loaded_value(location) if location else None) or None
     except Exception:  # noqa: BLE001 - a key that cannot be found is no key
-        # Kept in two files, or in one that cannot be read: nothing is sent,
-        # and the caller says the mind could not be reached.
         return None
 
 

@@ -82,14 +82,6 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
         assert session_access.TABLE.rules[spec].kind == user_access.ADMIN, spec
 
 
-def test_the_chiefs_two_reads_are_open_to_a_mind_and_held_to_itself():
-    """Story 883: the chief of staff gives up the administrator key, so its
-    live-sessions and wake-state reads admit a mind's own key; the handlers
-    hold it to its own mind."""
-    for spec in (("GET", "/sessions/live"), ("GET", "/minds/{mind_id}/wake-state")):
-        assert session_access.TABLE.rules[spec].kind == user_access.MACHINE, spec
-
-
 def test_registering_a_mind_is_machinery_rather_than_admin_only():
     """The one deliberate widening. A mind must be able to register itself —
     registration is the only channel by which the gateway learns that mind's

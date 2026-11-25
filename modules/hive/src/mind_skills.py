@@ -16,6 +16,7 @@ from __future__ import annotations
 import httpx
 from fastapi import HTTPException
 
+import mind_runtime
 from mind_runtime import admin_headers
 
 _TIMEOUT = 12.0
@@ -42,6 +43,7 @@ def _unwrap(response: httpx.Response, *, collection: bool = False) -> dict:
         )
     if response.status_code == 404:
         raise HTTPException(status_code=404, detail=_detail(response))
+    mind_runtime._refused_key(response)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=_detail(response))
     body = response.json()

@@ -26,9 +26,7 @@ def rename_setup(tmp_path, monkeypatch, builtin_console):
     monkeypatch.setattr(configuration_data, 'HIVE_MIND_MINDS_CONFIG_DIR', minds)
     monkeypatch.setenv('HIVE_MIND_PROJECT_PATH', str(tmp_path))
     monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'test-admin')
-    async def own_key(url):
-        return 'the-minds-own-key'
-    monkeypatch.setattr(configuration_data, 'own_credential_for', own_key)
+    monkeypatch.setattr(configuration_data, 'key_held_for', lambda name: 'the-minds-own-key')
     monkeypatch.setenv('HIVE_TOOLS_TOKEN', 'test-tools-token')
     env = tmp_path / '.env'
     env.write_text('COMMS_TOKEN_ORIGINAL=kept-secret\nCOMMS_TOKEN_RENAMED=kept-secret\n')
