@@ -93,3 +93,21 @@ async def test_a_mind_the_tools_know_only_by_the_shared_token_is_not_reported_as
 
     assert result["ok"] is False
     assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "shared token"
+
+
+async def test_a_service_that_answers_nothing_was_revoked_while_the_key_is_still_live_is_still_accepting(hive):
+    hive.tools.ignore_delete = True
+
+    result = await holder_credentials.cut_off_mind("ada")
+
+    assert result["ok"] is False
+    assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "still accepting"
+
+
+async def test_an_error_answer_is_still_accepting_even_when_its_body_claims_revoked(hive):
+    hive.tools.refuse_with_revoked = True
+
+    result = await holder_credentials.cut_off_mind("ada")
+
+    assert result["ok"] is False
+    assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "still accepting"
