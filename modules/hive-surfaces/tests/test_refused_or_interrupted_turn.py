@@ -378,3 +378,12 @@ async def test_finished_turn_with_no_text_is_not_spoken(monkeypatch):
     await tb._stream_to_message(_TgMessage([], "\u2026"), 1, 2, "hi", edit_interval=0, voice=True, chat=chat)
     await __import__("asyncio").sleep(0.01)
     assert spoken == []
+
+
+@pytest.mark.asyncio
+async def test_turn_incomplete_result_says_it_was_stopped():
+    client = _client(_sse(_text("Half"), {"type": "result", "is_error": False, "error_code": "TURN_INCOMPLETE"}))
+    sent, speak, _p = await _run_discord_skill(client)
+    shown = sent.edit.await_args.kwargs["content"]
+    assert "Interrupted" in shown and "stopped before it finished" in shown
+    assert speak.call_count == 0

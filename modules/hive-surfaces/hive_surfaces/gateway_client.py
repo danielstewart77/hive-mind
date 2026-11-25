@@ -483,7 +483,7 @@ class GatewayClient:
                         stopped = event.get("stop_reason") in ("stopped", "cancelled") or (
                             event.get("error_code") == "TURN_INCOMPLETE"
                         )
-                        failed = bool(event.get("error_code")) or event.get("stop_reason") in (
+                        failed = (bool(event.get("error_code")) and not stopped) or event.get("stop_reason") in (
                             "error", "failed",
                         )
                         if event.get("is_error") or failed or stopped or event.get("subtype") in ("error", "interrupted"):
