@@ -1,0 +1,220 @@
+{% extends "layout.html" %}
+{% block title %}Roles · Hive{% endblock %}
+{% block content %}
+<main class="page" data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Role management</p><h1 class="page-title">Roles</h1><p class="page-description">A role is a named set of skills, hooks, a model and the built-in tools an agent may use. An agent under role management holds the general role and any others it is given, and may use exactly what they grant together. Anything no role grants is not allowed, except the model: when no role an agent holds names one, it runs the model it is configured with.</p></div>
+        <div class="page-actions"><a class="button button-quiet" href="/skills/submit"><i data-lucide="git-pull-request"></i>Submit a skill</a>{% if current_user.is_admin %}<button class="button button-primary" type="button" id="role-new"><i data-lucide="plus"></i>New role</button>{% endif %}</div>
+    </header>
+    <div id="roles-status" class="event-hints"></div>
+    <section class="surface" id="role-editor" hidden>
+        <div class="surface-header"><div><h2 id="role-editor-title">New role</h2><p>Tick what this role grants. Anything left unticked is not allowed. The lists are what exists: the models the proxy serves, and the skills and hooks the Minds report.</p></div></div>
+        <form class="surface-body overview-stack" id="role-form">
+            <div class="field"><label for="role-name">Name</label><input id="role-name" name="name" required maxlength="80"></div>
+            <div class="field"><label for="role-model">Model</label><select id="role-model" name="model"></select><small id="role-model-note"></small></div>
+            <fieldset class="field"><legend>Built-in tools</legend><div id="role-tools"></div></fieldset>
+            <div class="field"><label>Skills</label><small id="role-skills-note"></small><label class="checkbox-row"><input type="checkbox" id="role-community"> Show community submissions</label>
+                <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Granted</th><th>Skill</th><th>Repo</th><th>Minds that have it</th></tr></thead><tbody id="role-skills"></tbody></table></div></div>
+            <div class="field"><label>Hooks</label><small id="role-hooks-note"></small>
+                <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Granted</th><th>Hook</th><th>Minds that have it</th></tr></thead><tbody id="role-hooks"></tbody></table></div></div>
+            <div class="form-actions"><button class="button" type="submit" id="role-save">Save role</button><button class="button button-quiet" type="button" id="role-cancel">Cancel</button></div>
+            <small id="role-form-status"></small>
+        </form>
+    </section>
+    <section class="surface">
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Role</th><th>Repo</th><th>Model</th><th>Built-in tools</th><th>Skills</th><th>Hooks</th><th></th></tr></thead><tbody id="roles-table"><tr><td colspan="7" class="loading-state">Loading roles…</td></tr></tbody></table></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    const isAdmin = document.querySelector("[data-is-admin]").dataset.isAdmin === "true";
+    const tbody = document.getElementById("roles-table");
+    const status = document.getElementById("roles-status");
+    const editor = document.getElementById("role-editor");
+    const form = document.getElementById("role-form");
+    const TOOL_LABELS = {"shell": "Shell", "files": "Files", "sub-minds": "Sub-minds", "web": "Web"};
+    // Each mark says where the role stands against the repo's copy. None of
+    // them changes anything: only the buttons do, and only when pressed.
+    const STATES = {
+        tracked: {label: "Tracked", actions: []},
+        local: {label: "Local only", actions: ["promote"]},
+        differs: {label: "Differs", actions: ["diff", "keep", "take", "promote"]},
+        repo_only: {label: "In the repo only", actions: ["take"]},
+        unreadable: {label: "Repo copy unreadable", actions: []}
+    };
+    const ACTION_LABELS = {diff: "Diff", keep: "Keep yours", take: "Take the repo update", promote: "Promote yours to the hive"};
+    let roles = [], tools = [], editing = null, catalog = null;
+    // What the role grants while it is being edited. The tables are painted
+    // from these, and saving sends these: a grant leaves a role only by
+    // being unticked, never by its row being off the screen.
+    const chosen = {skills: new Set(), hooks: new Set()};
+    function toolsCell(role) {
+        return tools.map(function (tool) {
+            const allowed = (role.tools || []).indexOf(tool) >= 0;
+            return '<span class="status-pill ' + (allowed ? "is-good" : "is-bad") + '"><span></span>' + h.escapeHtml(TOOL_LABELS[tool] || tool) + (allowed ? "" : " not allowed") + "</span>";
+        }).join(" ");
+    }
+    function render() {
+        if (!roles.length) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><h3>No roles yet</h3></div></td></tr>'; return; }
+        tbody.innerHTML = roles.map(function (role) {
+            const state = STATES[role.state] || {label: role.state, actions: []};
+            const key = role.id === null ? "slug:" + role.slug : String(role.id);
+            const actions = isAdmin ? state.actions : state.actions.filter(function (a) { return a === "diff"; });
+            const buttons = actions.map(function (action) {
+                return '<button class="button button-quiet" type="button" data-role="' + h.escapeHtml(key) + '" data-action="' + action + '">' + ACTION_LABELS[action] + "</button>";
+            });
+            if (isAdmin && role.id !== null) {
+                buttons.push('<button class="button button-quiet" type="button" data-role="' + h.escapeHtml(key) + '" data-action="edit">Edit</button>');
+                if (!role.general) buttons.push('<button class="button button-quiet" type="button" data-role="' + h.escapeHtml(key) + '" data-action="delete">Delete</button>');
+            }
+            let mark = state.label + (role.kept ? " (kept yours)" : "");
+            if (role.error) mark += ": " + role.error;
+            return '<tr><td>' + h.escapeHtml(role.name || role.slug) + (role.general ? " <small>held by every managed agent</small>" : "") +
+                '</td><td>' + h.escapeHtml(mark) + '</td><td>' + h.escapeHtml(role.model || "none") +
+                '</td><td>' + toolsCell(role) + '</td><td>' + h.escapeHtml((role.skills || []).join(", ") || "none") +
+                '</td><td>' + h.escapeHtml((role.hooks || []).join(", ") || "none") +
+                '</td><td class="row-actions">' + buttons.join(" ") + '</td></tr>' +
+                '<tr class="skill-diff" data-diff-for="' + h.escapeHtml(key) + '" hidden><td colspan="7"><pre class="code-panel">' + h.escapeHtml(role.diff || "") + '</pre></td></tr>';
+        }).join("");
+    }
+    async function load() {
+        try {
+            const body = await h.requestJson("/api/roles");
+            roles = body.roles || []; tools = body.tools || [];
+            render();
+        } catch (error) { tbody.innerHTML = '<tr><td colspan="7"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
+    }
+    function paintModel(current) {
+        const select = form.elements.model;
+        const models = catalog ? catalog.models || [] : [];
+        const providers = [];
+        models.forEach(function (m) { if (providers.indexOf(m.provider) < 0) providers.push(m.provider); });
+        let html = '<option value="">none: this role names no model</option>';
+        if (current && !models.some(function (m) { return m.id === current; })) html += '<option value="' + h.escapeHtml(current) + '">' + h.escapeHtml(current) + ' (not listed by the proxy)</option>';
+        providers.forEach(function (provider) {
+            html += '<optgroup label="' + h.escapeHtml(provider) + '">' + models.filter(function (m) { return m.provider === provider; }).map(function (m) { return '<option value="' + h.escapeHtml(m.id) + '">' + h.escapeHtml(m.id) + '</option>'; }).join("") + '</optgroup>';
+        });
+        select.innerHTML = html;
+        select.value = current || "";
+        document.getElementById("role-model-note").textContent = !catalog ? "" : catalog.models_error ? "The proxy's model list could not be read (" + catalog.models_error + "), so only this role's own model is offered." : "";
+    }
+    // One table of ticks. Every name the Minds report, and every name the
+    // role already grants whether or not a Mind reported it.
+    function paintGrants(kind, rows, silent) {
+        const known = new Set(rows.map(function (r) { return r.name; }));
+        const unseen = Array.from(chosen[kind]).filter(function (n) { return !known.has(n); }).sort();
+        const showCommunity = document.getElementById("role-community").checked;
+        const listed = rows.filter(function (r) { return !r.community || showCommunity || chosen[kind].has(r.name); });
+        const asked = catalog.minds_asked || 0;
+        const missing = asked - silent.length <= 0 ? "could not be checked: no Mind answered" : silent.length ? "not reported by the Minds that answered" : "not on any Mind";
+        const cells = function (name, rest) {
+            return '<tr><td><input type="checkbox" data-grant="' + kind + '" value="' + h.escapeHtml(name) + '" aria-label="' + h.escapeHtml(name) + '"' + (chosen[kind].has(name) ? " checked" : "") + '></td><td>' + h.escapeHtml(name) + rest + '</td></tr>';
+        };
+        const span = kind === "skills" ? 2 : 1;
+        const body = listed.map(function (r) {
+            const minds = h.escapeHtml((r.minds || []).join(", ") || "none");
+            return cells(r.name, (r.community ? ' <span class="status-pill"><span></span>Community submission</span>' : "") + (kind === "skills" ? '</td><td>' + (r.generated ? (r.repo ? "generated here (and in the repo)" : "generated here") : (r.repo ? "present" : "absent")) : "") + '</td><td>' + minds);
+        }).concat(unseen.map(function (name) { return cells(name, '</td><td colspan="' + span + '">' + missing); }));
+        document.getElementById("role-" + kind).innerHTML = body.join("") || '<tr><td colspan="' + (span + 2) + '">' + (asked - silent.length > 0 ? "No Mind reported any." : "No Mind answered.") + '</td></tr>';
+        const notes = [];
+        if (!asked) notes.push("No Mind could be asked.");
+        if (kind === "skills" && catalog.community_unread) notes.push("Which skills are community submissions could not be read, so none is marked.");
+        if (silent.length) notes.push("Did not answer, so what only they have is not listed: " + silent.join(", ") + ".");
+        const left = rows.length - listed.length;
+        if (left) notes.push(left + (left === 1 ? " community submission is" : " community submissions are") + " left out.");
+        document.getElementById("role-" + kind + "-note").textContent = notes.join(" ");
+    }
+    function paintLists() {
+        if (!catalog) return;
+        paintGrants("skills", catalog.skills || [], catalog.skills_unanswered || []);
+        paintGrants("hooks", catalog.hooks || [], catalog.hooks_unanswered || []);
+    }
+    async function openEditor(role) {
+        editing = role;
+        document.getElementById("role-editor-title").textContent = role ? "Edit " + role.name : "New role";
+        form.elements.name.value = role ? role.name : "";
+        chosen.skills = new Set(role ? role.skills || [] : []);
+        chosen.hooks = new Set(role ? role.hooks || [] : []);
+        document.getElementById("role-tools").innerHTML = tools.map(function (tool) {
+            const on = role && (role.tools || []).indexOf(tool) >= 0;
+            return '<label class="checkbox-row"><input type="checkbox" name="tools" value="' + h.escapeHtml(tool) + '"' + (on ? " checked" : "") + '> ' + h.escapeHtml(TOOL_LABELS[tool] || tool) + '</label>';
+        }).join("");
+        const formStatus = document.getElementById("role-form-status");
+        const current = role && role.model ? role.model : "";
+        catalog = null;
+        paintModel(current);
+        ["skills", "hooks"].forEach(function (kind) { document.getElementById("role-" + kind).innerHTML = ""; document.getElementById("role-" + kind + "-note").textContent = ""; });
+        formStatus.textContent = "Asking the proxy and the Minds what exists…";
+        document.getElementById("role-save").disabled = true;
+        form.elements.model.disabled = true;
+        editor.hidden = false;
+        form.elements.name.focus();
+        try {
+            const read = await h.requestJson("/api/roles/catalog");
+            if (editing !== role) return;
+            catalog = read;
+            formStatus.textContent = "";
+        } catch (error) {
+            if (editing !== role) return;
+            catalog = {models: [], models_error: error.message, skills: [], hooks: [], skills_unanswered: [], hooks_unanswered: [], minds_asked: 0};
+            formStatus.textContent = "What exists could not be read: " + error.message + ". Only what this role already grants is shown.";
+        }
+        paintModel(current);
+        form.elements.model.disabled = false;
+        paintLists();
+        document.getElementById("role-save").disabled = false;
+    }
+    document.getElementById("role-community").addEventListener("change", paintLists);
+    form.addEventListener("change", function (event) {
+        const box = event.target.closest("input[data-grant]");
+        if (!box) return;
+        if (box.checked) chosen[box.dataset.grant].add(box.value); else chosen[box.dataset.grant].delete(box.value);
+    });
+    const newButton = document.getElementById("role-new");
+    if (newButton) newButton.addEventListener("click", function () { openEditor(null); });
+    document.getElementById("role-cancel").addEventListener("click", function () { editing = null; editor.hidden = true; });
+    form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const body = {
+            name: form.elements.name.value,
+            model: form.elements.model.value || null,
+            tools: Array.from(form.querySelectorAll('input[name="tools"]:checked')).map(function (i) { return i.value; }),
+            skills: Array.from(chosen.skills).sort(),
+            hooks: Array.from(chosen.hooks).sort()
+        };
+        const formStatus = document.getElementById("role-form-status");
+        try {
+            if (editing) await h.requestJson("/api/roles/" + editing.id, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            else await h.requestJson("/api/roles", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            editor.hidden = true;
+            await load();
+        } catch (error) { formStatus.textContent = error.message; }
+    });
+    tbody.addEventListener("click", async function (event) {
+        const button = event.target.closest("button[data-role]");
+        if (!button) return;
+        const key = button.dataset.role, action = button.dataset.action;
+        const role = roles.find(function (r) { return (r.id === null ? "slug:" + r.slug : String(r.id)) === key; });
+        if (!role) return;
+        if (action === "diff") { const row = tbody.querySelector('[data-diff-for="' + CSS.escape(key) + '"]'); row.hidden = !row.hidden; return; }
+        if (action === "edit") { openEditor(role); return; }
+        if (action === "delete" && !window.confirm("Delete the role " + role.name + "? Every agent holding it loses what only it granted.")) return;
+        if (action === "take" && !window.confirm("Replace this hive's " + (role.name || role.slug) + " with the repo copy?")) return;
+        button.disabled = true;
+        try {
+            if (action === "delete") await h.requestJson("/api/roles/" + role.id, {method: "DELETE"});
+            if (action === "keep") await h.requestJson("/api/roles/" + role.id + "/keep", {method: "POST"});
+            if (action === "promote") {
+                const result = await h.requestJson("/api/roles/" + role.id + "/promote", {method: "POST"});
+                status.textContent = "Written to " + result.path + ", uncommitted, for review.";
+            }
+            if (action === "take") await h.requestJson("/api/roles/repo/" + encodeURIComponent(role.slug) + "/take", {method: "POST"});
+            await load();
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+    });
+    await load();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,1432 @@
+{% extends "layout.html" %}
+{% block title %}Mind · Hive{% endblock %}
+{% block content %}
+<main class="page" data-mind-id="{{ mind_id }}">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Mind details</p><h1 class="page-title" id="mind-title">Loading mind…</h1><p class="page-description" id="mind-description">Runtime identity and connection details.</p></div>
+        <div class="page-actions"><button class="button button-quiet" id="mind-rename-open" type="button">Rename</button><a class="button button-quiet" href="/minds"><i data-lucide="arrow-left"></i>All minds</a></div>
+    </header>
+    <div id="mind-error" class="error-state" hidden></div>
+    <section class="surface" id="mind-rename" hidden>
+        <div class="surface-header"><h2>Rename this Mind</h2></div>
+        <form class="surface-body overview-stack" id="mind-rename-form">
+            <p>Change its name throughout Hive, keeping its conversations, credentials, skills, settings and roles. An active turn or attached terminal will keep the rename waiting.</p>
+            <div class="field"><label for="mind-rename-name">New name</label><input id="mind-rename-name" name="name" required minlength="2" maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off"><small>2–32 lowercase letters, digits or hyphens.</small></div>
+            <div class="form-actions"><button class="button" id="mind-rename-submit" type="submit">Rename Mind</button><button class="button button-quiet" id="mind-rename-cancel" type="button" hidden>Cancel rename</button><button class="button button-quiet" id="mind-rename-recover" type="button" hidden>Retry recovery</button></div>
+            <p id="mind-rename-status" role="status" aria-live="polite"></p>
+            <a id="mind-rename-approval" href="{{ hive_tools_url }}" target="_blank" rel="noopener" hidden>Open Hive Tools to approve</a>
+        </form>
+    </section>
+    <div class="overview-stack" id="mind-content">
+        <section class="surface" id="mind-proxy-key" hidden><div class="surface-header"><h2>Mind’s provider token</h2></div><form class="surface-body overview-stack" id="mind-proxy-key-form"><div class="field"><label for="mind-proxy-key-input">Provider token</label><input id="mind-proxy-key-input" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" required><small>Paste the key this Mind should use. An already-used key is accepted with a warning.</small></div><div class="form-actions"><button class="button" type="submit">Save token</button></div><small id="mind-proxy-key-status" role="status"></small></form></section>
+        <section class="surface" id="mind-down" hidden><div class="surface-header"><div><h2>This Mind is not answering</h2><p id="mind-down-text"></p></div><button class="button button-quiet" type="button" onclick="window.location.reload()">Check again</button></div></section>
+        <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
+        {% if current_user.is_admin %}<section class="surface" id="mind-owner" hidden><div class="surface-header"><div><h2>Owner</h2><p>The user this Mind belongs to. They see it, and everything downstream of it, on their own console.</p></div></div><form class="surface-body overview-stack" id="mind-owner-form"><div class="field"><label for="mind-owner-user">Owner</label><select id="mind-owner-user" name="owner" required></select></div><div class="form-actions"><button class="button" type="submit">Move to this owner</button></div><small id="mind-owner-status"></small></form></section>{% endif %}
+        <section class="surface" id="mind-image" hidden><div class="surface-header"><div><h2>Picture</h2></div></div><div class="surface-body overview-stack"><div id="mind-image-summary"></div><input type="file" id="mind-image-file" name="file" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Choose a picture"><small id="mind-image-status"></small></div></section>
+        <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
+        <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-engine">Engine</label><select id="mind-voice-engine" name="voice_engine" required></select><small id="mind-voice-engine-help"></small></div><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form><form class="surface-body overview-stack" id="mind-clip-form" hidden><div class="field"><label for="mind-clip-file">Add a reference clip</label><input type="file" id="mind-clip-file" name="file" accept="audio/wav,.wav" required><small>A clean WAV recording. Added beside this Mind&#39;s existing clips; select it above to speak in it.</small></div><div class="form-actions"><button class="button button-quiet" type="submit" id="mind-clip-upload">Upload clip</button></div><small id="mind-clip-status"></small></form></div></section>
+        <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
+        <section class="surface" id="mind-mounts" data-editable hidden><div class="surface-header"><div><h2>Project folders</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-mounts-summary"></dl><div data-editor hidden><div class="surface-body overview-stack"><p>Saving writes this Mind&#39;s compose fragment and then recreates its container. Recreating ends every process the Mind had running inside it, including a harness turn in flight.</p><table class="data-table" id="mind-mounts-table"><thead><tr><th>Folder</th><th>Inside the Mind</th><th>Access</th></tr></thead><tbody id="mind-mounts-rows"></tbody></table><div class="field"><label for="mind-mounts-root">Root</label><select id="mind-mounts-root"></select></div><div class="field"><label for="mind-mounts-browse">Folder</label><select id="mind-mounts-browse"></select><small id="mind-mounts-here"></small></div><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-up">Up one level</button><button class="button button-quiet" type="button" id="mind-mounts-mount">Mount here</button><button class="button button-quiet" type="button" id="mind-mounts-newfolder">Add folder</button></div><div class="field" id="mind-mounts-new-field" hidden><label for="mind-mounts-new">New folder name</label><input id="mind-mounts-new" type="text" spellcheck="false" placeholder="name"><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-create">Create and mount</button></div></div><div class="form-actions"><button class="button" type="button" id="mind-mounts-save">Save and recreate</button></div><small id="mind-mounts-status"></small><div id="mind-mounts-infrastructure"></div></div></div></section>
+        <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
+        <section class="surface" id="mind-roles" hidden><div class="surface-header"><div><h2>Roles</h2><p>The roles this Mind holds. Under role management it may use exactly what they grant together, and a change to any of them reaches it at once. The general role is held by every Mind under role management.</p></div></div><div class="surface-body overview-stack"><div id="mind-roles-status"></div><div id="mind-roles-list"></div><dl class="detail-grid" id="mind-roles-grants"></dl><div class="form-actions"><button class="button" type="button" id="mind-roles-save">Save roles</button></div></div></section>
+        <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy (or, for a skill generated on this install, the generated one) against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span><label class="checkbox-row"><input type="checkbox" id="mind-skills-community"> Show community submissions</label></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
+        <section class="surface" id="mind-files" data-editable hidden><div class="surface-header"><div><h2>Skill and hook files</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-files-summary"></dl><div data-editor hidden><div class="surface-header"><div><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></div></section>
+        <section class="surface" id="mind-soul" data-editable hidden><div class="surface-header"><div><h2>Soul</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-soul-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-soul-form"><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form></div><div class="surface-body" id="mind-soul-history"></div></section>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    const requested = document.querySelector("[data-mind-id]").dataset.mindId;
+    let renameMindId = requested, renameTimer = null, renameWasPending = false;
+    const renameSection = document.getElementById("mind-rename");
+    const renameStatus = document.getElementById("mind-rename-status");
+    const renameSubmit = document.getElementById("mind-rename-submit");
+    function paintRename(result) {
+        const pending = !["none", "success", "failed", "cancelled"].includes(result.status);
+        if (pending) renameWasPending = true;
+        if (result.status !== "none") renameSection.hidden = false;
+        renameStatus.textContent = result.detail || "";
+        renameSubmit.disabled = pending;
+        document.getElementById("mind-rename-name").disabled = pending;
+        document.getElementById("mind-rename-recover").hidden = result.status !== "recovery_required";
+        document.getElementById("mind-rename-cancel").hidden = !["reserving", "waiting_approval", "waiting_idle"].includes(result.status);
+        document.getElementById("mind-rename-approval").hidden = result.status !== "waiting_approval";
+        if (result.status === "success" && renameWasPending) {
+            window.location.replace("/minds/" + encodeURIComponent(renameMindId));
+            return;
+        }
+        if (pending && result.status !== "recovery_required") renameTimer = window.setTimeout(pollRename, 3000);
+    }
+    async function pollRename() {
+        try { paintRename(await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename")); }
+        catch (error) { renameStatus.textContent = error.message; renameTimer = window.setTimeout(pollRename, 5000); }
+    }
+    document.getElementById("mind-rename-open").addEventListener("click", function () { renameSection.hidden = !renameSection.hidden; });
+    document.getElementById("mind-rename-form").addEventListener("submit", async function (event) {
+        event.preventDefault(); renameSubmit.disabled = true;
+        if (renameTimer) window.clearTimeout(renameTimer);
+        try { paintRename(await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: event.target.elements.name.value.trim().toLowerCase()})})); }
+        catch (error) { renameStatus.textContent = error.message; renameSubmit.disabled = false; }
+    });
+    document.getElementById("mind-rename-recover").addEventListener("click", async function () {
+        try { await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename/recover", {method: "POST"}); pollRename(); }
+        catch (error) { renameStatus.textContent = error.message; }
+    });
+    document.getElementById("mind-rename-cancel").addEventListener("click", async function () {
+        try { paintRename(await h.requestJson("/api/minds/" + encodeURIComponent(renameMindId) + "/rename/cancel", {method: "POST"})); }
+        catch (error) { renameStatus.textContent = error.message; }
+    });
+    window.addEventListener("pagehide", function () { if (renameTimer) window.clearTimeout(renameTimer); });
+    document.getElementById("mind-proxy-key-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const form = event.target, status = document.getElementById("mind-proxy-key-status");
+        const button = form.querySelector("button");
+        button.disabled = true;
+        try {
+            const saved = await h.requestJson("/api/minds/" + encodeURIComponent(document.getElementById("mind-proxy-key").dataset.mindName) + "/proxy-key", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({proxy_key: form.elements.proxy_key.value})});
+            form.elements.proxy_key.value = "";
+            status.textContent = (saved.warning ? saved.warning + " " : "") + "Saved. Restart this Mind to use the key.";
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+    });
+
+    // A Mind that has edited a skill for its own job is the interesting
+    // case, not an error — say what differs and offer both directions.
+    // "Not in the repo" is the ordinary state for most of a Mind's skills —
+    // the repo ships the hive-native ones, the Mind accumulates its own. It
+    // is not junk awaiting cleanup, and Remove deletes a directory that is
+    // under no version control, so it asks first.
+    // One mechanism for every section, wired once from the markup rather
+    // than per section: a section that shipped with a summary and no toggle
+    // would read as a value nobody can change, and four copies of this is
+    // four places for that to happen.
+    //
+    // Opening replaces the summary rather than sitting under it. Two
+    // renderings of one setting on screen at once is how an operator edits
+    // the field while reading the old value above it.
+    function wireEditToggles() {
+        document.querySelectorAll("section[data-editable]").forEach(function (section) {
+            const toggle = section.querySelector("[data-edit-toggle]");
+            const editor = section.querySelector("[data-editor]");
+            const summary = section.querySelector("[data-summary]");
+            if (!toggle || !editor) return;
+            const opened = toggle.textContent.trim();
+            toggle.addEventListener("click", function () {
+                const opening = editor.hidden;
+                editor.hidden = !opening;
+                if (summary) summary.hidden = opening;
+                toggle.textContent = opening ? "Done" : opened;
+            });
+        });
+    }
+
+    // A summary is pairs of label and value, and never a sentence. The page
+    // exists to be scanned for what a Mind is currently set to; prose is
+    // what the opened editor is for.
+    function paintSummary(id, pairs) {
+        document.getElementById(id).innerHTML = pairs.map(function (item) {
+            return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) +
+                '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>';
+        }).join("");
+    }
+
+    // Three states, not two, and each says what to do about it. "No token
+    // stored" is a token nobody has supplied; "not accepted" is one revoked
+    // or pasted wrong that is failing on every poll behind a surface that
+    // still looks up — and "could not be checked" is neither, because the
+    // remedy there is to go and look at the machine.
+    function tokenSummary(state) {
+        if (state.unreachable) return [["Token", "Could not be checked"], ["Reason", state.detail || "This Mind did not answer"]];
+        if (!state.stored) return [["Token", "None stored"], ["Reads from", state.where || "Unknown"]];
+        if (state.accepted === false) return [["Token", "Stored, not accepted"], ["Reason", state.detail || "The bot API refused it"], ["Reads from", state.where || "Unknown"]];
+        return [["Token", "Stored and accepted"], ["Authenticates as", state.bot_username ? "@" + state.bot_username : "Unknown bot"], ["Reads from", state.where || "Unknown"]];
+    }
+
+    // The catalogue is the speech engine's, not the Mind's: the pipeline is
+    // built for one language code and a voice outside it synthesises nothing,
+    // so the server offers only what it can actually say. "Could not read the
+    // catalogue" is kept distinct from "this engine has no voices" — the first
+    // is a network answer and the second is never true.
+    function voiceSummary(state) {
+        if (state.unreachable) return [["Voice", "Could not be read"], ["Reason", state.detail || "Unknown"]];
+        const engine = state.voice_engine || "chatterbox";
+        const chosen = state.voice ? state.voice : "";
+        const rows = [["Engine", engine]];
+        if (engine === "chatterbox") {
+            rows.push(["Reference clip", chosen || ("Default (" + (state.default_clip || "voice_ref.wav") + ")")]);
+            if (state.clip_missing) rows.push(["Clip", "Named but not on the voice server"]);
+            rows.push(["Clips held", String((state.clips || []).length)]);
+            return rows;
+        }
+        const offered = (state.catalogue && state.catalogue.voices) || [];
+        const match = offered.filter(function (v) { return v.name === chosen; })[0];
+        rows.push(["Voice", chosen ? (match ? match.label : chosen) : ("Default (" + (state.default_voice || "unset") + ")")]);
+        if (state.catalogue && state.catalogue.readable === false) {
+            rows.push(["Catalogue", "Could not be read"]);
+            rows.push(["Reason", state.catalogue.detail || "Unknown"]);
+        } else {
+            rows.push(["Offered", String(offered.length) + " voices this engine can speak"]);
+        }
+        return rows;
+    }
+
+    // The whole payload is kept, because switching the engine re-renders the
+    // other picker from it rather than fetching again: both lists arrive in
+    // one answer precisely so the switch costs no round trip.
+    let voiceState = {};
+
+    function renderVoiceOptions(state) {
+        voiceState = state;
+        const engines = (state.engines && state.engines.length) ? state.engines : ["chatterbox", "kokoro"];
+        const current = state.voice_engine || "chatterbox";
+        const engineSelect = document.getElementById("mind-voice-engine");
+        engineSelect.innerHTML = engines.map(function (name) {
+            return '<option value="' + h.escapeHtml(name) + '"' + (name === current ? " selected" : "") + ">" + h.escapeHtml(name) + "</option>";
+        }).join("");
+        document.getElementById("mind-voice-engine-help").textContent =
+            "Chatterbox clones a reference recording this Mind holds. Kokoro speaks one of the speech server's own voices.";
+        renderVoiceChoices();
+        document.getElementById("mind-voice-form").hidden = false;
+    }
+
+    // Which picker the Voice field is depends on the engine selected right
+    // now, not on the one the Mind is saved with: the operator switches the
+    // engine first and then chooses what that engine can actually speak.
+    function renderVoiceChoices() {
+        const engine = document.getElementById("mind-voice-engine").value;
+        const state = voiceState;
+        const saved = (state.voice_engine || "chatterbox") === engine ? (state.voice || "") : "";
+        const select = document.getElementById("mind-voice-name");
+        const help = document.getElementById("mind-voice-help");
+        const label = document.querySelector('label[for="mind-voice-name"]');
+        const uploader = document.getElementById("mind-clip-form");
+        voiceDescriptions = {};
+
+        if (engine === "chatterbox") {
+            // A recording the picker cannot offer is still shown, disabled
+            // and labelled: the operator put it there, and silence about it
+            // reads as the file never having arrived.
+            const offerable = (state.clips || []).filter(function (c) { return !c.unselectable; });
+            const clips = offerable;
+            const names = clips.map(function (c) { return c.name; });
+            const rows = clips.map(function (c) { return {name: c.name, label: c.name}; });
+            (state.clips || []).filter(function (c) { return c.unselectable; }).forEach(function (c) {
+                rows.push({name: c.name, label: c.name + " — cannot be selected, rename it without spaces", disabled: true});
+            });
+            // A clip the Mind names that is no longer on disk is kept and
+            // selected rather than dropped: it is the Mind's current answer,
+            // and replacing it with whatever sorts first would silently
+            // change the voice of a Mind the operator came here to look at.
+            if (saved && names.indexOf(saved) === -1) rows.unshift({name: saved, label: saved + " — not on the voice server"});
+            select.innerHTML = rows.map(function (c) {
+                return '<option value="' + h.escapeHtml(c.name) + '"' + (c.disabled ? " disabled" : "") + (c.name === saved ? " selected" : "") + ">" + h.escapeHtml(c.label) + "</option>";
+            }).join("");
+            if (label) label.textContent = "Reference clip";
+            help.textContent = clips.length
+                ? "Every recording in this Mind's own directory."
+                : "This Mind holds no reference recordings it can be spoken from. Upload one below.";
+            if (state.clip_missing) help.textContent += " The clip it names is not on the voice server, so it cannot speak until another is saved.";
+            uploader.hidden = false;
+            describeSelectedVoice();
+            return;
+        }
+
+        const offered = (state.catalogue && state.catalogue.voices) || [];
+        const names = offered.map(function (v) { return v.name; });
+        const rows = offered.slice();
+        if (saved && names.indexOf(saved) === -1) rows.unshift({name: saved, label: saved + " — not offered by this engine"});
+        select.innerHTML = rows.map(function (v) {
+            return '<option value="' + h.escapeHtml(v.name) + '"' + (v.name === saved ? " selected" : "") + ">" + h.escapeHtml(v.label || v.name) + "</option>";
+        }).join("");
+        if (label) label.textContent = "Voice";
+        if (state.catalogue && state.catalogue.readable === false) {
+            help.textContent = "The list of voices could not be read: " + (state.catalogue.detail || "unknown reason");
+        } else if (state.catalogue && state.catalogue.described === false) {
+            help.textContent = "Every English voice this engine can speak, in both accents. The descriptions could not be read from the model repository — press Listen to hear one.";
+        } else {
+            help.textContent = "Every English voice this engine can speak, in both accents.";
+        }
+        uploader.hidden = true;
+        offered.forEach(function (v) { voiceDescriptions[v.name] = v.description || ""; });
+        describeSelectedVoice();
+    }
+
+    let voiceDescriptions = {};
+
+    function describeSelectedVoice() {
+        const select = document.getElementById("mind-voice-name");
+        const note = document.getElementById("mind-voice-description");
+        if (!select || !note) return;
+        note.textContent = voiceDescriptions[select.value] || "";
+    }
+
+    let voiceSample = null;
+
+    async function playVoiceSample() {
+        const select = document.getElementById("mind-voice-name");
+        const status = document.getElementById("mind-voice-status");
+        const button = document.getElementById("mind-voice-listen");
+        // Two voices playing over each other is two voices nobody can judge,
+        // and play() resolves when playback starts, not when it ends — so the
+        // button stays disabled until the audio actually finishes.
+        if (voiceSample) { voiceSample.pause(); URL.revokeObjectURL(voiceSample.src); voiceSample = null; }
+        button.disabled = true;
+        status.textContent = "Speaking a sample…";
+        let url = null;
+        try {
+            const response = await fetch("/api/voices/sample", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    voice: select.value,
+                    voice_engine: document.getElementById("mind-voice-engine").value,
+                    voice_id: document.getElementById("mind-voice").dataset.mindName || ""
+                })
+            });
+            if (!response.ok) throw new Error(await response.text() || response.statusText);
+            url = URL.createObjectURL(await response.blob());
+            const audio = new Audio(url);
+            voiceSample = audio;
+            await new Promise(function (resolve, reject) {
+                audio.addEventListener("ended", resolve, {once: true});
+                audio.addEventListener("error", function () { reject(new Error("the sample would not play")); }, {once: true});
+                audio.play().catch(reject);
+            });
+            status.textContent = "";
+        } catch (error) {
+            status.textContent = "Could not speak a sample: " + error.message;
+        } finally {
+            if (url) URL.revokeObjectURL(url);
+            voiceSample = null;
+            button.disabled = false;
+        }
+    }
+
+    async function renderVoice(name) {
+        const section = document.getElementById("mind-voice");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/voice");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        paintSummary("mind-voice-summary", voiceSummary(state));
+        if (state.unreachable) {
+            document.getElementById("mind-voice-form").hidden = true;
+        } else {
+            renderVoiceOptions(state);
+        }
+    }
+
+    // The settings panel. The controls are the Mind's answer, not this
+    // page's: only the Mind knows which harness it runs, and a box whose
+    // value its runner would ignore is worse than no box, because nothing on
+    // screen could tell the operator it did nothing.
+    //
+    // A setting the Mind's file has no line for is still offered. It is shown
+    // as unset rather than pre-filled with whatever the code falls back to,
+    // because a default displayed as a value reads as a decision somebody
+    // made.
+    let settingsState = null;
+    let settingsRequest = 0;
+    let settingsSaving = false;
+    let settingsSummaryRefreshPending = false;
+
+    function settingsSummary(state) {
+        if (state.unreachable) return [["Settings", "Could not be read"], ["Reason", state.detail || "This Mind did not answer"]];
+        const rows = (state.settings || []).filter(function (entry) {
+            return entry.key !== "rotation_threshold_percent";
+        }).map(function (entry) {
+            return [entry.label, entry.present ? String(entry.value) : "Not set"];
+        });
+        const percentage = state.rotation_threshold_percent;
+        const invalid = state.rotation_policy_error === "invalid_runtime_policy";
+        rows.push(["Rotation threshold", invalid ? "Saved value is invalid" :
+            (percentage === null || percentage === undefined ? "Unavailable" :
+                String(percentage) + "%" + ((state.settings || []).some(function (entry) {
+                    return entry.key === "rotation_threshold_percent" && !entry.present;
+                }) ? " (default)" : ""))]);
+        rows.push(["Context window", state.context_window !== null && state.context_window !== undefined
+            ? Number(state.context_window).toLocaleString() + " tokens" : "Unavailable for this model"]);
+        rows.push(["Token threshold", state.rotation_threshold_tokens !== null &&
+            state.rotation_threshold_tokens !== undefined
+            ? Number(state.rotation_threshold_tokens).toLocaleString() + " tokens"
+            : "Cannot be calculated without a known context window"]);
+        return rows;
+    }
+
+    function settingsControl(entry) {
+        const id = "mind-setting-" + entry.key;
+        const value = entry.present ? entry.value :
+            (entry.key === "rotation_threshold_percent" && settingsState &&
+                settingsState.rotation_threshold_percent !== null &&
+                settingsState.rotation_threshold_percent !== undefined
+                ? settingsState.rotation_threshold_percent : "");
+        let control;
+        // A setting the Mind has no line for gets an explicit "Not set" entry,
+        // selected. Without one a browser selects the first option of every
+        // select, so a save of one unrelated field would write Yes into every
+        // switch the file happened not to declare — turning on a thing the
+        // operator never looked at.
+        const unset = entry.present ? "" : '<option value="" selected>Not set</option>';
+        if (entry.kind === "boolean") {
+            control = '<select id="' + id + '" data-setting="' + h.escapeHtml(entry.key) + '">' + unset +
+                '<option value="true"' + (value === true ? " selected" : "") + '>Yes</option>' +
+                '<option value="false"' + (value === false ? " selected" : "") + '>No</option></select>';
+        } else if (entry.kind === "choice") {
+            control = '<select id="' + id + '" data-setting="' + h.escapeHtml(entry.key) + '">' + unset +
+                (entry.choices || []).map(function (choice) {
+                    return '<option value="' + h.escapeHtml(choice) + '"' +
+                        (String(value) === choice ? " selected" : "") + '>' + h.escapeHtml(choice) + '</option>';
+                }).join("") + '</select>';
+        } else if (entry.kind === "number") {
+            control = '<input id="' + id + '" type="number" step="1"' +
+                (entry.minimum === null ? "" : ' min="' + entry.minimum + '"') +
+                (entry.maximum === null ? "" : ' max="' + entry.maximum + '"') +
+                ' value="' + h.escapeHtml(String(value)) + '" data-setting="' + h.escapeHtml(entry.key) + '">';
+        } else {
+            control = '<input id="' + id + '" type="text" spellcheck="false" value="' +
+                h.escapeHtml(String(value)) + '" data-setting="' + h.escapeHtml(entry.key) + '">';
+        }
+        return '<div class="field"><label for="' + id + '">' + h.escapeHtml(entry.label) + '</label>' +
+            control + '<small>' + h.escapeHtml(entry.help || "") + '</small></div>';
+    }
+
+    function paintSettings(state) {
+        settingsState = state;
+        paintSummary("mind-settings-summary", settingsSummary(state));
+        const form = document.getElementById("mind-settings-form");
+        if (state.unreachable) { form.hidden = true; return; }
+        form.hidden = false;
+        document.getElementById("mind-settings-fields").innerHTML =
+            (state.settings || []).map(settingsControl).join("");
+    }
+
+    async function renderSettings(name) {
+        if (settingsSaving) return;
+        const request = ++settingsRequest;
+        const section = document.getElementById("mind-settings");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/settings");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        if (request !== settingsRequest || settingsSaving) return;
+        paintSettings(state);
+    }
+
+    async function refreshSettingsSummary(name) {
+        if (settingsSaving) {
+            settingsSummaryRefreshPending = true;
+            return;
+        }
+        const section = document.getElementById("mind-settings");
+        if (section.dataset.mindName !== name) return;
+        const request = ++settingsRequest;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/settings");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        if (request !== settingsRequest || settingsSaving || section.dataset.mindName !== name) return;
+        paintSummary("mind-settings-summary", settingsSummary(state));
+    }
+
+
+    // The project folders this Mind can reach. They live in its own compose
+    // fragment, which is why saving recreates the container rather than
+    // restarting it: a restart replays the config the container was created
+    // with and cannot add a mount.
+    //
+    // Only the folders this control wrote are editable. The mounts the Mind
+    // boots from are listed and left alone — a Mind that lost one does not
+    // start.
+    let mountsState = null;
+    let mountBrowse = {root: "", path: ""};
+
+    function mountsSummary(state) {
+        // A Mind this console cannot read is a different sentence from a Mind
+        // whose folders are set somewhere else — one sends the operator to a
+        // file, the other to another machine.
+        if (state.failed) return [["Project folders", "Could not be read"], ["Reason", state.detail || ""]];
+        const rows = (state.mounts || []).map(function (row) {
+            return [row.name, row.container_path + (row.writable ? "" : " (read-only)") +
+                (row.missing ? " — this folder is no longer on the host" : "")];
+        });
+        if (!rows.length) rows.push(["Project folders", "None"]);
+        rows.push(["Mounts it boots from", String((state.infrastructure || []).length)]);
+        if (!state.rewritable) rows.push(["Editing", state.detail || "This compose file cannot be rewritten from here"]);
+        return rows;
+    }
+
+    function paintMountRows() {
+        document.getElementById("mind-mounts-rows").innerHTML =
+            (mountsState.mounts || []).map(function (row, index) {
+                // Access and Remove share one cell: a narrow viewport hides
+                // every table column past the third, so an action in a fourth
+                // one exists on a desktop and nowhere else.
+                return '<tr><td>' + h.escapeHtml((row.root_label || "") + "/" + (row.path || "")) +
+                    '</td><td>' + h.escapeHtml(row.container_path) +
+                    '</td><td class="row-actions"><select data-mount-access="' + index + '">' +
+                    '<option value="rw"' + (row.writable ? " selected" : "") + '>Writable</option>' +
+                    '<option value="ro"' + (row.writable ? "" : " selected") + '>Read-only</option>' +
+                    '</select><button class="button button-quiet" type="button" data-mount-remove="' +
+                    index + '">Remove</button></td></tr>';
+            }).join("") || '<tr><td colspan="3">No project folders yet.</td></tr>';
+        document.getElementById("mind-mounts-infrastructure").innerHTML =
+            '<small>Mounts this Mind boots from, not editable here: ' +
+            h.escapeHtml((mountsState.infrastructure || []).map(function (row) {
+                return row.container_path + (row.writable ? "" : " (read-only)");
+            }).join(", ") || "none") + '</small>';
+    }
+
+    async function paintMountBrowser() {
+        const picker = document.getElementById("mind-mounts-browse");
+        const here = document.getElementById("mind-mounts-here");
+        let listing;
+        try {
+            listing = await h.requestJson("/api/minds/" + encodeURIComponent(mountsState.name) +
+                "/mounts/folders?root=" + encodeURIComponent(mountBrowse.root) +
+                "&path=" + encodeURIComponent(mountBrowse.path));
+        } catch (error) {
+            picker.innerHTML = "";
+            here.textContent = error.message;
+            return;
+        }
+        const root = (mountsState.roots || []).find(function (r) { return r.key === mountBrowse.root; });
+        here.textContent = ((root && root.label) || mountBrowse.root) + "/" + listing.path;
+        document.getElementById("mind-mounts-up").disabled = !mountBrowse.path;
+        // Selecting opens; mounting is the button. A select that mounted on
+        // change would mount whatever the operator was passing through on the
+        // way deeper.
+        picker.innerHTML = '<option value="">Folders here…</option>' +
+            (listing.folders || []).map(function (folder) {
+                if (!folder.mountable) {
+                    return '<option value="" disabled>' + h.escapeHtml(folder.name) +
+                        ' (points outside this root)</option>';
+                }
+                return '<option value="' + h.escapeHtml(folder.path) + '">' +
+                    h.escapeHtml(folder.name) + '</option>';
+            }).join("");
+    }
+
+    function addMountRow(path) {
+        const root = (mountsState.roots || []).find(function (r) { return r.key === mountBrowse.root; }) || {};
+        const name = path ? path.split("/").pop() : (root.label || mountBrowse.root);
+        const target = (root.container_root || "/mnt/dev") + (path ? "/" + name : "");
+        if ((mountsState.mounts || []).some(function (row) { return row.container_path === target; })) {
+            document.getElementById("mind-mounts-status").textContent =
+                "Something is already mounted at " + target + ".";
+            return;
+        }
+        mountsState.mounts.push({root: mountBrowse.root, root_label: root.label || mountBrowse.root,
+            path: path, name: name, container_path: target, writable: true});
+        document.getElementById("mind-mounts-status").textContent = "";
+        paintMountRows();
+    }
+
+    async function renderOwner(mind) {
+        const section = document.getElementById("mind-owner");
+        const select = document.getElementById("mind-owner-user");
+        const status = document.getElementById("mind-owner-status");
+        try {
+            const users = (await h.requestJson("/api/admin/users")).users || [];
+            select.innerHTML = (mind.owner ? "" : '<option value="" selected>No owner</option>') + users.map(function (u) {
+                return '<option value="' + h.escapeHtml(u.username) + '"' + (u.username === mind.owner ? " selected" : "") + '>' + h.escapeHtml(u.username) + (u.disabled ? " (disabled)" : "") + '</option>';
+            }).join("");
+        } catch (error) { status.textContent = error.message; }
+        section.hidden = false;
+        document.getElementById("mind-owner-form").onsubmit = async function (event) {
+            event.preventDefault();
+            if (!select.value) return;
+            status.textContent = "Saving…";
+            try {
+                await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/owner", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({owner: select.value})});
+                mind.owner = select.value;
+                status.textContent = "Moved to " + select.value + ".";
+            } catch (error) { status.textContent = error.message; }
+        };
+    }
+
+    async function renderMounts(name) {
+        const section = document.getElementById("mind-mounts");
+        section.dataset.mindName = name;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/mounts");
+        } catch (error) {
+            state = {editable: false, failed: true, detail: error.message};
+        }
+        state.name = name;
+        mountsState = state;
+        const editor = section.querySelector("[data-editor]");
+        const toggle = section.querySelector("[data-edit-toggle]");
+        // A Mind that is not a container is offered no control at all — not a
+        // panel saying it cannot be edited — the same way the restart action
+        // is suppressed for one. A container whose compose file could not be
+        // read does get the panel, because that is a problem to go and fix.
+        if (!state.editable && !state.failed) { section.hidden = true; return; }
+        section.hidden = false;
+        paintSummary("mind-mounts-summary", mountsSummary(state));
+        if (!state.editable) { editor.hidden = true; if (toggle) toggle.hidden = true; return; }
+        // Listed, and not editable: the volumes are in a shape the writer
+        // would have to guess at.
+        document.getElementById("mind-mounts-save").disabled = !state.rewritable;
+        const picker = document.getElementById("mind-mounts-root");
+        picker.innerHTML = (state.roots || []).map(function (root) {
+            return '<option value="' + h.escapeHtml(root.key) + '">' + h.escapeHtml(root.label) + '</option>';
+        }).join("");
+        mountBrowse = {root: (state.roots || [{}])[0].key || "", path: ""};
+        paintMountRows();
+        await paintMountBrowser();
+    }
+
+    async function renderSurfaceToken(name) {
+        const section = document.getElementById("mind-surface-token");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/surface-token");
+        } catch (error) {
+            // A Mind that is down, and a Mind too old for the route, both
+            // leave the field offered: the token is written on the next
+            // reachable attempt, and hiding the form would send the operator
+            // to a shell for a value this page exists to take.
+            state = {unreachable: true, detail: error.message};
+        }
+        paintSummary("mind-token-summary", tokenSummary(state));
+    }
+
+    const SKILL_STATES = {
+        same: {label: "In sync", actions: []},
+        differs: {label: "Edited on this Mind", actions: ["diff", "install", "write-back"]},
+        not_installed: {label: "In the repo only", actions: ["install"]},
+        local_only: {label: "Not in the repo", actions: ["write-back", "remove"]},
+        unreadable: {label: "Cannot be read", actions: []}
+    };
+    // A skill generated on this install is not the repo's: its source is the install's own folder, so nothing here says "repo" of it and it is never written into the repo.
+    const GENERATED_STATES = {
+        same: {label: "In sync with the generated skill", actions: []},
+        differs: {label: "Differs from the generated skill", actions: ["diff", "install"]},
+        not_installed: {label: "Generated on this install only", actions: ["install"]},
+        local_only: {label: "Cannot be read", actions: []},
+        unreadable: {label: "Cannot be read", actions: []}
+    };
+    const ACTION_LABELS = {diff: "What changed", install: "Apply repo copy", "write-back": "Write into repo", remove: "Remove from Mind"};
+    const GENERATED_ACTION_LABELS = {diff: "What changed", install: "Apply generated copy", remove: "Remove from Mind"};
+    const CONFIRM_ACTIONS = {remove: "Delete this skill from the Mind? Its directory is not under version control, so this cannot be undone."};
+
+    // The picker is two dependent selects over one flat listing: the Mind
+    // reports every model its own proxy key may address, each row naming the
+    // provider hosting it, so the provider list is whatever those rows say.
+    // A provider added to the proxy therefore appears here with no change on
+    // this side, and nothing is offered that the proxy would refuse.
+    let modelRows = [];
+    let configurationRequest = 0;
+    let configurationSaving = false;
+
+    // Declared here, not beside the file-browser code below: the page-load
+    // block runs before those statements, and a `let` read from inside its
+    // own dead zone throws rather than reading undefined.
+    let filesTree = "skills";
+    let openFile = null;
+    // Increments on every navigation. A response for an older request is
+    // dropped rather than painted, so the list, the root path and the
+    // highlighted tab cannot end up describing different directories.
+    let filesRequest = 0;
+
+    // `preferred` is the Mind's current model when the picker first renders,
+    // and empty once the operator has changed provider. A current model the
+    // listing no longer offers is kept and selected rather than replaced with
+    // whatever sorts first: silently swapping it means an operator who opened
+    // this page for an unrelated reason and pressed Save rewrites the Mind's
+    // model without ever seeing the change.
+    // Each model row comes from the Mind and carries that Mind's saved
+    // percentage beside the proxy-owned capacity.
+    function rotationNote(row) {
+        return row && row.rotation_threshold_percent ? " — rotates at " + row.rotation_threshold_percent + "%" : "";
+    }
+
+    function rotationThreshold(row) {
+        if (!row || row.rotation_threshold_percent === null ||
+            row.rotation_threshold_percent === undefined) return "Saved percentage unavailable";
+        if (row.context_window === null || row.context_window === undefined)
+            return row.rotation_threshold_percent + "% — token threshold unavailable for this model";
+        return row.rotation_threshold_percent + "% (" +
+            Math.floor(row.context_window * row.rotation_threshold_percent / 100).toLocaleString() + " tokens)";
+    }
+
+    function renderModelOptions(provider, preferred) {
+        const select = document.getElementById("mind-default-model");
+        const rows = modelRows.filter(function (row) { return row.provider === provider; });
+        const missing = preferred && !rows.some(function (row) { return row.name === preferred; });
+        select.innerHTML = (missing ? '<option value="' + h.escapeHtml(preferred) + '" selected>' + h.escapeHtml(preferred) + " — set now, no longer offered</option>" : "") + rows.map(function (row) {
+            return '<option value="' + h.escapeHtml(row.name) + '"' + (row.name === preferred ? " selected" : "") + ">" + h.escapeHtml((row.label || row.name) + rotationNote(row)) + "</option>";
+        }).join("");
+        if (!preferred && rows.length) select.selectedIndex = 0;
+        return missing;
+    }
+
+    function populateModelPicker(rows, currentModel, currentProvider) {
+        const status = document.getElementById("mind-model-status");
+        const save = document.getElementById("mind-model-save");
+        const providerSelect = document.getElementById("mind-provider");
+        modelRows = rows.filter(function (row) { return row && row.name && row.provider; });
+        // Nothing offered means the Mind could not reach the proxy. Saving a
+        // model chosen from an empty list is impossible, and saving nothing is
+        // worse than saying so.
+        if (!modelRows.length) {
+            providerSelect.innerHTML = "";
+            document.getElementById("mind-default-model").innerHTML = "";
+            save.disabled = true;
+            status.textContent = "This Mind reported no available models, so its provider cannot be reached right now. Nothing can be saved until it answers.";
+            return;
+        }
+        save.disabled = false;
+        status.textContent = "";
+        const providers = [];
+        modelRows.forEach(function (row) {
+            if (!providers.some(function (p) { return p.name === row.provider; })) providers.push({name: row.provider, label: row.provider_label || row.provider});
+        });
+        // The Mind's current model decides the provider shown, not the
+        // provider field in its file: those disagree for a codex Mind, which
+        // declares `anthropic` whatever it actually runs.
+        const owning = modelRows.find(function (row) { return row.name === currentModel; });
+        const selectedProvider = (owning && owning.provider) || (providers.some(function (p) { return p.name === currentProvider; }) ? currentProvider : providers[0].name);
+        providerSelect.innerHTML = providers.map(function (p) {
+            return '<option value="' + h.escapeHtml(p.name) + '"' + (p.name === selectedProvider ? " selected" : "") + ">" + h.escapeHtml(p.label) + "</option>";
+        }).join("");
+        if (renderModelOptions(selectedProvider, currentModel)) {
+            status.textContent = "This Mind is set to " + currentModel + ", which its provider no longer offers. It stays selected until you pick something else.";
+        }
+        providerSelect.onchange = function () { renderModelOptions(providerSelect.value, ""); };
+    }
+
+    function paintModelConfiguration(configuration, fallbackModel, fallbackProvider) {
+        const runtime = configuration.configuration || {};
+        const currentModel = runtime.default_model || fallbackModel || "";
+        populateModelPicker(configuration.models || [], currentModel,
+            runtime.provider || fallbackProvider || "");
+        const row = (configuration.models || []).find(function (item) {
+            return item.name === currentModel;
+        });
+        paintSummary("mind-model-summary", [
+            ["Model", currentModel || "Unknown"],
+            ["Provider", runtime.provider || fallbackProvider || "Not reported"],
+            ["Rotation threshold", rotationThreshold(row)]
+        ]);
+    }
+
+    async function refreshModelConfiguration(name, fallbackModel, fallbackProvider) {
+        const request = ++configurationRequest;
+        const configuration = await h.requestJson(
+            "/api/minds/" + encodeURIComponent(name) + "/configuration"
+        );
+        if (request !== configurationRequest) return null;
+        paintModelConfiguration(configuration, fallbackModel, fallbackProvider);
+        return configuration;
+    }
+
+    document.getElementById("mind-files").addEventListener("click", function (event) {
+        const button = event.target.closest("button[data-tree]");
+        if (button) renderFiles(button.dataset.tree);
+    });
+    document.getElementById("mind-files-list").addEventListener("change", function () {
+        if (!this.value) return;
+        if (openFile && this.value !== openFile.path && !mayLeave()) {
+            this.value = openFile.path;
+            return;
+        }
+        openFileInEditor(this.value);
+    });
+    document.getElementById("mind-files-reload").addEventListener("click", function () {
+        if (openFile && mayLeave()) openFileInEditor(openFile.path);
+    });
+    document.getElementById("mind-files-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("mind-files-save-status");
+        const button = document.getElementById("mind-files-save");
+        if (!openFile) { status.textContent = "Open a file first."; return; }
+        button.disabled = true;
+        status.textContent = "Saving…";
+        try {
+            const saved = await h.requestJson(filesBase(filesTree) + "/content", {
+                method: "PUT",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    path: openFile.path,
+                    text: document.getElementById("mind-files-text").value,
+                    revision: openFile.revision
+                })
+            });
+            openFile.revision = saved.revision;
+            openFile.text = document.getElementById("mind-files-text").value;
+            status.textContent = filesTree === "hooks"
+                ? "Saved. This hook is live on the Mind's next event."
+                : "Saved. A harness process already running keeps the copy it loaded.";
+            // The sync table above now disagrees with the repo about this
+            // skill, and its Apply button would discard what was just saved.
+            // Re-render it so that is on screen rather than one refresh away.
+            if (filesTree === "skills") await renderSkills(document.getElementById("mind-files").dataset.mindName);
+        } catch (error) {
+            // A refused save must not be a dead end. The typed text stays in
+            // the box; taking the file's current revision turns the next
+            // Save into a deliberate overwrite rather than a silent one,
+            // and "Discard and reload" is still there for the other choice.
+            if (/changed since you opened it/i.test(error.message)) {
+                try {
+                    const current = await h.requestJson(filesBase(filesTree) + "/content?path=" + encodeURIComponent(openFile.path));
+                    // Whatever replaced it may not be editable at all — an
+                    // "Apply repo copy" can land a binary here. A null
+                    // revision offered back as an overwrite would ship a
+                    // save the Mind performs no staleness check on.
+                    if (!current.revision) {
+                        status.textContent = "This file changed on the Mind and what replaced it cannot be edited here (" + (current.reason || "not a text file") + "). Copy your text out before reloading.";
+                        return;
+                    }
+                    openFile.revision = current.revision;
+                    status.textContent = "This file changed on the Mind since you opened it. Your text is still here — Save again to overwrite what changed it, or Discard and reload to see theirs first.";
+                    return;
+                } catch (ignored) { /* fall through to the plain message */ }
+            }
+            status.textContent = error.message;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    // Roles (feature 10.18). General is always held and cannot be unticked;
+    // saving puts a Mind under role management, which it then stays under.
+    async function renderRoles(name) {
+        const section = document.getElementById("mind-roles");
+        const status = document.getElementById("mind-roles-status");
+        section.dataset.mindName = name; section.hidden = false;
+        let all, held;
+        try {
+            all = (await h.requestJson("/api/roles")).roles || [];
+            held = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/roles");
+        } catch (error) { status.textContent = "Cannot read roles: " + error.message; return; }
+        const grants = held.grants || {};
+        const holding = new Set((held.roles || []).map(function (r) { return r.id; }));
+        section.dataset.managed = grants.managed ? "true" : "false";
+        status.textContent = grants.managed ? "" : "Not under role management: this Mind runs as it always has. Saving roles puts it under role management.";
+        document.getElementById("mind-roles-list").innerHTML = all.filter(function (r) { return r.id !== null; }).map(function (r) {
+            const on = r.general ? grants.managed : holding.has(r.id);
+            return '<label class="checkbox-row"><input type="checkbox" data-role-id="' + r.id + '"' + (on ? " checked" : "") + (r.general ? " disabled" : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (every managed Mind)" : "") + '</label>';
+        }).join("");
+        const grid = grants.managed ? [["Skills", (grants.skills || []).join(", ") || "none"], ["Hooks", (grants.hooks || []).join(", ") || "none"], ["Models", (grants.models || []).join(", ") || "none named: runs its own model"], ["Built-in tools", (grants.tools || []).join(", ") || "none"]] : [];
+        document.getElementById("mind-roles-grants").innerHTML = grid.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+    }
+    document.getElementById("mind-roles-save").addEventListener("click", async function () {
+        const section = document.getElementById("mind-roles");
+        const ids = Array.from(section.querySelectorAll("input[data-role-id]:checked:not([disabled])")).map(function (i) { return Number(i.dataset.roleId); });
+        const status = document.getElementById("mind-roles-status");
+        // Saving is what puts a Mind under role management, and it never
+        // comes back out, so the first save is asked about by name.
+        if (section.dataset.managed !== "true" && !window.confirm("Put " + section.dataset.mindName + " under role management? From its next turn it may use only what the general role and the roles ticked here grant, and it stays under role management.")) return;
+        this.disabled = true;
+        try {
+            const saved = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/roles", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({role_ids: ids})});
+            await renderRoles(section.dataset.mindName);
+            if (saved.attachments && saved.attachments.detail) status.textContent = saved.attachments.detail;
+        } catch (error) { status.textContent = error.message; }
+        finally { this.disabled = false; }
+    });
+
+    async function renderSkills(name) {
+        const section = document.getElementById("mind-skills");
+        const status = document.getElementById("mind-skills-status");
+        const table = document.getElementById("mind-skills-table");
+        section.dataset.mindName = name; section.hidden = false;
+        status.textContent = "Loading skills…"; table.hidden = true;
+        let payload;
+        try {
+            const community = document.getElementById("mind-skills-community").checked ? "?community=1" : "";
+            payload = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/skills" + community);
+        } catch (error) {
+            status.textContent = "Cannot reach this Mind to read its skills: " + error.message;
+            return;
+        }
+        document.getElementById("mind-skills-harness").textContent = (payload.harness || "") + " skills";
+        const rows = payload.skills || [];
+        const left = payload.community_hidden || 0;
+        const leftNote = left ? left + (left === 1 ? " community submission is" : " community submissions are") + " left out; tick Show community submissions to list them." : "";
+        if (!rows.length) { status.textContent = leftNote || "This Mind has no skills on either side."; return; }
+        status.textContent = leftNote;
+        table.hidden = false;
+        document.getElementById("mind-skills-rows").innerHTML = rows.map(function (row) {
+            const generated = row.source === "generated";
+            const state = (generated ? GENERATED_STATES : SKILL_STATES)[row.state] || {label: row.state, actions: []};
+            const buttons = state.actions.map(function (action) {
+                return '<button class="button button-quiet" type="button" data-skill="' + h.escapeHtml(row.name) + '" data-action="' + action + '">' + (generated ? GENERATED_ACTION_LABELS : ACTION_LABELS)[action] + "</button>";
+            }).join(" ");
+            return '<tr><td>' + h.escapeHtml(row.name) + (row.community ? ' <span class="status-pill"><span></span>Community submission</span>' : '') + '</td><td>' + (row.repo !== null && row.repo !== undefined ? (row.source === "generated" ? "present, generated on this install" + (row.shadowed ? " (hides the repo's own copy)" : "") : "present") : "absent") +
+                '</td><td>' + h.escapeHtml(state.label) + '</td><td class="row-actions">' + buttons +
+                '</td></tr><tr class="skill-diff" data-diff-for="' + h.escapeHtml(row.name) + '" hidden><td colspan="4"><pre class="code-panel"></pre></td></tr>';
+        }).join("");
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    }
+
+    document.getElementById("mind-skills").addEventListener("click", async function (event) {
+        const button = event.target.closest("button[data-skill]");
+        if (!button) return;
+        const name = this.dataset.mindName, skill = button.dataset.skill, action = button.dataset.action;
+        if (CONFIRM_ACTIONS[action] && !window.confirm(CONFIRM_ACTIONS[action])) return;
+        const base = "/api/minds/" + encodeURIComponent(name) + "/skills/" + encodeURIComponent(skill);
+        const status = document.getElementById("mind-skills-status");
+        button.disabled = true;
+        try {
+            if (action === "diff") {
+                const row = this.querySelector('[data-diff-for="' + CSS.escape(skill) + '"]');
+                if (!row.hidden) { row.hidden = true; return; }
+                row.querySelector("pre").textContent = (await h.requestJson(base + "/diff")).diff || "(identical)";
+                row.hidden = false;
+                return;
+            }
+            if (action === "install") await h.requestJson(base + "/install", {method: "POST"});
+            if (action === "write-back") await h.requestJson(base + "/write-back", {method: "POST"});
+            if (action === "remove") await h.requestJson(base, {method: "DELETE"});
+            await renderSkills(name);
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+    });
+    try {
+        const minds = (await h.requestJson("/api/settings/minds")).minds || [];
+        const mind = minds.find(function (item) { return item.id === requested || item.name === requested || (item.id || "").startsWith(requested); });
+        if (mind) { renameMindId = mind.id; pollRename(); }
+        if (!mind) throw new Error("Mind not found");
+        const cfg = mind.local_config && mind.local_config.config || {};
+        const proxySection = document.getElementById("mind-proxy-key");
+        proxySection.dataset.mindName = mind.name;
+        proxySection.hidden = !mind.local_config || cfg.remote === true;
+        document.getElementById("mind-title").textContent = mind.name;
+        document.getElementById("mind-description").textContent = cfg.description || "Registered Hive mind";
+        document.getElementById("mind-status").innerHTML = h.statusPill(mind.activity_status === "active", "Active session", "Registered");
+        const details = [
+            ["Mind ID", mind.id || "Not reported"], ["Owner", mind.owner || "None"], ["Location", (!mind.local_config || cfg.remote) ? "Remote machine" : "Hive host"],
+            ["Harness", mind.harness || cfg.harness || "Unknown"], ["Provider", (cfg.provider_connection && cfg.provider_connection.name) || cfg.provider || "Not reported"],
+            ["Model", mind.model || cfg.default_model || "Unknown"], ["Gateway", mind.gateway_url || cfg.gateway_url || "Not reported"],
+            ["Last activity", h.formatTime(mind.last_activity)], ["Registry updated", h.formatTime(mind.last_seen)]
+        ];
+        document.getElementById("mind-details").innerHTML = details.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+        // Every registered Mind is configured the same way: over its own
+        // HTTP API. A Mind that is down answers nothing, and the editor says
+        // so rather than offering an edit that could not be written.
+        const editor = document.getElementById("mind-editor"); editor.dataset.mindName = mind.name; editor.hidden = false;
+        let down = false, downReason = "";
+        try {
+            await refreshModelConfiguration(
+                mind.name, cfg.default_model || mind.model || "", cfg.provider || ""
+            );
+        } catch (error) {
+            // 502 is the console saying the Mind itself did not answer. Its
+            // model, voice, settings, skills and files are the Mind's own
+            // account of itself, so none of them can be read: one notice
+            // says so, instead of every panel failing separately.
+            down = error.status === 502; downReason = error.message;
+            document.getElementById("mind-model-form").hidden = true;
+            paintSummary("mind-model-summary", [["Model", "Could not be read"], ["Reason", error.message]]);
+            document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
+        }
+        renderImage(mind.id, mind.name);
+        if (down) {
+            editor.hidden = true;
+            const notice = document.getElementById("mind-down");
+            document.getElementById("mind-down-text").textContent = mind.name + " is not answering at " + (mind.gateway_url || cfg.gateway_url || "its registered address") + ": it is stopped or cannot be reached. Its model, voice, settings, surface token, skills, skill and hook files and soul are read from the Mind itself, so they are not shown until it runs. Nothing has been removed. Its roles are held by the console and are below. What the console was told: " + downReason;
+            notice.hidden = false;
+        }
+        if (!down) { await renderVoice(mind.name);
+        await renderSettings(mind.name); }
+        {% if current_user.is_admin %}await renderMounts(mind.name);
+        await renderOwner(mind);{% endif %}
+        if (!down) await renderSurfaceToken(mind.name);
+        await renderRoles(mind.name);
+        if (!down) { await renderSkills(mind.name);
+        document.getElementById("mind-skills-community").addEventListener("change", function () { renderSkills(mind.name); });
+        const filesSection = document.getElementById("mind-files");
+        filesSection.dataset.mindName = mind.name;
+        filesSection.hidden = false;
+        await renderFiles("skills");
+        await renderSoul(mind.name); }
+        wireEditToggles();
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    } catch (error) {
+        document.getElementById("mind-content").hidden = true;
+        const box = document.getElementById("mind-error"); box.hidden = false; box.textContent = error.message;
+    }
+
+    // The two directories the harness actually reads, browsed and edited in
+    // place. This is not the sync table above it: that moves whole skill
+    // directories between the repo and the Mind, this changes the bytes of
+    // one file where the harness will find them.
+    //
+    // A save carries the revision the read handed back. The Mind refuses
+    // with 409 when it no longer describes the file, which is what stops a
+    // second tab — or an "Apply repo copy" pressed on the table above since
+    // this file was opened — from being silently undone.
+    function filesBase(tree) {
+        const name = document.getElementById("mind-files").dataset.mindName;
+        return "/api/minds/" + encodeURIComponent(name) + "/files/" + tree;
+    }
+
+    function dirty() {
+        return openFile && document.getElementById("mind-files-text").value !== openFile.text;
+    }
+
+    // Navigating away from an edited buffer throws it away. Twenty lines
+    // typed into a hook and one click on another row is not a mistake the
+    // operator should have to discover afterwards.
+    function mayLeave() {
+        return !dirty() || window.confirm("This file has unsaved changes. Leave them behind?");
+    }
+
+    async function renderFiles(tree) {
+        if (!mayLeave()) return;
+        const ticket = ++filesRequest;
+        filesTree = tree;
+        openFile = null;
+        const status = document.getElementById("mind-files-status");
+        const list = document.getElementById("mind-files-list");
+        const root = document.getElementById("mind-files-root");
+        document.getElementById("mind-files-form").hidden = true;
+        document.querySelectorAll("#mind-files [data-tree]").forEach(function (button) {
+            button.classList.toggle("button-primary", button.dataset.tree === tree);
+        });
+        status.textContent = "Loading " + tree + "…";
+        list.innerHTML = "";
+        root.textContent = "";
+        let payload;
+        try {
+            payload = await h.requestJson(filesBase(tree));
+        } catch (error) {
+            // Unreachable, refused, or a Mind without this API each say a
+            // different thing. None of them may read as "there is nothing here".
+            if (ticket !== filesRequest) return;
+            status.textContent = "Cannot read this Mind's " + tree + ": " + error.message;
+            return;
+        }
+        if (ticket !== filesRequest) return;
+        root.textContent = payload.root || "";
+        if (payload.exists === false) {
+            status.textContent = "This Mind has no " + tree + " directory at " + (payload.root || "that path") + ".";
+            return;
+        }
+        // Nothing is dropped quietly: a browser that hid things without
+        // saying so would be a browser nobody could trust about absence.
+        // These notes are composed before the empty check, or a directory
+        // holding nothing but a virtualenv would read as simply empty.
+        const rows = payload.files || [];
+        const notes = [];
+        if ((payload.omitted || []).length) notes.push("Not listed (installed dependencies, not the skill): " + payload.omitted.join(", ") + ".");
+        if ((payload.outside || []).length) notes.push("Links pointing outside this directory, which are not followed: " + payload.outside.join(", ") + ".");
+        if (payload.truncated) notes.push("This directory holds more files than the browser will list.");
+        if (!rows.length) notes.unshift("No editable files here.");
+        status.textContent = notes.join(" ");
+        if (!rows.length) return;
+        list.innerHTML = rows.map(function (row) {
+            return '<option value="' + h.escapeHtml(row.path) + '"' + (row.editable ? "" : " data-locked=\"1\"") + ">" + h.escapeHtml(row.path) + (row.editable ? "" : " — not editable here") + "</option>";
+        }).join("");
+    }
+
+    async function openFileInEditor(path) {
+        const ticket = ++filesRequest;
+        const form = document.getElementById("mind-files-form");
+        const status = document.getElementById("mind-files-save-status");
+        const area = document.getElementById("mind-files-text");
+        document.getElementById("mind-files-label").textContent = path;
+        status.textContent = "Loading…";
+        form.hidden = false;
+        try {
+            const payload = await h.requestJson(filesBase(filesTree) + "/content?path=" + encodeURIComponent(path));
+            if (ticket !== filesRequest) return;
+            if (!payload.editable) {
+                openFile = null;
+                area.value = "";
+                area.disabled = true;
+                document.getElementById("mind-files-save").disabled = true;
+                status.textContent = "Not editable here: " + (payload.reason || "this is not a text file") + ".";
+                return;
+            }
+            area.disabled = false;
+            document.getElementById("mind-files-save").disabled = false;
+            // Empty is a state, not a failure — a zero-byte file loads fine.
+            area.value = payload.text === null || payload.text === undefined ? "" : payload.text;
+            // `text` is kept so an unsaved edit can be recognised as one.
+            openFile = {path: path, revision: payload.revision, text: area.value};
+            status.textContent = "";
+        } catch (error) {
+            if (ticket !== filesRequest) return;
+            openFile = null;
+            status.textContent = error.message;
+        }
+    }
+
+
+    // The soul is read from the graph rather than from the Mind: a Mind whose
+    // soul is wrong is exactly the Mind you may have stopped, and routing the
+    // repair through it would make the broken thing a prerequisite.
+    function renderSoulHistory(history) {
+        const box = document.getElementById("mind-soul-history");
+        if (!history || !history.length) { box.textContent = "No recorded changes yet."; return; }
+        box.innerHTML = "";
+        history.forEach(function (entry) {
+            const added = (entry.after || []).filter(function (v) { return (entry.before || []).indexOf(v) === -1; });
+            const gone = (entry.before || []).filter(function (v) { return (entry.after || []).indexOf(v) === -1; });
+            const row = document.createElement("div");
+            row.className = "overview-stack";
+            const who = document.createElement("strong");
+            // "the Mind decided this" and "you typed this" must never look alike.
+            who.textContent = entry.actor === "console" ? "Edited here" : "Decided by the Mind";
+            const when = document.createElement("small");
+            when.textContent = " · " + (entry.at || "");
+            const why = document.createElement("p");
+            why.textContent = entry.reason || "";
+            row.appendChild(who); row.appendChild(when); row.appendChild(why);
+            added.forEach(function (v) { const d = document.createElement("small"); d.textContent = "+ " + v; row.appendChild(d); row.appendChild(document.createElement("br")); });
+            gone.forEach(function (v) { const d = document.createElement("small"); d.textContent = "− " + v; row.appendChild(d); row.appendChild(document.createElement("br")); });
+            box.appendChild(row);
+        });
+    }
+
+    function applySoul(payload) {
+        document.getElementById("mind-soul-values").value = (payload.soul_values || []).join("\n");
+        renderSoulHistory(payload.history || []);
+    }
+
+    async function renderSoul(name) {
+        const section = document.getElementById("mind-soul");
+        const status = document.getElementById("mind-soul-status");
+        // The write used to address the Mind by `requested`, which is the
+        // UUID the minds list links with — and Mind nodes in the graph are
+        // named (Skippy, Ada), so every save from a normal navigation went
+        // to a node that does not exist. Read and write take the same
+        // identifier now, the one the model form on this page already uses.
+        section.dataset.mindName = name;
+        section.hidden = false;
+        const target = section.dataset.mindName;
+        try {
+            applySoul(await h.requestJson("/api/minds/" + encodeURIComponent(target) + "/soul"));
+            status.textContent = "";
+        } catch (error) {
+            document.getElementById("mind-soul-form").hidden = true;
+            status.textContent = "Cannot read this Mind's soul: " + error.message;
+        }
+    }
+
+    document.getElementById("mind-soul-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("mind-soul-status");
+        const button = document.getElementById("mind-soul-save");
+        const lines = document.getElementById("mind-soul-values").value.split("\n")
+            .map(function (v) { return v.trim(); }).filter(function (v) { return v.length; });
+        const reason = document.getElementById("mind-soul-reason").value.trim();
+        if (!reason) { status.textContent = "Say why this changed before saving."; return; }
+        button.disabled = true; status.textContent = "Saving…";
+        try {
+            const target = document.getElementById("mind-soul").dataset.mindName;
+            applySoul(await h.requestJson("/api/minds/" + encodeURIComponent(target) + "/soul", {
+                method: "PUT",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({soul_values: lines, reason: reason})
+            }));
+            document.getElementById("mind-soul-reason").value = "";
+            // Composed fresh from the graph on every dispatch, so a running
+            // conversation keeps the copy already in its prompt.
+            status.textContent = "Saved. Takes effect on this Mind's next turn.";
+        } catch (error) {
+            status.textContent = "Could not save: " + error.message;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    document.getElementById("mind-voice-name").addEventListener("change", describeSelectedVoice);
+    document.getElementById("mind-voice-engine").addEventListener("change", renderVoiceChoices);
+    document.getElementById("mind-voice-listen").addEventListener("click", playVoiceSample);
+
+    document.getElementById("mind-voice-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-voice"), status = document.getElementById("mind-voice-status");
+        status.textContent = "Saving…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice: event.target.elements.voice.value, voice_engine: event.target.elements.voice_engine.value})});
+            status.textContent = "Saved. The next spoken reply uses " + (data.voice || "the new voice") + ".";
+            await renderVoice(section.dataset.mindName);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    // An upload adds a clip and re-reads the panel, so the new recording is
+    // selectable immediately. It does not save it as the voice: pressing
+    // Upload must not change what the Mind currently speaks in.
+    document.getElementById("mind-clip-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-voice"), status = document.getElementById("mind-clip-status");
+        const file = document.getElementById("mind-clip-file");
+        if (!file.files || !file.files.length) { status.textContent = "Choose a WAV file first."; return; }
+        const body = new FormData();
+        body.append("file", file.files[0]);
+        status.textContent = "Uploading…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice/clips", {method: "POST", body: body});
+            status.textContent = "Added " + (data.clip || "the clip") + ". Select it above and save to speak in it.";
+            file.value = "";
+            await renderVoice(section.dataset.mindName);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+
+    // The Mind's picture. Keyed by `mind.id` rather than by its name, because
+    // the file outlives a rename and a name does not — the registry rewrites
+    // `name` on an upsert and keeps `mind_id`. The section is the picture and
+    // the chooser and nothing else (Daniel, 2026-11-22): the route answers
+    // with the generated initial letter when there is no file, so an image
+    // always loads, and choosing a file uploads it.
+    function renderImage(mindId, mindName) {
+        const section = document.getElementById("mind-image");
+        section.hidden = false;
+        if (!mindId) {
+            // The registry reported this Mind without an id, which the
+            // Overview above renders as "Not reported". The picture is keyed
+            // by that id, so there is nothing to upload against — said out
+            // loud, because a section that simply did not appear is one
+            // Daniel would read as the feature being missing.
+            document.getElementById("mind-image-summary").textContent =
+                'Cannot be set: this Mind has no id in the registry, and a ' +
+                'picture is keyed by it. Re-register the Mind and this appears.';
+            document.getElementById("mind-image-file").hidden = true;
+            return;
+        }
+        section.dataset.mindId = mindId;
+        document.getElementById("mind-image-file").hidden = false;
+        const url = "/api/minds/" + encodeURIComponent(mindId) + "/image?v=" + Date.now();
+        document.getElementById("mind-image-summary").innerHTML =
+            '<img src="' + h.escapeHtml(url) + '" alt="' +
+            h.escapeHtml((mindName || "this Mind") + " picture") +
+            '" style="width:96px;height:96px;border-radius:50%;object-fit:cover;' +
+            'background:#0b1220;border:1px solid var(--console-line-strong)">';
+    }
+
+    document.getElementById("mind-image-file").addEventListener("change", async function () {
+        const section = document.getElementById("mind-image"), status = document.getElementById("mind-image-status");
+        const file = document.getElementById("mind-image-file");
+        if (!file.files || !file.files.length) return;
+        const body = new FormData();
+        body.append("file", file.files[0]);
+        status.textContent = "Uploading…";
+        try {
+            await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindId) + "/image", {method: "POST", body: body});
+            status.textContent = "";
+            file.value = "";
+            renderImage(section.dataset.mindId, document.getElementById("mind-title").textContent);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+
+    // The mount control's own events, delegated: the rows and the browser are
+    // both repainted from state, so a listener per button would be rebound on
+    // every repaint.
+    document.getElementById("mind-mounts").addEventListener("click", function (event) {
+        const target = event.target.closest("button");
+        if (!target || !mountsState || !mountsState.editable) return;
+        if (target.dataset.mountRemove !== undefined) {
+            mountsState.mounts.splice(Number(target.dataset.mountRemove), 1);
+            paintMountRows();
+        }
+    });
+
+    document.getElementById("mind-mounts").addEventListener("change", function (event) {
+        const index = event.target.dataset && event.target.dataset.mountAccess;
+        if (index === undefined || index === null) return;
+        mountsState.mounts[Number(index)].writable = event.target.value === "rw";
+    });
+
+    document.getElementById("mind-mounts-root").addEventListener("change", async function (event) {
+        mountBrowse = {root: event.target.value, path: ""};
+        await paintMountBrowser();
+    });
+
+    document.getElementById("mind-mounts-browse").addEventListener("change", async function (event) {
+        if (!event.target.value) return;
+        mountBrowse.path = event.target.value;
+        await paintMountBrowser();
+    });
+
+    document.getElementById("mind-mounts-up").addEventListener("click", async function () {
+        mountBrowse.path = mountBrowse.path.split("/").slice(0, -1).join("/");
+        await paintMountBrowser();
+    });
+
+    document.getElementById("mind-mounts-mount").addEventListener("click", function () {
+        addMountRow(mountBrowse.path);
+    });
+
+    document.getElementById("mind-mounts-newfolder").addEventListener("click", function () {
+        const field = document.getElementById("mind-mounts-new-field");
+        field.hidden = !field.hidden;
+        if (!field.hidden) document.getElementById("mind-mounts-new").focus();
+    });
+
+    document.getElementById("mind-mounts-create").addEventListener("click", async function () {
+        const field = document.getElementById("mind-mounts-new");
+        const status = document.getElementById("mind-mounts-status");
+        if (!field.value.trim()) { status.textContent = "Name the folder first."; return; }
+        status.textContent = "Creating…";
+        try {
+            const made = await h.requestJson("/api/minds/" +
+                encodeURIComponent(mountsState.name) + "/mounts/folders", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({root: mountBrowse.root, parent: mountBrowse.path, name: field.value.trim()})
+            });
+            field.value = "";
+            status.textContent = "";
+            document.getElementById("mind-mounts-new-field").hidden = true;
+            await paintMountBrowser();
+            addMountRow(made.path);
+        } catch (error) {
+            status.textContent = error.message;
+        }
+    });
+
+    document.getElementById("mind-mounts-save").addEventListener("click", async function () {
+        const status = document.getElementById("mind-mounts-status");
+        const button = document.getElementById("mind-mounts-save");
+        button.disabled = true;
+        status.textContent = "Writing the fragment and recreating the container…";
+        try {
+            const saved = await h.requestJson("/api/minds/" +
+                encodeURIComponent(mountsState.name) + "/mounts", {
+                method: "PUT", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({revision: mountsState.revision,
+                    mounts: (mountsState.mounts || []).map(function (row) {
+                        return {root: row.root, path: row.path, writable: row.writable};
+                    })})
+            });
+            status.textContent = saved.detail ||
+                (saved.recreated ? "Saved. The container was recreated with these folders."
+                                 : "Saved.");
+            await renderMounts(mountsState.name);
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    document.getElementById("mind-settings-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-settings"), status = document.getElementById("mind-settings-status");
+        if (settingsSaving) return;
+        // Only what the operator actually changed. A form that resent every
+        // field would write values nobody touched back over an edit made
+        // elsewhere since this page was opened.
+        const changed = {};
+        (settingsState && settingsState.settings || []).forEach(function (entry) {
+            const control = document.querySelector('[data-setting="' + entry.key + '"]');
+            if (!control) return;
+            const raw = control.value;
+            // A control left as it was found sends nothing, and that includes
+            // one found with nothing in it. Sending every unset field would
+            // make a Mind missing one text line unable to save any setting at
+            // all — a blank description is refused, and the refusal is the
+            // whole write.
+            if (raw === "") return;
+            if (entry.kind === "boolean") {
+                const now = raw === "true";
+                if (!entry.present || entry.value !== now) changed[entry.key] = now;
+                return;
+            }
+            if (entry.kind === "number") {
+                const now = Number(raw);
+                if (entry.key === "rotation_threshold_percent" && !entry.present &&
+                    now === settingsState.rotation_threshold_percent) return;
+                if (!entry.present || Number(entry.value) !== now) changed[entry.key] = now;
+                return;
+            }
+            if (!entry.present || String(entry.value) !== raw) changed[entry.key] = raw;
+        });
+        if (!Object.keys(changed).length) { status.textContent = "Nothing changed."; return; }
+        settingsSaving = true;
+        const request = ++settingsRequest;
+        const saveButton = document.getElementById("mind-settings-save");
+        saveButton.disabled = true;
+        status.textContent = "Saving…";
+        try {
+            const saved = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({settings: changed})});
+            status.textContent = "Saved to this Mind's runtime.yaml.";
+            if (request === settingsRequest) paintSettings(saved);
+        } catch (error) { status.textContent = error.message; }
+        finally {
+            settingsSaving = false;
+            saveButton.disabled = false;
+            if (settingsSummaryRefreshPending) {
+                settingsSummaryRefreshPending = false;
+                await refreshSettingsSummary(section.dataset.mindName);
+            }
+        }
+    });
+
+    document.getElementById("mind-token-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-surface-token"), status = document.getElementById("mind-token-status");
+        status.textContent = "Checking the token with the bot API…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/surface-token", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: event.target.elements.token.value})});
+            // The field is cleared whatever happens next. It held a live
+            // credential, and leaving it populated in the DOM outlives the
+            // reason it was typed.
+            event.target.reset();
+            status.textContent = data.accepted === false
+                ? "The bot API refused that token. The working one is untouched."
+                : "Stored" + (data.bot_username ? " for @" + data.bot_username : "") + ". The surface reads it when it is next restarted.";
+            await renderSurfaceToken(section.dataset.mindName);
+        } catch (error) { event.target.reset(); status.textContent = error.message; }
+    });
+
+    document.getElementById("mind-model-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status");
+        if (configurationSaving) return;
+        configurationSaving = true;
+        const request = ++configurationRequest;
+        const saveButton = document.getElementById("mind-model-save");
+        saveButton.disabled = true;
+        status.textContent = "Saving…";
+        try {
+            // No restart is offered here. The broker row the gateway reads at
+            // session creation is written along with the Mind's own file, so
+            // the next session starts on the new model with nothing bounced —
+            // which is what the save route reports as `restart_required`.
+            // Offering a restart anyway read as one being needed, and bouncing
+            // a container kills every conversation it is holding.
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value, provider: event.target.elements.provider.value})});
+            if (request !== configurationRequest) return;
+            const savedConfiguration = data.configuration || {};
+            const mindName = editor.dataset.mindName;
+            const savedModel = savedConfiguration.default_model || "";
+            const savedProvider = event.target.elements.provider.value;
+            status.textContent = "Saved. The next session this Mind is asked for starts on " + (savedModel || "the new model") + ".";
+            // The PATCH response is already the Mind's confirmed saved state.
+            // Paint it immediately so a slow catalog refresh cannot leave the
+            // visible model and threshold summary describing the old choice.
+            paintModelConfiguration({configuration: savedConfiguration, models: modelRows}, savedModel, savedProvider);
+            await Promise.all([
+                refreshModelConfiguration(mindName, savedModel, savedProvider),
+                refreshSettingsSummary(mindName),
+            ]);
+        } catch (error) { status.textContent = error.message; }
+        finally {
+            configurationSaving = false;
+            saveButton.disabled = false;
+        }
+    });
+});
+</script>
+{% endblock %}

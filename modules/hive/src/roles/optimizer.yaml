@@ -1,0 +1,10 @@
+name: Optimizer
+tools:
+  - shell
+  - files
+skills:
+  - optimize-context
+  - prune-memory
+  - skill-curator
+  - skill-proposer
+hooks: []

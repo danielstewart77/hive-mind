@@ -1,0 +1,46 @@
+{% extends "layout.html" %}
+{% block title %}Usage · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Inference</p><h1 class="page-title">Usage</h1><p class="page-description">What each person's minds used through the inference proxy. Cost is an estimate at each model's listed rates.</p></div>
+        <div class="field"><label for="usage-days">Window</label><select id="usage-days"><option value="1">Last day</option><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select></div>
+    </header>
+    <section class="surface">
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Person</th><th>Mind</th><th>Requests</th><th>Tokens</th><th>Cost (USD)</th></tr></thead><tbody id="usage-table"><tr><td colspan="5" class="loading-state">Loading usage…</td></tr></tbody></table></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    const tbody = document.getElementById("usage-table");
+    const days = document.getElementById("usage-days");
+    const n = function (v) { return Number(v || 0).toLocaleString(); };
+    const usd = function (v) { return "$" + Number(v || 0).toFixed(2); };
+
+    function row(person, mind, r, strong) {
+        const cells = [h.escapeHtml(person), h.escapeHtml(mind), n(r.requests), n(r.total_tokens), usd(r.cost)];
+        return "<tr" + (strong ? ' class="is-total"' : "") + "><td>" + cells.join("</td><td>") + "</td></tr>";
+    }
+
+    async function load() {
+        tbody.innerHTML = '<tr><td colspan="5" class="loading-state">Loading usage…</td></tr>';
+        try {
+            const body = await h.requestJson("/api/usage?days=" + encodeURIComponent(days.value));
+            const out = [];
+            (body.people || []).forEach(function (p) {
+                (p.minds || []).forEach(function (m) { out.push(row(p.username, m.holder, m, false)); });
+                out.push(row(p.username, "All of their minds", p, true));
+            });
+            (body.services || []).forEach(function (s) { out.push(row("The hive's services", s.holder, s, false)); });
+            tbody.innerHTML = out.length ? out.join("") : '<tr><td colspan="5"><div class="empty-state"><h3>No usage</h3><p>None of your minds has called the proxy in this window.</p></div></td></tr>';
+        } catch (err) {
+            tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><h3>Usage could not be read</h3><p>' + h.escapeHtml(err.message || String(err)) + "</p></div></td></tr>";
+        }
+    }
+
+    days.addEventListener("change", load);
+    load();
+});
+</script>
+{% endblock %}

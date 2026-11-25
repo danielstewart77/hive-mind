@@ -1,0 +1,737 @@
+{% extends "layout.html" %}
+{% block title %}Settings · Hive{% endblock %}
+{% block content %}
+<main class="page" data-settings-section="{{ settings_section }}">
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">System configuration</p><h1 class="page-title">Settings</h1><p class="page-description">Durable owner, connection, voice, and installation configuration.</p></div></header>
+    <div class="settings-layout">
+        <div class="settings-nav" role="navigation" aria-label="Settings sections">
+            <a href="/settings/features" class="{% if settings_section == 'features' %}is-active{% endif %}">Features</a>
+            <a href="/settings/remote-access" class="{% if settings_section == 'remote-access' %}is-active{% endif %}">Remote access</a>
+            {% if current_user.is_admin %}<a href="/settings/general" class="{% if settings_section == 'general' %}is-active{% endif %}">General</a>{% endif %}
+            <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">{{ 'Owner and access' if current_user.is_admin else 'Account and sessions' }}</a>
+            {% if current_user.is_admin %}<a href="/settings/users" class="{% if settings_section == 'users' %}is-active{% endif %}">Users and groups</a>
+            <a href="/settings/connections" class="{% if settings_section == 'connections' %}is-active{% endif %}">Connections</a>
+            <a href="/settings/providers" class="{% if settings_section == 'providers' %}is-active{% endif %}">Providers</a>
+            <a href="/settings/voice" class="{% if settings_section == 'voice' %}is-active{% endif %}">Voice</a>
+            <a href="/settings/credentials" class="{% if settings_section == 'credentials' %}is-active{% endif %}">Credentials</a>
+            <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>{% endif %}
+        </div>
+        <div class="settings-content">
+        {% if settings_section == 'features' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Features</h2><p>Choose which tabs appear in your left navigation. Settings always stays visible. Saved choices follow your account across browsers.</p></div>
+                <form id="feature-form" class="surface-body">
+                    <div class="feature-grid">
+                    {% for key, label, admin_only in feature_catalogue %}
+                    <label class="feature-choice"><input type="checkbox" name="{{ key }}" {% if feature_enabled[key] %}checked{% endif %}><span>{{ label }}{% if admin_only and not current_user.is_admin %}<small> · Requires admin access</small>{% endif %}</span></label>
+                    {% endfor %}
+                    </div>
+                    <p><button class="button button-primary" type="submit">Save features</button></p><p id="feature-save-status" role="status"></p>
+                </form>
+            </section>
+        {% elif settings_section == 'remote-access' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Your remote access</h2><p>Use a dedicated Cloudflare tunnel from your own account. Both addresses must have Cloudflare Access enabled. Only your Hive account can use this connection.</p><p>Connections close automatically at 8:00 pm and 2:00 am America/Chicago. Closing remote access leaves your Minds running. Arm it here while connected locally.</p></div>
+                <form id="remote-access-form" class="surface-body form-grid">
+                    <div class="field"><label for="remote-website">Public website address</label><input id="remote-website" name="website_url" type="url" required placeholder="https://hive.example.com"></div>
+                    <div class="field"><label for="remote-terminal">Public web terminal address</label><input id="remote-terminal" name="terminal_url" type="url" required placeholder="https://terminal.example.com"></div>
+                    <div class="field"><label for="remote-token">Tunnel connector token</label><input id="remote-token" name="tunnel_token" type="password" autocomplete="new-password" spellcheck="false"><small id="remote-token-help">Paste the token for this tunnel, not a Cloudflare account API key.</small></div>
+                    <div class="form-actions"><button class="button button-primary" type="submit">Save connection</button><button class="button" type="button" data-remote-toggle disabled>Checking remote access…</button><small id="remote-save-status" role="status"></small></div>
+                    <p data-remote-status role="status"></p>
+                </form>
+            </section>
+            {% if current_user.is_admin %}<section class="surface"><div class="settings-section-copy"><h2>Global remote access</h2><p>Turning this off closes every user's tunnel and prevents rearming.</p></div><div class="surface-body"><label><input id="remote-global-allowed" type="checkbox" disabled> Allow users to arm remote access</label><p id="remote-global-status" role="status"></p></div></section>{% endif %}
+        {% elif settings_section == 'general' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Installation</h2><p>Identity and first-run state for this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Product</dt><dd>Hive control center</dd></div><div class="detail-item"><dt>Owner</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Default view</dt><dd>System overview</dd></div></dl></div></section>
+            <section class="surface"><div class="settings-section-copy"><h2>Setup guide</h2><p>Re-run readiness checks or continue an incomplete installation.</p></div><div class="surface-body"><a class="button" href="/setup"><i data-lucide="list-checks"></i>Open setup guide</a></div></section>
+        {% elif settings_section == 'access' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Your account</h2><p>The account signed in to this console.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Username</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Role</dt><dd>{{ 'Admin' if current_user.is_admin else 'Member' }}</dd></div><div class="detail-item"><dt>Groups</dt><dd>{{ current_user.groups | join(', ') or 'None' }}</dd></div></dl><a class="button" href="/password"><i data-lucide="key-round"></i>Change password</a></div></section>
+            <section class="surface"><div class="surface-header"><div><h2>Mind sessions</h2><p>Delete abandoned conversation sessions.</p></div><button id="sessions-refresh" class="icon-button" type="button" aria-label="Refresh sessions"><i data-lucide="refresh-cw"></i></button></div><ul class="activity-list" id="settings-sessions"><li class="loading-state">Loading sessions…</li></ul></section>
+        {% elif settings_section == 'connections' %}
+            <section class="surface"><div class="surface-header"><div><h2>Shared services</h2><p>Connectivity from the Hive application.</p></div><button id="connections-refresh" class="icon-button" type="button" aria-label="Refresh connections"><i data-lucide="refresh-cw"></i></button></div><ul class="service-list" id="settings-connections"><li class="loading-state">Checking connections…</li></ul></section>
+        {% elif settings_section == 'providers' %}
+            <section class="surface"><div class="surface-header"><div><h2>Providers</h2><p>Named inference connections. Tokens belong to Minds and are entered on each Mind’s configuration. URL changes reach existing Minds when you reload them from their page.</p></div></div>
+                <div class="surface-body overview-stack" id="provider-list"></div>
+                <form class="surface-body form-grid" id="provider-form">
+                    <input name="id" type="hidden">
+                    <div class="field"><label for="provider-name">Name</label><input id="provider-name" name="name" required maxlength="100" placeholder="Hive Proxy"></div>
+                    <div class="field"><label for="provider-kind">Connection type</label><select id="provider-kind" name="kind"><option value="proxy">Proxy</option><option value="openai">Direct OpenAI</option><option value="anthropic">Direct Anthropic</option><option value="ollama">Ollama server</option><option value="custom">Custom</option></select></div>
+                    <div class="field"><label for="provider-url">Base URL</label><input id="provider-url" name="base_url" type="url" required placeholder="https://provider.example"></div>
+                    <div class="field"><label for="provider-format">API format</label><select id="provider-format" name="api_format"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="ollama">Ollama</option></select></div>
+                    <div class="form-actions"><button class="button button-primary" type="submit">Save provider</button><button class="button" type="button" id="provider-new">New provider</button><small id="provider-status" role="status"></small></div>
+                </form>
+            </section>
+        {% elif settings_section == 'voice' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Health of each speech server. A Mind's own engine and voice are set on its page.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
+        {% elif settings_section == 'credentials' %}
+            <section class="surface">
+                <div class="surface-header">
+                    <div><h2>Credentials</h2><p>One row per holder, each with its own value. Rotating one leaves the rest working.</p></div>
+                    <button id="credentials-refresh" class="icon-button" type="button" aria-label="Re-check every credential"><i data-lucide="refresh-cw"></i></button>
+                </div>
+                <div class="surface-body credential-toolbar">
+                    <input type="search" id="credential-filter" placeholder="Filter by mind or credential" autocomplete="off" spellcheck="false">
+                    <select id="credential-status-filter">
+                        <option value="">Any status</option>
+                        <option value="working">Working</option>
+                        <option value="refused">Refused</option>
+                        <option value="not_set">Not set</option>
+                        <option value="unchecked">Unchecked</option>
+                        <option value="undetermined">Undetermined</option>
+                        <option value="unreachable">Unreachable</option>
+                        <option value="predates_api">Older code</option>
+                        <option value="unaddressable">No address</option>
+                        <option value="unreadable">Unreadable</option>
+                        <option value="retired">Retired</option>
+                        <option value="validator">Validator</option>
+                    </select>
+                </div>
+                <div id="credential-registry"><p class="loading-state">Loading credentials…</p></div>
+            </section>
+        {% elif settings_section == 'users' %}
+            <section class="surface">
+                <div class="surface-header"><div><h2>Users</h2><p>A new user signs in with the temporary password you set and must change it. Users are disabled, never deleted.</p></div><button id="users-refresh" class="icon-button" type="button" aria-label="Refresh users"><i data-lucide="refresh-cw"></i></button></div>
+                <div class="surface-body">
+                    <form id="user-create" class="inline-form">
+                        <input name="username" placeholder="Username" autocomplete="off" required>
+                        <input name="email" type="email" placeholder="Email (optional)" autocomplete="off">
+                        <input name="domain_account" id="user-domain-account" placeholder="DOMAIN\username (optional)" autocomplete="off" hidden>
+                        <input name="temp_password" type="text" placeholder="Temporary password" autocomplete="off" minlength="8">
+                        <button class="button button-primary" type="submit"><i data-lucide="user-plus"></i>Add user</button>
+                    </form>
+                    <p class="faint">Leave the temporary password empty for an account that signs in only through Microsoft or Windows.</p>
+                </div>
+                <div class="table-wrap"><table class="data-table"><thead><tr><th>Username</th><th>Email</th><th>Domain account</th><th>Groups</th><th>Status</th><th></th></tr></thead><tbody id="users-rows"><tr><td colspan="6" class="loading-state">Loading users…</td></tr></tbody></table></div>
+            </section>
+            <section class="surface">
+                <div class="surface-header"><div><h2>Groups</h2><p>Membership of admins is what makes a user an admin. The last enabled admin cannot be removed or disabled.</p></div></div>
+                <div class="surface-body">
+                    <form id="group-create" class="inline-form"><input name="name" placeholder="New group" autocomplete="off" required><button class="button" type="submit"><i data-lucide="plus"></i>Add group</button></form>
+                    <form id="member-add" class="inline-form"><select name="group" id="member-group"></select><select name="username" id="member-user"></select><button class="button" type="submit"><i data-lucide="user-check"></i>Add to group</button></form>
+                </div>
+                <ul class="activity-list" id="groups-rows"><li class="loading-state">Loading groups…</li></ul>
+            </section>
+        {% elif settings_section == 'advanced' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Installer downloads</h2><p>Approved bootstrap assets published by Hive Init.</p></div><ul class="service-list" id="settings-downloads"><li class="loading-state">Loading downloads…</li></ul></section>
+            <section class="surface"><div class="settings-section-copy"><h2>Diagnostics</h2><p>Detailed runtime configuration is available on each Mind page with secrets removed.</p></div><div class="surface-body"><a class="button" href="/minds"><i data-lucide="brain-circuit"></i>Open mind diagnostics</a></div></section>
+        {% endif %}
+        </div>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    const providerForm = document.getElementById("provider-form");
+    if (providerForm) {
+        let providers = [];
+        const status = document.getElementById("provider-status");
+        function setFormat() { const kind = providerForm.elements.kind.value; providerForm.elements.api_format.disabled = ["openai", "anthropic", "ollama"].includes(kind); if (providerForm.elements.api_format.disabled) providerForm.elements.api_format.value = kind; }
+        async function loadProviders() {
+            providers = (await h.requestJson("/api/settings/providers")).providers || [];
+            document.getElementById("provider-list").innerHTML = providers.map(p => '<div class="detail-item"><span class="entity-copy"><strong>' + h.escapeHtml(p.name) + '</strong><small>' + h.escapeHtml(p.base_url) + ' · ' + h.escapeHtml(p.kind) + '</small></span><button class="button" type="button" data-provider-edit="' + h.escapeHtml(p.id) + '">Edit</button><button class="button button-danger" type="button" data-provider-delete="' + h.escapeHtml(p.id) + '">Delete</button></div>').join("") || '<p>No providers configured.</p>';
+        }
+        providerForm.elements.kind.addEventListener("change", setFormat);
+        document.getElementById("provider-new").addEventListener("click", function () { providerForm.reset(); providerForm.elements.id.value = ""; setFormat(); status.textContent = ""; });
+        document.getElementById("provider-list").addEventListener("click", async function (event) {
+            const edit = event.target.closest("[data-provider-edit]"), remove = event.target.closest("[data-provider-delete]");
+            if (edit) { const p = providers.find(p => p.id === edit.dataset.providerEdit); ["id", "name", "kind", "base_url", "api_format"].forEach(k => providerForm.elements[k].value = p[k]); setFormat(); }
+            if (remove && window.confirm("Delete this provider?")) { try { await h.requestJson("/api/settings/providers/" + encodeURIComponent(remove.dataset.providerDelete), {method: "DELETE"}); await loadProviders(); } catch (error) { status.textContent = error.message; } }
+        });
+        providerForm.addEventListener("submit", async function (event) {
+            event.preventDefault(); const id = providerForm.elements.id.value;
+            const body = {}; ["name", "kind", "base_url", "api_format"].forEach(k => body[k] = providerForm.elements[k].value);
+            const button = providerForm.querySelector('[type="submit"]'); button.disabled = true;
+            try { await h.requestJson("/api/settings/providers" + (id ? "/" + encodeURIComponent(id) : ""), {method: id ? "PUT" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); status.textContent = "Provider saved."; await loadProviders(); }
+            catch (error) { status.textContent = error.message; } finally { button.disabled = false; }
+        });
+        loadProviders().catch(error => status.textContent = error.message);
+    }
+    const featureForm = document.getElementById("feature-form");
+    if (featureForm) featureForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const button = featureForm.querySelector("button");
+        const status = document.getElementById("feature-save-status");
+        const choices = {};
+        featureForm.querySelectorAll("input[type=checkbox]").forEach(input => choices[input.name] = input.checked);
+        button.disabled = true; status.textContent = "Saving…";
+        try {
+            await h.requestJson("/api/settings/features", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(choices)});
+            window.location.reload();
+        } catch (error) { status.textContent = "Could not save features: " + error.message; button.disabled = false; }
+    });
+    const section = document.querySelector("[data-settings-section]").dataset.settingsSection;
+    function refreshIcons() { if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}}); }
+    async function loadSessions() {
+        const list = document.getElementById("settings-sessions");
+        try {
+            const sessions = (await h.requestJson("/api/settings/hive-comms/sessions")).sessions || [];
+            list.innerHTML = sessions.length ? sessions.map(function (item) { return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(item.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(item.opening_line || (item.id || "").slice(0, 8)) + '</small></span><button class="button button-danger" type="button" data-delete-session="' + h.escapeHtml(item.id) + '">Delete</button></li>'; }).join("") : '<li class="empty-state"><h3>No sessions</h3><p>There are no sessions to manage.</p></li>';
+            refreshIcons();
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    }
+    async function loadConnections() {
+        const list = document.getElementById("settings-connections");
+        try {
+            const data = h.normalizeOverview(await h.requestJson("/api/overview"));
+            const rows = [["Hive Comms", "Message broker and sessions", data.services.comms, "radio-tower"], ["Lucent", "Memory and knowledge graph", data.services.lucent, "database"]];
+            list.innerHTML = rows.map(function (item) { return h.serviceCheckRow(item[0], item[1], item[2], item[3], {optional: item[2].installed === false, badText: "Unavailable"}); }).join(""); refreshIcons();
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    }
+    async function loadVoice() {
+        try {
+            const data = await h.requestJson("/api/settings/voice");
+            document.getElementById("voice-servers").innerHTML = Object.entries(data.servers || {}).map(function (entry) { return '<li class="service-row"><span class="service-icon"><i data-lucide="audio-lines"></i></span><span class="service-copy"><strong>' + h.escapeHtml(entry[0]) + '</strong><small>Text to speech service</small></span>' + h.statusPill(entry[1].reachable, "Ready", "Unavailable") + '</li>'; }).join(""); refreshIcons();
+        } catch (error) { document.getElementById("voice-servers").innerHTML = '<li class="error-state">' + h.escapeHtml(error.message) + '</li>'; }
+    }
+    // The page keeps the whole answer and re-renders from it: a filter or a
+    // sort must not cost a round trip, and a live check that lands while the
+    // operator is typing must not drop what they typed.
+    let credentialState = {credentials: [], rows: [], holders: [], holderErrors: {}, registry: "ok", ttl: 300};
+    let holderChecked = {};
+    // Bumped by every load, so a sweep in flight knows it has been overtaken.
+    let holderGeneration = 0;
+    let credentialSort = {column: "holder", ascending: true};
+
+    const STATUS_WORDS = {
+        working: "Working", refused: "Refused", not_set: "Not set",
+        unchecked: "Unchecked", undetermined: "Could not tell",
+        unreachable: "Unreachable", predates_api: "Older code",
+        unaddressable: "No address", unreadable: "Unreadable",
+        retired: "Retired", validator: "Validator",
+    };
+    // Rank for sort-by-status: what the operator must act on first. Never a
+    // colour — the whole status is a word for that reason.
+    const STATUS_RANK = ["refused", "undetermined", "unreadable", "unreachable",
+                         "predates_api", "unaddressable", "not_set", "unchecked",
+                         "retired", "validator", "working"];
+
+    // A save in flight, and a box whose token has just been stored. Both were
+    // held only on the DOM node, and a filter keystroke, a sort click or any
+    // completed save replaces the whole container — so a row mid-save came back
+    // with an enabled Save button and its token still in the box, one reflex
+    // Enter away from a duplicate write.
+    const credentialSaving = {};
+    function credentialKey(credential, holder) { return credential + "\u0000" + holder; }
+
+    // The mask is CSS, so it is feature-detected rather than assumed: where the
+    // property is unsupported the box falls back to a password field, which
+    // masks and carries the autofill cost, instead of rendering a live token as
+    // plain text on screen with nothing to say the mask had been dropped.
+    const CREDENTIAL_INPUT_TYPE = (window.CSS && window.CSS.supports
+        && window.CSS.supports("-webkit-text-security", "disc")) ? "text" : "password";
+
+    // A save with no deadline wedges the control. The disabled "Verifying…"
+    // state now survives a re-render, so a socket held open by a proxy in front
+    // of a mind leaves that row unusable until the whole page is reloaded, with
+    // nothing on screen to say why.
+    const CREDENTIAL_SAVE_TIMEOUT_MS = 45 * 1000;
+    async function credentialSave(url, options) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(function () { controller.abort(); }, CREDENTIAL_SAVE_TIMEOUT_MS);
+        try {
+            return await h.requestJson(url, Object.assign({}, options, {signal: controller.signal}));
+        } catch (error) {
+            // Whether it landed is genuinely unknown — the request may have been
+            // served and the answer lost — so the message says so rather than
+            // claiming nothing was written.
+            if (controller.signal.aborted) {
+                throw new Error("No answer in " + (CREDENTIAL_SAVE_TIMEOUT_MS / 1000)
+                    + " seconds. Whether the token was stored is unknown — check the row before pasting again.");
+            }
+            throw error;
+        } finally {
+            window.clearTimeout(timer);
+        }
+    }
+
+    function credentialInput(attrs) {
+        return '<input type="' + CREDENTIAL_INPUT_TYPE + '" class="credential-token"'
+            + ' placeholder="Paste a token" autocomplete="off" spellcheck="false" data-set-input ' + attrs + '>';
+    }
+
+    // Clearing the live node, never a flag consumed by the next render: a flag
+    // outlives a render that never comes — a group filtered off the page, a
+    // reload that failed — and then eats the next token pasted into that box.
+    // And a value that is no longer the one just stored is a correction typed
+    // during the save, which is not ours to discard.
+    function clearCredentialInput(credential, holder, stored) {
+        document.querySelectorAll("#credential-registry input[data-set-input]").forEach(function (input) {
+            if (input.dataset.credential !== credential || input.dataset.holder !== holder) return;
+            if (input.value.trim() === stored) input.value = "";
+        });
+    }
+
+    function credentialSaveButton(classes, attrs, credential, holder) {
+        const saving = credentialSaving[credentialKey(credential, holder)];
+        return '<button class="' + classes + '" type="button" ' + attrs + (saving ? " disabled" : "") + '>'
+            + (saving ? "Verifying…" : "Save") + '</button>';
+    }
+
+    function credentialAge(row) {
+        if (row.age_seconds === null || row.age_seconds === undefined) return "—";
+        const seconds = Math.round(row.age_seconds);
+        if (seconds < 60) return seconds + "s ago";
+        if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+        return Math.round(seconds / 3600) + "h ago";
+    }
+
+    function credentialRowHtml(row) {
+        const status = STATUS_WORDS[row.status] || row.status;
+        const detail = row.detail ? '<small>' + h.escapeHtml(row.detail) + '</small>' : "";
+        const account = row.names ? '<small>' + h.escapeHtml(row.names) + '</small>' : "";
+        const value = row.preview ? h.escapeHtml(row.preview) : (row.present === false ? "—" : "");
+        const keys = 'data-credential="' + h.escapeHtml(row.credential) + '" data-holder="' + h.escapeHtml(row.holder) + '"';
+        let action = "";
+        if (row.settable) {
+            // Masked by CSS, never type="password", and that is the whole
+            // defence: with no password field anywhere on the page Chrome finds
+            // no login form to anchor, so it classifies this group as unfillable
+            // and has no username field to fill. A password field here cost
+            // secrets twice over. Chrome ignores autocomplete="off" on one and
+            // treats the whole document as one login form, filling the nearest
+            // preceding text input as the username — which is the filter box,
+            // whose own handler then re-renders the table out from under the
+            // cursor. And a password field whose node is removed after a
+            // successful XHR is Chrome's "password changed" shape, so it offers
+            // to save a live bot token or the host PAT into the browser's synced
+            // credential store. No route in this console returns a token;
+            // handing one to the password manager is the same leak by another
+            // door.
+            action = '<span class="credential-set">' + credentialInput(keys) + '' + credentialSaveButton("button button-quiet", "data-set-row " + keys, row.credential, row.holder) + '</span>';
+        } else if (row.checkable) {
+            action = '<button class="button button-quiet" type="button" data-check-row ' + keys + '>Check</button>';
+        }
+        return '<tr data-row ' + keys + ' data-status="' + h.escapeHtml(row.status) + '">'
+            + '<td><strong>' + h.escapeHtml(row.holder_label) + '</strong>' + account + '</td>'
+            + '<td><small>' + h.escapeHtml(row.where || "—") + '</small></td>'
+            + '<td>' + value + '</td>'
+            + '<td>' + h.escapeHtml(status) + detail + '</td>'
+            + '<td><small>' + credentialAge(row) + '</small></td>'
+            + '<td>' + action + '</td></tr>';
+    }
+
+    // One section per service, one row per holder it reports. A holder this
+    // console holds no writable location for gets no rotate control and says
+    // why: minting a value with nowhere to put it is how a holder is killed.
+    function holderRowHtml(row) {
+        const checked = holderChecked[row.service + "\u0000" + row.holder];
+        const status = row.revoked ? "Revoked" : (checked ? (STATUS_WORDS[checked.status] || checked.status) : "Unchecked");
+        const detail = checked && checked.detail ? ' <small>' + h.escapeHtml(checked.detail) + '</small>' : "";
+        const where = row.path ? h.escapeHtml(row.path) + ' <small>(' + h.escapeHtml(row.env_key) + ')</small>' : '<small>' + h.escapeHtml(row.unrotatable_reason || "") + '</small>';
+        const buttons = 'data-service="' + h.escapeHtml(row.service) + '" data-holder="' + h.escapeHtml(row.holder) + '"';
+        // Two columns, never one. Sharing a cell put Revoke exactly where
+        // Rotate had been for any holder whose file became unreadable, so an
+        // operator clicking from muscle memory revoked a live mind.
+        const rotate = row.rotatable
+            ? '<button class="button button-quiet" type="button" data-holder-rotate ' + buttons + '>' + (row.revoked ? "Reinstate" : "Rotate") + '</button>'
+            : '<span class="pill" title="' + h.escapeHtml(row.unrotatable_reason || "") + '">Not from here</span>';
+        const revoke = row.revoked
+            ? ''
+            : '<button class="button button-quiet" type="button" data-holder-revoke ' + buttons + '>Revoke</button>';
+        return '<tr data-holder-row ' + buttons + '>'
+            + '<td><strong>' + h.escapeHtml(row.holder) + '</strong> <small>' + h.escapeHtml(row.role || "") + '</small></td>'
+            + '<td>' + h.escapeHtml(row.username || "") + '</td>'
+            + '<td>' + where + '</td>'
+            + '<td>' + h.escapeHtml(row.restart_target || "") + '</td>'
+            + '<td>' + h.escapeHtml(status) + detail + '</td>'
+            + '<td>' + rotate + '</td><td>' + revoke + '</td></tr>';
+    }
+
+    function holderGroupHtml(service, rows) {
+        const error = credentialState.holderErrors[service];
+        if (error) return '<section class="credential-group"><div class="surface-header"><div><h3>' + h.escapeHtml(service) + '</h3></div></div><div class="error-state">' + h.escapeHtml(error) + '</div></section>';
+        const table = rows.length
+            ? '<table class="credential-table"><thead><tr><th>Holder</th><th>Answers for</th><th>Reads from</th><th>Restart</th><th>Status</th><th></th><th></th></tr></thead><tbody>'
+              + rows.map(holderRowHtml).join("") + '</tbody></table>'
+            : '<div class="empty-state"><h3>No holders</h3><p>This service reports nobody holding a credential.</p></div>';
+        return '<section class="credential-group"><div class="surface-header"><div><h3>' + h.escapeHtml(rows.length ? rows[0].service_label : service) + '</h3></div></div>' + table + '</section>';
+    }
+
+    function credentialGroupHtml(credential, rows) {
+        let action;
+        if (credential.key === "github_pat") {
+            action = '<span class="credential-set">' + credentialInput('data-credential="github_pat" data-holder="host"') + '' + credentialSaveButton("button", 'data-set-host="github_pat"', "github_pat", "host") + '</span>';
+        } else if (credential.manual_reason) {
+            action = '<span class="pill" title="' + h.escapeHtml(credential.manual_reason) + '">Manual only</span>';
+        } else {
+            action = "";
+        }
+        const note = credential.note ? '<p>' + h.escapeHtml(credential.note) + '</p>' : "";
+        const outOfSync = credential.kind === "shared" && !credential.in_sync
+            ? '<p><strong>Holders do not all carry the same value.</strong></p>' : "";
+        const body = rows.length
+            ? '<table class="credential-table"><thead><tr>'
+              + '<th data-sort="holder">Holder</th><th>Where it is kept</th><th>Value</th>'
+              + '<th data-sort="status">Status</th><th data-sort="checked">Checked</th><th></th>'
+              + '</tr></thead><tbody>' + rows.map(credentialRowHtml).join("") + '</tbody></table>'
+            : '<p class="empty-state">No holders match.</p>';
+        return '<section class="credential-group" data-credential="' + h.escapeHtml(credential.key) + '">'
+            + '<div class="surface-header"><div><h3>' + h.escapeHtml(credential.label) + '</h3>' + note + outOfSync + '</div>' + action + '</div>'
+            + body + '</section>';
+    }
+
+    function renderCredentials() {
+        const container = document.getElementById("credential-registry");
+        const needle = (document.getElementById("credential-filter").value || "").trim().toLowerCase();
+        const wanted = document.getElementById("credential-status-filter").value;
+        const banner = credentialState.registry === "unreadable"
+            ? '<div class="error-state">The mind registry could not be read, so no per-mind rows are shown. The shared secrets below are read from this host.</div>'
+            : "";
+        const holderServices = [];
+        credentialState.holders.forEach(function (row) { if (holderServices.indexOf(row.service) === -1) holderServices.push(row.service); });
+        Object.keys(credentialState.holderErrors).forEach(function (service) { if (holderServices.indexOf(service) === -1) holderServices.push(service); });
+        const holderHtml = holderServices.map(function (service) {
+            let rows = credentialState.holders.filter(function (row) { return row.service === service; });
+            if (needle) rows = rows.filter(function (row) { return (row.holder + " " + (row.username || "") + " " + (row.role || "")).toLowerCase().indexOf(needle) !== -1; });
+            return holderGroupHtml(service, rows);
+        }).join("");
+        const html = holderHtml + credentialState.credentials.map(function (credential) {
+            // Filtering and sorting move rows within a credential, never out
+            // of one: a sort that dissolved the grouping would leave each
+            // credential's own control over rows no longer on screen.
+            let rows = credentialState.rows.filter(function (row) { return row.credential === credential.key; });
+            if (needle) rows = rows.filter(function (row) { return (row.holder + " " + row.holder_label + " " + row.credential_label).toLowerCase().indexOf(needle) !== -1; });
+            if (wanted) rows = rows.filter(function (row) { return row.status === wanted; });
+            rows = rows.slice().sort(function (a, b) {
+                let left, right;
+                if (credentialSort.column === "status") { left = STATUS_RANK.indexOf(a.status); right = STATUS_RANK.indexOf(b.status); }
+                else if (credentialSort.column === "checked") { left = a.age_seconds === null ? Infinity : a.age_seconds; right = b.age_seconds === null ? Infinity : b.age_seconds; }
+                else { left = a.holder_label.toLowerCase(); right = b.holder_label.toLowerCase(); }
+                if (left < right) return credentialSort.ascending ? -1 : 1;
+                if (left > right) return credentialSort.ascending ? 1 : -1;
+                return 0;
+            });
+            // A filter hides rows, never a credential that has none to begin
+            // with: the host PAT's only control lives in its group header, and
+            // dropping the group took the paste box off the page along with
+            // anything already pasted into it.
+            const hasRows = credentialState.rows.some(function (row) { return row.credential === credential.key; });
+            if (!rows.length && hasRows && (needle || wanted)) return "";
+            return credentialGroupHtml(credential, rows);
+        }).join("");
+        const typed = {};
+        let focused = null;
+        container.querySelectorAll("input[data-set-input]").forEach(function (input) {
+            const key = credentialKey(input.dataset.credential, input.dataset.holder);
+            if (document.activeElement === input) focused = key;
+            if (input.value) typed[key] = input.value;
+        });
+        container.innerHTML = banner + (html || '<p class="empty-state">Nothing matches that filter.</p>');
+        container.querySelectorAll("input[data-set-input]").forEach(function (input) {
+            const key = credentialKey(input.dataset.credential, input.dataset.holder);
+            if (typed[key]) input.value = typed[key];
+            if (focused === key) input.focus();
+        });
+        refreshIcons();
+    }
+
+    function credentialRowElement(credential, holder) {
+        return Array.prototype.find.call(
+            document.querySelectorAll("#credential-registry tr[data-row]"),
+            function (element) { return element.dataset.credential === credential && element.dataset.holder === holder; }
+        );
+    }
+
+    function replaceCredentialRow(answer) {
+        const row = credentialState.rows.find(function (item) { return item.credential === answer.credential && item.holder === answer.holder; });
+        if (!row) return;
+        Object.assign(row, answer);
+        // A mind that turned out to be running older code is not offered a
+        // paste box: one that always refuses is worse than none.
+        if (answer.status === "predates_api" || answer.status === "retired") row.settable = false;
+        // One row, never the whole table. The paste boxes live inside the
+        // container, and the first load queues a check for every row — so
+        // re-rendering here threw away whatever the operator had typed, and
+        // the focus with it, repeatedly, for as long as the sweep took.
+        const existing = credentialRowElement(row.credential, row.holder);
+        if (!existing) return;
+        const typed = existing.querySelector("input");
+        // The caret is in this row: nothing is rewritten at all. A longer status
+        // or detail string widens its column, which reflows the whole table and
+        // slides the focused box out from under the cursor mid-paste — the row
+        // catches up when focus leaves, and the save queues its own check.
+        if (typed && document.activeElement === typed) return;
+        if (typed && typed.value !== "") {
+            // Holding a token but unfocused: the status, value and age may move,
+            // the action may not.
+            const cells = existing.children;
+            if (cells.length >= 5) {
+                cells[2].innerHTML = row.preview ? h.escapeHtml(row.preview) : (row.present === false ? "—" : "");
+                cells[3].innerHTML = h.escapeHtml(STATUS_WORDS[row.status] || row.status) + (row.detail ? '<small>' + h.escapeHtml(row.detail) + '</small>' : "");
+                cells[4].innerHTML = '<small>' + credentialAge(row) + '</small>';
+            }
+            return;
+        }
+        existing.outerHTML = credentialRowHtml(row);
+        refreshIcons();
+    }
+
+    // Three at a time. A hive with a dozen minds and five shared secrets is
+    // tens of probes, and a page that fired them all at once would earn a
+    // secondary rate limit from GitHub whose rows then read as refused.
+    async function checkCredentialRows(rows) {
+        const queue = rows.slice();
+        async function worker() {
+            while (queue.length) {
+                const row = queue.shift();
+                try {
+                    replaceCredentialRow(await h.requestJson("/api/settings/credentials/" + encodeURIComponent(row.credential) + "/check", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({holder: row.holder})}));
+                } catch (error) {
+                    replaceCredentialRow({credential: row.credential, holder: row.holder, status: "undetermined", detail: error.message, age_seconds: 0});
+                }
+            }
+        }
+        await Promise.all([worker(), worker(), worker()]);
+    }
+
+    // One row at a time, off the listing. The listing is the whole content of
+    // the page and must not wait on thirty holders' services answering.
+    async function checkHolderRows(rows, generation) {
+        for (const row of rows) {
+            // A sweep started before a rotation would otherwise land after it
+            // with the pre-rotation answer, and re-render the button the
+            // rotation disabled back to enabled mid-flight.
+            if (generation !== holderGeneration) return;
+            try {
+                const answer = await h.requestJson("/api/settings/holders/" + encodeURIComponent(row.service) + "/" + encodeURIComponent(row.holder) + "/check", {method: "POST"});
+                holderChecked[row.service + "\u0000" + row.holder] = answer;
+            } catch (error) { holderChecked[row.service + "\u0000" + row.holder] = {status: "undetermined", detail: error.message}; }
+            if (generation !== holderGeneration) return;
+            renderCredentials();
+        }
+    }
+
+    async function loadCredentials(recheckAll) {
+        const container = document.getElementById("credential-registry");
+        try {
+            const data = await h.requestJson("/api/settings/credentials");
+            credentialState = {credentials: data.credentials || [], rows: data.rows || [], holders: data.holders || [], holderErrors: data.holder_errors || {}, registry: data.registry || "ok", ttl: data.check_ttl_seconds || 300};
+            if (recheckAll) holderChecked = {};
+            const generation = ++holderGeneration;
+            renderCredentials();
+            checkHolderRows(credentialState.holders.filter(function (row) { return !row.revoked && !holderChecked[row.service + "\u0000" + row.holder]; }), generation);
+            // Only rows with no answer or a stale one. The answer is held on
+            // the console and shared by every open tab, so a second browser
+            // and a left-open dashboard cost nothing.
+            const due = credentialState.rows.filter(function (row) { return row.checkable && (recheckAll || row.stale); });
+            if (due.length) await checkCredentialRows(due);
+        } catch (error) { container.innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
+    }
+
+    async function loadDownloads() {
+        const list = document.getElementById("settings-downloads");
+        try { const rows = (await h.requestJson("/api/settings/downloads")).downloads || []; list.innerHTML = rows.length ? rows.map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="download"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.filename) + '</strong><small>' + h.escapeHtml(item.size_bytes) + ' bytes</small></span><a class="button" href="/downloads/' + encodeURIComponent(item.filename) + '">Download</a></li>'; }).join("") : '<li class="empty-state"><h3>No installer assets</h3><p>Hive Init has not published downloads on this host.</p></li>'; refreshIcons(); }
+        catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    }
+    if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
+    if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
+    if (section === "voice") { loadVoice(); }
+    if (section === "credentials") {
+    // The GitHub PAT has two homes on this host and each is its own
+    // operation, so the report names both and, where one was skipped, why.
+    function locationReport(result) {
+        const rows = result.locations || [];
+        const lines = rows.map(function (row) { return (row.written ? "✓ " : "✗ ") + row.file + (row.written ? "" : " — " + row.reason); });
+        const done = rows.filter(function (row) { return row.written; }).length;
+        const heading = result.complete ? "Written to " + rows.length + " of " + rows.length + " files." : "Partial: " + done + " of " + rows.length + " files written.";
+        return [heading].concat(lines).join("\n");
+    }
+    const registry = document.getElementById("credential-registry");
+    registry.addEventListener("click", async function (event) {
+        const header = event.target.closest("[data-sort]");
+        if (header) {
+            const column = header.dataset.sort;
+            credentialSort = {column: column, ascending: credentialSort.column === column ? !credentialSort.ascending : true};
+            renderCredentials();
+            return;
+        }
+        const holderRotate = event.target.closest("[data-holder-rotate]");
+        if (holderRotate) {
+            const service = holderRotate.dataset.service, holder = holderRotate.dataset.holder;
+            const reinstating = (holderRotate.textContent || "").indexOf("Reinstate") === 0;
+            const warning = reinstating
+                ? "This credential is revoked. Giving " + holder + " a new value for " + service + " brings it back to life. Continue?"
+                : "Give " + holder + " a new value for " + service + "? No other holder is touched, and nothing restarts automatically — until the service named on the row is restarted it keeps presenting the value it booted with.";
+            if (!window.confirm(warning)) return;
+            holderRotate.disabled = true; holderRotate.textContent = "Rotating…";
+            try {
+                const result = await h.requestJson("/api/settings/holders/" + encodeURIComponent(service) + "/" + encodeURIComponent(holder) + "/rotate", {method: "POST"});
+                window.alert("Written to " + result.path + " (" + result.env_key + ").\n\nRestart: " + (result.restart_target || "nothing reads this from a file"));
+                await loadCredentials(true);
+            } catch (error) { window.alert(error.message); holderRotate.disabled = false; holderRotate.textContent = "Rotate"; }
+            return;
+        }
+        const holderRevoke = event.target.closest("[data-holder-revoke]");
+        if (holderRevoke) {
+            const service = holderRevoke.dataset.service, holder = holderRevoke.dataset.holder;
+            if (!window.confirm("Revoke " + holder + "'s " + service + " credential? It is refused on its next request, and this console cannot give it a new one.")) return;
+            holderRevoke.disabled = true; holderRevoke.textContent = "Revoking…";
+            try {
+                await h.requestJson("/api/settings/holders/" + encodeURIComponent(service) + "/" + encodeURIComponent(holder) + "/revoke", {method: "POST"});
+                await loadCredentials(true);
+            } catch (error) { window.alert(error.message); holderRevoke.disabled = false; holderRevoke.textContent = "Revoke"; }
+            return;
+        }
+        const hostButton = event.target.closest("[data-set-host]");
+        if (hostButton) {
+            const input = hostButton.parentElement.querySelector("input[data-set-input]");
+            const token = (input && input.value || "").trim();
+            if (!token) { window.alert("Paste the token first."); return; }
+            const hostKey = credentialKey("github_pat", "host");
+            credentialSaving[hostKey] = true;
+            hostButton.disabled = true; hostButton.textContent = "Verifying…";
+            try {
+                const result = await credentialSave("/api/settings/credentials/github_pat/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                delete credentialSaving[hostKey];
+                clearCredentialInput("github_pat", "host", token);
+                window.alert("Verified as " + (result.login || "unknown") + ".\n\n" + locationReport(result));
+                await loadCredentials(true);
+            } catch (error) {
+                // The error is reported before the re-render, never after: a
+                // throw inside the render would otherwise swallow it and leave
+                // the control reading "Verifying…" with nothing said at all.
+                // Re-render rather than re-enable this node, because a sweep
+                // that landed mid-save has already detached the button.
+                delete credentialSaving[hostKey];
+                window.alert(error.message);
+                renderCredentials();
+            }
+            return;
+        }
+        const checkButton = event.target.closest("[data-check-row]");
+        if (checkButton) {
+            checkButton.disabled = true; checkButton.textContent = "Checking…";
+            await checkCredentialRows([{credential: checkButton.dataset.credential, holder: checkButton.dataset.holder}]);
+            return;
+        }
+        const setRowButton = event.target.closest("[data-set-row]");
+        if (setRowButton) {
+            const credential = setRowButton.dataset.credential;
+            const holder = setRowButton.dataset.holder;
+            const input = setRowButton.parentElement.querySelector("input[data-set-input]");
+            const token = (input && input.value || "").trim();
+            if (!token) { window.alert("Paste the token first."); return; }
+            const route = credential === "mind_github_token" ? "github-token" : "surface-token";
+            const rowKey = credentialKey(credential, holder);
+            credentialSaving[rowKey] = true;
+            setRowButton.disabled = true; setRowButton.textContent = "Verifying…";
+            try {
+                const result = await credentialSave("/api/minds/" + encodeURIComponent(holder) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                delete credentialSaving[rowKey];
+                clearCredentialInput(credential, holder, token);
+                const who = result.login || result.bot_username || "unknown";
+                window.alert("Stored on " + holder + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : (result.note ? "\n\n" + result.note : "")));
+                await loadCredentials(false);
+                // The set routes record no check of their own and the row was
+                // checked minutes ago, so a reload alone leaves it reporting the
+                // status the token just replaced — refused, against a token that
+                // now works, beside an empty box saying nothing happened.
+                await checkCredentialRows([{credential: credential, holder: holder}]);
+            } catch (error) {
+                delete credentialSaving[rowKey];
+                window.alert(error.message);
+                renderCredentials();
+            }
+        }
+    });
+    // Enter saves. A keydown rather than a form submission: implicit submission
+    // only fires while a form holds exactly one field, so a second input added
+    // to this control later would silently kill the key with nothing on screen
+    // to say so.
+    registry.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter" || event.isComposing) return;
+        const input = event.target.closest("input[data-set-input]");
+        if (!input) return;
+        event.preventDefault();
+        // An empty box stays a no-op. Routing it to Save would turn a keystroke
+        // that did nothing before into a modal the operator has to dismiss.
+        if (!input.value.trim()) return;
+        const button = input.parentElement.querySelector("button");
+        if (button && !button.disabled) button.click();
+    });
+    document.getElementById("credential-filter").addEventListener("input", renderCredentials);
+    document.getElementById("credential-status-filter").addEventListener("change", renderCredentials);
+    document.getElementById("credentials-refresh").addEventListener("click", function () { loadCredentials(true); });
+    loadCredentials(false); }
+    if (section === "advanced") loadDownloads();
+    if (section === "users") {
+        const usersRows = document.getElementById("users-rows");
+        const groupsRows = document.getElementById("groups-rows");
+        async function act(url, options) {
+            try { await h.requestJson(url, options); } catch (error) { window.alert(error.message); }
+            loadUsers();
+        }
+        function json(method, body) {
+            return {method: method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})};
+        }
+        async function loadUsers() {
+            let data;
+            try { data = await h.requestJson("/api/admin/users"); } catch (error) {
+                usersRows.innerHTML = '<tr><td colspan="6" class="error-state">' + h.escapeHtml(error.message) + '</td></tr>';
+                return;
+            }
+            const users = data.users || [];
+            const groups = data.groups || [];
+            // Domain accounts are held only by the console's own store.
+            document.getElementById("user-domain-account").hidden = data.backend !== "builtin";
+            usersRows.innerHTML = users.map(function (u) {
+                const name = h.escapeHtml(u.username);
+                const status = u.disabled ? "Disabled" : (u.must_change ? "Must change password" : "Active");
+                return '<tr><td>' + name + '</td><td>' + h.escapeHtml(u.email || "") + '</td><td>' + h.escapeHtml(u.domain_account || "") + '</td><td>' + h.escapeHtml((u.groups || []).join(", ")) + '</td><td>' + status + '</td><td class="row-actions">'
+                    + '<button class="button button-quiet" type="button" data-user-toggle="' + name + '" data-disabled="' + (u.disabled ? "1" : "") + '">' + (u.disabled ? "Enable" : "Disable") + '</button>'
+                    + '<button class="button button-quiet" type="button" data-user-reset="' + name + '">Reset password</button>'
+                    + (u.microsoft_bound ? '<button class="button button-quiet" type="button" data-user-unbind="' + name + '">Unbind Microsoft</button>' : '') + '</td></tr>';
+            }).join("") || '<tr><td colspan="6" class="empty-state">No users.</td></tr>';
+            groupsRows.innerHTML = groups.map(function (g) {
+                const members = (g.members || []).map(function (m) {
+                    return '<span class="pill">' + h.escapeHtml(m) + ' <button class="icon-button" type="button" aria-label="Remove ' + h.escapeHtml(m) + '" data-member-remove="' + h.escapeHtml(m) + '" data-group="' + h.escapeHtml(g.name) + '">×</button></span>';
+                }).join(" ");
+                return '<li class="activity-row"><strong>' + h.escapeHtml(g.name) + '</strong> ' + (members || '<span class="faint">No members</span>') + '</li>';
+            }).join("");
+            document.getElementById("member-group").innerHTML = groups.map(function (g) { return '<option>' + h.escapeHtml(g.name) + '</option>'; }).join("");
+            document.getElementById("member-user").innerHTML = users.map(function (u) { return '<option>' + h.escapeHtml(u.username) + '</option>'; }).join("");
+        }
+        document.getElementById("users-refresh").addEventListener("click", loadUsers);
+        document.getElementById("user-create").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            const form = new FormData(event.target);
+            const body = {username: form.get("username"), email: form.get("email") || null};
+            if (form.get("temp_password")) body.temp_password = form.get("temp_password");
+            if (form.get("domain_account")) body.domain_account = form.get("domain_account");
+            await act("/api/admin/users", json("POST", body));
+            event.target.reset();
+        });
+        document.getElementById("group-create").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            await act("/api/admin/groups", json("POST", {name: new FormData(event.target).get("name")}));
+            event.target.reset();
+        });
+        document.getElementById("member-add").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            const form = new FormData(event.target);
+            await act("/api/admin/groups/" + encodeURIComponent(form.get("group")) + "/members/" + encodeURIComponent(form.get("username")), {method: "PUT"});
+        });
+        usersRows.addEventListener("click", async function (event) {
+            const toggle = event.target.closest("[data-user-toggle]");
+            if (toggle) {
+                await act("/api/admin/users/" + encodeURIComponent(toggle.dataset.userToggle), json("PATCH", {disabled: !toggle.dataset.disabled}));
+                return;
+            }
+            const unbind = event.target.closest("[data-user-unbind]");
+            if (unbind) {
+                await act("/api/admin/users/" + encodeURIComponent(unbind.dataset.userUnbind) + "/microsoft", {method: "DELETE"});
+                return;
+            }
+            const reset = event.target.closest("[data-user-reset]");
+            if (reset) {
+                const temp = window.prompt("New temporary password for " + reset.dataset.userReset + " (at least 8 characters)");
+                if (temp) await act("/api/admin/users/" + encodeURIComponent(reset.dataset.userReset) + "/reset", json("POST", {temp_password: temp}));
+            }
+        });
+        groupsRows.addEventListener("click", async function (event) {
+            const remove = event.target.closest("[data-member-remove]");
+            if (remove) await act("/api/admin/groups/" + encodeURIComponent(remove.dataset.group) + "/members/" + encodeURIComponent(remove.dataset.memberRemove), {method: "DELETE"});
+        });
+        loadUsers();
+    }
+});
+</script>
+{% endblock %}

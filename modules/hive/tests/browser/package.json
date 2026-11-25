@@ -1,0 +1,1 @@
+{"private":true,"description":"Disposable DOM checks for Hive provider forms","engines":{"node":"^22.19 || >=24"},"devDependencies":{"jsdom":"29.1.1"}}

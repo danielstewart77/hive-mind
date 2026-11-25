@@ -1,0 +1,10 @@
+name: Planner
+tools:
+  - files
+  - sub-minds
+  - web
+skills:
+  - backlog
+  - brainstorm
+  - design-spec
+hooks: []
