@@ -20,7 +20,7 @@ tile without selecting it.
 Auth is not its own, and no longer a copy of the console's either. `auth`
 (the account store), `store` (the database under it) and `route_access` (the
 route table's enforcement) are the console's own modules, installed from the
-`hive_site` package in the hive repository as a second build context — the
+`hive_site` package (modules/hive/hive_site in hive-mind) as a second build context — the
 same way `hive_data` arrives. `src/auth.py`, `src/store.py` and
 `src/route_access.py` are three-line aliases binding them under the bare
 name. They were verbatim copies for a year and the copies drifted: this one
@@ -65,8 +65,9 @@ network (to reach `hive-comms`, the voice server and the hive's Postgres).
 so a change to it reaches this site by a rebuild; route changes need a
 container restart.
 
-`.env` keys: `COMMS_BEARER_TOKEN`; `HIVE_DATA_DIR` and, if the hive checkout
-is not at the default path, `HIVE_SITE_DIR` — the two build contexts;
+`.env` keys: `COMMS_BEARER_TOKEN`; (`hive_site` and `hive_data` are build
+contexts taken from `../hive/hive_site` and `../hive-data` inside the hive-mind
+checkout; `HIVE_DATA_DIR` and `HIVE_SITE_DIR` are no longer read);
 `HIVE_DATABASE_URL` (required); `HIVE_SECRET_KEY` only if
 the console sets one (left unset on both, the key is generated once and kept
 in the shared store); and, when the console signs in through auth-service,

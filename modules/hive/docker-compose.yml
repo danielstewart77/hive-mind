@@ -1,12 +1,17 @@
+# The project name is pinned: the directory is modules/hive inside hive-mind,
+# and a project named after any other directory would not be the one the
+# running console belongs to. Container name, port and network are unchanged.
+name: hive
+
 services:
   hive:
     build:
       context: .
       additional_contexts:
-        # The access layer lives in its own repository and is private, so it
-        # arrives as a second build context rather than as a git install
-        # needing a credential in the build.
-        hive_data: ${HIVE_DATA_DIR:?set HIVE_DATA_DIR in .env}
+        # The access layer is hive-mind's own modules/hive-data, a second
+        # build context. Relative to this file, so a fresh checkout builds
+        # with no sibling folder. A HIVE_DATA_DIR left in .env is ignored.
+        hive_data: ../hive-data
     container_name: hive-site
     restart: unless-stopped
     ports:

@@ -1,8 +1,8 @@
 # hive-site
 
-The accounts, sessions and data store that the hive console (`Dev/hive`) and
-the terminal site (`Dev/terminal`) both run. One copy, installed into each
-image from this directory as a build context — the same way both take
+The accounts, sessions and data store that the hive console (`modules/hive`) and
+the terminal site (`modules/terminal`) both run. One copy, installed into each
+image from this directory (`modules/hive/hive_site` in hive-mind) as a build context — the same way both take
 `hive_data`.
 
 - `hive_site.store` — every operation either site performs on the hive's

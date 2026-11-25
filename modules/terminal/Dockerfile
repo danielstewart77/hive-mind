@@ -6,9 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # The accounts, sessions, store and authorization middleware this site
-# shares with the console, from a build context of its own rather than from
-# git: the repository is private, so installing it by URL would need a
-# credential at build time. Installed, not bind-mounted: a mount would make
+# shares with the console, from a build context of its own: hive-mind's
+# modules/hive/hive_site (see docker-compose.yml), not a path beside this one. Installed, not bind-mounted: a mount would make
 # this site run whatever branch the hive checkout has out, and a checkout of
 # a branch without the package would stop it starting. A change to the
 # shared auth reaches this site by a rebuild, deliberately.
@@ -19,8 +18,8 @@ COPY --from=hive_site . /tmp/hive-site
 RUN pip install --no-cache-dir --no-deps /tmp/hive-site && rm -rf /tmp/hive-site
 
 # The hive's data-access layer, which the shared store runs on. Same
-# reasoning: private repository, second
-# build context, dependencies declared beside everything else.
+# reasoning: second build context (modules/hive-data), dependencies declared
+# beside everything else.
 COPY --from=hive_data . /tmp/hive-data
 RUN pip install --no-cache-dir --no-deps /tmp/hive-data && rm -rf /tmp/hive-data
 

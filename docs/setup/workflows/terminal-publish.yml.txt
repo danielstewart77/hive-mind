@@ -1,0 +1,92 @@
+# Publish the terminal image (ghcr.io/danielstewart77/terminal) on a tag
+# `terminal-vX.Y.Z`. Only that tag form starts it: a hive-mind release tag, a
+# hive-surfaces-v... or hive-data-v... tag, or a bare v... tag never does.
+#
+# Consumers (a laptop running modules/terminal/run.ps1) pin a version rather
+# than following a branch, so this never fires on a push to master. The image
+# name is explicit, because inside hive-mind github.repository is hive-mind.
+name: terminal publish
+
+on:
+  push:
+    tags:
+      - "terminal-v[0-9]+.[0-9]+.[0-9]+"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/danielstewart77/terminal
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modules/terminal
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      HIVE_DATA_TEST_ADMIN_DSN: postgresql://postgres:test@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # The two packages the image installs from named build contexts, from
+      # the same checkout.
+      - run: pip install --no-deps ../hive/hive_site ../hive-data
+      # The tile's browser tests drive a real Chromium. Without this the
+      # suite fails on a missing executable, which reads as a broken test
+      # rather than a runner that was never provisioned.
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest -q
+
+  publish:
+    # Never ship a tag whose tests did not pass: the consumer pins this
+    # digest and has no way to notice it was broken at build time.
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        run: echo "value=${GITHUB_REF_NAME#terminal-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Semver tags only, and explicitly no `latest`: a consumer that
+          # tracks a moving tag has no version to roll back to. The version is
+          # the tag without its terminal-v prefix.
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.value }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.value }}
+          flavor: |
+            latest=false
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: modules/terminal
+          build-contexts: |
+            hive_site=modules/hive/hive_site
+            hive_data=modules/hive-data
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

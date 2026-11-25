@@ -12,9 +12,8 @@ RUN apt-get update \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# The hive's data-access layer, from a build context of its own rather than
-# from git: the repository is private, so installing it by URL would need a
-# credential at build time. `--no-deps` is deliberate — its dependencies are
+# The hive's data-access layer, from a build context of its own
+# (hive-mind's modules/hive-data, see docker-compose.yml) rather than from git. `--no-deps` is deliberate — its dependencies are
 # declared in requirements.txt above, where this image's resolver can see
 # them beside everything else.
 COPY --from=hive_data . /tmp/hive-data
