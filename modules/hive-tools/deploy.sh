@@ -22,6 +22,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(git -C "$here" rev-parse --show-toplevel)"
 state="${HIVE_TOOLS_STATE_DIR:-$HOME/.config/hive-tools}"
+mkdir -p "$state" && state="$(cd "$state" && pwd)"
 action="${1:-up}"
 
 [ ! -d "$state/.env" ] || { echo "deploy: $state/.env is a directory (Docker made it when a container mounted it first); remove it and put the tools' .env file there" >&2; exit 2; }
