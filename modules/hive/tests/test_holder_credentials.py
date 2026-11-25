@@ -59,6 +59,8 @@ def hive(tmp_path, monkeypatch):
     monkeypatch.setattr(credentials_data, "BACKUP_DIR", tmp_path / "backups")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-for-tests")
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", "lucent-admin-for-tests")
+    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "tools-admin-for-tests")
+    monkeypatch.setenv("HIVE_TOOLS_URL", "http://hive-tools.invalid:9421")
     monkeypatch.delenv("PROXY_CREDENTIAL_ADMIN_KEY", raising=False)
     monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.invalid:8899")
     return {"shared": shared, "own": own}
@@ -281,11 +283,45 @@ def test_a_new_minds_pasted_key_is_given_to_the_gateway_and_memory_store_as_that
 
     sent = [call for call in service["sent"] if call.get("token")]
     assert failed is None
-    assert [call["token"] for call in sent] == [PASTED, PASTED]
-    assert [call["role"] for call in sent] == ["mind", "mind"]
-    assert [call.get("mind_id") for call in sent] == [None, "uuid-1234"]
+    assert [call["token"] for call in sent] == [PASTED, PASTED, PASTED]
+    assert [call["role"] for call in sent] == ["mind", "mind", "mind"]
+    assert [call.get("mind_id") for call in sent] == [None, "uuid-1234", None]
+    assert [call["url"].rsplit("/", 1)[-1] for call in sent] == ["quokka"] * 3
+    assert [call["bearer"] for call in sent][-1] == "Bearer tools-admin-for-tests"
+    assert "hive-tools.invalid" in sent[-1]["url"]
     assert not [call for call in service["sent"] if "proxy.invalid" in call["url"]]
+    assert {entry["service"] for entry in minted} == {"comms", "lucent", "proxy", "tools"}
+
+
+@pytest.mark.parametrize("name", ["hitl-approver", "Internal", "skippy"])
+def test_a_mind_named_for_a_holder_the_tools_keep_is_refused_before_any_service_is_written(
+        hive, service, name):
+    with pytest.raises(holder_credentials.MintRefused, match="tools keep for themselves"):
+        _run(holder_credentials.provision_mind(name, "uuid-1234", "daniel", proxy_key=PASTED))
+
+    assert service["sent"] == []
+    assert _run(holder_credentials.name_held_by_something_else(name)) == "the tools"
+
+
+def test_a_hive_without_the_tools_creates_the_mind_without_registering_it_with_them(
+        hive, service, monkeypatch):
+    monkeypatch.delenv("TOOLS_ADMIN_BEARER_TOKEN")
+    monkeypatch.delenv("HIVE_TOOLS_URL")
+
+    minted, failed = _run(
+        holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
+
+    assert failed is None
     assert {entry["service"] for entry in minted} == {"comms", "lucent", "proxy"}
+
+
+def test_a_tools_service_that_refuses_the_value_fails_the_creation_naming_the_holder_clash(
+        hive, service):
+    service["state"]["refuse"]["hive-tools"] = 400
+    service["state"]["error"] = "that value is already held by 'ada'; a credential belongs to one holder"
+
+    with pytest.raises(holder_credentials.KeyHeldByAnother):
+        _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
 
 
 def test_a_new_mind_with_no_pasted_key_is_refused_and_nothing_is_sent(hive, service):
@@ -306,7 +342,7 @@ def test_one_service_refusing_still_reports_the_credential_that_landed(hive, ser
         holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED)
     )
 
-    assert [entry["service"] for entry in minted] == ["comms", "proxy"]
+    assert [entry["service"] for entry in minted] == ["comms", "proxy", "tools"]
     assert "memory store" in failed
 
 

@@ -79,10 +79,14 @@ async def rename_mind(mind_id: str, old: str, new: str) -> Row:
                 raise ValueError('The original holder does not belong to this Mind')
         if row['name'] == new:
             return row
+        if await unit.fetch_one('SELECT 1 FROM tools.api_tokens WHERE lower(name)=$1', new):
+            raise ValueError('The destination credential holder is occupied')
         await unit.execute('UPDATE core.minds SET name=$2,gateway_url=$3 WHERE mind_id=$1',
                            mind_id, new, f'http://{new}:8420')
         for table in ('core.credentials', 'memory.credentials'):
             await unit.execute(f'UPDATE {table} SET holder=$2 WHERE holder=$1', old, new)
+        # The tools know a mind by the name its key was registered under.
+        await unit.execute('UPDATE tools.api_tokens SET name=$2 WHERE lower(name)=$1', old, new)
         await unit.execute('UPDATE core.secret_scopes SET mind_name=$2 WHERE mind_name=$1', old, new)
         await unit.execute('UPDATE core.session_memory SET mind_name=$2 WHERE mind_id=$1', mind_id, new)
         await unit.execute('UPDATE memory.nodes SET name=$2 WHERE mind_id=$1 AND type=$3', mind_id, new, 'Mind')

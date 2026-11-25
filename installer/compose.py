@@ -453,7 +453,10 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         if voice:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
-            env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
+            env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN"),
+                        # The console registers a mind's pasted key with the
+                        # tools at creation. Only the console holds this.
+                        "TOOLS_ADMIN_BEARER_TOKEN": env_ref("TOOLS_ADMIN_BEARER_TOKEN")})
         # The Hive Tools card reports what is really there: the module, read
         # only, where the console looks for a checkout.
         env["HIVE_TOOLS_DIR"] = str(repo("hive-tools"))

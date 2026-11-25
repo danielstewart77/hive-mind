@@ -23,7 +23,7 @@ The rule, in full, for a package:
    subdirectory form:
 
    ```
-   pip install "hive-data @ git+https://github.com/danielstewart77/hive-mind.git@hive-data-v0.3.0#subdirectory=modules/hive-data"
+   pip install "hive-data @ git+https://github.com/danielstewart77/hive-mind.git@hive-data-v0.4.0#subdirectory=modules/hive-data"
    ```
 
 5. Because the version moves, `pip install --upgrade` does what it says. No

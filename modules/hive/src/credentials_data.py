@@ -347,7 +347,9 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
         "manual_reason": (
             "Issued per-consumer from hive-tools' own token store (the "
             "Postgres tools.api_tokens table, sha256-hashed) — there is no symmetric "
-            "env value to fan out. Mint a replacement via hive-tools' "
+            "env value to fan out. This is the shared service token; a mind's "
+            "own key is registered with the tools at creation and listed per "
+            "holder under the tools. Mint a replacement via hive-tools' "
             "token admin, then update each consumer's HIVE_TOOLS_TOKEN by hand."
         ),
         "locations": [

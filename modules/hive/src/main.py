@@ -5675,7 +5675,8 @@ async def api_settings_credentials(user: dict = Depends(require_auth)):
     # the moment the service it answers to comes up.
     holders: list[dict] = []
     holder_errors: dict[str, str] = {}
-    services = list(holder_credentials.SERVICES.values())
+    services = [s for s in holder_credentials.SERVICES.values()
+                if s.key != "tools" or s.configured()]
     # Together, not one after the other: two services that hang would
     # otherwise hold the page for the sum of their timeouts.
     answers = await asyncio.gather(

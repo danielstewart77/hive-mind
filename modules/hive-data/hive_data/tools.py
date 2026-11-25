@@ -25,7 +25,7 @@ from typing import Any
 
 from . import _sql
 from .core import _execute, _execute_returning, _fetch, _fetch_one
-from .errors import ValueRefused
+from .errors import Conflict, ValueRefused
 from .schema import COLUMNS, qualified, select_list
 from .unit import Unit
 
@@ -358,6 +358,103 @@ async def revoke_token(token_id: int, at: int, *,
     sql, args = _sql.update(TOKENS, values, {"id": token_id},
                             extra_where=clause)
     return await _execute(unit, sql, *args, *extra_args)
+
+
+def _held_by(holder: str) -> str:
+    return (f"that value is already held by {holder!r}; "
+            "a credential belongs to one holder")
+
+
+def _same(a: Any, b: Any) -> bool:
+    return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+
+async def register_token(name: str, token_hash: str, created_at: int, *,
+                         unit: Unit | None = None) -> Row:
+    """Make this digest the one live credential of holder `name`.
+
+    The person supplied the value, so nothing is generated here. One holder
+    has one working value: the holder's other live rows are revoked in the
+    same unit, so an old and a new key are never both accepted.
+
+    The digest is unique across every row, revoked ones included, so a
+    digest already on a row is one of three things and each is told apart:
+    this holder's own (revived if it was revoked: the console's restore
+    hands a holder its previous value back), or another holder's, live or
+    revoked, which is refused by name with `Conflict` and changes nothing.
+    """
+    if unit is None:
+        from .unit import transaction
+        async with transaction() as own:
+            return await register_token(name, token_hash, created_at, unit=own)
+    await unit.hold(f"tools:token:{name.strip().lower()}")
+    held = await unit.fetch_one(
+        f'SELECT "id", "name", "revoked_at" FROM {qualified(TOKENS)} '
+        'WHERE "token_hash" = $1', token_hash)
+    if held is not None and not _same(held["name"], name):
+        raise Conflict(_held_by(str(held["name"])))
+    await unit.execute(
+        f'UPDATE {qualified(TOKENS)} SET "revoked_at" = $3 '
+        'WHERE lower("name") = $1 AND "revoked_at" IS NULL '
+        'AND "token_hash" <> $2', name.strip().lower(), token_hash, created_at)
+    if held is not None:
+        await unit.execute(
+            f'UPDATE {qualified(TOKENS)} SET "revoked_at" = NULL '
+            'WHERE "id" = $1', held["id"])
+        return {"id": held["id"], "rows": 1}
+    sql, args = _sql.insert(TOKENS, {
+        "name": name, "token_hash": token_hash, "created_at": created_at,
+    }, returning=("id",))
+    try:
+        return await unit.execute_returning(sql, *args)
+    except Conflict as exc:
+        # The same value registered for another holder between the read and
+        # the write. Still a sentence, not a constraint name.
+        raise Conflict(_held_by("another holder")) from exc
+
+
+async def holder_tokens(*, unit: Unit | None = None) -> list[Row]:
+    """One row per holder: whether it has a live credential, never a digest."""
+    return await _fetch(
+        unit,
+        'SELECT lower("name") AS holder, bool_or("revoked_at" IS NULL) AS live, '
+        'max("created_at") AS created_at, max("last_used_at") AS last_used_at, '
+        'max("revoked_at") AS revoked_at '
+        f'FROM {qualified(TOKENS)} GROUP BY lower("name") ORDER BY 1')
+
+
+async def revoke_holder_tokens(name: str, at: int, *,
+                               unit: Unit | None = None) -> Row:
+    """Revoke every live credential of one holder, reporting how many."""
+    return await _execute(
+        unit,
+        f'UPDATE {qualified(TOKENS)} SET "revoked_at" = $2 '
+        'WHERE lower("name") = $1 AND "revoked_at" IS NULL',
+        name.strip().lower(), at)
+
+
+async def remove_holder_tokens(name: str, *, unit: Unit | None = None) -> Row:
+    """Delete one holder's rows outright, so its digest is free again."""
+    return await _execute(
+        unit, f'DELETE FROM {qualified(TOKENS)} WHERE lower("name") = $1',
+        name.strip().lower())
+
+
+async def expire_pending_requests(caller_mind: str, now: int, *,
+                                  unit: Unit | None = None) -> Row:
+    """Let every request this caller still has waiting run out, now.
+
+    The expiry is a rule applied at read, and the decision's own statement
+    refuses a request past it, so moving the deadline behind `now` is what
+    makes a cut-off holder's request undecidable: approving it later would
+    replay a call as a mind that no longer has a key.
+    """
+    return await _execute(
+        unit,
+        f'UPDATE {qualified(REQUESTS)} SET "expires_at" = $2 '
+        'WHERE lower("caller_mind") = $1 AND "status" = $3 '
+        'AND "expires_at" >= $4',
+        caller_mind.strip().lower(), now - 1, PENDING, now)
 
 
 # -------------------------------------------------------------------- users

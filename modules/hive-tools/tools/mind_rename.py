@@ -56,7 +56,7 @@ def load(root, operation_id):
 def _variables(old, new):
     return {f'{prefix}_TOKEN_{old.replace("-", "_").upper()}':
             f'{prefix}_TOKEN_{new.replace("-", "_").upper()}'
-            for prefix in ('COMMS', 'LUCENT', 'PROXY')}
+            for prefix in ('COMMS', 'LUCENT', 'PROXY', 'TOOLS')}
 
 
 def reserve(root, operation_id, mind_id, old, new, caller):

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import secrets
 import time
 from typing import Any
 
 import store
 from fastapi import HTTPException, Request
+from hive_data.errors import Conflict
 
 
 #: The holder of the one credential that may decide an approval over the API.
@@ -27,6 +30,134 @@ MIND_CANNOT_DECIDE = (
     "The token sent is {holder}'s, and a mind's token may make gated calls "
     "but never approve or deny one. Decide on the approval page, or from a "
     "bot holding the approver credential.")
+
+
+#: Holders the credential routes never write, revoke or remove, whatever the
+#: caller's authority: the approver (so no console credential can make one),
+#: the internal replay secret, and the holder of the shared service token
+#: every consumer still presents until it is retired (story 884).
+RESERVED_HOLDERS = frozenset({APPROVER_HOLDER, "internal", "skippy"})
+
+#: What a holder's name may be once lowercased and trimmed.
+_HOLDER_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+#: Shorter than any real key; stops a stray character becoming a credential.
+MIN_VALUE_LENGTH = 8
+
+
+class CredentialRefused(ValueError):
+    """The credential routes would not do this. Nothing changed."""
+
+
+def normalize_holder(holder: str) -> str:
+    """A holder's name as every credential route and row spells it."""
+    return str(holder or "").strip().lower()
+
+
+def _checked_holder(holder: str) -> str:
+    name = normalize_holder(holder)
+    if name in RESERVED_HOLDERS:
+        raise CredentialRefused(
+            f"{name!r} is not a holder this route manages; its credential is "
+            "made and kept another way")
+    if not _HOLDER_NAME.fullmatch(name):
+        raise CredentialRefused(
+            "a holder is 1 to 64 letters, digits, dots, hyphens or underscores")
+    return name
+
+
+def bearer_value(auth_header: str) -> str:
+    """The token in a `Bearer` header, as it was meant.
+
+    Trimmed, as the gateway and the memory store trim it: a value read out of
+    a CRLF `.env` carries a carriage return, and the same key must open all
+    three services or a mind is accepted by two and refused by the third.
+    """
+    return auth_header[7:].strip()
+
+
+async def register_credential(holder: str, value: str) -> dict[str, Any]:
+    """Make `value` the holder's one working credential, as supplied.
+
+    Registering a value another holder has is refused, naming that holder.
+    Any value the holder had is cut off in the same step, and so are its
+    requests still waiting on a person: a mind does not keep a way to be
+    approved after its key was replaced by someone else's choice.
+    """
+    name = _checked_holder(holder)
+    raw = str(value or "").strip()
+    if len(raw) < MIN_VALUE_LENGTH or re.search(r"\s", raw):
+        raise CredentialRefused(
+            f"a credential is at least {MIN_VALUE_LENGTH} characters with no "
+            "spaces in it")
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    now = int(time.time())
+    try:
+        async with store.transaction():
+            await store.register_token(name, digest, now)
+    except Conflict as exc:
+        raise CredentialRefused(str(exc)) from exc
+    return {"holder": name, "created_at": now}
+
+
+async def revoke_credential(holder: str, *, remove: bool = False) -> dict[str, Any]:
+    """Cut one holder off, and expire what it was waiting on.
+
+    Its approved-but-unrun requests are not touched (they already ran or are
+    running); its pending ones are made undecidable, so approving one later
+    cannot replay a call as a mind that no longer has a key. `remove` deletes
+    the holder's rows so its digest may be given to a mind again: the undo of
+    a creation.
+    """
+    name = _checked_holder(holder)
+    now = int(time.time())
+    async with store.transaction():
+        revoked = await store.revoke_holder_tokens(name, now)
+        expired = await store.expire_pending_requests(name, now)
+        removed = await store.remove_holder_tokens(name) if remove else 0
+    answer: dict[str, Any] = {"holder": name, "revoked": revoked > 0,
+                              "expired_requests": expired}
+    if remove:
+        answer["removed"] = removed > 0
+    return answer
+
+
+async def list_credentials() -> list[dict[str, Any]]:
+    """Who holds a credential: name, live or not, whose mind it is. Never a value."""
+    owners: dict[str, str] = {}
+    for mind in await store.mind_names():
+        owners[mind] = (await store.mind_owner(mind)) or ""
+    rows = []
+    for row in await store.holder_tokens():
+        holder = str(row["holder"])
+        is_mind = holder in owners
+        rows.append({
+            "holder": holder,
+            "username": owners.get(holder) or None,
+            "role": "mind" if is_mind else "service",
+            "created_at": row["created_at"],
+            "revoked_at": row["revoked_at"],
+            "live": bool(row["live"]),
+        })
+    return rows
+
+
+async def require_admin_bearer(request: Request) -> None:
+    """FastAPI dependency: the one credential that may manage holders.
+
+    Held by the console and nothing else. Never a holder's token, a mind's
+    included, and never the internal secret.
+    """
+    expected = os.environ.get("TOOLS_ADMIN_BEARER_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="Credential routes are disabled: TOOLS_ADMIN_BEARER_TOKEN is unset")
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    if not secrets.compare_digest(bearer_value(header).encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
 async def generate_token(name: str) -> str:
@@ -89,8 +220,7 @@ async def require_api_token(request: Request) -> str:
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
-    raw_token = auth_header[7:]
-    name = await validate_token(raw_token)
+    name = await validate_token(bearer_value(auth_header))
     if name is None:
         raise HTTPException(status_code=401, detail="Invalid or revoked token")
     if name == APPROVER_HOLDER:
@@ -167,7 +297,7 @@ async def require_approver(request: Request) -> str:
                        "never makes one; the request is still pending.")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
-    name = await validate_token(auth_header[7:])
+    name = await validate_token(bearer_value(auth_header))
     if name is None:
         raise HTTPException(status_code=401, detail="Invalid or revoked token")
     if name != APPROVER_HOLDER:

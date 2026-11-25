@@ -141,3 +141,15 @@ class SmsSendRequest(BaseModel):
 
 class SmsInboundEnabledRequest(BaseModel):
     enabled: bool
+
+
+class CredentialRequest(BaseModel):
+    """What the console sends to register a holder's key.
+
+    `username` and `role` are what the gateway also takes; the tools derive
+    both from the mind registry, so they are accepted and not trusted.
+    """
+    token: str
+    username: str | None = None
+    role: str | None = None
+    mind_id: str | None = None

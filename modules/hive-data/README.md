@@ -27,7 +27,7 @@ development:
 On its own, from a named version (a tag of hive-mind, see Versions):
 
 ```
-pip install "hive-data @ git+https://github.com/danielstewart77/hive-mind.git@hive-data-v0.3.0#subdirectory=modules/hive-data"
+pip install "hive-data @ git+https://github.com/danielstewart77/hive-mind.git@hive-data-v0.4.0#subdirectory=modules/hive-data"
 ```
 
 The installed version is the one in `pyproject.toml` at that tag, so

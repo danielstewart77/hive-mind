@@ -89,6 +89,31 @@ because the whole purpose of capturing the body is that an approval replays
 the call that was approved, and a body stored with the NUL taken out is a
 different call.
 
+## A mind's one key
+
+A mind presents one key to the gateway, the memory store and these tools, and
+each knows which mind is calling: the tools record a gated call under the
+holder the key belongs to, send the approval notice naming that mind, and
+address the result to that mind's id. The console registers the key the person
+pasted when the mind is created, with these admin-guarded routes (bearer
+`TOOLS_ADMIN_BEARER_TOKEN`, held by the console and by no mind):
+
+- `PUT /credentials/{holder}` with `{"token": "<value>"}` registers the value
+  for that holder, replacing any it had: a holder has one working key. A value
+  another holder already has, live or revoked, is refused naming that holder.
+  The holders `hitl-approver`, `internal` and `skippy` are refused on every
+  credential route, so no administrator credential can make an approver.
+- `DELETE /credentials/{holder}` revokes the holder and expires its pending
+  requests, so approving one later replays nothing. `?remove=true` deletes the
+  holder's rows, freeing the value for a mind (the undo of a creation).
+- `GET /credentials` lists holders, whether each is live, never a value or digest.
+
+What a mind's key reaches is what the shared service token reached, less the
+approver: the same routes, with docker routes still gated by approval and by
+the owner check. It never decides an approval: `POST /hitl/{id}/respond` answers
+403 to every mind and the request stays pending. A renamed mind keeps its
+tools holder (the rename moves `tools.api_tokens` with the rest).
+
 ## Where the data lives
 
 The `tools` schema of the hive's Postgres, through `hive_data`, at

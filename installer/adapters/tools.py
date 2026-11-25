@@ -21,7 +21,10 @@ URL = f"http://{SERVICE}:{PORT}"
 #: anything else (404 for this id) for one it does.
 DOCKER_SOCKET = "/var/run/docker.sock"
 TOKEN_CHECK = "/hitl/installer-token-check"  # secret-guard: allow — a route path
-SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD")
+#: TOOLS_ADMIN_BEARER_TOKEN guards the tools' credential routes. It is handed
+#: to the tools and to the console, which registers a mind's pasted key with
+#: them at creation; no mind and no bot is given it.
+SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD", "TOOLS_ADMIN_BEARER_TOKEN")
 
 _MINT = """import asyncio,store,auth_api
 async def m():
@@ -41,6 +44,7 @@ def environment(env_ref, *, dsn_ref: str, proxy_url: str, key_ref: str,
         "HIVE_DATABASE_URL": dsn_ref,
         "HT_SECRET_KEY": env_ref("HT_SECRET_KEY"),
         "HT_ADMIN_PASSWORD": env_ref("HT_ADMIN_PASSWORD"),
+        "TOOLS_ADMIN_BEARER_TOKEN": env_ref("TOOLS_ADMIN_BEARER_TOKEN"),
         "INFERENCE_PROXY_URL": proxy_url,
         "INFERENCE_PROXY_KEY": key_ref,
         "HIVE_TOOLS_DEFAULT_MODEL": model_ref,

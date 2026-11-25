@@ -75,6 +75,9 @@ PROBE_PATHS: dict[str, str] = {
     "comms": "/broker/minds",
     "lucent": "/graph/schema",
     "proxy": "/v1/models",
+    # An id nothing will ever have: the tools answer 404 once they have
+    # authenticated the caller, and a mind's key is refused nowhere else.
+    "tools": "/hitl/credential-probe-no-such-request",
 }
 PROBE_ACCEPTED = frozenset({200, 404})
 
@@ -113,6 +116,15 @@ class Service:
     #: when the process environment does not carry it - so issuing this
     #: console that credential needs no restart of the console.
     admin_file: str | None = None
+
+    def configured(self) -> bool:
+        """Whether this console has been given this service at all.
+
+        Only the tools can be absent: a hive installed without them names no
+        address and holds no administrator credential for them, and a mind
+        created there has nothing to be registered with. A service that is
+        named but cannot be written is a failure, never a skip."""
+        return bool(os.getenv(self.url_env, "").strip() or self.admin_token())
 
     def url(self) -> str:
         base = (os.getenv(self.url_env) or self.url_default).rstrip("/")
@@ -176,7 +188,29 @@ SERVICES: dict[str, Service] = {
         wants_mind_id=False,
         admin_file=MIND_ENV_LABEL,
     ),
+    # The tools know a mind by the same key: `PUT /credentials/{holder}`
+    # registers the pasted value and the holder name is the mind's name, so a
+    # gated call is recorded under, and its result sent to, that mind. The
+    # administrator credential is the console's alone, read from the tools'
+    # own env file when the process environment lacks it.
+    "tools": Service(
+        key="tools",
+        label="the tools",
+        url_env="HIVE_TOOLS_URL",
+        url_default="http://hive-tools:9421",
+        admin_env="TOOLS_ADMIN_BEARER_TOKEN",
+        prefix="TOOLS",
+        own_files={},
+        wants_mind_id=False,
+        admin_file="hive_tools",
+    ),
 }
+
+#: Holder names the tools never register a value under (the approver, the
+#: internal replay secret, the shared service token's holder). Checked here
+#: before any service is written, so a refused name leaves nothing behind on
+#: the gateway or the memory store; the tools refuse them again on their own.
+TOOLS_RESERVED_HOLDERS = frozenset({"hitl-approver", "internal", "skippy"})
 
 #: What has to be restarted for a value written into each file to be read.
 #: Keyed by file rather than by holder, which is the honest direction: a
@@ -668,6 +702,8 @@ async def name_held_by_something_else(name: str) -> str | None:
     retypes it from `service` to `mind` — and that app reads its value from a
     file this console does not mount, so no restart fixes it.
     """
+    if name.strip().lower() in TOOLS_RESERVED_HOLDERS:
+        return SERVICES["tools"].label
     for service in SERVICES.values():
         try:
             rows = await list_holders(service)
@@ -762,8 +798,9 @@ async def provision_mind(
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Give a brand-new containerised mind its one key, on every service.
 
-    The person pasted the key; the hive invents nothing. The gateway and the
-    memory store are each made to accept exactly that value as this mind, and
+    The person pasted the key; the hive invents nothing. The gateway, the
+    memory store and the tools are each made to accept exactly that value as
+    this mind, and
     it is written to the three variables the mind's generated compose file
     reads. The proxy is sent nothing: the key is already its client's.
 
@@ -777,10 +814,18 @@ async def provision_mind(
     """
     if not proxy_key:
         raise MintRefused(KEY_MISSING_MESSAGE)
+    if name.strip().lower() in TOOLS_RESERVED_HOLDERS:
+        # Before the first service is written: the tools would refuse the
+        # name last, after the gateway and the memory store had taken it.
+        raise MintRefused(
+            f"{name!r} is a name the tools keep for themselves; "
+            "choose another name for this mind")
     minted: list[dict[str, Any]] = []
     failures: list[str] = []
     held = False
     for service in SERVICES.values():
+        if service.key == "tools" and not service.configured():
+            continue
         try:
             key = variable_name(service, name)
             if MIND_ENV_LABEL not in ENV_FILES:

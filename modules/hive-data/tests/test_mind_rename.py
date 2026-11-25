@@ -20,6 +20,8 @@ async def test_rename_preserves_identity_credentials_conversations_and_soul(conn
                                  token_sha=digest, created_at=12)
     await graph.credential_put(holder=old, username='daniel', role='mind', mind_id=ident,
                                token_sha=digest, created_at=12)
+    await inspector.execute(
+        "INSERT INTO tools.api_tokens (name, token_hash, created_at) VALUES ($1, $2, 1)", old, digest)
     await inspector.execute("INSERT INTO core.sessions (id,mind_id,conversation_id,harness_sid,surface,surface_id,created_at,last_active) VALUES ($1,$2,$3,$4,$5,'test',1,2)",
                             ident, ident, 'conversation-kept', 'harness-kept', 'terminal')
     await graph.type_put(name='Mind', kind='first-class', property_schema={})
@@ -32,6 +34,7 @@ async def test_rename_preserves_identity_credentials_conversations_and_soul(conn
     assert after == {**before, 'name': new, 'gateway_url': f'http://{new}:8420'}
     assert await inspector.fetchval('SELECT holder FROM core.credentials WHERE token_sha=$1', digest) == new
     assert await inspector.fetchval('SELECT holder FROM memory.credentials WHERE token_sha=$1', digest) == new
+    assert await inspector.fetchval('SELECT name FROM tools.api_tokens WHERE token_hash=$1', digest) == new
     session = await inspector.fetchrow('SELECT conversation_id,harness_sid,mind_id FROM core.sessions WHERE id=$1', ident)
     assert tuple(session) == ('conversation-kept', 'harness-kept', ident)
     node = await inspector.fetchrow('SELECT name,properties FROM memory.nodes WHERE mind_id=$1 AND type=$2', ident, 'Mind')
