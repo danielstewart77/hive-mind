@@ -50,10 +50,13 @@ All services run on a shared Docker network (`hivemind`). The gateway (`hive-com
 ## Modules (`modules/`)
 
 Every repository hive-mind depends on is a module in its manifest,
-[`.gitmodules`](.gitmodules): hive-tools, hive-data, hive (the console),
+[`.gitmodules`](.gitmodules): hive-tools, hive (the console),
 terminal, inference-proxy, hive-harness-dsh, hive-surfaces and auth-service
 (where people sign in to the hive, with local accounts or third-party
-sign-in; every hive runs it), each under `modules/<name>`. Clone hive-mind and bring them all in at the latest:
+sign-in; every hive runs it), each under `modules/<name>`. hive-data, the shared data package, is not a
+module any more: it is ordinary files of this repository at
+`modules/hive-data`, versioned by tags `hive-data-vX.Y.Z` (see
+[docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Clone hive-mind and bring them all in at the latest:
 
 ```bash
 git clone https://github.com/danielstewart77/hive-mind.git && cd hive-mind
