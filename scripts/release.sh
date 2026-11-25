@@ -206,13 +206,13 @@ fi
 # The release the console builds a new mind from: this commit, at the address
 # it is published at. Written beside the minds it creates; nothing here is a
 # secret. A tag cannot name its own commit, so this is read from the checkout.
-url="${HIVE_RELEASE_CONTEXT_URL:-$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://)[^/]*@#\1#')}"
+url="$(printf '%s' "${HIVE_RELEASE_CONTEXT_URL:-$(git remote get-url origin 2>/dev/null)}" | sed -E 's#^(https?://)[^/]*@#\1#')"
 case "$url" in
   https://*|http://*)
     mkdir -p "$minds_dir" 2>/dev/null || true
     if [ -d "$minds_dir" ]; then printf '%s#%s\n' "$url" "$target" > "$minds_dir/.release-context"
-    else echo "release: cannot create $minds_dir, so the console's release file was not written" >&2; fail_ctx=1; fi ;;
-  *) echo "release: origin ($url) is not an http(s) address a console build can fetch from, so the console's release file was not written; set HIVE_RELEASE_CONTEXT_URL" >&2; fail_ctx=1 ;;
+    else echo "release: cannot create $minds_dir, so the console's release file was not written" >&2; fi ;;
+  *) echo "release: origin ($url) is not an http(s) address a console build can fetch from, so the console's release file was not written; set HIVE_RELEASE_CONTEXT_URL (the checkout is on the release; only new minds built by the console are affected)" >&2 ;;
 esac
 
 echo "release: checkout is on $target ($(describe "$target")); previous recorded as $(cut -d' ' -f1 "$rel/previous" 2>/dev/null | cut -c1-9)"

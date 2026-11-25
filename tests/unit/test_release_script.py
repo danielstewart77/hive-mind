@@ -443,7 +443,34 @@ def test_a_missing_option_value_is_an_error_not_a_hang(hive):
 def test_an_origin_a_console_build_cannot_fetch_from_writes_no_release_file_and_says_so(hive):
     run = hive.run("to", "v1", env={"HIVE_RELEASE_CONTEXT_URL": ""})  # origin here is a local path
 
-    assert run.returncode != 0
+    assert run.returncode == 0, run.stderr
     assert "not an http(s) address" in run.stderr
     assert not (hive.minds / ".release-context").exists()
     assert hive.commit() == hive.tag_commit("v1")
+
+
+def test_an_old_clone_whose_only_unsaved_work_is_a_stash_stops_the_move(hive):
+    work = hive.origin_work
+    (work / "modules" / "hive-data").mkdir(parents=True)
+    (work / "modules" / "hive-data" / "pkg.py").write_text("files\n")
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "hive-data moves in", cwd=work)
+    git("tag", "v3", cwd=work)
+    git("push", "-q", "origin", "master", "--tags", cwd=work)
+    old = hive.checkout / "modules" / "hive-data"
+    git("clone", "-q", str(hive.bare), str(old), cwd=hive.root)
+    (old / "app.py").write_text("stashed\n")
+    git("stash", "-q", cwd=old)
+
+    run = hive.run("to", "v3")
+
+    assert run.returncode != 0
+    assert "no remote has" in run.stderr
+
+
+def test_a_credential_in_the_context_override_is_not_written_to_the_release_file(hive):
+    run = hive.run("to", "v1", env={"HIVE_RELEASE_CONTEXT_URL": "https://u:p@w0rd@example.invalid/hive-mind.git"})
+
+    assert run.returncode == 0, run.stderr
+    text = (hive.minds / ".release-context").read_text()
+    assert "p@w0rd" not in text and "w0rd" not in text
