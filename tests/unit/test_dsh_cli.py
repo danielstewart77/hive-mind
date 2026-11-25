@@ -684,6 +684,30 @@ async def test_a_conversation_naming_no_effort_tells_its_dsh_process_none(
     assert "DSH_REASONING_EFFORT" not in spawn.env
 
 
+async def test_a_conversation_naming_no_effort_runs_at_the_minds_own_default(
+    dsh, monkeypatch
+) -> None:
+    """Daniel, 2026-11-24: the coder's build conversations run at medium.
+    Whoever opens a conversation for a mind sets no level on it."""
+    monkeypatch.setitem(dsh.RUNTIME, "default_effort", "medium")
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_REASONING_EFFORT"] == "medium"
+
+
+async def test_the_effort_a_conversation_names_wins_over_the_minds_default(
+    dsh, monkeypatch
+) -> None:
+    monkeypatch.setitem(dsh.RUNTIME, "default_effort", "medium")
+    _session(dsh)["effort"] = "high"
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_REASONING_EFFORT"] == "high"
+
+
 async def test_an_effort_word_dsh_does_not_know_is_not_handed_to_it(
     dsh, monkeypatch
 ) -> None:
