@@ -43,10 +43,13 @@ class MigrationTools(ToolsStandIn):
     def __init__(self):
         super().__init__()
         self.retired = False
+        self.retire_status = 200
         self.services = {"hive-site", "scheduler"}
 
     def __call__(self, request):
         if request.url.path == "/credentials/shared-token/retire" and request.method == "POST":
+            if self.retire_status >= 400:
+                return httpx.Response(self.retire_status, json={})
             self.retired = True
             return httpx.Response(200, json={"holder": "skippy", "revoked": True})
         if request.url.path == "/credentials" and request.method == "GET":
@@ -224,6 +227,7 @@ async def test_two_minds_with_the_same_proxy_key_are_both_named_and_neither_is_m
     report = await key_migration.account()
 
     by_name = {m["mind"]: m for m in report["minds"]}
+    assert by_name["ada"]["state"] == "not moved" and by_name["bob"]["state"] == "not moved"
     assert any("shares its proxy key with bob" in p for p in by_name["ada"]["problems"])
     assert any("shares its proxy key with ada" in p for p in by_name["bob"]["problems"])
     with pytest.raises(holder_credentials.KeyHeldByAnother):
@@ -371,3 +375,98 @@ async def test_retirement_keeps_a_line_when_the_stack_file_that_might_read_it_ca
     # No stack file exists in this scenario, so nothing may be deleted on a guess.
     assert result["old_lines_removed"] == []
     assert credentials_data._read_env_value(old_hive.env, "COMMS_TOKEN_ADA") == ADA_COMMS
+
+
+async def test_the_report_names_a_mind_whose_files_hold_two_different_proxy_keys(old_hive):
+    old_hive.env.write_text(old_hive.env.read_text() + f"ADA_PROXY_KEY={BOB_PROXY}\n")
+
+    report = await key_migration.account()
+
+    ada = next(m for m in report["minds"] if m["mind"] == "ada")
+    assert ada["state"] == "not moved"
+    assert any("different proxy keys" in p for p in ada["problems"])
+
+
+async def test_a_mind_holding_its_one_key_but_missing_on_a_service_is_not_reported_moved_and_blocks_retirement(old_hive):
+    await key_migration.move_mind("ada")
+    old_hive.tools.values.pop("ada")
+
+    report = await key_migration.account()
+
+    ada = next(m for m in report["minds"] if m["mind"] == "ada")
+    assert ada["state"] == "not moved"
+    assert report["ready_to_retire"] is False
+
+
+async def test_a_revoked_holder_is_reported_revoked_not_live(old_hive):
+    await holder_credentials.revoke(holder_credentials.SERVICES["comms"], "scheduler")
+
+    report = await key_migration.account()
+
+    comms = next(s for s in report["services"] if s["service"] == "comms")
+    assert next(h for h in comms["holders"] if h["holder"] == "scheduler")["live"] is False
+
+
+async def test_a_move_is_refused_when_an_old_value_the_service_holds_is_in_no_file(old_hive):
+    old_hive.env.write_text(f"PROXY_TOKEN_ADA={ADA_PROXY}\nUNRELATED=keep\n")  # the old lines are gone
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.move_mind("ada")
+
+    assert (await _answers(old_hive, ADA_COMMS))["comms"] == 200
+
+
+async def _retirable(old_hive, monkeypatch):
+    await key_migration.move_mind("ada")
+    await key_migration.move_mind("bob")
+    await _carol_already_on_one_key(old_hive)
+    stack = old_hive.env.parent / "docker-compose.yml"
+    stack.write_text("services: {}\n")
+    monkeypatch.setattr(configuration_data, "stack_compose_path", lambda: stack)
+    return stack
+
+
+async def test_retirement_stops_and_leaves_the_old_lines_when_the_tools_refuse_to_retire_the_shared_token(
+        old_hive, monkeypatch):
+    await _retirable(old_hive, monkeypatch)
+    old_hive.tools.retire_status = 500
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.retire()
+
+    assert credentials_data._read_env_value(old_hive.env, "COMMS_TOKEN_ADA") == ADA_COMMS
+
+
+async def test_retirement_keeps_an_old_line_a_compose_file_still_reads_and_removes_the_others(old_hive, monkeypatch):
+    stack = await _retirable(old_hive, monkeypatch)
+    stack.write_text("services:\n  ada-bot:\n    environment:\n      - MIND_PROACTIVE_TOKEN=${COMMS_TOKEN_ADA}\n")
+
+    result = await key_migration.retire()
+
+    assert credentials_data._read_env_value(old_hive.env, "COMMS_TOKEN_ADA") == ADA_COMMS
+    assert credentials_data._read_env_value(old_hive.env, "LUCENT_TOKEN_ADA") is None
+    assert credentials_data._read_env_value(old_hive.env, "COMMS_TOKEN_BOB") is None
+    assert result["old_lines_kept_because_a_compose_file_reads_them"] == ["hive_mind:COMMS_TOKEN_ADA"]
+
+
+def test_a_move_and_an_undo_through_the_routes_clear_the_credential_check_cache_and_a_mind_cannot_use_them(
+        old_hive, builtin_console, monkeypatch):
+    from starlette.testclient import TestClient
+    import credential_registry
+    import main
+
+    cleared = []
+    monkeypatch.setattr(credential_registry, "forget_all", lambda: cleared.append(1))
+    monkeypatch.delenv("KEY_MIGRATION_TOKEN", raising=False)
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", ADA_COMMS)
+    admin = builtin_console.admin()
+    base = "/api/settings/key-migration/ada"
+
+    mind_try = TestClient(main.app).post(base + "/move", headers={"Authorization": f"Bearer {ADA_COMMS}"})
+    moved = admin.post(base + "/move")
+    undone = admin.post(base + "/undo")
+
+    assert mind_try.status_code in (401, 403)
+    assert (moved.status_code, undone.status_code) == (200, 200)
+    assert len(cleared) == 2
+    assert testing.run(_answers(old_hive, ADA_COMMS))["comms"] == 200
