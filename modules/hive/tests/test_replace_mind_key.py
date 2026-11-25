@@ -10,6 +10,7 @@ tree whose module names collide with this console's, so they stand in at the
 transport; their own refusal of a replaced key is guarded by the tools' own
 suite (tests/api/test_credentials_routes.py).
 """
+import asyncio
 import hashlib
 import json
 import sys
@@ -43,6 +44,7 @@ class ToolsStandIn:
     def __init__(self):
         self.values = {}
         self.fail = False
+        self.cancel = False
 
     def __call__(self, request):
         if request.url.path == "/credentials" and request.method == "GET":
@@ -51,6 +53,9 @@ class ToolsStandIn:
         if request.url.path.startswith("/credentials/") and request.method == "PUT":
             holder = request.url.path.rsplit("/", 1)[-1]
             value = json.loads(request.content)["token"]
+            if self.cancel:
+                self.cancel = False  # the cancelling happens once
+                raise asyncio.CancelledError()
             if self.fail:
                 return httpx.Response(500, json={"error": "the tools are down"})
             for other, held in self.values.items():
@@ -176,4 +181,43 @@ async def test_pasting_a_key_another_mind_holds_changes_nothing_and_both_minds_k
 
     assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
     assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
+    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+
+
+async def test_a_cut_off_mind_stays_cut_off_when_a_replacement_fails_and_is_put_back(hive):
+    for name in ("comms", "lucent"):
+        await holder_credentials.revoke(holder_credentials.SERVICES[name], "ada")
+    assert (await hive.status(OLD))["comms"] == 401
+    hive.tools.fail = True
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await _replace()
+
+    assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
+    answers = await hive.status(OLD)
+    assert answers["comms"] == 401 and answers["lucent"] == 401
+    assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
+
+
+async def test_a_key_a_service_already_accepts_is_refused_before_anything_changes(hive):
+    from lucent_api import holder_access
+    await holder_access.put_credential("carol", "daniel", NEW, role="service")
+
+    with pytest.raises(holder_credentials.KeyHeldByAnother):
+        await _replace()
+
+    assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
+    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert holder_credentials.key_journal.unfinished() == []
+
+
+async def test_a_request_cancelled_part_way_still_puts_the_old_key_back(hive):
+    hive.tools.cancel = True
+
+    with pytest.raises(asyncio.CancelledError):
+        await _replace()
+
+    assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
+    answers = await hive.status(OLD)
+    assert answers["comms"] == 200 and answers["lucent"] == 200
     assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD

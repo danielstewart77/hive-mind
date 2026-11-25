@@ -1077,6 +1077,16 @@ async def _accepts(service: Service, value: str) -> bool | None:
     return None
 
 
+def _is_revoked(row: dict[str, Any] | None) -> bool:
+    return bool(row) and (bool(row.get("revoked_at")) or row.get("live") is False)
+
+
+async def _revoke_row(service: Service, holder: str) -> None:
+    response = await _request(service, "DELETE", f"/credentials/{holder}")
+    if response.status_code >= 400:
+        raise MintRefused("not revoked again")
+
+
 async def _put_key(
     service: Service, holder: str, owner: str, mind_id: str,
     row: dict[str, Any] | None, value: str,
@@ -1176,6 +1186,14 @@ async def replace_mind_key(
                         f"Could not check that key against {service.label}. "
                         "Nothing was changed.")
                 accepted[service.key] = answer
+            # This mind's own key is `old`. A service that accepts a different
+            # value gave it to some other holder, unless an earlier replacement
+            # of this mind was left part-way (a journal record for it is open
+            # or needs attention), when it may be this mind's own new key.
+            # Then the write below decides, naming the holder if it is not.
+            if (old is not None and any(accepted.values())
+                    and not key_journal.open_for(holder)):
+                raise KeyHeldByAnother(key_held_message(None))
             # A service that accepts the value already has it for some holder:
             # this mind's own row (a repeat paste) or another mind's. It is
             # written first, and its own clash check refuses by naming the
@@ -1189,6 +1207,10 @@ async def replace_mind_key(
         try:
             record = key_journal.begin("replace", holder, [s.key for s in services])
             record["owner"], record["mind_id"] = owner, mind_id
+            # A put replaces the value and clears a revocation, so a mind cut
+            # off with Revoke would be live again after a put-back. Remember
+            # which services had it cut off, to cut it off again.
+            record["revoked"] = [k for k, r in rows.items() if _is_revoked(r)]
             key_journal.update(record)
         except OSError as exc:
             raise MintRefused(
@@ -1197,12 +1219,18 @@ async def replace_mind_key(
 
         state: dict[str, str] = {}
         failure: Exception | None = None
+        cancelled = False
         for service in services:
             try:
                 await _put_key(service, holder, owner, mind_id, rows[service.key], value)
             except MintUncertain as exc:
                 state[service.key] = "unknown"
                 failure = exc
+                break
+            except asyncio.CancelledError:
+                state[service.key] = "unknown"
+                failure = MintRefused("the request was cancelled")
+                cancelled = True
                 break
             except Exception as exc:  # noqa: BLE001 - every failure is put back below
                 state[service.key] = "untouched"
@@ -1245,45 +1273,72 @@ async def replace_mind_key(
                 "proxy_note": PROXY_NOTE,
             }
 
-        # Put back, in the reverse order, whatever may have taken the new key.
-        for service in reversed(services):
-            if state.get(service.key) not in ("new", "unknown"):
-                continue
-            row = rows[service.key]
-            try:
-                if row is None and state[service.key] in ("new", "unknown"):
-                    response = await _request(
-                        service, "DELETE", f"/credentials/{holder}?remove=true")
-                    if response.status_code >= 400:
-                        raise MintRefused("not removed")
-                    state[service.key] = "none"
-                elif old is not None:
-                    await _put_key(service, holder, owner, mind_id, row, old)
-                    state[service.key] = "old"
-                elif row is None:
-                    response = await _request(
-                        service, "DELETE", f"/credentials/{holder}?remove=true")
-                    if response.status_code >= 400:
-                        raise MintRefused("not removed")
-                    state[service.key] = "none"
-                else:
-                    state[service.key] = (
-                        "unrestorable" if state[service.key] == "new" else "unknown")
-            except Exception:  # noqa: BLE001 - reported below, by service
-                pass
-        file_ok = True
-        if location is not None and old is not None:
-            try:
-                if _loaded_value(location) != old:
-                    with credentials_data._WRITE_LOCK:
-                        credentials_data._write_location(
-                            location.path, location.env_key, old, location.file)
-                    file_ok = _loaded_value(location) == old
-            except Exception:  # noqa: BLE001
-                file_ok = False
+        async def put_back() -> bool:
+            # Put back, in the reverse order, whatever may have taken the new key.
+            for service in reversed(services):
+                if state.get(service.key) not in ("new", "unknown"):
+                    continue
+                row = rows[service.key]
+                try:
+                    if row is None and state[service.key] in ("new", "unknown"):
+                        response = await _request(
+                            service, "DELETE", f"/credentials/{holder}?remove=true")
+                        if response.status_code >= 400:
+                            raise MintRefused("not removed")
+                        state[service.key] = "none"
+                    elif old is not None:
+                        await _put_key(service, holder, owner, mind_id, row, old)
+                        if _is_revoked(row):
+                            await _revoke_row(service, holder)
+                        state[service.key] = "old"
+                    elif row is None:
+                        response = await _request(
+                            service, "DELETE", f"/credentials/{holder}?remove=true")
+                        if response.status_code >= 400:
+                            raise MintRefused("not removed")
+                        state[service.key] = "none"
+                    else:
+                        state[service.key] = (
+                            "unrestorable" if state[service.key] == "new" else "unknown")
+                except Exception:  # noqa: BLE001 - reported below, by service
+                    pass
+            file_ok = True
+            if location is not None and old is not None:
+                try:
+                    if _loaded_value(location) != old:
+                        with credentials_data._WRITE_LOCK:
+                            credentials_data._write_location(
+                                location.path, location.env_key, old, location.file)
+                        file_ok = _loaded_value(location) == old
+                except Exception:  # noqa: BLE001
+                    file_ok = False
+            return file_ok
+
+        # A cancelled request still puts the services back: the put-back runs
+        # as its own task and is awaited to the end before cancelling goes on.
+        task = asyncio.ensure_future(put_back())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+            await asyncio.wait({task})
+        file_ok = task.result() if not task.cancelled() and task.exception() is None else False
         clean = file_ok and all(
             state.get(s.key, "untouched") in ("old", "none", "untouched") for s in services)
         reason = _failure_sentence(failure)
+        if cancelled:
+            if clean:
+                try:
+                    key_journal.finish(record)
+                except OSError:
+                    pass
+            else:
+                try:
+                    key_journal.update(record, status="needs_attention",
+                                       detail=_states_sentence(services, state))
+                except OSError:
+                    pass
+            raise asyncio.CancelledError()
         if clean:
             try:
                 key_journal.finish(record)
@@ -1327,6 +1382,8 @@ async def recover_replacements() -> list[dict[str, Any]]:
         holder = record["mind"]
         try:
             async with _ROTATION_LOCK:
+                if not key_journal.is_open(record):
+                    continue  # finished by a replacement since the snapshot was taken
                 location = stored_key_location(holder)
                 if location is None:
                     raise MintRefused(
@@ -1340,12 +1397,16 @@ async def recover_replacements() -> list[dict[str, Any]]:
                     row = await _holder_row(service, holder)
                     await _put_key(service, holder, str(record.get("owner") or ""),
                                    str(record.get("mind_id") or ""), row, value)
+                    if key in record.get("revoked", []):
+                        await _revoke_row(service, holder)
             key_journal.finish(record)
             handled.append({"mind": holder, "recovered": True})
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
             try:
-                # Left as started: the next start tries again.
-                key_journal.update(record, detail=_failure_sentence(exc))
+                # Left as started: the next start tries again. A record that
+                # has gone since the snapshot is not written back.
+                if key_journal.is_open(record):
+                    key_journal.update(record, detail=_failure_sentence(exc))
             except OSError:
                 pass
             handled.append({"mind": holder, "recovered": False, "detail": _failure_sentence(exc)})

@@ -59,6 +59,14 @@ def update(record: dict[str, Any], **changes: Any) -> dict[str, Any]:
     return record
 
 
+def is_open(record: dict[str, Any]) -> bool:
+    """The record is still on disk and unfinished (a snapshot may be stale)."""
+    try:
+        return json.loads(_path(record["operation_id"]).read_text()).get("status") == OPEN
+    except (OSError, ValueError):
+        return False
+
+
 def finish(record: dict[str, Any]) -> None:
     """The operation ended with every service and the stored key in step."""
     try:
@@ -94,6 +102,11 @@ def needing_attention(mind: str | None = None) -> list[dict[str, Any]]:
             if record.get("detail") and (mind is None or record.get("mind") == mind):
                 found.append(record)
     return found
+
+
+def open_for(mind: str) -> bool:
+    """An earlier operation on this mind was left unfinished or needs attention."""
+    return bool(needing_attention(mind)) or any(r.get("mind") == mind for r in unfinished())
 
 
 def clear(mind: str) -> None:
