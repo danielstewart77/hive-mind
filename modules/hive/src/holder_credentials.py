@@ -1128,6 +1128,8 @@ _STATE_WORDS = {
     "none": "has no key for this mind",
     "unknown": "did not answer, so its state is unknown, check before trying again",
     "untouched": "was not changed and still holds the old key",
+    "live_again": "holds the old key and is live again although this mind was cut off, revoke it",
+    "unrestorable_revoked": "holds the new key, cut off as before; the old one is not known here",
     "unrestorable": "holds the new key and the old one is not known here to put back",
 }
 
@@ -1288,6 +1290,7 @@ async def replace_mind_key(
                         state[service.key] = "none"
                     elif old is not None:
                         await _put_key(service, holder, owner, mind_id, row, old)
+                        state[service.key] = "live_again"
                         if _is_revoked(row):
                             await _revoke_row(service, holder)
                         state[service.key] = "old"
@@ -1298,8 +1301,12 @@ async def replace_mind_key(
                             raise MintRefused("not removed")
                         state[service.key] = "none"
                     else:
-                        state[service.key] = (
-                            "unrestorable" if state[service.key] == "new" else "unknown")
+                        was = state[service.key]
+                        state[service.key] = "unrestorable" if was == "new" else "unknown"
+                        if _is_revoked(row):
+                            # Cut off before: the new key must not be live either.
+                            await _revoke_row(service, holder)
+                            state[service.key] = "unrestorable_revoked"
                 except Exception:  # noqa: BLE001 - reported below, by service
                     pass
             file_ok = True
@@ -1321,7 +1328,11 @@ async def replace_mind_key(
             await asyncio.shield(task)
         except asyncio.CancelledError:
             cancelled = True
-            await asyncio.wait({task})
+            while not task.done():
+                try:
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    pass
         file_ok = task.result() if not task.cancelled() and task.exception() is None else False
         clean = file_ok and all(
             state.get(s.key, "untouched") in ("old", "none", "untouched") for s in services)
@@ -1403,10 +1414,12 @@ async def recover_replacements() -> list[dict[str, Any]]:
             handled.append({"mind": holder, "recovered": True})
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
             try:
-                # Left as started: the next start tries again. A record that
-                # has gone since the snapshot is not written back.
-                if key_journal.is_open(record):
-                    key_journal.update(record, detail=_failure_sentence(exc))
+                # Left as started: the next start tries again. Under the lock,
+                # and only while the record is still there, so a replacement
+                # that finished since the snapshot is not written back.
+                async with _ROTATION_LOCK:
+                    if key_journal.is_open(record):
+                        key_journal.update(record, detail=_failure_sentence(exc))
             except OSError:
                 pass
             handled.append({"mind": holder, "recovered": False, "detail": _failure_sentence(exc)})

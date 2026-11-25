@@ -106,7 +106,8 @@ def needing_attention(mind: str | None = None) -> list[dict[str, Any]]:
 
 def open_for(mind: str) -> bool:
     """An earlier operation on this mind was left unfinished or needs attention."""
-    return bool(needing_attention(mind)) or any(r.get("mind") == mind for r in unfinished())
+    return any(r.get("kind") == "replace"
+               for r in needing_attention(mind) + [u for u in unfinished() if u.get("mind") == mind])
 
 
 def clear(mind: str) -> None:

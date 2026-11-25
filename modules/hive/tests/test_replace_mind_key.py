@@ -221,3 +221,16 @@ async def test_a_request_cancelled_part_way_still_puts_the_old_key_back(hive):
     answers = await hive.status(OLD)
     assert answers["comms"] == 200 and answers["lucent"] == 200
     assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+
+
+async def test_a_cut_off_mind_whose_old_key_is_unknown_is_not_left_live_on_the_new_key(hive):
+    for name in ("comms", "lucent"):
+        await holder_credentials.revoke(holder_credentials.SERVICES[name], "ada")
+    hive.env.write_text(f"MIND_KEY_BOB={BOB}\n")  # ada's key is not stored here
+    hive.tools.fail = True
+
+    with pytest.raises(holder_credentials.ReplacementFailed):
+        await _replace()
+
+    answers = await hive.status(NEW)
+    assert answers["comms"] == 401 and answers["lucent"] == 401
