@@ -477,9 +477,15 @@ class GatewayClient:
                             tail_newlines = len(text) - len(text.rstrip("\n"))
                     elif etype == "result":
                         saw_result = True
-                        if event.get("is_error") or event.get("subtype") in ("error", "interrupted"):
-                            error_reason = _result_reason(event)
-                            if event.get("subtype") == "interrupted":
+                        stopped = event.get("stop_reason") in ("stopped", "cancelled") or (
+                            event.get("error_code") == "TURN_INCOMPLETE"
+                        )
+                        if event.get("is_error") or stopped or event.get("subtype") in ("error", "interrupted"):
+                            error_reason = (
+                                "the turn was stopped before it finished" if stopped
+                                and not event.get("is_error") else _result_reason(event)
+                            )
+                            if stopped or event.get("subtype") == "interrupted":
                                 error_status = TURN_INTERRUPTED
                         else:
                             result_fallback = event.get("result", "")

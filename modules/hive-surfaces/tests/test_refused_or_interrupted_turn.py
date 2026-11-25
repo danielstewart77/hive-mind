@@ -59,6 +59,10 @@ CASES = {
     "stream ends with no finishing event": dict(
         body=_sse(_text("Half an answ")), reason="without a finishing event",
         partial="Half an answ"),
+    "dsh turn stopped by an interrupt": dict(
+        body=_sse(_text("Half an answ"),
+                  {"type": "result", "stop_reason": "stopped", "is_error": False}),
+        reason="stopped before it finished", partial="Half an answ"),
     "gateway refuses the message": dict(
         body=b"", status=403, error_body={"detail": "not allowed here"},
         reason="not allowed here", partial=""),
@@ -141,7 +145,7 @@ async def _run_discord_skill(client):
             patch.object(db, "_play_tts_for_member", play):
         try:
             await db.bot.tree.get_command("skill").callback(interaction, name="x", args=None)
-        except RuntimeError:
+        except (RuntimeError, ConnectionError):
             pass
     return sent, speak, play
 
@@ -179,3 +183,85 @@ async def test_query_raises_for_a_turn_that_did_not_finish():
 
     with pytest.raises(GatewayTurnError, match="boom"):
         await client.query(1, 2, "hi")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_message_is_shown_as_refused_not_interrupted():
+    client = _client(b"", 403, {"detail": "not allowed here"})
+
+    sent, _speak, _play = await _run_discord_skill(client)
+
+    shown = sent.edit.await_args.kwargs["content"]
+    assert "Refused: " in shown and "Interrupted" not in shown
+
+
+@pytest.mark.asyncio
+async def test_discord_long_partial_answer_cut_off_shows_the_mark_in_a_message():
+    async def iter_any():
+        yield _sse(_text("x" * 2500))
+        raise ConnectionError("reset")
+
+    client = _client(b"")
+    ctx = client.http.post.return_value
+    resp = await ctx.__aenter__()
+    resp.content.iter_any = iter_any
+
+    sent, speak, play = await _run_discord_skill(client)
+
+    texts = [c.kwargs["content"] for c in sent.edit.await_args_list]
+    texts += [c.args[0] for c in sent.channel.send.await_args_list]
+    assert any("Interrupted" in t and "reset" in t for t in texts)
+    assert speak.call_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [{"error": "Session not found"}, {"detail": "no"}])
+async def test_telegram_stop_does_not_say_interrupted_for_a_refusal(answer):
+    update = MagicMock()
+    update.effective_user.id, update.effective_chat.id = 123, 456
+    update.message.reply_text = AsyncMock()
+    gw = MagicMock(find_active_session=AsyncMock(return_value="s1"),
+                   interrupt_session=AsyncMock(return_value=answer))
+    configure(SurfaceConfig(telegram_allowed_users=[123]))
+    with patch.object(tb, "gateway", gw), \
+            patch.object(tb, "_auth_check", AsyncMock(return_value=True)):
+        await tb.cmd_stop(update, MagicMock())
+
+    assert "Interrupted." not in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, said", [
+    ({"error": "Session not found"}, "Could not interrupt"),
+    ({"ok": True, "message": "nothing_running"}, "Nothing running."),
+    ({"ok": True}, "Interrupted."),
+])
+async def test_discord_stop_words_each_outcome(answer, said):
+    interaction, _ = _interaction()
+    interaction.followup.send = AsyncMock()
+    configure(SurfaceConfig(discord_allowed_users=[7]))
+    gw = MagicMock(find_active_session=AsyncMock(return_value="s1"),
+                   interrupt_session=AsyncMock(return_value=answer))
+    with patch.object(db, "gateway", gw):
+        await db.bot.tree.get_command("stop").callback(interaction)
+
+    assert said in interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cmd", ["/new", "/clear", "/switch 3"])
+async def test_discord_refused_command_is_not_reported_as_success(cmd):
+    gw = MagicMock(server_command=AsyncMock(return_value={"detail": "Not authenticated"}))
+    with patch.object(db, "gateway", gw):
+        out = await db._handle_server_command(cmd, 7, 2)
+
+    assert out == "Error: Not authenticated"
+
+
+@pytest.mark.asyncio
+async def test_discord_sessions_listing_still_works():
+    gw = MagicMock(server_command=AsyncMock(return_value=[]))
+    with patch.object(db, "gateway", gw):
+        out = await db._handle_server_command("/sessions", 7, 2)
+
+    assert not out.startswith("Error")

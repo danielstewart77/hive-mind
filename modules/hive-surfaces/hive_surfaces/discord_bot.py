@@ -440,12 +440,17 @@ async def _stream_to_message(
                     last_edit = now
         except Exception as exc:
             # A connection that broke partway: the text on screen must say so.
-            outcome.status, outcome.reason = TURN_INTERRUPTED, f"{type(exc).__name__}: {exc}"
+            if outcome.finished:
+                outcome.status, outcome.reason = TURN_INTERRUPTED, f"{type(exc).__name__}: {exc}"
             marked = (accumulated + "\n\n" if accumulated else "") + turn_marker(
                 outcome, bool(accumulated),
             )
+            marked_chunks = _chunk_message(marked)
             with contextlib.suppress(discord.HTTPException):
-                await sent.edit(content=_chunk_message(marked)[0])
+                await sent.edit(content=marked_chunks[0])
+            for extra in marked_chunks[1:]:
+                with contextlib.suppress(discord.HTTPException):
+                    await sent.channel.send(extra)
             raise
 
     if not outcome.finished:
@@ -491,7 +496,7 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
         refusal = result.get("error") or result.get("detail")
         if refusal is None and "error" in result:
             refusal = "refused"
-    else:
+    elif not isinstance(result, list):
         refusal = "unexpected answer from the gateway"
     if refusal is not None:
         log_event(
@@ -753,11 +758,15 @@ async def cmd_stop(interaction: discord.Interaction):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    session_id = await gateway.find_active_session(interaction.user.id, interaction.channel_id)
-    if session_id is None:
-        await interaction.followup.send("No active session.", ephemeral=True)
+    try:
+        session_id = await gateway.find_active_session(interaction.user.id, interaction.channel_id)
+        if session_id is None:
+            await interaction.followup.send("No active session.", ephemeral=True)
+            return
+        result = await gateway.interrupt_session(session_id)
+    except Exception as exc:
+        await interaction.followup.send(f"Could not interrupt: {exc}", ephemeral=True)
         return
-    result = await gateway.interrupt_session(session_id)
     refusal = result.get("error") or result.get("detail") if isinstance(result, dict) else "unexpected answer"
     if refusal:
         msg = f"Could not interrupt: {refusal}"

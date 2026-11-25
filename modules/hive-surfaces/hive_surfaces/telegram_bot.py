@@ -565,7 +565,8 @@ async def _stream_to_message(
         # The connection broke partway: what is on screen must not stay as it
         # was, looking like a finished answer. Mark it, then let the handler
         # report the failure as it always has.
-        outcome.status, outcome.reason = TURN_INTERRUPTED, f"{type(exc).__name__}: {exc}"
+        if outcome.finished:
+            outcome.status, outcome.reason = TURN_INTERRUPTED, f"{type(exc).__name__}: {exc}"
         await _show_final(bubbles, [_sanitize_response(c) for c in _chunk_message(
             (accumulated + "\n\n" if accumulated else "") + turn_marker(outcome, bool(accumulated))
         )])
