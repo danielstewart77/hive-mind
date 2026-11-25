@@ -45,6 +45,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from core import mind_key
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event, recent_errors
 from minds import (
     files_api,
@@ -60,6 +61,16 @@ from minds import (
 from minds.harness import dsh_hooks, hook_commands, rotation_hooks
 from minds.proactive import BUFFER as proactive_buffer, make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
+
+# The mind's one key (core/mind_key.py): when this container was started with
+# it, every per-service name the readers below look for is set from it before
+# anything reads them, so a mind carries one value and presents it to the
+# gateway, the memory store, the tools and the proxy. Without it nothing is
+# touched and the old per-service values stand (the transition, until the old
+# values are retired). What the mind's own bot presents on /proactive is read
+# first, because applying the key overwrites the gateway name it used to share.
+_LEGACY_GATEWAY_VALUE = os.environ.get("COMMS_BEARER_TOKEN", "")
+mind_key.apply_environment()
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
 MIND_DIR = Path(__file__).resolve().parent / MIND_NAME
@@ -113,7 +124,8 @@ install_fastapi_logging(app, log, f"mind:{NAME}")
 # settled after the turn that dispatched it had closed. The codex adapter
 # spawns per turn with no idle stream and leaves it empty.
 app.include_router(make_proactive_router(
-    proactive_buffer, os.environ.get("COMMS_BEARER_TOKEN") or None,
+    proactive_buffer,
+    mind_key.proactive_token(os.environ, _LEGACY_GATEWAY_VALUE),
 ))
 
 
@@ -337,7 +349,7 @@ def _hooks_check(harness: str) -> str | None:
 
 
 def _env_value(names: tuple[str, ...]) -> str:
-    declared = _BOOT_RUNTIME.get("env") or {}
+    declared = mind_key.runtime_env(_BOOT_RUNTIME.get("env") or {})
     for name in names:
         value = str(declared.get(name) or os.environ.get(name) or "").strip()
         if value:

@@ -721,7 +721,7 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
 def _console_credential() -> str:
     """What the console is expected to present: the admin token where this
     mind holds one, otherwise this mind's own key. Never both."""
-    return admin_token() or os.environ.get("COMMS_BEARER_TOKEN", "").strip()
+    return admin_token() or (os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN", "")).strip()
 
 
 def authorize_admin(request: Request) -> JSONResponse | None:
@@ -777,6 +777,7 @@ async def register_with_broker(path: Path, *, mind_name: str, mind_id: str, log)
     # itself with its own, which the gateway accepts for its own row.
     token = (
         os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
+        or os.environ.get("MIND_KEY", "")
         or os.environ.get("COMMS_BEARER_TOKEN", "")
     )
     if not comms_url or not token:

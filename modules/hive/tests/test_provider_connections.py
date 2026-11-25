@@ -61,7 +61,7 @@ def test_scaffold_routes_inference_to_selected_connection_without_embedding_key(
     compose = yaml.safe_load((tmp_path / "minds/new-mind/container/compose.yaml").read_text())
     env = dict(item.split("=", 1) for item in compose["services"]["new-mind"]["environment"])
     assert env["OPENAI_BASE_URL"] == "https://direct.invalid/v1"
-    assert env["OPENAI_API_KEY"] == "${PROXY_TOKEN_NEW_MIND}"
+    assert env["OPENAI_API_KEY"] == "${MIND_KEY_NEW_MIND}"
     assert "INFERENCE_PROXY_URL" not in env
     runtime = yaml.safe_load((tmp_path / "minds/new-mind/runtime.yaml").read_text())
     assert runtime["provider_connection"]["id"] == "direct"
@@ -74,7 +74,7 @@ def test_new_mind_creation_stores_its_token_and_selected_connection(creation):
     assert saved.status_code == 200
     response = client.post("/api/minds", json={"name": "direct-new", "harness": "dsh", "provider_id": saved.json()["id"], "provider_token": "mind-owned-token", "default_model": "direct-model"})
     assert response.status_code == 200, response.text
-    assert credentials_data._read_env_value(env, "PROXY_TOKEN_DIRECT_NEW") == "mind-owned-token"
+    assert credentials_data._read_env_value(env, "MIND_KEY_DIRECT_NEW") == "mind-owned-token"
     assert not state["proxy_requests"]
     runtime = yaml.safe_load((minds / "direct-new/runtime.yaml").read_text())
     assert runtime["provider_connection"]["base_url"] == "http://direct.invalid/v1"

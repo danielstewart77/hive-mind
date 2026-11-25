@@ -317,35 +317,27 @@ def internal_mind_exists(name: str) -> bool:
 OWNER_RE = re.compile(r"[a-z0-9][a-z0-9._@-]{0,63}")
 
 
-def _comms_variable(name: str) -> str:
-    """The variable this mind's gateway value is written under.
+#: The per-service names its harnesses, hooks and skills read, each set from the
+#: one key. The same list as `GENERIC_NAMES` less the inference ones in
+#: hive-mind's core/mind_key.py, which sets the full list again at the mind's
+#: start; this module cannot import that one (it is the mind's, not the
+#: console's), so the two are kept equal by hand.
+_SERVICE_NAMES_FROM_ONE_KEY = (
+    "COMMS_BEARER_TOKEN", "HIVEMIND_BROKER_TOKEN", "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN",
+)
 
-    Asked of the module that writes it rather than spelled again here. A name
-    may carry hyphens and a `.env` key may not, so two copies of the rule is a
-    compose file reading a variable the mint never wrote — and a container that
-    comes up holding nothing.
+
+def _key_variable(name: str) -> str:
+    """The variable a shared env file holds this mind's one key under.
+
+    Asked of the module that writes it (`holder_credentials`), for the reason
+    every per-mind variable was: a name may carry hyphens and a `.env` key may
+    not, so two copies of the rule is a compose file reading a variable the
+    creation never wrote.
     """
     import holder_credentials
 
-    return holder_credentials.variable_name(
-        holder_credentials.SERVICES["comms"], name
-    )
-
-
-def _proxy_variable(name: str) -> str:
-    import holder_credentials
-
-    return holder_credentials.variable_name(
-        holder_credentials.SERVICES["proxy"], name
-    )
-
-
-def _lucent_variable(name: str) -> str:
-    import holder_credentials
-
-    return holder_credentials.variable_name(
-        holder_credentials.SERVICES["lucent"], name
-    )
+    return holder_credentials.one_key_variable(name)
 
 
 #: The rotation threshold a newly created Mind starts with: the percentage of
@@ -486,42 +478,36 @@ def scaffold_internal_mind(
                     # Its own keyring, in its own folder: the hive's shared
                     # one holds other minds' secrets.
                     f"KEY_RING={own}/data/keyring",
+                    # The mind's one key, the value its owner pasted. The
+                    # gateway, the memory store, the tools and the proxy each
+                    # accept it as this mind, so every service value below is
+                    # the same one, and no mind-specific variable but this
+                    # one is named. MIND_KEY is what the mind reads (the
+                    # left-hand names below are what its harnesses, hooks
+                    # and skills read, and do not change).
+                    f"MIND_KEY=${{{_key_variable(name)}}}",
+                    *[f"{variable}=${{{_key_variable(name)}}}"
+                      for variable in _SERVICE_NAMES_FROM_ONE_KEY],
                     "LUCENT_URL=http://hive-lucent:8424",
                     "LUCENT_URL_SELF=http://hive-lucent:8424",
-                    # This mind's own value, not the hive's. Both services
-                    # key credentials per holder and refuse one another
-                    # holder already has, so a mind interpolating the shared
-                    # variable comes up holding something nothing accepts.
-                    # The left-hand name is what every reader inside the mind
-                    # resolves by and does not change; only where the value
-                    # comes from does.
-                    f"LUCENT_BEARER_TOKEN=${{{_lucent_variable(name)}}}",
-                    # No Hive Tools token. The shared one is Skippy's, and a
-                    # mind holding it reaches Daniel's Google tools as him.
-                    # A mind whose owner is not the owner of the tool
-                    # credentials must never reach them (DECIDED 2026-11-15,
-                    # Daniel); it gets its own when every service accepts the
-                    # mind's one credential.
                     "HIVE_TOOLS_URL=http://hive-tools:9421",
                     "COMMS_URL=http://hive-comms:8424",
-                    f"COMMS_BEARER_TOKEN=${{{_comms_variable(name)}}}",
                     # No gateway admin credential: it opens every person's
                     # conversations and mints anyone's credentials. The
                     # console registers this mind, with the session
                     # credential minted beside its runtime.yaml.
                     "HIVEMIND_BROKER_URL=http://hive-comms:8424",
-                    # Every harness logs in to the inference proxy with this
-                    # mind's own key, minted when it was created, so every
-                    # call is metered to it (story 2.1.9) - never a host
-                    # login, and never another mind's key.
+                    # Every harness logs in to the inference proxy with the
+                    # mind's key, so every call is metered to it - never a
+                    # host login, and never another mind's key.
                     f"INFERENCE_PROXY_URL={proxy}",
                     f"ANTHROPIC_BASE_URL={proxy}",
-                    f"ANTHROPIC_AUTH_TOKEN=${{{_proxy_variable(name)}}}",
+                    f"ANTHROPIC_AUTH_TOKEN=${{{_key_variable(name)}}}",
                     "ANTHROPIC_API_KEY=",
                     f"OPENAI_BASE_URL={proxy}/v1",
-                    f"OPENAI_API_KEY=${{{_proxy_variable(name)}}}",
+                    f"OPENAI_API_KEY=${{{_key_variable(name)}}}",
                     f"DSH_PROXY_BASE_URL={proxy}/v1",
-                    f"DSH_API_KEY=${{{_proxy_variable(name)}}}",
+                    f"DSH_API_KEY=${{{_key_variable(name)}}}",
                     "GATEWAY_URL=http://server:8420",
                     "SPECS_DIR=/usr/src/app/specs/data-classes",
                     f"AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/{name}/data/auto-remember",
@@ -568,7 +554,7 @@ def scaffold_internal_mind(
         service["environment"] = [item for item in service["environment"]
                                   if item.split("=", 1)[0] not in inference_names]
         service["environment"] += [f"{k}={v}" for k, v in inference_environment(
-            connection, f"${{{_proxy_variable(name)}}}", harness).items()]
+            connection, f"${{{_key_variable(name)}}}", harness).items()]
     if is_dsh:
         service = compose["services"][name]
         service["environment"] += [
@@ -578,7 +564,7 @@ def scaffold_internal_mind(
             # code is root's.
             f"DSH_SPAWN_DIR={own}/data",
             # What its capture hook classifies with, as its own proxy client.
-            *([f"MIND_PROXY_KEY=${{{_proxy_variable(name)}}}"] if not connection else []),
+            *([f"MIND_PROXY_KEY=${{{_key_variable(name)}}}"] if not connection else []),
             "HIVE_CLASSIFIER_MODEL=${HIVE_CLASSIFIER_MODEL:-}",
         ]
         # The harness itself, read-only: a mind must not rewrite the tree it

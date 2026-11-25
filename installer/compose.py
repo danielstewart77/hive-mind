@@ -123,6 +123,43 @@ def token_var(service: str, holder: str) -> str:
     return f"{service}_TOKEN_" + holder.upper().replace("-", "_")
 
 
+#: The proxy key the hive's own services (lucent's embeddings and classifier,
+#: the console, the tools' model calls) present. Theirs alone: the mind's key
+#: opens the gateway, the memory store and the tools as that mind, so a service
+#: holding it would hold the mind's identity.
+SERVICE_PROXY_KEY = "SERVICE_PROXY_KEY"
+#: The proxy client that key belongs to.
+SERVICE_PROXY_CLIENT = "hive-services"
+
+
+def mind_key_var(mind: str) -> str:
+    """Where `.env` keeps a mind's one key (the console's rule: core/mind_key)."""
+    return "MIND_KEY_" + mind.upper().replace("-", "_")
+
+
+def proactive_var(mind: str) -> str:
+    """The credential a mind's own bots present to collect its proactive
+    messages. Theirs alone: a bot given the mind's key would hold the mind's
+    inference key."""
+    return "PROACTIVE_TOKEN_" + mind.upper().replace("-", "_")
+
+
+def on_one_key(home: Home, answers: dict) -> bool:
+    """Whether the installed mind is run on its one key.
+
+    A fresh install is. An install that already holds the mind's per-service
+    values (made before the one key) keeps running on them: its gateway and
+    memory-store rows carry those values, and switching the mind to another
+    value on a rerun would leave it presenting one nothing accepts. It moves
+    when its key is moved, and the old values are retired after.
+    """
+    mind = answers.get("mind_name")
+    if not mind:
+        return True
+    from installer import secrets_store
+    return not secrets_store.current(home).get(token_var("COMMS", mind))
+
+
 def service_holders(answers: dict) -> dict[str, list[str]]:
     """{"comms": [...], "lucent": [...]}: the service holders this install mints."""
     pieces = plan.installed(answers)
@@ -132,8 +169,9 @@ def service_holders(answers: dict) -> dict[str, list[str]]:
     return {"comms": comms, "lucent": lucent}
 
 
-def secret_names(answers: dict) -> list[str]:
-    """Every value the installer generates for this selection."""
+def secret_names(answers: dict, one_key: bool = True) -> list[str]:
+    """Every value the installer generates for this selection. The mind's own
+    key is not one of them: the proxy issues it (or the operator typed it)."""
     names = list(BASE_SECRETS)
     if plan.runs_here(answers, "postgres"):
         names.append("HIVE_PG_PASSWORD")
@@ -145,7 +183,10 @@ def secret_names(answers: dict) -> list[str]:
     names += [token_var("COMMS", h) for h in holders["comms"]]
     names += [token_var("LUCENT", h) for h in holders["lucent"]]
     mind = answers.get("mind_name")
-    if mind:
+    if mind and one_key:
+        # Its bots' own credential; the mind's service values are its one key.
+        names.append(proactive_var(mind))
+    elif mind:
         names += [token_var("COMMS", mind), token_var("LUCENT", mind)]
     return names
 
@@ -257,7 +298,7 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
         given("telegram_token")
     if "discord" in pieces:
         given("discord_token")
-    for name in ("MIND_PROXY_KEY", "HIVE_TOOLS_TOKEN"):
+    for name in ("MIND_PROXY_KEY", SERVICE_PROXY_KEY, "HIVE_TOOLS_TOKEN"):
         if current.get(name) and name not in values:
             values[name] = current[name]
     if plan.runs_here(answers, "proxy"):
@@ -265,6 +306,23 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     values.update({k: v for k, v in (extra or {}).items() if v is not None})
     values["HIVE_DATABASE_URL"] = database_url(answers, values)
     values.setdefault("MIND_PROXY_KEY", "")
+    # The services' own proxy key. Until one is minted for them (proxy step),
+    # or on an existing proxy where the operator gave one key, they present
+    # what they always have: the install's one proxy key.
+    if not plan.runs_here(answers, "proxy"):
+        # One operator-given key on a proxy the installer does not run: the
+        # services cannot be given a separate one, and say so on the page.
+        values[SERVICE_PROXY_KEY] = values["MIND_PROXY_KEY"]
+    else:
+        values.setdefault(SERVICE_PROXY_KEY, values["MIND_PROXY_KEY"])
+    mind = answers.get("mind_name")
+    if mind and values["MIND_PROXY_KEY"] and on_one_key(home, answers):
+        # The mind's one key is the key the proxy issued it (or the operator
+        # typed): the compose file reads it under its own name.
+        values[mind_key_var(mind)] = values["MIND_PROXY_KEY"]
+    elif mind and on_one_key(home, answers):
+        values.setdefault(mind_key_var(mind), "")
+        values.setdefault(proactive_var(mind), "")
     values.setdefault(EMBEDDING_MODEL_VAR, "")
     values.setdefault(CLASSIFIER_MODEL_VAR, "")
     values.setdefault("HIVE_TOOLS_TOKEN", "")
@@ -375,7 +433,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     lucent_env = {
         "LUCENT_API_PORT": "8424", "LUCENT_URL_SELF": "http://127.0.0.1:8424",
         "HIVE_DATABASE_URL": dsn, "INFERENCE_PROXY_URL": proxy_url(answers),
-        "INFERENCE_PROXY_KEY": env_ref("MIND_PROXY_KEY"),
+        "INFERENCE_PROXY_KEY": env_ref(SERVICE_PROXY_KEY),
         "LUCENT_EMBEDDING_MODEL": env_ref(EMBEDDING_MODEL_VAR),
         "LUCENT_CLASSIFIER_MODEL": env_ref(CLASSIFIER_MODEL_VAR),
         "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN"),
@@ -429,7 +487,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                # key: OLLAMA_BASE_URL / OLLAMA_URL are where it points a mind
                # it scaffolds for local models.
                "INFERENCE_PROXY_URL": proxy_url(answers),
-               "INFERENCE_PROXY_KEY": env_ref("MIND_PROXY_KEY"),
+               "INFERENCE_PROXY_KEY": env_ref(SERVICE_PROXY_KEY),
                "OLLAMA_BASE_URL": proxy_url(answers), "OLLAMA_URL": proxy_url(answers),
                "HOST_UID": str(host.uid), "HOST_GID": str(host.gid),
                # Where the hive's compose project is, for the console's
@@ -507,7 +565,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             # The classifier the hive already checked through the proxy, with
             # the hive's one proxy key, as lucent and the capture hook use.
             **tools.environment(env_ref, dsn_ref=dsn, proxy_url=proxy_url(answers),
-                                key_ref=env_ref("MIND_PROXY_KEY"),
+                                key_ref=env_ref(SERVICE_PROXY_KEY),
                                 model_ref=env_ref(CLASSIFIER_MODEL_VAR)),
             "COMMS_URL": COMMS_URL,
             "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", tools.SERVICE)),
@@ -520,6 +578,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                           bind(Path(tools.DOCKER_SOCKET), tools.DOCKER_SOCKET, kind=host_paths),
                           bind(home.root, str(home.root))]
 
+    one_key = on_one_key(home, answers)
+    mind_value = env_ref(mind_key_var(mind)) if one_key else env_ref("MIND_PROXY_KEY")
     mind_dir = home.mind(mind)
     app_mind = f"{APP}/minds/{mind}"
     mountpoints.append(repo("hive-mind") / "minds" / mind)
@@ -529,20 +589,26 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "CODEX_HOME": f"{app_mind}/.codex", "KEY_RING": f"{app_mind}/data/keyring",
         "PYTHONNOUSERSITE": "1", "PYTHONPATH": f"{APP}/vendor",
         "COMMS_URL": COMMS_URL, "HIVEMIND_BROKER_URL": COMMS_URL,
-        "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", mind)),
-        "HIVEMIND_BROKER_TOKEN": env_ref(token_var("COMMS", mind)),
+        "COMMS_BEARER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("COMMS", mind)),
+        "HIVEMIND_BROKER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("COMMS", mind)),
         "COMMS_ADMIN_BEARER_TOKEN": env_ref("COMMS_ADMIN_BEARER_TOKEN"),
         "LUCENT_URL": LUCENT_URL, "LUCENT_URL_SELF": LUCENT_URL,
-        "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", mind)),
+        "LUCENT_BEARER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("LUCENT", mind)),
         "SPECS_DIR": f"{APP}/specs/data-classes",
         "AUTO_REMEMBER_LOG_DIR": f"{app_mind}/data/auto-remember",
         # The capture hook classifies through the proxy with the mind's key.
         CLASSIFIER_MODEL_VAR: env_ref(CLASSIFIER_MODEL_VAR),
         **dsh.mind_environment(app_mind_dir=app_mind, proxy_url=proxy_url(answers),
-                               key_ref=env_ref("MIND_PROXY_KEY")),
+                               key_ref=mind_value),
     }
+    if one_key:
+        # One value, named once for what reads it by its own name and once
+        # (`MIND_KEY`) for what reads the one key (core/mind_key.py).
+        mind_env["MIND_KEY"] = mind_value
+        mind_env["MIND_PROACTIVE_TOKEN"] = env_ref(proactive_var(mind))
     if "tools" in pieces:
-        mind_env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
+        mind_env.update({"HIVE_TOOLS_URL": tools.URL,
+                         "HIVE_TOOLS_TOKEN": mind_value if one_key else env_ref("HIVE_TOOLS_TOKEN")})
     svc = base(mind, image="hive/mind:local", needs=(COMMS, LUCENT), build=mind_build, env=mind_env)
     svc["container_name"] = f"hive-mind-{mind}"
     svc["working_dir"] = APP
@@ -563,7 +629,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", holder)),
                var: env_ref(var), "PYTHONNOUSERSITE": "1",
                "MIND_BACKEND_URL": f"http://{mind}:8420",
-               "MIND_PROACTIVE_TOKEN": env_ref(token_var("COMMS", mind))}
+               "MIND_PROACTIVE_TOKEN": env_ref(proactive_var(mind) if one_key
+                                               else token_var("COMMS", mind))}
         if voice:
             env.update({"VOICE_SERVER_URL": voice, "VOICE_SERVER_URL_KOKORO": voice})
         needs = (COMMS, mind) + ((VOICE,) if plan.mode(answers, "voice") == plan.HERE else ())

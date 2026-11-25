@@ -67,6 +67,28 @@ AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/${MIND_NAME}/data/auto-remember
 
 The bearer tokens come from the host-level `.env` and are interpolated by Docker Compose at container start.
 
+### One key per mind
+
+A mind has one key, the value its owner pasted when it was made, and presents
+it to every hive service as that mind: the inference proxy, the gateway, the
+memory store and the tools. Its compose fragment names it once:
+
+```
+MIND_KEY=${MIND_KEY_<NAME>}              # <NAME> is the mind's name, upper case, hyphens as underscores
+MIND_PROACTIVE_TOKEN=${PROACTIVE_TOKEN_<NAME>}  # its own bots' credential, never the key
+```
+
+At start `minds.mind_server` calls `core.mind_key.apply_environment`, which sets
+`COMMS_BEARER_TOKEN`, `HIVEMIND_BROKER_TOKEN`, `LUCENT_BEARER_TOKEN`,
+`HIVE_TOOLS_TOKEN`, `MIND_PROXY_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`
+and `DSH_API_KEY` from it, so the harness binaries and the per-mind hook copies
+(which read those names) are unchanged. A mind started without `MIND_KEY` keeps
+the per-service variables above: that is the transition, until a mind's key is
+moved and the old values are retired. A `runtime.yaml` `env:` block is not where
+a key lives; with `MIND_KEY` set, any key-bearing name in it is ignored. To
+replace a mind's key, paste the new one on the mind's page and recreate the
+mind: the file is read at start.
+
 Surfaces (Telegram, Discord, web) reach a mind's backend through
 `hive-comms` rather than the mind container directly:
 `HIVE_MIND_SERVER_URL=http://hive-comms:8424`. `comms` is registered as

@@ -16,6 +16,8 @@ External integrations (Gmail, Calendar, browser, Docker ops, HITL) live outside 
 
 All endpoints require `Authorization: Bearer <token>`.
 
+A mind presents its own key (`MIND_KEY`) to the tools, not this shared token; the shared token is what a person-run script uses.
+
 Token is stored in keyring: `python3 -m keyring get hive-mind "HIVE_TOOLS_TOKEN"`
 
 In skills:

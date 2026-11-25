@@ -54,9 +54,16 @@ def load(root, operation_id):
 
 
 def _variables(old, new):
-    return {f'{prefix}_TOKEN_{old.replace("-", "_").upper()}':
-            f'{prefix}_TOKEN_{new.replace("-", "_").upper()}'
-            for prefix in ('COMMS', 'LUCENT', 'PROXY', 'TOOLS')}
+    """Every variable a mind's compose names by the mind: its one key, the
+    bot's own credential, the older per-service spellings and the
+    `<NAME>_PROXY_KEY` one some hand-kept minds use."""
+    stem_old, stem_new = old.replace('-', '_').upper(), new.replace('-', '_').upper()
+    names = {f'{prefix}_TOKEN_{stem_old}': f'{prefix}_TOKEN_{stem_new}'
+             for prefix in ('COMMS', 'LUCENT', 'PROXY', 'TOOLS')}
+    names[f'MIND_KEY_{stem_old}'] = f'MIND_KEY_{stem_new}'
+    names[f'PROACTIVE_TOKEN_{stem_old}'] = f'PROACTIVE_TOKEN_{stem_new}'
+    names[f'{stem_old}_PROXY_KEY'] = f'{stem_new}_PROXY_KEY'
+    return names
 
 
 def reserve(root, operation_id, mind_id, old, new, caller):

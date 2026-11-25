@@ -352,7 +352,7 @@ def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
 
     assert _create(client, harness=harness, provider=provider).status_code == 200
 
-    own = holder_credentials.variable_name(holder_credentials.SERVICES["proxy"], "atlas")
+    own = holder_credentials.one_key_variable("atlas")
     compose = yaml.safe_load(
         (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text())
     environment = dict(
@@ -444,8 +444,7 @@ def test_a_mind_made_from_the_console_is_not_locked_and_its_settings_card_reache
     environment = dict(item.split("=", 1) for item in service["environment"])
     assert "COMMS_ADMIN_BEARER_TOKEN" not in environment
     issued = credentials_data._read_env_value(
-        client.env_file,
-        holder_credentials.variable_name(holder_credentials.SERVICES["comms"], "atlas"))
+        client.env_file, holder_credentials.one_key_variable("atlas"))
     assert issued and issued != os.environ["COMMS_ADMIN_BEARER_TOKEN"]
 
     registry = [
@@ -831,9 +830,8 @@ def test_on_a_hive_laid_out_as_the_installer_lays_it_out_a_new_mind_gets_its_key
     response = _create(client, harness="dsh", provider="anthropic")
 
     assert response.status_code == 200, response.text
-    for service in holder_credentials.SERVICES.values():
-        key = holder_credentials.variable_name(service, "atlas")
-        assert credentials_data._read_env_value(client.env_file, key), key
+    assert credentials_data._read_env_value(
+        client.env_file, holder_credentials.one_key_variable("atlas"))
     assert yaml.safe_load(stack.read_text()) == {
         "include": [{"path": "atlas/container/compose.yaml"}]}
     registered = [r["json"] for r in client.services.received

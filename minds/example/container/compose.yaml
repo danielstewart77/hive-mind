@@ -15,6 +15,13 @@ services:
       - HIVE_PROJECT_DIR=/usr/src/app
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
       - COMMS_URL=http://hive-comms:8424
+      # This mind's one key, the value its owner pasted when it was made. The
+      # gateway, the memory store, the tools and the inference proxy each
+      # accept it as this mind; the mind sets every per-service name its
+      # harnesses and hooks read from it. Left empty the mind is started on
+      # the per-service values it had before (the transition); set it in the
+      # install's .env as MIND_KEY_EXAMPLE.
+      - MIND_KEY=${MIND_KEY_EXAMPLE:-}
       # A mind re-registers from its own runtime.yaml on every start, and
       # POST /broker/minds is an admin route.
       - COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}

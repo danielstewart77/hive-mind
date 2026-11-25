@@ -48,7 +48,7 @@ def main() -> int:
         return fail("empty memory content", 2)
 
     load_env()
-    token = os.environ.get("LUCENT_BEARER_TOKEN", "")
+    token = os.environ.get("MIND_KEY") or os.environ.get("LUCENT_BEARER_TOKEN", "")
     mind_id = os.environ.get("MIND_ID", "")
     base_url = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8425")
     if not token or not mind_id:

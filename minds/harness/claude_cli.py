@@ -29,6 +29,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from core import mind_key
 from minds.proactive import BUFFER as proactive_buffer, idle_drain
 from minds.pty_attach import (
     TmuxTerminals,
@@ -98,7 +99,7 @@ RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
 NAME: str = RUNTIME["name"]
 MIND_ID: str = RUNTIME["mind_id"]
 PROVIDER: str = RUNTIME["provider"]
-RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
+RUNTIME_ENV: dict[str, Any] = mind_key.runtime_env(RUNTIME.get("env", {}) or {})
 
 NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
@@ -407,7 +408,7 @@ def _role_guard(env: dict[str, str], timeout: float = 10.0) -> tuple[list[str], 
     """
     return role_guard.prepare_claude(
         CONFIG_DIR, env.get("MIND_ID") or MIND_ID,
-        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
+        env.get("COMMS_URL", ""), mind_key.resolve(env, "COMMS_BEARER_TOKEN"), timeout=timeout,
         # Story 10.18.15: the hooks and skills its roles name arrive here.
         on_grants=lambda grants: role_files.provision("claude", CONFIG_DIR, grants, log=log,
             deadline=min(role_files.DEADLINE, timeout / 3)))

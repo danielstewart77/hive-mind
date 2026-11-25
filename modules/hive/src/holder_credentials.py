@@ -252,6 +252,24 @@ def variable_name(service: Service, holder: str) -> str:
     return f"{service.prefix}_TOKEN_{stem}"
 
 
+#: A mind created now holds one key: one line in the shared env file, which its
+#: compose names as `MIND_KEY` inside the container (core/mind_key.py). A mind
+#: made before still has its per-service lines, and keeps reading them until
+#: its key is moved; both are looked for, the one key first.
+ONE_KEY_PREFIX = "MIND_KEY_"
+
+
+ONE_KEY_REFUSAL = (
+    "This mind holds one key for every service. A new key is pasted on the "
+    "mind's own page, so that all of them take the same one; it cannot be "
+    "replaced one service at a time here")
+
+
+def one_key_variable(holder: str) -> str:
+    """The variable a shared `.env` holds this mind's one key under."""
+    return ONE_KEY_PREFIX + holder.strip().lower().replace("-", "_").upper()
+
+
 def _loaded_value(location: Location) -> str | None:
     """The value the holder's own process loads, not the file's spelling of it.
 
@@ -291,6 +309,23 @@ def locate(service: Service, holder: str) -> Location | None:
     this container was never given are one case, which is what they are.
     """
     own = service.own_files.get(holder.strip().lower())
+    one = one_key_variable(holder)
+    held: list[Location] = []
+    for label in ENV_FILES:
+        # A mind that holds one key reads that, whatever the service: the
+        # per-service lines are what a mind not yet moved still has.
+        try:
+            if credentials_data._read_env_value(ENV_FILES[label], one) is not None:
+                held.append(Location(label, one))
+        except Unreadable as exc:
+            raise Unreadable(str(exc)) from exc
+    if len(held) > 1:
+        raise Ambiguous(
+            f"{', '.join(location.file for location in held)} each name "
+            f"{one}, so which one {holder!r} reads cannot be told from here"
+        )
+    if held:
+        return held[0]
     key = variable_name(service, holder)
     found: list[Location] = []
     for label in ENV_FILES:
@@ -455,6 +490,12 @@ async def mint(
     if location is None:
         location = locate(service, holder)
     await _require_managed_proxy(service, holder)
+    if value is None and location is not None and location.env_key.startswith(ONE_KEY_PREFIX):
+        # One line is every service's value for this mind. A fresh value
+        # written to it and sent to one service leaves the others holding a
+        # key nothing now matches. Replacing a mind's key is done from the
+        # mind's own page, which gives every service the same new one.
+        raise MintRefused(ONE_KEY_REFUSAL)
     new_value = value if value is not None else secrets.token_urlsafe(32)
 
     async with _ROTATION_LOCK:
@@ -601,7 +642,7 @@ async def rotate(service: Service, holder: str) -> dict[str, Any]:
 
 
 def _proxy_variables() -> list[str]:
-    """Holders a `PROXY_TOKEN_<NAME>` in the shared mind file is for."""
+    """Holders a `MIND_KEY_<NAME>` or `PROXY_TOKEN_<NAME>` in the shared mind file is for."""
     path = ENV_FILES.get(MIND_ENV_LABEL)
     if path is None:
         return []
@@ -609,7 +650,7 @@ def _proxy_variables() -> list[str]:
         text = path.read_text()
     except OSError:
         return []
-    found = re.findall(r"(?m)^PROXY_TOKEN_([A-Z0-9_]+)=", text)
+    found = re.findall(r"(?m)^(?:PROXY_TOKEN|MIND_KEY)_([A-Z0-9_]+)=", text)
     # A mind name has hyphens where its variable has underscores.
     return [stem.lower().replace("_", "-") for stem in found]
 
@@ -644,6 +685,8 @@ async def holder_rows(service: Service) -> list[dict[str, Any]]:
             reason = f"a file that may hold this holder's value could not be read: {exc}"
         except Ambiguous as exc:
             reason = str(exc)
+        if location is not None and location.env_key.startswith(ONE_KEY_PREFIX):
+            reason = ONE_KEY_REFUSAL
         rows.append(
             {
                 "service": service.key,
@@ -657,7 +700,7 @@ async def holder_rows(service: Service) -> list[dict[str, Any]]:
                 "path": str(location.path) if location else None,
                 "env_key": location.env_key if location else None,
                 "restart_target": location.restart_target if location else None,
-                "rotatable": location is not None,
+                "rotatable": location is not None and reason is None,
                 "unrotatable_reason": reason,
             }
         )
@@ -739,7 +782,7 @@ MIN_KEY_LENGTH = 8
 
 _KEY_VARIABLE = re.compile(
     r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+|[A-Z0-9_]*_PROXY_KEY|MIND_PROXY_KEY"
-    r"|PROXY_CREDENTIAL_ADMIN_KEY)\s*=")
+    r"|MIND_KEY_[A-Z0-9_]+|PROXY_CREDENTIAL_ADMIN_KEY)\s*=")
 
 
 def _mind_runtime_files() -> list[Path]:
@@ -754,14 +797,14 @@ def _mind_runtime_files() -> list[Path]:
 def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
     """Every place on this machine a mind's proxy key is kept that holds
     `value`, by name and never by content: the variables of every env file
-    this console reads (`PROXY_TOKEN_<NAME>`, `<NAME>_PROXY_KEY`,
-    `MIND_PROXY_KEY`) and the `env` of every mind's runtime.yaml.
+    this console reads (`MIND_KEY_<NAME>`, `PROXY_TOKEN_<NAME>`,
+    `<NAME>_PROXY_KEY`, `MIND_PROXY_KEY`) and the `env` of every mind's runtime.yaml.
 
     `own` is the mind the value is being given to; its own places are not a
     clash. Used by creation here and by moving existing minds, so the two
     agree on what "held by another mind" means.
     """
-    mine = variable_name(SERVICES["proxy"], own) if own else None
+    mine = {variable_name(SERVICES["proxy"], own), one_key_variable(own)} if own else set()
     found: list[str] = []
     for label, path in ENV_FILES.items():
         try:
@@ -771,7 +814,7 @@ def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
         except Exception:  # noqa: BLE001 - an unreadable file is reported below
             raise Unreadable(f"{path}") from None
         for variable in _KEY_VARIABLE.findall(text):
-            if variable == mine:
+            if variable in mine:
                 continue
             existing = _loaded_value(Location(label, variable))
             if existing and secrets.compare_digest(existing, value):
@@ -801,8 +844,9 @@ async def provision_mind(
     The person pasted the key; the hive invents nothing. The gateway, the
     memory store and the tools are each made to accept exactly that value as
     this mind, and
-    it is written to the three variables the mind's generated compose file
-    reads. The proxy is sent nothing: the key is already its client's.
+    it is written once, to the one variable the mind's generated compose file
+    reads (`MIND_KEY_<NAME>`). The proxy is sent nothing: the key is already
+    its client's.
 
     Role and provenance are stated, never inferred. A mind is minted before it
     has a broker row, and comms types a holder it cannot find as a `person`;
@@ -827,7 +871,7 @@ async def provision_mind(
         if service.key == "tools" and not service.configured():
             continue
         try:
-            key = variable_name(service, name)
+            key = one_key_variable(name)
             if MIND_ENV_LABEL not in ENV_FILES:
                 raise MintRefused(
                     f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
@@ -910,10 +954,19 @@ async def validate_mind_proxy_key(
     return value, None
 
 
+def name_has_old_proxy_line(path: Path, name: str) -> bool:
+    return credentials_data._read_env_value(
+        path, variable_name(SERVICES["proxy"], name)) is not None
+
+
 async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, Any]:
     """Persist an already verified key without minting or rotating it upstream."""
-    key = variable_name(SERVICES["proxy"], name)
     path = ENV_FILES[MIND_ENV_LABEL]
+    # A mind that holds its one key keeps it on that line; one made before
+    # still has its own proxy line, and the key goes there until it is moved.
+    key = one_key_variable(name)
+    if credentials_data._read_env_value(path, key) is None and name_has_old_proxy_line(path, name):
+        key = variable_name(SERVICES["proxy"], name)
     async with _ROTATION_LOCK:
         with credentials_data._WRITE_LOCK:
             _ensure_key(path, key)
@@ -977,7 +1030,7 @@ async def unprovision_mind(name: str) -> list[str]:
     failures: list[str] = []
     holder = name.strip().lower()
     for service in SERVICES.values():
-        key = variable_name(service, holder)
+        keys = (one_key_variable(holder), variable_name(service, holder))
         try:
             # A service this console holds no admin credential for is one it
             # cannot have issued anything at: the value there, if any, was
@@ -1014,12 +1067,12 @@ async def unprovision_mind(name: str) -> list[str]:
             with credentials_data._WRITE_LOCK:
                 text = credentials_data._read_text(path)
                 kept = [line for line in text.splitlines(keepends=True)
-                        if not line.startswith(f"{key}=")]
+                        if not line.startswith(tuple(f"{key}=" for key in keys))]
                 if len(kept) != len(text.splitlines(keepends=True)):
                     credentials_data._write_file_in_place(
-                        path, "".join(kept), MIND_ENV_LABEL, key, text)
+                        path, "".join(kept), MIND_ENV_LABEL, keys[0], text)
         except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
-            failures.append(f"the line {key} is still in {path} ({exc})")
+            failures.append(f"the line {keys[0]} is still in {path} ({exc})")
     return failures
 
 

@@ -35,6 +35,7 @@ import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from core import mind_key
 from core.hive_logging import log_event
 from minds.rotation_policy import read_policy
 from minds.runtime_api import authorize_gateway, load_runtime
@@ -46,7 +47,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=6)
 # ANTHROPIC_BASE_URL at all — it carries its provider in CODEX_HOME's
 # config.toml, which is not readable as an environment variable.
 _BASE_URL_VARS = ("INFERENCE_PROXY_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL")
-_KEY_VARS = ("MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
+_KEY_VARS = ("MIND_KEY", "MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
 
 #: One listing, filtered by the proxy to what the named harness can send:
 #: claude gets Anthropic and Ollama, codex gets OpenAI and Ollama, dsh gets
@@ -93,7 +94,7 @@ def _mind_env(path: Path) -> dict[str, str]:
     """
     merged: dict[str, str] = {}
     try:
-        declared = load_runtime(path).get("env") or {}
+        declared = mind_key.runtime_env(load_runtime(path).get("env") or {})
         if isinstance(declared, dict):
             merged.update({str(k): str(v) for k, v in declared.items()})
     except Exception:

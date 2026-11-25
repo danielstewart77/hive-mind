@@ -63,29 +63,39 @@ def log(name: str, message: str) -> None:
         pass
 
 
+def _one_key(legacy: str) -> str:
+    """The mind's one key (``MIND_KEY``) if it was started with one, else the
+    per-service variable it was started with before. Kept to the standard
+    library: this file is copied into the mind's folder and run on its own, so
+    it does not import ``core.mind_key``, whose rule it repeats."""
+    return (os.environ.get("MIND_KEY") or os.environ.get(legacy) or "").strip()
+
+
 def comms() -> tuple[str, str]:
     """The gateway's address and this mind's bearer for it."""
     return (os.environ.get("COMMS_URL", "").rstrip("/"),
-            os.environ.get("COMMS_BEARER_TOKEN", ""))
+            _one_key("COMMS_BEARER_TOKEN"))
 
 
 def lucent() -> tuple[str, str]:
     """Memory's address and this mind's bearer for it."""
     url = os.environ.get("LUCENT_URL_SELF") or os.environ.get("LUCENT_URL") or ""
-    return url.rstrip("/"), os.environ.get("LUCENT_BEARER_TOKEN", "")
+    return url.rstrip("/"), _one_key("LUCENT_BEARER_TOKEN")
 
 
 def proxy() -> tuple[str, str]:
     """The inference proxy's root and this mind's key for it: the one key.
 
-    ``INFERENCE_PROXY_URL`` / ``MIND_PROXY_KEY`` as the installer sets them,
-    else the dsh variables naming the same proxy and key.
+    ``INFERENCE_PROXY_URL`` with the mind's one key (``MIND_KEY``, else
+    ``MIND_PROXY_KEY`` as the installer sets it), else the dsh variables naming
+    the same proxy and key.
     """
     url = os.environ.get("INFERENCE_PROXY_URL") or os.environ.get("DSH_PROXY_BASE_URL") or ""
     url = url.strip().rstrip("/")
     if url.endswith("/v1"):
         url = url[: -len("/v1")]
-    key = os.environ.get("MIND_PROXY_KEY") or os.environ.get("DSH_API_KEY") or ""
+    key = (os.environ.get("MIND_KEY") or os.environ.get("MIND_PROXY_KEY")
+           or os.environ.get("DSH_API_KEY") or "")
     return url, key.strip()
 
 

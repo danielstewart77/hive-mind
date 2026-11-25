@@ -169,9 +169,12 @@ def make_proactive_router(buffer: list[dict], token: str | None) -> APIRouter:
     """Return a FastAPI router exposing ``GET /proactive``.
 
     The endpoint drains ``buffer`` (pop-all) and returns the items as JSON. It
-    is protected with ``token``, which is this mind's own credential — the
-    surface is handed the same value through ``MIND_PROACTIVE_TOKEN`` and
-    presents it here. It used to be described as "the token the backend
+    is protected with ``token``, which is the credential the mind's own bot
+    presents here: the bot is handed it as ``MIND_PROACTIVE_TOKEN`` and the mind
+    reads the same name. It is the bot's own value and never the mind's one key
+    (``MIND_KEY``), which would make the bot a holder of the mind's inference
+    key; only a mind given no bot credential yet falls back to what it was
+    started with. It used to be described as "the token the backend
     already trusts", meaning the one gateway token every caller in the stack
     shared; once each holder got its own, a bot presenting the gateway token
     it holds was refused on every poll. When ``token`` is falsy the endpoint

@@ -107,7 +107,7 @@ def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     response = client.post("/api/minds", json=body(KEY, harness, provider))
     assert response.status_code == 200, response.text
     assert KEY not in response.text and KEY not in caplog.text
-    assert env.read_text().split("PROXY_TOKEN_PASTED_KEY_FIXTURE=", 1)[1].splitlines()[0] == KEY
+    assert env.read_text().split("MIND_KEY_PASTED_KEY_FIXTURE=", 1)[1].splitlines()[0] == KEY
     assert state["proxy_requests"][0].headers["authorization"] == f"Bearer {KEY}"
     parsed = subprocess.run(
         ["docker", "compose", "--env-file", str(env), "-f", str(stack), "config", "--format", "json"],
@@ -119,6 +119,10 @@ def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     assert runtime_env["ANTHROPIC_AUTH_TOKEN"] == KEY
     assert runtime_env["INFERENCE_PROXY_URL"] == "http://proxy.invalid:8899"
     assert runtime_env["DSH_API_KEY"] == KEY
+    # One key: the gateway, the memory store and the tools values are it too.
+    for name in ("MIND_KEY", "COMMS_BEARER_TOKEN", "HIVEMIND_BROKER_TOKEN",
+                 "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN"):
+        assert runtime_env[name] == KEY, name
     if harness == "dsh":
         import yaml
 

@@ -256,7 +256,8 @@ def render_config(ctx: Ctx):
             f"install folder has no password for it. Put the earlier install's .env back in "
             f"{home.root}, or remove the volume (docker volume rm {compose.PG_VOLUME}) if its "
             "data is not wanted, then run again")
-    generated = secrets_store.resolve(home, compose.secret_names(answers))
+    generated = secrets_store.resolve(home, compose.secret_names(
+        answers, compose.on_one_key(home, answers)))
     values = compose.env_values(home, answers, generated, current, typed=ctx.typed)
     # The web proxy for a console-made mind's image build, as this host has
     # it now: one named on an earlier run and since removed must not linger.
@@ -469,6 +470,16 @@ def proxy_setup(ctx: Ctx):
     elif not ctx.env().get("MIND_PROXY_KEY"):
         raise StepFailed(f"the proxy already has a key for {a['mind_name']!r} that this install "
                          f"did not record; revoke it on {_proxy_admin(ctx)} and run again")
+    if compose.on_one_key(ctx.home, a):
+        # The mind's one key is that key, read under the name its compose
+        # file names; every service then accepts it as this mind.
+        ctx.set_env(**{compose.mind_key_var(a["mind_name"]): ctx.env()["MIND_PROXY_KEY"]})
+    # The hive's own services present a proxy key of their own, so none of
+    # them holds a value that opens the gateway or the tools as the mind.
+    services_key = proxy_adapter.mint_key(ctx.sh, ctx.compose, kind="app",
+                                          client=compose.SERVICE_PROXY_CLIENT)
+    if services_key:
+        ctx.set_env(**{compose.SERVICE_PROXY_KEY: services_key})
     # The key the console issues each new mind's own key with. Minted once;
     # a rerun finds the client there and keeps the value this install holds.
     admin = proxy_adapter.mint_key(ctx.sh, ctx.compose, kind="app",
@@ -735,6 +746,20 @@ def mint_credentials(ctx: Ctx):
     return done
 
 
+def _register_mind_with_tools(ctx: Ctx, mind: str, key: str) -> None:
+    """The tools take the mind's one key as that mind. Asked from inside the
+    network with the tools' administrator credential, which no mind holds."""
+    admin = ctx.env().get("TOOLS_ADMIN_BEARER_TOKEN", "")
+    if not admin:
+        raise StepFailed("the install holds no tools administrator credential, so the "
+                         f"tools cannot be told {mind!r}'s key")
+    out = ctx.http("PUT", f"{tools.URL}/credentials/{mind}",
+                   headers={"Authorization": f"Bearer {admin}"},
+                   body={"token": key}, timeout=20)
+    if out.get("status") not in (200, 201):
+        raise StepFailed(f"the tools refused {mind!r}'s key (HTTP {out.get('status')})")
+
+
 # ---- 17. model --------------------------------------------------------------
 def _runtime(ctx: Ctx) -> Path:
     return ctx.home.mind(ctx.answers["mind_name"]) / "runtime.yaml"
@@ -877,10 +902,16 @@ def register_mind(ctx: Ctx):
                          "run again")
     hive_api.register_mind(ctx.comms(), mind_id=mind_id, name=name,
                            gateway_url=f"http://{name}:8420", model=a["model"], owner=admin)
+    # The mind's one key where it has one; the per-service values an install
+    # made before the one key still run on until its key is moved.
+    one = compose.on_one_key(ctx.home, a)
     for store, api in (("comms", ctx.comms()), ("lucent", ctx.lucent())):
-        hive_api.mint(api, {name: env[compose.token_var(store.upper(), name)]}, admin,
+        value = env[compose.mind_key_var(name)] if one else env[compose.token_var(store.upper(), name)]
+        hive_api.mint(api, {name: value}, admin,
                       role=hive_api.MIND, mind_id=mind_id,
                       on_minted=lambda h, s=store: _record_minted(ctx, s, [h]))
+    if one and "tools" in plan.installed(a):
+        _register_mind_with_tools(ctx, name, env[compose.mind_key_var(name)])
     return f"{name} on dsh, owned by {admin}, model {a['model']}"
 
 

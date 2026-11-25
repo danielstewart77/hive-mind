@@ -24,9 +24,9 @@ if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/specs/data-classes" ]; then
 fi
 
 LUCENT_URL="${LUCENT_URL_SELF:-http://127.0.0.1:8425}"
-LUCENT_AUTH="Authorization: Bearer ${LUCENT_BEARER_TOKEN:-}"
+LUCENT_AUTH="Authorization: Bearer ${MIND_KEY:-${LUCENT_BEARER_TOKEN:-}}"
 HIVE_TOOLS_URL="${HIVE_TOOLS_URL:-http://127.0.0.1:9421}"
-HIVE_TOOLS_TOKEN="${HIVE_TOOLS_TOKEN:-}"
+HIVE_TOOLS_TOKEN="${MIND_KEY:-${HIVE_TOOLS_TOKEN:-}}"
 SPECS_DIR="$PROJECT_DIR/specs/data-classes"
 LOG_ROOT="${AUTO_REMEMBER_LOG_DIR:-$PROJECT_DIR/data/auto-remember}"
 MIND_ID="${MIND_ID:?MIND_ID required in .env}"

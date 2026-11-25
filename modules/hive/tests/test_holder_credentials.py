@@ -329,7 +329,7 @@ def test_a_new_mind_with_no_pasted_key_is_refused_and_nothing_is_sent(hive, serv
         _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=None))
 
     assert service["sent"] == []
-    assert not _value(hive["shared"], "COMMS_TOKEN_QUOKKA")
+    assert not _value(hive["shared"], "MIND_KEY_QUOKKA")
 
 
 def test_one_service_refusing_still_reports_the_credential_that_landed(hive, service):
@@ -349,9 +349,9 @@ def test_one_service_refusing_still_reports_the_credential_that_landed(hive, ser
 def test_a_new_minds_variables_all_hold_the_pasted_key_in_the_shared_file(hive, service):
     _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
 
-    assert _value(hive["shared"], "COMMS_TOKEN_QUOKKA") == PASTED
-    assert _value(hive["shared"], "LUCENT_TOKEN_QUOKKA") == PASTED
-    assert _value(hive["shared"], "PROXY_TOKEN_QUOKKA") == PASTED
+    assert _value(hive["shared"], "MIND_KEY_QUOKKA") == PASTED
+    for old in ("COMMS_TOKEN_QUOKKA", "LUCENT_TOKEN_QUOKKA", "PROXY_TOKEN_QUOKKA"):
+        assert _value(hive["shared"], old) is None
     assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
 
 
@@ -390,7 +390,7 @@ def test_adding_a_variable_never_lands_on_the_last_line(hive, service):
     _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
 
     assert _value(hive["shared"], "LAST_ONE") == "matters"
-    assert _value(hive["shared"], "COMMS_TOKEN_QUOKKA")
+    assert _value(hive["shared"], "MIND_KEY_QUOKKA")
 
 
 # --- what a rotation must not be confused with ---------------------------

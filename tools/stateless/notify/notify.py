@@ -49,7 +49,7 @@ def _owner_chat_id(client=None) -> str:
         return configured
     # The credential the mind itself presents to comms, resolved the way
     # `mind_server.comms_credential` resolves it.
-    token = (os.getenv("COMMS_BEARER_TOKEN") or "").strip() or (
+    token = (os.getenv("MIND_KEY") or os.getenv("COMMS_BEARER_TOKEN") or "").strip() or (
         os.getenv("COMMS_ADMIN_BEARER_TOKEN") or "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     url = f"{base}/broker/minds/{mind_id}/surface-claim"
@@ -242,7 +242,7 @@ def _voice_server_url(voice_id: str) -> str:
         return legacy
     resolver = voice_routing.VoiceServerResolver(
         os.getenv("COMMS_URL", ""),
-        os.getenv("COMMS_BEARER_TOKEN", ""),
+        os.getenv("MIND_KEY") or os.getenv("COMMS_BEARER_TOKEN", ""),
         {
             voice_routing.CHATTERBOX: os.getenv(
                 "VOICE_SERVER_URL_CHATTERBOX", "") or stack.get("chatterbox", ""),

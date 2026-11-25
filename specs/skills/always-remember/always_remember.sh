@@ -28,7 +28,7 @@ esac
 PROJECT_DIR="${HIVE_PROJECT_DIR:-}"
 
 LUCENT_URL="${LUCENT_URL_SELF:-http://127.0.0.1:8425}"
-LUCENT_AUTH="Authorization: Bearer ${LUCENT_BEARER_TOKEN:-}"
+LUCENT_AUTH="Authorization: Bearer ${MIND_KEY:-${LUCENT_BEARER_TOKEN:-}}"
 MIND_ID="${MIND_ID:?MIND_ID required in .env}"
 
 # scope=shared writes a sentinel mind_id so bootstrap_loader unions
