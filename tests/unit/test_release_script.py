@@ -441,10 +441,12 @@ def test_a_missing_option_value_is_an_error_not_a_hang(hive):
 
 
 def test_an_origin_a_console_build_cannot_fetch_from_writes_no_release_file_and_says_so(hive):
+    (hive.minds / ".release-context").write_text("https://example.invalid/x.git#" + "a" * 40 + "\n")
     run = hive.run("to", "v1", env={"HIVE_RELEASE_CONTEXT_URL": ""})  # origin here is a local path
 
     assert run.returncode == 0, run.stderr
     assert "not an http(s) address" in run.stderr
+    # A stale file from an earlier release would send new minds to the old commit.
     assert not (hive.minds / ".release-context").exists()
     assert hive.commit() == hive.tag_commit("v1")
 

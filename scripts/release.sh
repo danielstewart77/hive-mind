@@ -212,13 +212,14 @@ case "$url" in
     mkdir -p "$minds_dir" 2>/dev/null || true
     if [ -d "$minds_dir" ]; then printf '%s#%s\n' "$url" "$target" > "$minds_dir/.release-context"
     else echo "release: cannot create $minds_dir, so the console's release file was not written" >&2; fi ;;
-  *) echo "release: origin ($url) is not an http(s) address a console build can fetch from, so the console's release file was not written; set HIVE_RELEASE_CONTEXT_URL (the checkout is on the release; only new minds built by the console are affected)" >&2 ;;
+  *) rm -f "$minds_dir/.release-context"
+     echo "release: origin ($url) is not an http(s) address a console build can fetch from, so the console's release file was not written; set HIVE_RELEASE_CONTEXT_URL (the checkout is on the release; only new minds built by the console are affected)" >&2 ;;
 esac
 
 echo "release: checkout is on $target ($(describe "$target")); previous recorded as $(cut -d' ' -f1 "$rel/previous" 2>/dev/null | cut -c1-9)"
 
 # ---- rebuild ---------------------------------------------------------------
-fail=${fail_ctx:-0}
+fail=0
 build_stack() {  # build_stack <label> <docker compose args...>
   local label="$1"; shift
   echo "release: building $label"

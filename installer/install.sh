@@ -59,7 +59,7 @@ main() {
   }
 
   release_is_not_a_branch() {
-    case "$2" in origin/*|refs/*|heads/*) fail "$2 is a branch, and a release is a tag or a commit" "name a tag or a commit" ;; esac
+    case "$2" in origin/*|refs/heads/*|refs/remotes/*) fail "$2 is a branch, and a release is a tag or a commit" "name a tag or a commit" ;; esac
     git -C "$1" show-ref --verify -q "refs/remotes/origin/$2" 2>/dev/null \
       && fail "$2 is a branch, and a release is a tag or a commit" "name a tag (git ls-remote --tags $HIVE_REPO_BASE/hive-mind.git) or a commit"
     return 0

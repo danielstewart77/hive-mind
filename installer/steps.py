@@ -174,7 +174,7 @@ def clone_repos(ctx: Ctx):
         if release:
             # A named release: a tag or a commit, never a branch.
             ctx.sh.run(["git", "-C", str(path), "fetch", "--quiet", "--tags", "origin"], timeout=300)
-            if release.startswith(("origin/", "refs/", "heads/")):
+            if release.startswith(("origin/", "refs/heads/", "refs/remotes/")):
                 raise StepFailed(f"{release} is a branch; a release is a tag or a commit")
             if ctx.sh.run(["git", "-C", str(path), "show-ref", "--verify", "--quiet",
                            f"refs/remotes/origin/{release}"], check=False).returncode == 0:
@@ -196,7 +196,7 @@ def clone_repos(ctx: Ctx):
             raise StepFailed(f"the clone of {name} has no HEAD")
         release = os.environ.get("HIVE_RELEASE", "").strip()
         if release:
-            if release.startswith(("origin/", "refs/", "heads/")):
+            if release.startswith(("origin/", "refs/heads/", "refs/remotes/")):
                 raise StepFailed(f"{release} is a branch; a release is a tag or a commit")
             if ctx.sh.run(["git", "-C", str(partial), "show-ref", "--verify", "--quiet",
                            f"refs/remotes/origin/{release}"], check=False).returncode == 0:
