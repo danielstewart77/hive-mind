@@ -3236,6 +3236,16 @@ class SessionManager:
                                     log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
                                 return
                         else:
+                            # The stream closed with no result event: the
+                            # mind's process was stopped under the turn (an
+                            # interrupt, a kill). Say so, or a chat surface
+                            # reads the silence as a finished answer.
+                            yield {
+                                "type": "result",
+                                "subtype": "interrupted",
+                                "is_error": True,
+                                "errors": ["Turn interrupted before it finished."],
+                            }
                             return  # stream exhausted
             except aiohttp.ClientError as exc:
                 # Not taken only while the mind never answered. Once it has

@@ -33,7 +33,9 @@ from telegram.ext import (
 
 from hive_surfaces.config import config, photo_root
 from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, picker_spent, time_ago
-from hive_surfaces.gateway_client import GatewayClient
+from hive_surfaces.gateway_client import (
+    GatewayClient, TURN_INTERRUPTED, TurnOutcome, turn_marker,
+)
 from hive_surfaces import (
     effort_picker, harness_picker, hitl, model_picker, rename_prompt, session_picker,
     surface_claim, voice_routing,
@@ -492,6 +494,20 @@ async def _reply_chunked(update: Update, text: str) -> None:
 # ---------------------------------------------------------------------------
 # Streaming helper
 # ---------------------------------------------------------------------------
+async def _show_final(bubbles: list, final_chunks: list[str]) -> None:
+    # Every bubble gets its sanitized final text, and any the stream never
+    # reached is sent now. Each edit is attempted independently: one message
+    # refused for being unchanged must not cost the rest their final copy.
+    for index, piece in enumerate(final_chunks):
+        try:
+            if index < len(bubbles):
+                await bubbles[index].edit_text(piece)
+            else:
+                bubbles.append(await bubbles[-1].reply_text(piece))
+        except Exception:
+            log.debug("Final edit of bubble %s failed", index, exc_info=True)
+
+
 async def _stream_to_message(
     sent,
     user_id: int,
@@ -520,29 +536,50 @@ async def _stream_to_message(
 
     # The indicator is held by `with_typing` around the whole handler, which
     # started before this stream and outlasts it.
-    async for text_chunk in gateway.query_stream(user_id, chat_id, prompt, images=images):
-        # Concatenate without separator. Per-token deltas (when the mind has
-        # --include-partial-messages enabled) include their own whitespace;
-        # buffered assistant text already has its own paragraph breaks.
-        accumulated += text_chunk
-        now = time.monotonic()
-        if now - last_edit >= edit_interval:
-            pieces = _chunk_message(accumulated)
-            try:
-                # Earlier bubbles are finished text and are written once, so a
-                # rolled-over answer does not re-edit the whole reply each tick.
-                for index in range(len(bubbles) - 1, len(pieces) - 1):
-                    await bubbles[index].edit_text(pieces[index])
-                while len(bubbles) < len(pieces):
-                    bubbles.append(
-                        await bubbles[-1].reply_text(pieces[len(bubbles)])
-                    )
-                await bubbles[-1].edit_text(pieces[-1])
-            except Exception:
-                pass  # MessageNotModified or rate limit — skip this update
-            last_edit = now
+    outcome = TurnOutcome()
+    try:
+        async for text_chunk in gateway.query_stream(
+            user_id, chat_id, prompt, images=images, outcome=outcome,
+        ):
+            # Concatenate without separator. Per-token deltas (when the mind has
+            # --include-partial-messages enabled) include their own whitespace;
+            # buffered assistant text already has its own paragraph breaks.
+            accumulated += text_chunk
+            now = time.monotonic()
+            if now - last_edit >= edit_interval:
+                pieces = _chunk_message(accumulated)
+                try:
+                    # Earlier bubbles are finished text and are written once, so a
+                    # rolled-over answer does not re-edit the whole reply each tick.
+                    for index in range(len(bubbles) - 1, len(pieces) - 1):
+                        await bubbles[index].edit_text(pieces[index])
+                    while len(bubbles) < len(pieces):
+                        bubbles.append(
+                            await bubbles[-1].reply_text(pieces[len(bubbles)])
+                        )
+                    await bubbles[-1].edit_text(pieces[-1])
+                except Exception:
+                    pass  # MessageNotModified or rate limit — skip this update
+                last_edit = now
+    except Exception as exc:
+        # The connection broke partway: what is on screen must not stay as it
+        # was, looking like a finished answer. Mark it, then let the handler
+        # report the failure as it always has.
+        outcome.status, outcome.reason = TURN_INTERRUPTED, f"{type(exc).__name__}: {exc}"
+        await _show_final(bubbles, [_sanitize_response(c) for c in _chunk_message(
+            (accumulated + "\n\n" if accumulated else "") + turn_marker(outcome, bool(accumulated))
+        )])
+        raise
 
-    if not accumulated:
+    if not outcome.finished:
+        # Refused, failed or cut short: shown as exactly that, with the reason,
+        # after whatever text had arrived — never finalised as a whole answer
+        # and never spoken.
+        accumulated = (accumulated + "\n\n" if accumulated else "") + turn_marker(
+            outcome, bool(accumulated),
+        )
+        voice = False
+    elif not accumulated:
         # The gateway forwards mind errors as a result event, which arrives
         # via query_stream's result fallback — so an empty stream here means
         # nothing was reported at all.
@@ -552,17 +589,7 @@ async def _stream_to_message(
         )
 
     final_chunks = [_sanitize_response(c) for c in _chunk_message(accumulated)]
-    # Every bubble gets its sanitized final text, and any the stream never
-    # reached is sent now. Each edit is attempted independently: one message
-    # refused for being unchanged must not cost the rest their final copy.
-    for index, piece in enumerate(final_chunks):
-        try:
-            if index < len(bubbles):
-                await bubbles[index].edit_text(piece)
-            else:
-                bubbles.append(await bubbles[-1].reply_text(piece))
-        except Exception:
-            log.debug("Final edit of bubble %s failed", index, exc_info=True)
+    await _show_final(bubbles, final_chunks)
 
     # Send one voice message with the complete response — detached so it
     # doesn't hold the chat lock while TTS round-trips. The text response is
@@ -1700,7 +1727,10 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result = await gateway.interrupt_session(session_id)
 
-    if result.get("message") == "nothing_running":
+    refusal = result.get("error") or result.get("detail") if isinstance(result, dict) else "unexpected answer"
+    if refusal:
+        await update.message.reply_text(f"Could not interrupt: {refusal}")
+    elif result.get("message") == "nothing_running":
         await update.message.reply_text("Nothing running.")
     else:
         await update.message.reply_text("Interrupted.")

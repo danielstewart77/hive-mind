@@ -21,7 +21,9 @@ from hive_surfaces import (
     effort_picker, harness_picker, model_picker, surface_claim, token_store, voice_routing,
 )
 from hive_surfaces.config import config
-from hive_surfaces.gateway_client import GatewayClient
+from hive_surfaces.gateway_client import (
+    GatewayClient, TURN_INTERRUPTED, TurnOutcome, turn_marker,
+)
 from hive_surfaces.bot_utils import get_lock, time_ago
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
@@ -406,11 +408,16 @@ async def _stream_to_message(
     channel_id: int,
     prompt: str,
     edit_interval: float = 1.0,
+    outcome: TurnOutcome | None = None,
 ) -> str:
     """Stream a gateway response, progressively editing sent as chunks arrive.
 
-    Returns the full accumulated text.
+    Returns the full accumulated text. A turn that did not finish shows its
+    marked refusal or interruption after the text and says so in ``outcome``;
+    the caller must not speak it.
     """
+    if outcome is None:
+        outcome = TurnOutcome()
     accumulated = ""
     last_edit = 0.0
 
@@ -418,18 +425,34 @@ async def _stream_to_message(
     # refreshes the indicator while the block runs, so it keeps showing for as
     # long as the mind is working instead of lapsing after five seconds.
     async with sent.channel.typing():
-        async for text_chunk in gateway.query_stream(user_id, channel_id, prompt):
-            # Plain concatenation — the stream carries mid-word token deltas and
-            # emits its own block separators.
-            accumulated += text_chunk
-            now = time.monotonic()
-            if now - last_edit >= edit_interval:
-                preview = _chunk_message(accumulated)[0]
-                with contextlib.suppress(discord.HTTPException):
-                    await sent.edit(content=preview)
-                last_edit = now
+        try:
+            async for text_chunk in gateway.query_stream(
+                user_id, channel_id, prompt, outcome=outcome,
+            ):
+                # Plain concatenation — the stream carries mid-word token deltas and
+                # emits its own block separators.
+                accumulated += text_chunk
+                now = time.monotonic()
+                if now - last_edit >= edit_interval:
+                    preview = _chunk_message(accumulated)[0]
+                    with contextlib.suppress(discord.HTTPException):
+                        await sent.edit(content=preview)
+                    last_edit = now
+        except Exception as exc:
+            # A connection that broke partway: the text on screen must say so.
+            outcome.status, outcome.reason = TURN_INTERRUPTED, f"{type(exc).__name__}: {exc}"
+            marked = (accumulated + "\n\n" if accumulated else "") + turn_marker(
+                outcome, bool(accumulated),
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await sent.edit(content=_chunk_message(marked)[0])
+            raise
 
-    if not accumulated:
+    if not outcome.finished:
+        accumulated = (accumulated + "\n\n" if accumulated else "") + turn_marker(
+            outcome, bool(accumulated),
+        )
+    elif not accumulated:
         accumulated = (
             "ERROR: mind stream closed with no text output. "
             "Check the mind container logs for the real failure."
@@ -463,12 +486,19 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
 
     result = await gateway.server_command(user_id, channel_id, content)
 
-    if "error" in result:
+    refusal = None
+    if isinstance(result, dict):
+        refusal = result.get("error") or result.get("detail")
+        if refusal is None and "error" in result:
+            refusal = "refused"
+    else:
+        refusal = "unexpected answer from the gateway"
+    if refusal is not None:
         log_event(
             log, "surface.command.failed", level=logging.WARNING, surface="discord",
             command=cmd, user_id=user_id, client_ref=channel_id,
         )
-        return f"Error: {result['error']}"
+        return f"Error: {refusal}"
     log_event(
         log, "surface.command.completed", surface="discord", command=cmd,
         user_id=user_id, client_ref=channel_id,
@@ -717,6 +747,27 @@ async def cmd_kill(interaction: discord.Interaction, target: str):
     await interaction.followup.send(msg, ephemeral=True)
 
 
+@bot.tree.command(name="stop", description="Interrupt the running turn without ending the session")
+async def cmd_stop(interaction: discord.Interaction):
+    if not await _is_allowed_user(interaction.user.id):
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    session_id = await gateway.find_active_session(interaction.user.id, interaction.channel_id)
+    if session_id is None:
+        await interaction.followup.send("No active session.", ephemeral=True)
+        return
+    result = await gateway.interrupt_session(session_id)
+    refusal = result.get("error") or result.get("detail") if isinstance(result, dict) else "unexpected answer"
+    if refusal:
+        msg = f"Could not interrupt: {refusal}"
+    elif result.get("message") == "nothing_running":
+        msg = "Nothing running."
+    else:
+        msg = "Interrupted."
+    await interaction.followup.send(msg, ephemeral=True)
+
+
 # ---------------------------------------------------------------------------
 # /skills — list all available skills
 # ---------------------------------------------------------------------------
@@ -771,9 +822,13 @@ async def cmd_skill(interaction: discord.Interaction, name: str, args: str = Non
     await interaction.response.defer()
     prompt = f"/{name} {args}" if args else f"/{name}"
     sent = await interaction.followup.send("\u2026", wait=True)
-    response = await _stream_to_message(sent, interaction.user.id, interaction.channel_id, prompt)
-    speak_reply(interaction.channel, response)
-    await _play_tts_for_member(interaction.user, response)
+    outcome = TurnOutcome()
+    response = await _stream_to_message(
+        sent, interaction.user.id, interaction.channel_id, prompt, outcome=outcome,
+    )
+    if outcome.finished:
+        speak_reply(interaction.channel, response)
+        await _play_tts_for_member(interaction.user, response)
 
 
 # ---------------------------------------------------------------------------
@@ -886,9 +941,13 @@ async def on_message(message: discord.Message):
             else:
                 async with message.channel.typing():
                     sent = await message.reply("\u2026")
-                response = await _stream_to_message(sent, message.author.id, channel_id, content)
-                speak_reply(message.channel, response)
-                await _play_tts_for_member(message.author, response)
+                outcome = TurnOutcome()
+                response = await _stream_to_message(
+                    sent, message.author.id, channel_id, content, outcome=outcome,
+                )
+                if outcome.finished:
+                    speak_reply(message.channel, response)
+                    await _play_tts_for_member(message.author, response)
 
         except Exception:
             log.exception("Error processing message in channel %s", channel_id)

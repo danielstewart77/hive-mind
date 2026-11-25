@@ -8,6 +8,7 @@ here and were split out in Phase B7.
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 import aiohttp
@@ -21,6 +22,48 @@ log = logging.getLogger("hive-mind.gateway-client")
 # separator itself cannot: it sees token deltas and whole blocks on one
 # channel with nothing distinguishing them.
 BLOCK_SEPARATOR = "\n\n"
+
+# How a turn ended, as told to the caller of query_stream.
+TURN_FINISHED = "finished"
+TURN_FAILED = "failed"            # the mind or gateway reported an error result
+TURN_REFUSED = "refused"          # the gateway would not take the message
+TURN_INTERRUPTED = "interrupted"  # the stream ended or broke without a finish
+
+
+@dataclass
+class TurnOutcome:
+    """Filled in by query_stream: how the turn ended, and why if it did not finish."""
+
+    status: str = TURN_FINISHED
+    reason: str = ""
+
+    @property
+    def finished(self) -> bool:
+        return self.status == TURN_FINISHED
+
+
+class GatewayTurnError(RuntimeError):
+    """A turn that did not finish. ``status`` is one of the TURN_* values."""
+
+    def __init__(self, status: str, reason: str):
+        super().__init__(f"Turn {status}: {reason}")
+        self.status = status
+        self.reason = reason
+
+
+def _result_reason(event: dict) -> str:
+    """The reason an error result carries, in ``result`` or in ``errors``."""
+    reason = event.get("result")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    errors = event.get("errors")
+    if isinstance(errors, list):
+        joined = "; ".join(str(e) for e in errors if e)
+        if joined:
+            return joined
+    elif errors:
+        return str(errors)
+    return "no reason given"
 
 # What marks a run of the mind's own reasoning on a chat surface. A surface has
 # only text to work with, so the two are told apart by a word rather than by
@@ -257,8 +300,16 @@ class GatewayClient:
     async def query_stream(
         self, user_id: int, client_ref: int | str, prompt: str,
         images: list[dict] | None = None,
+        outcome: TurnOutcome | None = None,
     ) -> AsyncGenerator[str, None]:
         """Yield assistant text chunks from the gateway SSE response as they arrive.
+
+        Pass a :class:`TurnOutcome` to learn how the turn ended: finished,
+        failed (an error result; its reason is never yielded as answer text),
+        refused (non-200, raised as before) or interrupted (the stream closed
+        or broke with no finishing event). Without one, nothing changes for
+        the caller except that error results and interrupted streams are no
+        longer yielded as if they were answers.
 
         Yields each assistant message block as it comes in, enabling callers
         to update a live message progressively rather than waiting for the full
@@ -274,6 +325,11 @@ class GatewayClient:
         )
         yielded_any = False
         result_fallback = ""
+        saw_result = False
+        error_reason: str | None = None
+        error_status = TURN_FAILED
+        if outcome is None:
+            outcome = TurnOutcome()
 
         # SSE streams can be very long-lived (docker builds, long
         # tool calls, etc.), so override the default aiohttp timeouts.
@@ -292,12 +348,13 @@ class GatewayClient:
                 try:
                     data = await resp.json()
                     if isinstance(data, dict):
-                        error_text = str(data.get("error", ""))
+                        error_text = str(data.get("error") or data.get("detail") or "")
                     else:
                         error_text = str(data)
                 except Exception:
                     error_text = await resp.text()
                 error_text = error_text or f"HTTP {resp.status}"
+                outcome.status, outcome.reason = TURN_REFUSED, error_text
                 log_event(
                     log, "gateway.turn.failed", level=logging.ERROR,
                     session_id=session_id, mind_id=self.mind_id, status_code=resp.status,
@@ -419,11 +476,30 @@ class GatewayClient:
                             yield text
                             tail_newlines = len(text) - len(text.rstrip("\n"))
                     elif etype == "result":
-                        result_fallback = event.get("result", "")
+                        saw_result = True
+                        if event.get("is_error") or event.get("subtype") in ("error", "interrupted"):
+                            error_reason = _result_reason(event)
+                            if event.get("subtype") == "interrupted":
+                                error_status = TURN_INTERRUPTED
+                        else:
+                            result_fallback = event.get("result", "")
 
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        if error_reason is None and not saw_result:
+            error_reason, error_status = (
+                "the stream ended without a finishing event", TURN_INTERRUPTED,
+            )
+        if error_reason is not None:
+            outcome.status, outcome.reason = error_status, error_reason
+            log_event(
+                log, "gateway.turn.failed" if error_status == TURN_FAILED else "gateway.turn.interrupted",
+                level=logging.ERROR if error_status == TURN_FAILED else logging.WARNING,
+                session_id=session_id, mind_id=self.mind_id, elapsed_ms=elapsed_ms,
+                yielded_text=yielded_any, reason=error_reason,
+            )
+            return
         if not yielded_any and result_fallback:
             yield result_fallback
-        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
         log_event(
             log, "gateway.turn.completed", session_id=session_id, mind_id=self.mind_id,
             elapsed_ms=elapsed_ms,
@@ -438,8 +514,14 @@ class GatewayClient:
                     images: list[dict] | None = None) -> str:
         """Send a query and return the complete response text (non-streaming)."""
         texts: list[str] = []
-        async for text in self.query_stream(user_id, client_ref, prompt, images=images):
+        outcome = TurnOutcome()
+        async for text in self.query_stream(
+            user_id, client_ref, prompt, images=images, outcome=outcome,
+        ):
             texts.append(text)
+        if not outcome.finished:
+            # A refused, failed or cut-short turn is never returned as an answer.
+            raise GatewayTurnError(outcome.status, outcome.reason)
         # Plain concatenation: query_stream emits its own block separators,
         # and its pieces can split mid-word.
         combined = "".join(texts)
@@ -449,3 +531,18 @@ class GatewayClient:
                 "stream produced no text and no result fallback."
             )
         return combined
+
+
+def turn_marker(outcome: TurnOutcome, shown_text: bool) -> str:
+    """The plain notice a chat surface shows for a turn that did not finish.
+
+    Both bots use this one wording, so a refusal or a cut-short turn reads the
+    same on Telegram and Discord and never like an answer.
+    """
+    if outcome.status == TURN_INTERRUPTED:
+        head = "\u26a0 Interrupted" if shown_text else "\u26a0 Interrupted before any answer"
+    elif outcome.status == TURN_REFUSED:
+        head = "\u26a0 Refused"
+    else:
+        head = "\u26a0 Error"
+    return f"{head}: {outcome.reason}" if outcome.reason else head

@@ -202,6 +202,7 @@ class TestStreamCarriesTheMindsText:
         """R1: the non-streaming helper joins the same way its stream demands."""
         _serve(gateway, _sse(
             _block_start(0), _delta(0, "Half a "), _delta(0, "sentence."),
+            {"type": "result", "result": "Half a sentence."},
         ))
 
         assert await gateway.query(1, 2, "hi") == "Half a sentence."
