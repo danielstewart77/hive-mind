@@ -37,11 +37,15 @@ main() {
       git -C "$repo" ls-tree HEAD -- "$path" | grep -q '^160000 ' || continue
       git -C "$repo" fetch --quiet \
         || fail "could not fetch $repo" "check the network (and any web proxy), then run again"
+      git -C "$repo" rev-parse --verify -q '@{u}' >/dev/null \
+        || fail "$repo has no upstream branch, so the update cannot be read" \
+                "git -C $repo branch --set-upstream-to origin/<branch>, then run again"
       git -C "$repo" ls-tree '@{u}' -- "$path" | grep -q '^040000 ' || continue
       [ -z "$(git -C "$repo/$path" status --porcelain)" ] \
         || fail "$repo/$path has uncommitted changes, and $name now lives inside hive-mind" \
                 "commit or discard them there (or copy them into $repo/$path after the update), then run again"
-      [ -z "$(git -C "$repo/$path" log --branches --not --remotes --oneline)" ] \
+      [ -z "$(git -C "$repo/$path" log --branches HEAD --not --remotes --oneline)" ] \
+        && [ -z "$(git -C "$repo/$path" stash list)" ] \
         || fail "$repo/$path has commits that no remote has, and $name now lives inside hive-mind" \
                 "git -C $repo/$path push, or keep them elsewhere, then run again"
       stamp="$(date +%Y%m%d%H%M%S)"

@@ -294,6 +294,21 @@ def test_a_shipped_step_only_adds(version):
     ("ALTER TABLE core.minds RENAME COLUMN voice TO sound;", "renames"),
     ("ALTER TABLE core.minds ALTER COLUMN voice TYPE integer;", "retypes"),
     ("DROP TABLE core.minds;", "drops a table"),
+    ("DROP SCHEMA core CASCADE;", "drops a schema"),
+    ("DROP TYPE core.kind;", "drops a type"),
+    ("TRUNCATE core.minds;", "truncates"),
+    ("ALTER TABLE core.minds RENAME TO people;", "renames"),
+    ("ALTER TABLE core.minds ALTER COLUMN voice SET DATA TYPE integer;",
+     "retypes"),
+    ("ALTER TABLE core.minds DROP voice;", "drops a column"),
+    ("INSERT INTO core.t VALUES ('--x'); DROP TABLE core.minds;",
+     "drops a table"),
+    ("/* ; */ DROP TABLE core.minds;", "drops a table"),
+    ('ALTER TABLE "My T" DROP COLUMN "a b";', "drops a column"),
+    ("ALTER TABLE core.minds ADD COLUMN a text NOT NULL "
+     "CHECK (a <> 'DEFAULT');", "NOT NULL"),
+    ("ALTER TABLE core.a ALTER COLUMN x SET DEFAULT 1; "
+     "ALTER TABLE core.b ALTER COLUMN x SET NOT NULL;", "NOT NULL"),
 ])
 def test_a_step_that_breaks_the_previous_release_is_named(sql, mentions):
     found = migrate.rule_violations(migrate.Step(99, "bad", sql))
@@ -306,6 +321,14 @@ def test_a_step_that_breaks_the_previous_release_is_named(sql, mentions):
     "ALTER TABLE core.minds ALTER COLUMN owner SET DEFAULT '', "
     "ALTER COLUMN owner SET NOT NULL;",
     "CREATE TABLE core.fresh (x integer NOT NULL);",
+    "ALTER TABLE core.minds ADD COLUMN n bigint NOT NULL "
+    "GENERATED ALWAYS AS IDENTITY;",
+    "ALTER TABLE core.minds ADD CONSTRAINT u UNIQUE (voice);",
+    "ALTER TABLE core.minds ADD COLUMN c integer CHECK (c > 0) "
+    "REFERENCES core.other (id);",
+    "INSERT INTO core.t VALUES ('a;b -- c DROP TABLE x');",
+    "CREATE FUNCTION core.f() RETURNS trigger LANGUAGE plpgsql AS $$ "
+    "BEGIN DROP TABLE x; RETURN NEW; END $$;",
 ])
 def test_a_step_that_only_adds_is_not_named(sql):
     assert migrate.rule_violations(migrate.Step(99, "ok", sql)) == []
