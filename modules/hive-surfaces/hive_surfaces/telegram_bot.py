@@ -1730,7 +1730,12 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Could not interrupt: {exc}")
         return
 
-    refusal = result.get("error") or result.get("detail") if isinstance(result, dict) else "unexpected answer"
+    if not isinstance(result, dict):
+        refusal = "unexpected answer"
+    else:
+        refusal = result.get("error") or result.get("detail") or (
+            "the gateway did not confirm it" if result.get("ok") is False else None
+        )
     if refusal:
         await update.message.reply_text(f"Could not interrupt: {refusal}")
     elif result.get("message") == "nothing_running":

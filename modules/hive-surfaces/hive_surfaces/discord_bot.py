@@ -767,7 +767,12 @@ async def cmd_stop(interaction: discord.Interaction):
     except Exception as exc:
         await interaction.followup.send(f"Could not interrupt: {exc}", ephemeral=True)
         return
-    refusal = result.get("error") or result.get("detail") if isinstance(result, dict) else "unexpected answer"
+    if not isinstance(result, dict):
+        refusal = "unexpected answer"
+    else:
+        refusal = result.get("error") or result.get("detail") or (
+            "the gateway did not confirm it" if result.get("ok") is False else None
+        )
     if refusal:
         msg = f"Could not interrupt: {refusal}"
     elif result.get("message") == "nothing_running":

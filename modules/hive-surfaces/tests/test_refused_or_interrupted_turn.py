@@ -215,8 +215,14 @@ async def test_discord_long_partial_answer_cut_off_shows_the_mark_in_a_message()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [{"error": "Session not found"}, {"detail": "no"}])
-async def test_telegram_stop_does_not_say_interrupted_for_a_refusal(answer):
+@pytest.mark.parametrize("answer, said", [
+    ({"error": "Session not found"}, "Could not interrupt"),
+    ({"detail": "no"}, "Could not interrupt"),
+    ({"ok": False}, "Could not interrupt"),
+    ({"ok": True, "message": "nothing_running"}, "Nothing running."),
+    ({"ok": True}, "Interrupted."),
+])
+async def test_telegram_stop_words_each_outcome(answer, said):
     update = MagicMock()
     update.effective_user.id, update.effective_chat.id = 123, 456
     update.message.reply_text = AsyncMock()
@@ -227,12 +233,14 @@ async def test_telegram_stop_does_not_say_interrupted_for_a_refusal(answer):
             patch.object(tb, "_auth_check", AsyncMock(return_value=True)):
         await tb.cmd_stop(update, MagicMock())
 
-    assert "Interrupted." not in update.message.reply_text.await_args.args[0]
+    assert said in update.message.reply_text.await_args.args[0]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer, said", [
     ({"error": "Session not found"}, "Could not interrupt"),
+    ({"detail": "no"}, "Could not interrupt"),
+    ({"ok": False}, "Could not interrupt"),
     ({"ok": True, "message": "nothing_running"}, "Nothing running."),
     ({"ok": True}, "Interrupted."),
 ])
