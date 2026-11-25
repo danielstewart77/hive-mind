@@ -53,11 +53,12 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
     Piece("mind", "One mind", required=True,
           needs=("dsh", "comms", "lucent", "proxy"), repos=("hive-mind",)),
     # The terminal is built from the console's shared site code (hive_site),
-    # which lives in the console's repository — not from the console service.
+    # which lives beside it in hive-mind (modules/hive/hive_site) — not from
+    # the console service.
     Piece("terminal", "Browser terminal (chat with your mind)", default=True, needs=("comms",),
-          repos=("terminal", "hive")),
+          repos=("hive-mind",)),
     Piece("console", "Hive site (settings and admin)", needs=("comms", "lucent"),
-          repos=("hive",)),
+          repos=("hive-mind",)),
     Piece("voice", "Voice server", needs=("comms",), repos=("hive-mind",),
           modes=(NONE, HERE, EXISTING)),
     # Its model calls go through the proxy, like every other service's.
