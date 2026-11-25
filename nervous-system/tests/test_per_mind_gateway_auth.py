@@ -676,43 +676,19 @@ def test_a_mind_of_anyone_elses_with_no_credential_registered_is_sent_none(monke
     assert bare == {route: [""] for route in _SWITCH_CALLS}
 
 
-def test_the_owners_older_mind_still_gets_the_admin_credential_after_refusing_its_own(
+def test_the_trusted_owners_mind_that_refuses_its_own_credential_is_refused_not_retried(
     monkeypatch,
 ) -> None:
-    """His minds still running code that accepts only the admin credential on
-    these routes keep switching until they are restarted."""
-    seen = _switch_calls(monkeypatch, owner="daniel", trusted="daniel", refusing=True)
-    assert seen == {route: ["alpha-token", "hive-admin"] for route in _SWITCH_CALLS}
-
-
-def test_with_no_owner_named_the_admin_credential_goes_to_no_mind(monkeypatch) -> None:
-    seen = _switch_calls(monkeypatch, owner="daniel", trusted="", refusing=True)
-    assert seen == {route: ["alpha-token"] for route in _SWITCH_CALLS}
-
-
-def test_the_owners_mind_with_no_credential_registered_gets_admin_only_after_a_refusal(
-    monkeypatch,
-) -> None:
-    seen = _switch_calls(monkeypatch, owner="daniel", trusted="daniel", refusing=True,
-                         token=None)
-    assert seen == {route: ["", "hive-admin"] for route in _SWITCH_CALLS}
-
-
-def test_the_owner_is_matched_whatever_its_case_and_on_a_503_too(monkeypatch) -> None:
-    """A mind that cannot read its own credential answers 503, not 401."""
-    seen = _switch_calls(monkeypatch, owner="Daniel", trusted=" DANIEL ", refusing=True,
-                         status=503)
-    assert seen == {route: ["alpha-token", "hive-admin"] for route in _SWITCH_CALLS}
-
-
-def test_the_owner_may_be_named_in_the_gateways_config_file(monkeypatch, tmp_path) -> None:
-    from comms import config as comms_config
-
-    named = tmp_path / "config.yaml"
-    named.write_text("admin_credential_owner: daniel\n")
-    monkeypatch.setattr(comms_config, "_CONFIG_YAML", named)
-    seen = _switch_calls(monkeypatch, owner="daniel", trusted=None, refusing=True)
-    assert seen == {route: ["alpha-token", "hive-admin"] for route in _SWITCH_CALLS}
+    """Feature 834, requirement 17: no mind, whoever owns it, is ever tried with
+    the admin credential after refusing its own - on a 401 or a 503, with or
+    without a credential registered."""
+    for status in (401, 503):
+        seen = _switch_calls(monkeypatch, owner="daniel", trusted="daniel",
+                             refusing=True, status=status)
+        assert seen == {route: ["alpha-token"] for route in _SWITCH_CALLS}
+    bare = _switch_calls(monkeypatch, owner="daniel", trusted="daniel",
+                         refusing=True, token=None)
+    assert bare == {route: [""] for route in _SWITCH_CALLS}
 
 
 def test_a_refused_harness_listing_or_handover_is_a_refusal_not_an_answer(monkeypatch) -> None:

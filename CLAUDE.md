@@ -441,10 +441,10 @@ listings answer to the service token every surface bot holds. One token taken
 off one mind opens that mind and no other, which matters most for the minds
 trusted least — the two Windows boxes the boys use.
 
-The admin token is deliberately *not* the credential on this path: it unlocks
-`PATCH /runtime`, the skills write-back and the file editor, and a routine chat
-turn must not carry the thing that owns the machine. A mind still accepts it,
-so the console or the operator can reach a wedged session directly.
+No administrator key is on this path, and no mind holds or accepts one. A
+mind's `PATCH /runtime`, skills write-back and file editor answer to that
+mind's own key, which the console presents; a routine chat turn carries only
+the session credential.
 
 All seven outbound paths carry it — spawn, message, interrupt, release,
 rotate-pty, kill, and the terminal WebSocket proxy — and **a refusal is
@@ -479,14 +479,10 @@ between *hosts* — the kid boxes, Hex, Dragoman, this workstation — and weake
 than the phrase suggests in two places. The five container minds all
 bind-mount the same tree read-write, so each can read
 `minds/<other>/session_token`; injecting `MIND_SESSION_TOKEN` per container
-from its own env file fixes that. And the guard accepts the admin token as
-well as the session token, deliberately, so the console and the operator can
-reach a wedged pane — but on this hive that resolves to
-`COMMS_ADMIN_BEARER_TOKEN`, which every mind already holds. So a compromised
-mind can still reach another's session surface with a credential it had
-before; what it cannot do any more is reach one with nothing at all. A
-distinct `MIND_ADMIN_TOKEN` per mind closes that, and is the next thing worth
-doing if the boys' boxes stop being trusted.
+from its own env file fixes that. The guard accepts the session credential and the mind's own key
+(for the console's settings changes) and nothing hive-wide: no mind holds or
+accepts a gateway administrator key (feature 834). Each mind's own key reaches
+only its own routes.
 
 ### Who a containerised bot answers
 

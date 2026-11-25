@@ -22,9 +22,9 @@ services:
       # the per-service values it had before (the transition); set it in the
       # install's .env as MIND_KEY_EXAMPLE.
       - MIND_KEY=${MIND_KEY_EXAMPLE:-}
-      # A mind re-registers from its own runtime.yaml on every start, and
-      # POST /broker/minds is an admin route.
-      - COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}
+      # A mind re-registers from its own runtime.yaml on every start with its
+      # own key; the gateway accepts that for its own row. No hive-wide
+      # administrator key is ever given to a mind.
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       # Which keyring entry holds this mind's Telegram token. The mind's own
       # surface container names the same key; a backend that named none would

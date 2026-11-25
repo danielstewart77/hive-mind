@@ -456,12 +456,11 @@ def test_a_mind_made_from_the_console_is_not_locked_and_its_settings_card_reache
         "Authorization": f"Bearer {issued}"}
 
 
-def test_the_console_never_sends_its_admin_credential_to_a_mind_it_made(client, monkeypatch):
+def test_the_console_sends_a_mind_only_its_own_key_and_only_at_its_own_address(client, monkeypatch):
     """However that mind's address is written: it can re-register itself with
-    the gateway at any address - a server of its own, or another mind's,
-    which the console would then act on for it. So the admin credential is
-    withheld from every address its registry row claims, and from wherever
-    its container answers."""
+    the gateway at any address - a server of its own, or another mind's. So its
+    key goes only where every registry row claiming the address is that one
+    mind, and nothing else is ever sent in its place (no administrator key)."""
     import asyncio
     import route_access
     import mind_runtime
@@ -473,45 +472,20 @@ def test_the_console_never_sends_its_admin_credential_to_a_mind_it_made(client, 
     registry = [
         {"id": mind_id, "name": "atlas", "gateway_url": "http://ada:8420"},
         {"id": "ada-id", "name": "ada", "gateway_url": "http://ada:8420"},
+        {"id": mind_id, "name": "atlas", "gateway_url": "http://atlas:8420"},
         {"id": "bob-id", "name": "bob", "gateway_url": "http://bob:8420"},
     ]
     monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
-    where = {"atlas": {"10.9.0.7"}, "10.9.0.7": {"10.9.0.7"}, "ada": {"10.9.0.3"},
-             "bob": {"10.9.0.2"}}
-    monkeypatch.setattr(configuration_data, "_addresses", lambda host: where.get(host, set()))
 
-    for url in ("http://ada:8420", "http://atlas:8420", "http://10.9.0.7:7777"):
+    # An address two minds claim gets nothing; neither does one nobody claims,
+    # and bob, whose key this console does not hold, is not sent the admin key.
+    for url in ("http://ada:8420", "http://10.9.0.7:7777", "http://bob:8420"):
         with pytest.raises(main_mod.HTTPException) as refused:
             asyncio.run(mind_runtime.admin_headers(url))
         assert refused.value.status_code == 503, url
-    assert asyncio.run(mind_runtime.admin_headers("http://bob:8420")) == {
-        "Authorization": "Bearer admin-token"}
-
-
-def test_the_console_withholds_its_admin_credential_from_minds_the_gateway_withholds_it_from(
-    client, monkeypatch,
-):
-    """A kid's box elsewhere on the network, created nowhere near this
-    console, is not to be sent it either; the gateway marks which minds are."""
-    import asyncio
-    import route_access
-    import mind_runtime
-
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
-    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "tools-admin-token")
-    registry = [
-        {"id": "arnold-id", "name": "arnold", "owner": "sloan",
-         "gateway_url": "http://192.168.5.64:8433", "admin_credential_allowed": False},
-        {"id": "bob-id", "name": "bob", "owner": "daniel",
-         "gateway_url": "http://bob:8420", "admin_credential_allowed": True},
-    ]
-    monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
-
-    with pytest.raises(main_mod.HTTPException) as refused:
-        asyncio.run(mind_runtime.admin_headers("http://192.168.5.64:8433"))
-    assert refused.value.status_code == 503
-    assert asyncio.run(mind_runtime.admin_headers("http://bob:8420")) == {
-        "Authorization": "Bearer admin-token"}
+    sent = asyncio.run(mind_runtime.admin_headers("http://atlas:8420"))
+    assert sent == {"Authorization": f"Bearer {PASTED_KEY}"}
+    assert "admin-token" not in str(sent)
 
 
 def test_a_mind_cannot_be_named_after_an_address_on_the_hives_network(client):

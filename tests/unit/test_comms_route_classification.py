@@ -68,7 +68,6 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
     """The refactor must not have widened anything. Each of these answered to
     the admin token alone before the table existed."""
     for spec in (
-        ("GET", "/sessions/live"),
         ("GET", "/sessions/live/text"),
         # `POST /broker/minds` deliberately left this set: a mind registers
         # itself, which is why every mind used to hold the admin token. It is
@@ -81,6 +80,14 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
         ("DELETE", "/secrets/scopes"),
     ):
         assert session_access.TABLE.rules[spec].kind == user_access.ADMIN, spec
+
+
+def test_the_chiefs_two_reads_are_open_to_a_mind_and_held_to_itself():
+    """Story 883: the chief of staff gives up the administrator key, so its
+    live-sessions and wake-state reads admit a mind's own key; the handlers
+    hold it to its own mind."""
+    for spec in (("GET", "/sessions/live"), ("GET", "/minds/{mind_id}/wake-state")):
+        assert session_access.TABLE.rules[spec].kind == user_access.MACHINE, spec
 
 
 def test_registering_a_mind_is_machinery_rather_than_admin_only():

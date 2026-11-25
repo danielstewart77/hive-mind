@@ -6548,15 +6548,9 @@ async def api_hive_errors(user: dict = Depends(require_auth)):
         for mind in minds:
             if isinstance(mind, dict) and mind.get("gateway_url"):
                 name = mind.get("name") or "Mind"
-                # The admin credential goes only where `admin_headers` sends
-                # it. A mind it refuses is listed as withheld and never asked.
+                # Each mind is asked with its own key, where this console
+                # holds it; one it does not hold is listed as withheld.
                 try:
-                    # The row in hand is judged too: the guard reads the
-                    # registry again, and a failed second read must not undo
-                    # what the gateway said in the first.
-                    if mind.get("admin_credential_allowed") is False:
-                        raise HTTPException(503, "the gateway marks this mind as not to be "
-                                                 "sent the hive's admin credential")
                     headers = await mind_runtime.admin_headers(mind["gateway_url"])
                 except HTTPException as refused:
                     withheld.append({"name": name, "status": "withheld", "errors": [],

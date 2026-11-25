@@ -28,7 +28,7 @@ ADMIN = {"Authorization": "Bearer s3cret"}
 
 @pytest.fixture()
 def client(monkeypatch):
-    monkeypatch.setattr(runtime_api, "admin_token", lambda: "s3cret")
+    monkeypatch.setattr(runtime_api, "_own_key", lambda: "s3cret")
     monkeypatch.setenv("GITHUB_TOKEN_KEYRING_KEY", "CYPHER_GITHUB_TOKEN")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     app = FastAPI()

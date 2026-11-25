@@ -593,7 +593,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "COMMS_URL": COMMS_URL, "HIVEMIND_BROKER_URL": COMMS_URL,
         "COMMS_BEARER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("COMMS", mind)),
         "HIVEMIND_BROKER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("COMMS", mind)),
-        "COMMS_ADMIN_BEARER_TOKEN": env_ref("COMMS_ADMIN_BEARER_TOKEN"),
         "LUCENT_URL": LUCENT_URL, "LUCENT_URL_SELF": LUCENT_URL,
         "LUCENT_BEARER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("LUCENT", mind)),
         "SPECS_DIR": f"{APP}/specs/data-classes",

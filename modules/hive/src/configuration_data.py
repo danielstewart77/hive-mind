@@ -904,11 +904,6 @@ def _mind_uid() -> int:
         raise ValueError(f"HIVE_MIND_UID is not a uid: {raw!r}") from exc
 
 
-#: The variable, in the stack's env file and in a mind's container, that
-#: holds the hive's admin credential.
-ADMIN_CREDENTIAL_VARIABLE = "COMMS_ADMIN_BEARER_TOKEN"
-
-
 def _own_service(name: str) -> dict | None:
     """The service this console wrote for a mind it made, or None.
 
@@ -943,23 +938,6 @@ def _environment(service: dict) -> dict[str, str]:
         for item in listed)
 
 
-def holds_no_admin_credential(name: str) -> bool:
-    """Whether a mind on this host is one this console made, which is given
-    no admin credential: that credential opens every person's conversations
-    (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
-    credentials), and a mind made here is made the same whoever it is for."""
-    service = _own_service(name)
-    return service is not None and ADMIN_CREDENTIAL_VARIABLE not in _environment(service)
-
-
-def minds_without_the_admin_credential() -> list[str]:
-    try:
-        names = sorted(p.name for p in HIVE_MIND_MINDS_CONFIG_DIR.iterdir())
-    except OSError:
-        return []
-    return [name for name in names if holds_no_admin_credential(name)]
-
-
 def name_is_a_host_already(name: str) -> bool:
     """A name another container on this network already answers to, or one
     the hive's own services are named in. A mind's name is its address on
@@ -967,16 +945,6 @@ def name_is_a_host_already(name: str) -> bool:
     meant for the gateway - the admin credential among them."""
     lowered = (name or "").strip().lower()
     return lowered.startswith("hive") or bool(_addresses(lowered))
-
-
-def _identities_without_the_admin_credential() -> dict[str, str]:
-    """Each such mind's name and the id this console gave it, read from its
-    compose file: its runtime.yaml is its own to write."""
-    found = {}
-    for name in minds_without_the_admin_credential():
-        service = _own_service(name) or {}
-        found[name] = _environment(service).get("MIND_ID", "")
-    return found
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -988,66 +956,24 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
 
 
-async def withholds_admin_credential(url: str) -> bool:
-    """Whether the hive's admin credential must not be sent to `url`.
-
-    Yes when a registry row claiming that address is one the gateway marks
-    as not to be sent it (`admin_credential_allowed` false: a mind not owned
-    by the person the gateway trusts with it, such as a kid's box elsewhere
-    on the network) - the console and the gateway withhold it from the same
-    minds (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches
-    his credentials). A gateway too old to mark its rows marks none.
-
-    Yes, too, when the address is one that a mind this console made claims
-    in the registry, whatever it is: such a mind can re-register itself with the
-    gateway at any address - a server of its own, or another mind's, which
-    the console would then act on for it. And yes when the address leads to
-    such a mind's container. A registry that cannot be read while one exists
-    is answered yes.
-    """
-    import route_access
-
-    identities = _identities_without_the_admin_credential()
-    names, ids = set(identities), set(identities.values()) - {""}
-    try:
-        rows = await route_access.registered_minds()
-    except Exception:  # noqa: BLE001 - unreadable, judged below
-        rows = None
-    target = _origin(url)
-    for row in rows or []:
-        if _origin(str(row.get("gateway_url") or "")) != target:
-            continue
-        if row.get("admin_credential_allowed") is False:
-            return True
-        if str(row.get("name") or "").lower() in names or str(row.get("id") or "") in ids:
-            return True
-    if not names:
-        return False
-    if rows is None:
-        return True
-    return await asyncio.to_thread(_leads_to_such_a_container, target[1], names)
-
-
 async def own_credential_for(url: str) -> str | None:
-    """The one mind's own gateway key that may be sent to `url`, or None.
+    """The one mind's own key that may be sent to `url`, or None.
 
-    How a change the console has already allowed, by the account of the
-    person signed in, reaches a mind that holds no admin credential: the
-    console presents that mind's own key, the one it was issued when it was
-    made, and the mind accepts what it already holds. Nothing new is issued
-    (Daniel, 2026-11-18: "A mind has a key and that is it").
+    How a change the console has already allowed, by the account of the person
+    signed in, reaches a mind: the console presents that mind's own key, the
+    one it holds for it (Daniel, 2026-11-18: "A mind has a key and that is
+    it"), and the mind accepts what it already holds. There is no hive-wide
+    administrator key to fall back on (feature 834, requirement 17).
 
-    Only when the address is that one mind's and nobody else's: every
-    registry row claiming it is the same mind this console made. An address
-    two minds claim, or one no row claims, gets nothing - a mind can
-    re-register itself anywhere, and another mind's key is not its to draw.
+    Only when the address is that one mind's and nobody else's: every registry
+    row claiming it is the same mind. An address two minds claim, or one no
+    row claims, gets nothing - a mind can re-register itself anywhere, and
+    another mind's key is not its to draw. A mind whose key this console does
+    not hold (one on another machine, pasted there) gets nothing as well.
     """
     import holder_credentials
     import route_access
 
-    identities = _identities_without_the_admin_credential()
-    if not identities:
-        return None
     try:
         rows = await route_access.registered_minds()
     except Exception:  # noqa: BLE001 - a registry that cannot be read names nobody
@@ -1056,22 +982,13 @@ async def own_credential_for(url: str) -> str | None:
     claimants = [
         row for row in rows or []
         if _origin(str(row.get("gateway_url") or "")) == target]
-    if not claimants:
-        return None
-    by_id = {mind_id: name for name, mind_id in identities.items() if mind_id}
-    whose = set()
-    for row in claimants:
-        name = str(row.get("name") or "").lower()
-        mind_id = str(row.get("id") or "")
-        if name in identities and identities[name] and identities[name] == mind_id:
-            whose.add(name)
-        elif mind_id in by_id:
-            whose.add(by_id[mind_id])
-        else:
-            return None
+    whose = {(str(row.get("id") or ""), str(row.get("name") or "").strip().lower())
+             for row in claimants}
     if len(whose) != 1:
         return None
-    (name,) = whose
+    ((_, name),) = whose
+    if not name:
+        return None
     service = holder_credentials.SERVICES["comms"]
     try:
         location = holder_credentials.locate(service, name)

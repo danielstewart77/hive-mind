@@ -49,8 +49,7 @@ def _owner_chat_id(client=None) -> str:
         return configured
     # The credential the mind itself presents to comms, resolved the way
     # `mind_server.comms_credential` resolves it.
-    token = (os.getenv("MIND_KEY") or os.getenv("COMMS_BEARER_TOKEN") or "").strip() or (
-        os.getenv("COMMS_ADMIN_BEARER_TOKEN") or "").strip()
+    token = (os.getenv("MIND_KEY") or os.getenv("COMMS_BEARER_TOKEN") or "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     url = f"{base}/broker/minds/{mind_id}/surface-claim"
     try:
@@ -67,6 +66,10 @@ def _owner_chat_id(client=None) -> str:
         # FastAPI's own answer for a path it has no route for: a gateway
         # from before claims existed. A refused claim says "No such claim".
         return configured
+    if response.status_code == 401:
+        print("notify: GET /broker/minds/{id}/surface-claim: this mind's key "
+              "was refused; not retrying with another credential",
+              file=sys.stderr)
     if response.status_code != 200 or not isinstance(body, dict):
         return ""
     return str(body.get("claimed_ref") or "")

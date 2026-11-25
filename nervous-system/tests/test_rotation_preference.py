@@ -37,7 +37,7 @@ from tests.test_context_window import (
     fetchrow,
 )
 
-MIND_ADMIN = "mind-admin-for-rotation-tests"
+MIND_ADMIN = GRILL_ADMIN  # the mind's own key is the one the hooks present
 APP_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -168,7 +168,7 @@ def _rotation_system(tmp_path: Path, monkeypatch, *, hold_first: bool = False):
     from comms import server as server_module
 
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
-    monkeypatch.setenv("MIND_ADMIN_TOKEN", MIND_ADMIN)
+    monkeypatch.setenv("MIND_KEY", MIND_ADMIN)
     for key in (
         "INFERENCE_PROXY_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
         "MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY",

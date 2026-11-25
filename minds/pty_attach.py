@@ -387,7 +387,7 @@ async def fetch_carry_forward(session_id: str, conversation_id: str) -> str:
     import aiohttp
 
     comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
-    token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
+    token = runtime_api._own_key()
     if not comms_url or not token or not conversation_id:
         return ""
     async with aiohttp.ClientSession() as http:
@@ -397,6 +397,11 @@ async def fetch_carry_forward(session_id: str, conversation_id: str) -> str:
             headers={"Authorization": f"Bearer {token}"},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
+            if resp.status == 401:
+                log.warning("GET /sessions/%s/carry-forward: this mind's key "
+                            "was refused; not retrying with another credential",
+                            session_id)
+                return ""
             if resp.status >= 400:
                 log.warning("carry-forward lookup for session %s returned %s",
                             session_id, resp.status)

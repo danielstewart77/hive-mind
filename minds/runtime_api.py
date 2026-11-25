@@ -603,8 +603,8 @@ def authorize_session(request, mind_dir: Path) -> JSONResponse | None:
     """Guard a session route. None means the caller may proceed.
 
     Accepts the mind's session token — the gateway, which is the only real
-    caller — or the admin token, so the console or the operator can reach a
-    wedged session directly.
+    caller — and nothing else. No hive-wide administrator key is accepted here
+    or anywhere on a mind.
 
     A mind that cannot establish a credential of its own refuses with 503
     rather than serving open. The transitional state the rollout needs is
@@ -619,8 +619,7 @@ def authorize_session(request, mind_dir: Path) -> JSONResponse | None:
             {"error": f"this mind cannot establish its session credential: {exc}"},
             status_code=503,
         )
-    admin = admin_token()
-    accepted = [expected] + ([admin] if admin else [])
+    accepted = [expected]
     offered = presented_bearers(request)
     for token in offered:
         for candidate in accepted:
@@ -681,18 +680,10 @@ async def refuse_session_websocket(websocket, denial: JSONResponse) -> None:
         await websocket.close(code=4401, reason="unauthorized")
 
 
-def admin_token() -> str:
-    """Bearer accepted on a mind's config-write route.
-
-    A dedicated `MIND_ADMIN_TOKEN` when the install has one; otherwise the
-    gateway's admin bearer, which the console already holds. No token
-    configured means the write route refuses rather than opens.
-    """
-    return (
-        os.environ.get("MIND_ADMIN_TOKEN")
-        or os.environ.get("COMMS_ADMIN_BEARER_TOKEN")
-        or ""
-    )
+def _own_key() -> str:
+    """This mind's one key, the only credential it holds or accepts for the
+    console. "" when it was started with none."""
+    return (os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN", "")).strip()
 
 
 def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
@@ -700,47 +691,33 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
 
     `/models`, `/harnesses`, `/handover` and `/skills/check`: the gateway
     asks them while it switches a conversation's model or harness. It
-    presents this mind's session credential there, as on `/sessions`, and
-    not the hive's admin credential, which would open every person's
-    conversations to whatever answers at this mind's registered address
-    (DECIDED 2026-11-15, Daniel: a mind not owned by him never reaches his
-    credentials). The admin credential is still accepted, for the console
-    and the operator, and checked first, so a mind that cannot read its own
-    session credential still answers them. Configuration writes keep
-    `authorize_admin`.
+    presents this mind's session credential there, as on `/sessions`. This
+    mind's own key is accepted too, for the console. Nothing hive-wide is: a
+    hive administrator key would open every person's conversations to
+    whatever answers at this mind's registered address (feature 834,
+    requirement 17). Configuration writes keep `authorize_admin`.
     """
-    # The console's credential, whichever this mind takes: a mind made from
-    # the console holds no admin token and is sent its own key, and its
-    # model list is asked for with the same bearer as its settings.
-    admin = _console_credential()
-    if admin and any(tokens_match(t, admin) for t in presented_bearers(request)):
+    own = _own_key()
+    if own and any(tokens_match(t, own) for t in presented_bearers(request)):
         return None
     return authorize_session(request, mind_dir)
-
-
-def _console_credential() -> str:
-    """What the console is expected to present: the admin token where this
-    mind holds one, otherwise this mind's own key. Never both."""
-    return admin_token() or (os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN", "")).strip()
 
 
 def authorize_admin(request: Request) -> JSONResponse | None:
     """Guard a config-write route. None means the caller may proceed.
 
-    A mind that holds an admin token accepts that and nothing else here: not
-    its session credential, which every chat turn carries. A mind that holds
-    none - one made from the console, which is given no credential that
-    opens anybody else's conversations (DECIDED 2026-11-15, Daniel) - accepts
-    its own key, the one it was issued when it was made and presents to the
-    gateway. The console holds that key for it and sends it once the person
-    signed in has been allowed by their account. Nothing new is issued for
-    this (Daniel, 2026-11-18: "A mind has a key and that is it"). A mind with
-    neither refuses rather than opens.
+    Accepts this mind's own key and nothing else: the one it was issued, which
+    the console holds for it and presents once the person signed in has been
+    allowed by their account. Not the session credential, which every chat
+    turn carries, and no hive-wide administrator key (feature 834,
+    requirement 17). A mind started with no key refuses with 503 rather than
+    opens; a wrong key is 401.
     """
-    expected = _console_credential()
+    expected = _own_key()
     if not expected:
         return JSONResponse(
-            {"error": "no admin token configured on this mind"}, status_code=503
+            {"error": "this mind holds no key, so its settings cannot be changed"},
+            status_code=503,
         )
     header = request.headers.get("Authorization", "")
     presented = header[7:] if header.startswith("Bearer ") else ""
@@ -766,23 +743,13 @@ async def register_with_broker(path: Path, *, mind_name: str, mind_id: str, log)
     import aiohttp
 
     comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
-    # `COMMS_ADMIN_BEARER_TOKEN` specifically, and not the guard's
-    # `admin_token()`: this bearer authenticates *to comms*, which knows
-    # nothing about a local `MIND_ADMIN_TOKEN`. An install holding only the
-    # local one cannot register, and since registration is now the only channel
-    # by which the gateway learns this mind's credential, that mind is
-    # unreachable — which is why the line below is an error rather than the
-    # note it used to be.
-    # A mind made from the console holds no admin credential and registers
-    # itself with its own, which the gateway accepts for its own row.
-    token = (
-        os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-        or os.environ.get("MIND_KEY", "")
-        or os.environ.get("COMMS_BEARER_TOKEN", "")
-    )
+    # This mind's one key: the gateway accepts it for this mind's own row.
+    # Nothing else is tried; a refusal is reported below and not retried with
+    # another credential.
+    token = _own_key()
     if not comms_url or not token:
         log.error(
-            "No COMMS_URL/admin token: skipping broker self-registration, so "
+            "No COMMS_URL or mind key: skipping broker self-registration, so "
             "the gateway will never learn this mind's session credential and "
             "every call it makes here will be refused"
         )
@@ -813,6 +780,10 @@ async def register_with_broker(path: Path, *, mind_name: str, mind_id: str, log)
                         log, "mind.register.failed", mind_id=mind_id, status=resp.status
                     )
                     return "retry"
+                if resp.status == 401:
+                    log.warning(
+                        "POST /broker/minds: this mind's key was refused; "
+                        "not retrying with another credential")
                 if not 200 <= resp.status < 300:
                     log_event(
                         log, "mind.register.rejected", level=logging.WARNING,
@@ -849,14 +820,14 @@ async def registration_loop(
     someone restarts it — that race is real on every reboot, since systemd
     wins against a compose stack. Unreachable or erroring comms is retried
     with doubling delays capped at `max_delay`. A rejection — comms refusing
-    the payload or the admin bearer — retries at the slow heartbeat cadence
+    the payload or the mind's key — retries at the slow heartbeat cadence
     rather than stopping: this registration is the only channel by which the
     gateway learns the credential the mind now demands back, so a loop that
     gives up leaves a mind that refuses every call the gateway makes, until
     somebody restarts it. Retrying once every `heartbeat` is not noise, it is
     the only thing that heals a comms bearer rotated while the mind was up.
 
-    `skipped` does stop it: no `COMMS_URL` or no admin token configured is not
+    `skipped` does stop it: no `COMMS_URL` or no mind key configured is not
     a condition retrying can change.
 
     After a success the loop keeps going as a heartbeat: re-registering

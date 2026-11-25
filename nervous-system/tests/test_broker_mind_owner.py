@@ -246,21 +246,31 @@ def test_a_minds_own_registration_lands_under_its_credentials_person(app_client)
     assert _listed(app_client)["arnold"]["owner"] == "sloan"
 
 
-def test_the_listing_marks_which_minds_may_be_sent_the_admin_credential(
-    app_client, monkeypatch,
-) -> None:
-    """The console reads this, so it withholds from the same minds."""
-    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "daniel")
-    app_client.post("/broker/minds", json=_registration(owner="Daniel"))
-    app_client.post("/broker/minds", json=_registration(
-        mind_id="22222222-2222-4222-8222-222222222222", name="arnold", owner="sloan"))
+def test_a_mind_with_its_own_key_is_refused_on_the_administrator_only_routes(app_client) -> None:
+    """Feature 834 story 883: no mind holds the administrator key, and its
+    own key opens none of what only that key opens."""
+    kid = _a_kids_credential()
+    for method, path in (("get", "/credentials"), ("get", "/sessions/live/text?session_id=x"),
+                         ("put", "/broker/minds/arnold/owner")):
+        response = getattr(app_client, method)(path, headers=kid)
+        assert response.status_code == 401, path
 
-    listed = _listed(app_client)
-    assert listed[MIND_A]["admin_credential_allowed"] is True
-    assert listed["22222222-2222-4222-8222-222222222222"]["admin_credential_allowed"] is False
 
-    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "")
-    assert _listed(app_client)[MIND_A]["admin_credential_allowed"] is False
+def test_a_mind_reads_only_its_own_live_sessions_and_wake_state(app_client) -> None:
+    """The chief of staff gave up the administrator key: its own key reads its
+    own mind's rows on the two routes it needs, and another mind's are refused
+    or left out."""
+    kid = _a_kids_credential()
+    app_client.post("/broker/minds", headers=kid, json=_registration(
+        mind_id="arnold", name="arnold", gateway_url="http://192.168.5.64:8433"))
+    app_client.post("/broker/minds", headers=ADMIN, json=_registration(owner="daniel"))
+
+    own = app_client.get("/minds/arnold/wake-state", headers=kid)
+    assert own.status_code == 200 and own.json()["mind_id"] == "arnold"
+    other = app_client.get(f"/minds/{MIND_A}/wake-state", headers=kid)
+    assert other.status_code == 404
+    assert app_client.get("/sessions/live", headers=kid).status_code == 200
+    assert app_client.get("/sessions/live").status_code == 200  # the admin credential
 
 
 def test_a_mind_cannot_rename_itself(app_client) -> None:

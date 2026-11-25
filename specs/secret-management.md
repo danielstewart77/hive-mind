@@ -27,7 +27,7 @@ Service name for all keys: `hive-mind`.
 
 ## Managed Keys — feature-specific, only if you're using them
 
-`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `LUCENT_ADMIN_BEARER_TOKEN`/`COMMS_ADMIN_BEARER_TOKEN`, `SMS_INBOUND_HMAC_SECRET`.
+`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `LUCENT_ADMIN_BEARER_TOKEN`/`COMMS_ADMIN_BEARER_TOKEN` (the console and the services only; no mind holds either), `SMS_INBOUND_HMAC_SECRET`.
 
 ## Rules
 

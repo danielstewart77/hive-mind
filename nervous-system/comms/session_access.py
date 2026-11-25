@@ -139,6 +139,12 @@ TABLE.add(
     "GET /sessions/{session_id}/carry-forward",
     "GET /models",
     "GET /broker/minds",
+    # The chief of staff's own recreate and report delivery read its own
+    # mind's live conversations and wake state with its own key. The handlers
+    # hold a mind to itself and refuse a service value; the admin credential
+    # reads every mind's.
+    "GET /sessions/live",
+    "GET /minds/{mind_id}/wake-state",
     # What a mind's roles let it use (feature 10.18), read by its own role
     # guard on every tool call and hook event. A mind's credential reaches
     # only its own: `mind_grants` holds it to the mind in the path.
@@ -177,8 +183,6 @@ TABLE.add(
 # Each of these takes only the admin token today and continues to.
 TABLE.add(
     Rule(ADMIN),
-    "GET /minds/{mind_id}/wake-state",
-    "GET /sessions/live",
     "GET /sessions/live/text",
     "PUT /broker/minds/{mind_id}/owner",
     # Minting a phrase is the one call that sees it in the clear, and

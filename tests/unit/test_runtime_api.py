@@ -111,7 +111,7 @@ def _overlapping_route_writer(
         Path(os.__file__).resolve().parent
     ):
         raise RuntimeError(f"spawned worker loaded non-stdlib secrets: {standard_secrets.__file__}")
-    os.environ["MIND_ADMIN_TOKEN"] = "separate-process-token"
+    os.environ["MIND_KEY"] = "separate-process-token"
     os.environ["INFERENCE_PROXY_URL"] = proxy_url
     os.environ["MIND_PROXY_KEY"] = "separate-process-proxy-key"
     real_replace = process_runtime_api.os.replace
@@ -289,23 +289,6 @@ class TestRegistrationPayload:
         assert "mind_id" in str(exc.value)
 
 
-class TestAdminToken:
-    def test_prefers_the_dedicated_token(self, monkeypatch):
-        monkeypatch.setenv("MIND_ADMIN_TOKEN", "mind-token")
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "gateway-token")
-        assert runtime_api.admin_token() == "mind-token"
-
-    def test_falls_back_to_the_gateway_bearer(self, monkeypatch):
-        monkeypatch.delenv("MIND_ADMIN_TOKEN", raising=False)
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "gateway-token")
-        assert runtime_api.admin_token() == "gateway-token"
-
-    def test_no_token_configured_is_empty_not_open(self, monkeypatch):
-        monkeypatch.delenv("MIND_ADMIN_TOKEN", raising=False)
-        monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
-        assert runtime_api.admin_token() == ""
-
-
 class _Listing:
     """The inference proxy's model listing, at the HTTP boundary."""
 
@@ -362,7 +345,7 @@ def listing(monkeypatch):
 
 @pytest.fixture()
 def client(runtime_file, monkeypatch, listing):
-    monkeypatch.setenv("MIND_ADMIN_TOKEN", "s3cret")
+    monkeypatch.setenv("MIND_KEY", "s3cret")
     app = FastAPI()
     import logging
 
@@ -414,8 +397,8 @@ class TestRoutes:
     def test_patch_refuses_when_no_token_is_configured(
         self, client, runtime_file, monkeypatch
     ):
-        monkeypatch.delenv("MIND_ADMIN_TOKEN", raising=False)
-        monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("MIND_KEY", raising=False)
+        monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
         assert client.patch("/runtime", json={"default_model": "opus"}).status_code == 503
 
     def test_patch_rejects_a_bad_model_name(self, client, runtime_file):
@@ -433,7 +416,7 @@ def test_overlapping_runtime_routes_preserve_both_successful_updates_across_proc
     runtime_file, monkeypatch, first_action,
 ):
     """Separate route workers preserve distinct writes under a stale replacement schedule."""
-    monkeypatch.setenv("MIND_ADMIN_TOKEN", "separate-process-token")
+    monkeypatch.setenv("MIND_KEY", "separate-process-token")
     proxy = _ProcessProxy()
     proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
     proxy_thread.start()
@@ -532,7 +515,7 @@ class _Response:
 class TestRegisterWithBroker:
     async def test_posts_runtime_yaml_to_the_broker(self, runtime_file, monkeypatch):
         monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin")
+        monkeypatch.setenv("MIND_KEY", "admin")
         posted: dict = {}
 
         class _Session:
@@ -563,7 +546,7 @@ class TestRegisterWithBroker:
         self, runtime_file, monkeypatch
     ):
         monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin")
+        monkeypatch.setenv("MIND_KEY", "admin")
         runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
         posted: dict = {}
 
@@ -592,7 +575,7 @@ class TestRegisterWithBroker:
         self, runtime_file, monkeypatch
     ):
         monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin")
+        monkeypatch.setenv("MIND_KEY", "admin")
 
         class _Session:
             async def __aenter__(self):
@@ -611,7 +594,7 @@ class TestRegisterWithBroker:
 
     async def test_no_comms_configured_is_a_no_op(self, runtime_file, monkeypatch):
         monkeypatch.delenv("COMMS_URL", raising=False)
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin")
+        monkeypatch.setenv("MIND_KEY", "admin")
         import logging
 
         with patch(
@@ -664,7 +647,7 @@ class TestRegistrationLoop:
     @pytest.fixture(autouse=True)
     def _comms_env(self, monkeypatch):
         monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin")
+        monkeypatch.setenv("MIND_KEY", "admin")
 
     async def test_registers_once_the_broker_comes_up_without_a_restart(
         self, runtime_file

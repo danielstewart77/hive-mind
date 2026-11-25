@@ -44,7 +44,7 @@ def _build(monkeypatch, tmp_path, harness: str):
     monkeypatch.setenv("MIND_NAME", "example")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("MIND_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MIND_KEY", ADMIN_TOKEN)
     monkeypatch.setattr(skills_api, "PROJECT_DIR", project, raising=True)
 
     app = FastAPI()

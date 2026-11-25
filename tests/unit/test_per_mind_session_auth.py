@@ -223,11 +223,13 @@ class TestTheSessionGuard:
         assert denied is not None
         assert denied.status_code == 401
 
-    def test_the_admin_token_also_opens_a_session_route(self, mind_dir):
+    def test_a_hive_administrator_key_opens_no_session_route(self, mind_dir):
         runtime_api.session_token(mind_dir)
         headers = {"Authorization": "Bearer the-admin-token"}
-        with patch.dict(os.environ, {"MIND_ADMIN_TOKEN": "the-admin-token"}):
-            assert runtime_api.authorize_session(_request(headers), mind_dir) is None
+        with patch.dict(os.environ, {"MIND_ADMIN_TOKEN": "the-admin-token",
+                                     "COMMS_ADMIN_BEARER_TOKEN": "the-admin-token"}):
+            denied = runtime_api.authorize_session(_request(headers), mind_dir)
+        assert denied is not None and denied.status_code == 401
 
     def test_a_subprotocol_credential_is_admitted(self, mind_dir):
         """A browser attaching directly cannot set a header."""
@@ -332,7 +334,7 @@ class TestTheConfigSurfaceIsSeparate:
     def test_a_session_token_is_refused_by_the_admin_guard(self, mind_dir):
         token = runtime_api.session_token(mind_dir)
         headers = {"Authorization": f"Bearer {token}"}
-        with patch.dict(os.environ, {"MIND_ADMIN_TOKEN": "the-admin-token"}):
+        with patch.dict(os.environ, {"MIND_KEY": "the-mind-key"}):
             denied = runtime_api.authorize_admin(_request(headers))
         assert denied is not None
         assert denied.status_code == 401

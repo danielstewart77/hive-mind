@@ -38,6 +38,10 @@ def test_feature_choices_belong_to_the_signed_in_account(builtin_console):
 def test_hive_errors_endpoint_reports_a_mind_failure(builtin_console, monkeypatch):
     client = builtin_console.admin()
     monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'stand-in-admin')
+    import configuration_data
+    async def own_key(url):
+        return 'the-minds-own-key'
+    monkeypatch.setattr(configuration_data, 'own_credential_for', own_key)
     original_client = httpx.AsyncClient
     feed = {'started_at': '2026-11-13T18:00:00Z', 'errors': [
         {'message': 'Failed to open terminal', 'detail': 'no context window for gpt-5.6-sol'}]}
@@ -72,9 +76,8 @@ def test_a_mind_the_credential_guard_refuses_is_listed_as_withheld_and_never_ask
         **kwargs, transport=httpx.MockTransport(transport)))
     components = {c['name']: c for c in client.get('/api/hive-errors').json()['components']}
     assert components['Kidbox']['status'] == 'withheld'
-    assert components['Atlas']['status'] == 'ok'
-    assert asked['atlas'] == 'Bearer stand-in-admin'
-    assert 'kidbox' not in asked
+    assert components['Atlas']['status'] == 'withheld'
+    assert 'kidbox' not in asked and 'atlas' not in asked
 
 
 async def test_terminal_start_exception_reaches_component_error_report():

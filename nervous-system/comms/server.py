@@ -311,6 +311,21 @@ async def _require_own_session_mind(request: Request, session_id: str) -> None:
         raise HTTPException(404, "Session not found")
 
 
+async def _own_mind_keys_or_refuse(request: Request) -> set[str] | None:
+    """For a route only the admin credential and a mind itself may call.
+
+    None for the admin credential (no restriction); the keys naming the one
+    mind otherwise. Anyone else - a person, a surface bot's service value, an
+    unknown caller - is refused 401, like any admin route.
+    """
+    caller = _caller(request)
+    if caller.sees_everything():
+        return None
+    if caller.role != user_access.MIND:
+        raise HTTPException(401, "Invalid token")
+    return await user_access.holder_keys(caller)
+
+
 async def _names_own_mind(caller: user_access.Caller, mind_id: object) -> bool:
     """Whether this caller may act *as* the mind it named.
 
@@ -928,8 +943,8 @@ async def set_session_name(session_id: str, body: SetSessionNameRequest):
         raise HTTPException(400, str(exc)) from exc
 
 
-@app.get("/sessions/live", dependencies=[Depends(require_admin_bearer)])
-async def live_sessions():
+@app.get("/sessions/live")
+async def live_sessions(request: Request):
     """Every conversation producing output right now, with its context figures.
 
     What a dashboard reads instead of `status`, which is written to
@@ -937,8 +952,23 @@ async def live_sessions():
     column reports every session that has ever taken a turn as busy.
 
     Declared before `/sessions/{session_id}` so the literal path wins.
+
+    The admin credential reads every conversation. A mind's own credential
+    reads only its own mind's rows (the chief of staff finds the conversation
+    to report into this way); any other caller is refused, so a mind never
+    sees another mind's work.
     """
-    return await session_mgr.live_dashboard()
+    keys = await _own_mind_keys_or_refuse(request)
+    board = await session_mgr.live_dashboard()
+    if keys is None:
+        return board
+    return {
+        **board,
+        "sessions": [row for row in board.get("sessions", [])
+                     if user_access.mind_is_named_in(keys, row.get("mind_id"))],
+        "idle": [row for row in board.get("idle", [])
+                 if user_access.mind_is_named_in(keys, row.get("mind_id"))],
+    }
 
 
 @app.get("/sessions/live/text", dependencies=[Depends(require_admin_bearer)])
@@ -1392,9 +1422,15 @@ async def _run_brief(session_id: str, content: str, images, goal_rounds, sender_
 
 
 @app.get("/minds/{mind_id}/wake-state")
-async def get_mind_wake_state(mind_id: str, since: float | None = None):
+async def get_mind_wake_state(request: Request, mind_id: str, since: float | None = None):
     """Whether a mind is mid-turn or owed a wake, for whatever must not lose
-    either - the recreate of the chief of staff's container. Admin only."""
+    either - the recreate of the chief of staff's container. The admin
+    credential asks about any mind; a mind's own credential only about itself."""
+    keys = await _own_mind_keys_or_refuse(request)
+    if keys is not None:
+        row = await core.get_mind_by_id_or_name(mind_id)
+        if not row or not user_access.mind_is_named_in(keys, row["mind_id"]):
+            raise HTTPException(404, "No such mind")
     return await session_mgr.mind_idle_state(mind_id, since=since)
 
 
@@ -2368,22 +2404,8 @@ async def role_holders(slug: str, request: Request):
 
 @app.get("/broker/minds")
 async def broker_get_minds():
-    """Return all registered minds from the broker database.
-
-    Each row says whether the hive's admin credential may be sent to the
-    address it registered (`admin_credential_allowed`): only a mind owned by
-    `config.admin_credential_owner()`. The console reads it, so the gateway
-    and the console withhold that credential from the same minds.
-    """
-    from comms.config import admin_credential_owner
-
-    trusted = admin_credential_owner()
-    rows = await broker.get_registered_minds()
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict):
-            owner = str(row.get("owner") or "").strip().lower()
-            row["admin_credential_allowed"] = bool(trusted) and owner == trusted
-    return rows
+    """Return all registered minds from the broker database."""
+    return await broker.get_registered_minds()
 
 
 async def _refuse_foreign_registration(caller, body) -> None:

@@ -20,9 +20,7 @@ models:
   opus: anthropic
   haiku: anthropic
 
-# The one person whose minds may still be sent the gateway's admin
-# credential on a model or harness switch, as a fallback for minds running
-# code that refuses their own session credential there. Empty: nobody. Every
-# other mind is sent only its own credential. COMMS_ADMIN_CREDENTIAL_OWNER
-# overrides it.
+# The person a message from a mind with no owner on its row is taken to come
+# from. It decides nothing about credentials: no mind is ever sent the
+# gateway's admin credential. COMMS_ADMIN_CREDENTIAL_OWNER overrides it.
 admin_credential_owner: ""

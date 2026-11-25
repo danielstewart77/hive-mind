@@ -15,8 +15,6 @@ was unreachable would be overwritten the moment it came back.
 
 from __future__ import annotations
 
-import os
-
 import httpx
 from fastapi import HTTPException
 
@@ -26,34 +24,22 @@ _TIMEOUT = 8.0
 async def admin_headers(target_url: str) -> dict[str, str]:
     """The bearer a Mind accepts on its config-write route, for `target_url`.
 
-    The same admin token the gateway uses; Minds accept it (or their own
-    `MIND_ADMIN_TOKEN`, when an install sets one). Never to a mind that is
-    not to hold it: that admin token opens every person's conversations
-    (DECIDED 2026-11-15, Daniel). A mind this console made holds none and is
-    sent its own key, which it accepts; a mind elsewhere that the gateway
-    marks as not to be sent it is refused with 503.
+    That mind's own key, which it holds and presents to the gateway, and which
+    the console holds for it. Never a hive-wide administrator key: no mind
+    holds or accepts one (feature 834, requirement 17). A mind whose key this
+    console does not hold - one on another machine, its key pasted there - is
+    answered 503 with a sentence saying so, not sent something else.
     """
     import configuration_data
 
-    if await configuration_data.withholds_admin_credential(target_url):
-        # A mind this console made is sent its own key instead: the person
-        # asking has already been allowed by their account, and the mind
-        # accepts the one key it holds.
-        own = await configuration_data.own_credential_for(target_url)
-        if own:
-            return {"Authorization": f"Bearer {own}"}
-        raise HTTPException(
-            status_code=503,
-            detail="this mind is not sent the hive's admin credential, so its "
-            "settings cannot be read or changed from here",
-        )
-    token = os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")
-    if not token:
-        raise HTTPException(
-            status_code=503,
-            detail="COMMS_ADMIN_BEARER_TOKEN is not configured for this console",
-        )
-    return {"Authorization": f"Bearer {token}"}
+    own = await configuration_data.own_credential_for(target_url)
+    if own:
+        return {"Authorization": f"Bearer {own}"}
+    raise HTTPException(
+        status_code=503,
+        detail="this console does not hold this mind's own key, so its settings "
+        "cannot be read or changed from here",
+    )
 
 
 def _endpoint(gateway_url: str) -> str:
