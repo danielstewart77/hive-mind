@@ -236,6 +236,37 @@ def _mind_build_args() -> dict[str, str]:
 #: read. Overridable for an install whose hive-mind lives elsewhere.
 DEFAULT_MIND_BUILD_CONTEXT = "https://github.com/danielstewart77/hive-mind.git#master"
 
+#: In-repository packages a mind's image installs from named build contexts
+#: (`COPY --from=<name>`), and where each sits inside hive-mind.
+MIND_BUILD_PACKAGE_CONTEXTS = {
+    "hive_data": "modules/hive-data",
+    "hive_surfaces": "modules/hive-surfaces",
+}
+
+
+def mind_build_contexts(context: str) -> dict[str, str]:
+    """The named build contexts a mind's image needs, from the main context.
+
+    The image copies `hive_data` and `hive_surfaces` from folders of hive-mind
+    itself, so they are named at the same place the main context is: a git
+    URL gets docker's subdirectory form on the same ref
+    (`<url>#<ref>:modules/hive-surfaces`), a folder gets the subfolder. They
+    always follow the main context, so the code and the packages it installs
+    come from one revision. A URL already naming a subdirectory is left
+    without them: it is not a hive-mind root.
+    """
+    out: dict[str, str] = {}
+    for name, sub in MIND_BUILD_PACKAGE_CONTEXTS.items():
+        if "://" in context or context.startswith("git@"):
+            url, _, frag = context.partition("#")
+            if ":" in frag:
+                continue
+            out[name] = f"{url}#{frag}:{sub}"
+        else:
+            out[name] = f"{context.rstrip('/')}/{sub}"
+    return out
+
+
 #: The image stage whose code belongs to root, so the mind cannot rewrite the
 #: server that receives the gateway's and the console's calls.
 MIND_BUILD_TARGET = "locked-mind"
@@ -429,6 +460,8 @@ def scaffold_internal_mind(
 
     own = f"/usr/src/app/minds/{name}"
     host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
+    build_context = (os.getenv("HIVE_MIND_BUILD_CONTEXT", "").strip()
+                     or DEFAULT_MIND_BUILD_CONTEXT)
     compose: dict[str, Any] = {
         "services": {
             name: {
@@ -436,8 +469,8 @@ def scaffold_internal_mind(
                 # DEFAULT_MIND_BUILD_CONTEXT. The code is the image's, so a
                 # change reaches this mind when it is rebuilt.
                 "build": {
-                    "context": os.getenv("HIVE_MIND_BUILD_CONTEXT", "").strip()
-                    or DEFAULT_MIND_BUILD_CONTEXT,
+                    "context": build_context,
+                    "additional_contexts": mind_build_contexts(build_context),
                     "dockerfile": "Dockerfile",
                     "target": MIND_BUILD_TARGET,
                     **({"args": build_args} if build_args else {}),
