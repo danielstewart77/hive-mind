@@ -364,3 +364,24 @@ def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
     assert asyncio.run(
         fetchval("SELECT COUNT(*) FROM core.sessions WHERE mind_id = $1", mind)
     ) == 0
+
+
+def test_the_credential_route_removes_a_mind_row_only_when_asked_to(client):
+    """`remove=true` is what a failed creation's undo sends; without it the
+    route keeps the row revoked, which is what a cut-off needs."""
+    key = "pasted-route-key-0123456789"  # secret-guard: allow
+    put = client.put("/credentials/route-mind", headers=REACHES_EVERYTHING,
+                     json={"username": OPERATOR, "token": key, "role": "mind"})
+    assert put.status_code == 200, put.text
+
+    revoked = client.delete("/credentials/route-mind", headers=REACHES_EVERYTHING)
+    assert revoked.json()["revoked"] is True
+    clash = client.put("/credentials/other-mind", headers=REACHES_EVERYTHING,
+                       json={"username": OPERATOR, "token": key, "role": "mind"})
+    assert clash.status_code == 400
+
+    removed = client.delete("/credentials/route-mind?remove=true", headers=REACHES_EVERYTHING)
+    assert removed.json()["removed"] is True
+    freed = client.put("/credentials/other-mind", headers=REACHES_EVERYTHING,
+                       json={"username": OPERATOR, "token": key, "role": "mind"})
+    assert freed.status_code == 200, freed.text
