@@ -37,6 +37,7 @@ def creation(tmp_path, monkeypatch, builtin_console):
     monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", str(tmp_path))
     monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.invalid:8899")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "fixture-gateway-admin")
+    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "fixture-tools-admin")
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", "fixture-memory-admin")
     monkeypatch.setenv("HIVE_TOOLS_TOKEN", "fixture-tools-token")
     monkeypatch.delenv("PROXY_CREDENTIAL_ADMIN_KEY", raising=False)

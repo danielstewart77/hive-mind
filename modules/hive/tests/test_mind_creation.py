@@ -167,6 +167,7 @@ def client(tmp_path, monkeypatch):
                          "HIVE_TOOLS_URL"):
             monkeypatch.setenv(variable, server.url)
         monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "stand-in-gateway-admin")
+        monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "stand-in-tools-admin")
         monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", "stand-in-memory-admin")
         # The proxy's is not in the environment: it is read from the env file.
         monkeypatch.delenv("PROXY_CREDENTIAL_ADMIN_KEY", raising=False)
@@ -322,6 +323,7 @@ def comms(fake_comms, monkeypatch):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "tools-admin-token")
     fake_comms.received.clear()
     return fake_comms
 
@@ -466,6 +468,7 @@ def test_the_console_never_sends_its_admin_credential_to_a_mind_it_made(client, 
     import mind_runtime
 
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "tools-admin-token")
     assert _create(client).status_code == 200
     mind_id = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())["mind_id"]
     registry = [
@@ -496,6 +499,7 @@ def test_the_console_withholds_its_admin_credential_from_minds_the_gateway_withh
     import mind_runtime
 
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "tools-admin-token")
     registry = [
         {"id": "arnold-id", "name": "arnold", "owner": "sloan",
          "gateway_url": "http://192.168.5.64:8433", "admin_credential_allowed": False},
@@ -696,7 +700,7 @@ def test_a_start_that_hive_tools_refuses_is_not_reported_as_started(
     looking for a mind that is not running."""
     monkeypatch.setenv("HIVE_MIND_STACK_COMPOSE", str(_stack(tmp_path, "ada")))
     monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", "/host/Dev/hive_mind")
-    hive_tools.refuse = True
+    hive_tools.refusing.add(("POST", "/docker/up"))
 
     body = _create(client).json()
 
@@ -743,7 +747,7 @@ def test_a_creation_that_fails_at_a_step_says_not_made_names_the_step_and_leaves
         # the memory store; the proxy is sent nothing, its key is the person's.
         removed = [r for r in sent
                    if (r["method"], r["path"]) == ("DELETE", "/credentials/atlas")]
-        assert len(removed) == 2
+        assert len(removed) == 3
         assert all(r["query"] == {"remove": ["true"]} for r in removed)
     if refused == ("POST", "/graph/upsert"):
         # The gateway had the mind by then, and no longer does.
