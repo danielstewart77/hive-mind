@@ -27,3 +27,11 @@ delete them from each site's `.env`.
    example `.mint-services.py`) need the new paths.
 5. Terminal image: tag `terminal-vX.Y.Z` on hive-mind publishes
    `ghcr.io/danielstewart77/terminal`; no other tag does.
+6. The terminal publish workflow is kept as
+   `docs/setup/workflows/terminal-publish.yml.txt` because the push token
+   cannot write `.github/workflows`. Copy it to
+   `.github/workflows/terminal-publish.yml`; until then a `terminal-v*` tag
+   publishes nothing.
+7. An old clone moved aside by the installer (`modules/.hive.moved-aside-*`)
+   still holds the untracked `.env` and `data/`; carry them over before
+   deleting it.
