@@ -652,6 +652,9 @@ async def undo_move(name: str) -> dict[str, Any]:
     services = [s for s in _services() if s.key != "tools" or _tools_applies(holder)]
     owner, mind_id = str(row.get("owner") or ""), str(row.get("mind_id") or "")
     async with hc._ROTATION_LOCK:
+        if _retired_marker().exists():  # a retirement may have run while this waited
+            raise MintRefused(
+                "the old keys were retired, so no mind can be put back on its old values")
         old: dict[str, str] = {}
         for service in services:
             if service.key == "tools":
@@ -824,28 +827,39 @@ async def retire() -> dict[str, Any]:
                     if value:
                         old_values.append((service, name, value))
         shared_value = None
+        # Before the first irreversible step, whether or not the tools are
+        # configured: once the marker exists no undo can bring an old value back,
+        # whatever fails after this. A marker that already existed (a repeat) is
+        # never taken away.
+        existed = _retired_marker().exists()
+        try:
+            key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _retired_marker().write_text("retired\n")
+        except OSError as exc:
+            raise MintRefused(
+                f"the record that retirement happened could not be written "
+                f"({exc.strerror or exc}); nothing was retired") from None
         if tools.configured():
             import os
+            import httpx
             shared_value = os.environ.get("HIVE_TOOLS_TOKEN") or None
-            # Before the first irreversible step: once the marker exists no undo
-            # can bring an old value back, whatever fails after this.
-            try:
-                key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-                _retired_marker().write_text("retired\n")
-            except OSError as exc:
-                raise MintRefused(
-                    f"the record that retirement happened could not be written "
-                    f"({exc.strerror or exc}); nothing was retired") from None
             try:
                 retired = await hc._request(tools, "POST", "/credentials/shared-token/retire")
-            except Exception:
-                _retired_marker().unlink(missing_ok=True)  # nothing retired: undo stays open
+            except Exception as exc:
+                # Only a request that was never sent proves nothing was retired.
+                # A timeout may have landed, so the marker stays and undo stays closed.
+                if not existed and isinstance(exc.__cause__, httpx.ConnectError):
+                    _retired_marker().unlink(missing_ok=True)
                 raise
             if retired.status_code >= 400:
-                _retired_marker().unlink(missing_ok=True)
+                if not existed and retired.status_code < 500:
+                    _retired_marker().unlink(missing_ok=True)  # a clean refusal: nothing retired
                 raise MintRefused(
                     f"the tools did not retire the shared token (they answered {retired.status_code}); "
-                    "the old mind keys were left as they were")
+                    "the old mind keys were left as they were"
+                    + ("" if retired.status_code < 500 else
+                       ", but the tools may have retired it before failing, so undo stays closed; "
+                       "check the tools and run retire again"))
             holder = SHARED_HOLDER
             if holder in registry:
                 location = _stored(holder)

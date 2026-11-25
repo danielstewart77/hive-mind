@@ -543,9 +543,34 @@ async def test_retirement_closes_undo_even_if_a_step_after_the_shared_token_reti
 
 async def test_a_retirement_the_tools_refuse_leaves_undo_open(old_hive, monkeypatch):
     await _retirable(old_hive, monkeypatch)
-    old_hive.tools.retire_status = 500
+    old_hive.tools.retire_status = 403
 
     with pytest.raises(holder_credentials.MintRefused):
         await key_migration.retire()
 
     assert (await key_migration.undo_move("ada"))["mind"] == "ada"
+
+
+async def test_a_retire_the_tools_fail_with_a_server_error_keeps_undo_closed_since_it_may_have_landed(old_hive, monkeypatch):
+    await _retirable(old_hive, monkeypatch)
+    old_hive.tools.retire_status = 500
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.retire()
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.undo_move("ada")
+
+
+async def test_a_repeat_retirement_the_tools_refuse_does_not_reopen_undo(old_hive, monkeypatch):
+    stack = await _retirable(old_hive, monkeypatch)
+    stack.write_text("services:\n  ada-bot:\n    environment:\n"
+                     "      - A=${COMMS_TOKEN_ADA}\n      - B=${LUCENT_TOKEN_ADA}\n")
+    await key_migration.retire()
+    old_hive.tools.retire_status = 403
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.retire()
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.undo_move("ada")
