@@ -832,10 +832,16 @@ async def retire() -> dict[str, Any]:
         # whatever fails after this. A marker that already existed (a repeat) is
         # never taken away.
         existed = _retired_marker().exists()
+        if tools.configured() and not tools.admin_token():
+            raise MintRefused(
+                f"this console holds no {tools.admin_env}, so it cannot retire the shared "
+                "tools token; nothing was retired")
         try:
             key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
             _retired_marker().write_text("retired\n")
         except OSError as exc:
+            if not existed:
+                _retired_marker().unlink(missing_ok=True)
             raise MintRefused(
                 f"the record that retirement happened could not be written "
                 f"({exc.strerror or exc}); nothing was retired") from None
@@ -851,13 +857,13 @@ async def retire() -> dict[str, Any]:
                 if not existed and isinstance(exc.__cause__, httpx.ConnectError):
                     _retired_marker().unlink(missing_ok=True)
                 raise
-            if retired.status_code >= 400:
-                if not existed and retired.status_code < 500:
+            if retired.status_code != 200:
+                if not existed and 400 <= retired.status_code < 500 and retired.status_code != 408:
                     _retired_marker().unlink(missing_ok=True)  # a clean refusal: nothing retired
                 raise MintRefused(
                     f"the tools did not retire the shared token (they answered {retired.status_code}); "
                     "the old mind keys were left as they were"
-                    + ("" if retired.status_code < 500 else
+                    + ("" if 400 <= retired.status_code < 500 and retired.status_code != 408 else
                        ", but the tools may have retired it before failing, so undo stays closed; "
                        "check the tools and run retire again"))
             holder = SHARED_HOLDER

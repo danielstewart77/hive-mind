@@ -574,3 +574,26 @@ async def test_a_repeat_retirement_the_tools_refuse_does_not_reopen_undo(old_hiv
 
     with pytest.raises(holder_credentials.MintRefused):
         await key_migration.undo_move("ada")
+
+
+async def test_retirement_with_the_tools_unconfigured_still_closes_undo(old_hive, monkeypatch):
+    stack = await _retirable(old_hive, monkeypatch)
+    stack.write_text("services:\n  ada-bot:\n    environment:\n"
+                     "      - A=${COMMS_TOKEN_ADA}\n      - B=${LUCENT_TOKEN_ADA}\n")
+    monkeypatch.delenv("HIVE_TOOLS_URL")
+    monkeypatch.delenv("TOOLS_ADMIN_BEARER_TOKEN")
+    await key_migration.retire()
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.undo_move("ada")
+
+
+async def test_a_retirement_the_console_cannot_send_leaves_undo_open(old_hive, monkeypatch):
+    await _retirable(old_hive, monkeypatch)
+    monkeypatch.delenv("TOOLS_ADMIN_BEARER_TOKEN")
+
+    with pytest.raises((key_migration.RetirementRefused, holder_credentials.MintRefused)):
+        await key_migration.retire()
+
+    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", ADMIN["tools"])
+    assert (await key_migration.undo_move("ada"))["mind"] == "ada"
