@@ -8,13 +8,15 @@ finished one.
 
 from __future__ import annotations
 
+import json
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 
-from hive_data import migrate
+from hive_data import migrate, schema
 from hive_data.errors import MigrationFailed, MigrationRefused
 from hive_data.schema import COLUMNS, bare, schema_of
 
@@ -268,3 +270,85 @@ async def test_a_step_creating_a_role_is_refused_up_front_without_createrole():
             await server.execute(f"DROP ROLE IF EXISTS {creator}")
         finally:
             await server.close()
+
+
+#: The columns the previous release declared, as that release shipped them.
+#: Refreshed with the release procedure when a release is tagged (see the
+#: README, "Versions"): after that, the steps added since are what this
+#: suite proves the release just gone can still live beside.
+PREVIOUS = json.loads(
+    (Path(__file__).parent / "previous_release_columns.json").read_text())
+
+
+@pytest.mark.parametrize("version", [s.version for s in migrate.steps()
+                                     if s.version > 4])
+def test_a_shipped_step_only_adds(version):
+    step = next(s for s in migrate.steps() if s.version == version)
+    assert migrate.rule_violations(step) == []
+
+
+@pytest.mark.parametrize("sql, mentions", [
+    ("ALTER TABLE core.minds ADD COLUMN x integer NOT NULL;", "NOT NULL"),
+    ("ALTER TABLE core.minds ALTER COLUMN owner SET NOT NULL;", "owner"),
+    ("ALTER TABLE core.minds DROP COLUMN voice;", "drops a column"),
+    ("ALTER TABLE core.minds RENAME COLUMN voice TO sound;", "renames"),
+    ("ALTER TABLE core.minds ALTER COLUMN voice TYPE integer;", "retypes"),
+    ("DROP TABLE core.minds;", "drops a table"),
+])
+def test_a_step_that_breaks_the_previous_release_is_named(sql, mentions):
+    found = migrate.rule_violations(migrate.Step(99, "bad", sql))
+    assert found and any(mentions in line for line in found)
+
+
+@pytest.mark.parametrize("sql", [
+    "ALTER TABLE core.minds ADD COLUMN x integer;",
+    "ALTER TABLE core.minds ADD COLUMN x integer NOT NULL DEFAULT 0;",
+    "ALTER TABLE core.minds ALTER COLUMN owner SET DEFAULT '', "
+    "ALTER COLUMN owner SET NOT NULL;",
+    "CREATE TABLE core.fresh (x integer NOT NULL);",
+])
+def test_a_step_that_only_adds_is_not_named(sql):
+    assert migrate.rule_violations(migrate.Step(99, "ok", sql)) == []
+
+
+async def test_the_previous_release_still_verifies_and_writes_against_the_current_steps(
+        monkeypatch):
+    async with claimed_database(ADMIN_DSN, "hive_data_other_") as dsn:
+        await migrate.apply(dsn)
+        # The previous release, as it declares its columns.
+        monkeypatch.setattr(
+            schema, "COLUMNS", {t: tuple(c) for t, c in PREVIOUS.items()})
+        connection = await asyncpg.connect(dsn)
+        try:
+            await schema.verify(connection)
+
+            # Every column a later step added to a table the old release
+            # writes must be one an insert can leave out. (A table the old
+            # release has never heard of is nothing it writes to.)
+            theirs = {(schema.schema_of(t), schema.bare(t)): set(c)
+                      for t, c in PREVIOUS.items()}
+            rows = await connection.fetch(
+                "SELECT table_schema, table_name, column_name "
+                "FROM information_schema.columns "
+                "WHERE is_nullable = 'NO' AND column_default IS NULL "
+                "AND is_identity = 'NO' AND is_generated = 'NEVER'")
+            unknown = sorted(
+                f"{r['table_schema']}.{r['table_name']}.{r['column_name']}"
+                for r in rows
+                if (r["table_schema"], r["table_name"]) in theirs
+                and r["column_name"]
+                not in theirs[(r["table_schema"], r["table_name"])])
+            assert unknown == []
+
+            # And an old-release write: an insert naming only the columns the
+            # previous release knows, into a table later steps changed.
+            await connection.execute(
+                "INSERT INTO board.work_items "
+                "(id, kind, title, \"position\") VALUES "
+                "('old-release-row', 'task', 'written by the previous "
+                "release', 1)")
+            assert await connection.fetchval(
+                "SELECT count(*) FROM board.work_items "
+                "WHERE id = 'old-release-row'") == 1
+        finally:
+            await connection.close()
