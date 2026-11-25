@@ -304,6 +304,8 @@ def test_a_shipped_step_only_adds(version):
     ("INSERT INTO core.t VALUES ('--x'); DROP TABLE core.minds;",
      "drops a table"),
     ("/* ; */ DROP TABLE core.minds;", "drops a table"),
+    ("INSERT INTO core.t VALUES (E'it\\'s'); DROP TABLE core.minds;",
+     "drops a table"),
     ('ALTER TABLE "My T" DROP COLUMN "a b";', "drops a column"),
     ("ALTER TABLE core.minds ADD COLUMN a text NOT NULL "
      "CHECK (a <> 'DEFAULT');", "NOT NULL"),
@@ -327,6 +329,7 @@ def test_a_step_that_breaks_the_previous_release_is_named(sql, mentions):
     "ALTER TABLE core.minds ADD COLUMN c integer CHECK (c > 0) "
     "REFERENCES core.other (id);",
     "INSERT INTO core.t VALUES ('a;b -- c DROP TABLE x');",
+    "/* a /* b */ ; DROP TABLE core.minds; */ SELECT 1;",
     "CREATE FUNCTION core.f() RETURNS trigger LANGUAGE plpgsql AS $$ "
     "BEGIN DROP TABLE x; RETURN NEW; END $$;",
 ])

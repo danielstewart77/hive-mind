@@ -150,18 +150,28 @@ def _statements(sql: str) -> list[str]:
             i = n if i < 0 else i
             continue
         if two == "/*":
-            end = sql.find("*/", i + 2)
-            if end < 0:
-                raise ValueError("unterminated block comment in a step")
-            i = end + 2
+            depth, j = 1, i + 2
+            while depth:
+                nxt = re.search(r"/\*|\*/", sql[j:])
+                if not nxt:
+                    raise ValueError("unterminated block comment in a step")
+                depth += 1 if nxt[0] == "/*" else -1
+                j += nxt.end()
+            i = j
             buffer.append(" ")
             continue
         if char == "'":
+            escaped = i > 0 and sql[i - 1] in "eE" and not (
+                i > 1 and (sql[i - 2].isalnum() or sql[i - 2] == "_"))
             j = i + 1
             while True:
                 j = sql.find("'", j)
                 if j < 0:
                     raise ValueError("unterminated string in a step")
+                if escaped and sql[j - 1] == "\\" and (
+                        len(sql[:j]) - len(sql[:j].rstrip("\\"))) % 2:
+                    j += 1
+                    continue
                 if sql[j + 1:j + 2] == "'":
                     j += 2
                     continue
