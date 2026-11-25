@@ -74,19 +74,19 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip "setupt
 COPY requirements.txt .
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# The shared surfaces core tracks `main`, which neither pip nor Docker will
-# move on its own. pip compares versions and the version never changes
-# between commits, so a plain requirements install is a no-op that says
-# nothing; and the layer above is cached on the contents of requirements.txt,
-# so a rebuild reuses the venv holding whatever commit was current when that
-# file last changed. Fetching the commit object busts the cache when and only
-# when `main` moves, and the force-reinstall is what replaces the code.
-ADD https://api.github.com/repos/danielstewart77/hive-surfaces/commits/main \
-    /tmp/hive-surfaces-main.json
-RUN /opt/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps \
-        "hive-surfaces @ git+https://github.com/danielstewart77/hive-surfaces.git@main" \
-    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
-    && rm -f /tmp/hive-surfaces-main.json
+# The chat surfaces (Telegram, Discord) are this repository's own
+# modules/hive-surfaces, installed from a named build context, `hive_surfaces`,
+# that the compose file points at that folder (named, because this image's own
+# context excludes modules/ in .dockerignore and a named context is not read
+# through it). So the commit that built the image names the surfaces code it
+# runs; nothing is fetched from GitHub. The package pulls in discord.py and
+# the rest of its own dependencies, which requirements.txt deliberately does
+# not repeat. Every build of this Dockerfile needs the context:
+# `additional_contexts: hive_surfaces: ./modules/hive-surfaces` in compose, or
+# `--build-context hive_surfaces=modules/hive-surfaces` on the command line.
+COPY --from=hive_surfaces . /tmp/hive-surfaces
+RUN /opt/venv/bin/pip install --no-cache-dir /tmp/hive-surfaces \
+    && rm -rf /tmp/hive-surfaces
 
 # Playwright browsers (installed as root before USER switch, shared path)
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers

@@ -1,0 +1,13 @@
+# The folder is a named build context (`hive_surfaces`) of the mind image, and
+# a named context reads the .dockerignore in its own folder, not the one at
+# the root of hive-mind. pip needs pyproject.toml, README.md and
+# hive_surfaces/ and nothing else.
+**/__pycache__
+*.py[cod]
+*.egg-info
+build/
+dist/
+.pytest_cache/
+.venv/
+tests/
+.git

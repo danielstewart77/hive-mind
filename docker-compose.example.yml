@@ -240,7 +240,11 @@ services:
   # mind's bot token.
   # ─────────────────────────────────────────────────────────────
   telegram-bot:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The surfaces are this repository's own modules/hive-surfaces.
+        hive_surfaces: ./modules/hive-surfaces
     container_name: hive-mind-telegram
     init: true
     working_dir: /usr/src/app
@@ -340,7 +344,11 @@ services:
   # Example Discord bot.
   # ─────────────────────────────────────────────────────────────
   discord-bot:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The surfaces are this repository's own modules/hive-surfaces.
+        hive_surfaces: ./modules/hive-surfaces
     container_name: hive-mind-discord
     init: true
     working_dir: /usr/src/app

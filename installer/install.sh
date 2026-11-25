@@ -31,7 +31,7 @@ main() {
   # remote has, is never moved: the install stops and says so.
   make_room_for_moved_modules() {
     local repo="$1" name path stamp
-    for name in hive-data; do
+    for name in hive-data hive-surfaces; do
       path="modules/$name"
       [ -e "$repo/$path/.git" ] || continue
       git -C "$repo" ls-tree HEAD -- "$path" | grep -q '^160000 ' || continue

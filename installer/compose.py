@@ -482,7 +482,9 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                                     "hive_data": hive_data}}, env=env)
         svc["ports"] = [f"0.0.0.0:{TERMINAL_PORT}:{TERMINAL_PORT}"]
 
-    mind_build = {"context": str(repo("hive-mind")), "args": mind_image.build_args(host)}
+    mind_build = {"context": str(repo("hive-mind")),
+                  "additional_contexts": {"hive_surfaces": str(repo("hive-surfaces"))},
+                  "args": mind_image.build_args(host)}
     if plan.mode(answers, "voice") == plan.HERE:
         svc = base(VOICE, image="hive/voice:local", needs=(COMMS,), build={
             **mind_build, "dockerfile": "Dockerfile.voice.kokoro"}, env={

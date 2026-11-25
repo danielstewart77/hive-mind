@@ -2,6 +2,8 @@ services:
   example:
     build:
       context: ../../..
+      additional_contexts:
+        hive_surfaces: ../../../modules/hive-surfaces
     container_name: hive-mind-example
     init: true
     working_dir: /usr/src/app
