@@ -47,28 +47,44 @@ docker compose up -d --build
 
 All services run on a shared Docker network (`hivemind`). The gateway (`hive-comms`, built from `nervous-system/`) is at `http://localhost:8426`; the vector store + knowledge graph (`hive-lucent`) is at `http://localhost:8425`.
 
-## Modules (`modules/`)
+## Modules (`modules/`) and releases
 
-Every repository hive-mind depends on is a module in its manifest,
-[`.gitmodules`](.gitmodules): inference-proxy, hive-harness-dsh and auth-service
-(where people sign in to the hive, with local accounts or third-party
-sign-in; every hive runs it), each under `modules/<name>`. hive-data (the shared data package), hive-surfaces (the chat
-surfaces), hive (the console), terminal and hive-tools are not modules any more: they are ordinary files of this repository at
-`modules/hive-data`, `modules/hive-surfaces`, `modules/hive`, `modules/terminal` and `modules/hive-tools`; the first two are versioned by tags `hive-data-vX.Y.Z` and `hive-surfaces-vX.Y.Z` (see
-[docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Clone hive-mind and bring them all in at the latest:
+hive-mind is one repository. The data package, the chat surfaces, the console,
+the terminal and the tools are ordinary folders of it, at `modules/hive-data`,
+`modules/hive-surfaces`, `modules/hive`, `modules/terminal` and
+`modules/hive-tools`; the first two are also installable alone at a tag
+(`hive-data-vX.Y.Z`, `hive-surfaces-vX.Y.Z`, see
+[docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Three
+repositories stay outside it, each independently versioned and listed in
+[`.gitmodules`](.gitmodules): inference-proxy, hive-harness-dsh and
+auth-service (where people sign in to the hive), each under `modules/<name>`.
+
+A release is a commit of hive-mind named by a tag. It records, in its own
+tree, the exact commit of each of those three. Clone it and bring them in at
+those commits:
 
 ```bash
 git clone https://github.com/danielstewart77/hive-mind.git && cd hive-mind
+git checkout --detach <release-tag>
 scripts/modules.sh
 ```
 
-Nothing is pinned. `scripts/modules.sh` brings each module to the newest
-commit of its branch and leaves it checked out on that branch, so you can
-work in it, commit and push as in any clone; run it again to update. A module
-you have switched to another branch is left alone. To pin one for a reason,
-add `pin = <commit>` to its entry. The installer runs the same script, and
-the containers that mount hive-mind never see the modules: a mind reaches
-Hive Tools over its API, not its code.
+`scripts/modules.sh` checks each module out at the commit the release records,
+detached, and never moves work: a module on a branch, or holding commits no
+remote has, is left as it is and named. Following a branch tip is an explicit
+opt-in for development (`HIVE_MODULES_FLOAT=1 scripts/modules.sh`).
+
+Put a machine on a release, and go back, with one command each:
+
+```bash
+scripts/release.sh to <release-tag>     # onto that release
+scripts/release.sh back                 # onto the one before
+```
+
+The written procedure, with what it leaves alone and where going back stops
+holding, is [docs/setup/one-repository.md](docs/setup/one-repository.md).
+The containers that mount hive-mind never see the modules: a mind reaches the
+tools over their API, not their code.
 
 ## Documentation (`docs/`)
 

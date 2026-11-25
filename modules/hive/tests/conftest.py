@@ -99,6 +99,17 @@ def _mind_creation_records_in_a_folder_the_test_owns(tmp_path, monkeypatch):
     monkeypatch.setattr(mind_rename, 'RENAME_DIR', tmp_path / 'mind-renames')
 
 
+RELEASE_CONTEXT = "https://github.com/danielstewart77/hive-mind.git#" + "c" * 40
+
+
+@pytest.fixture(autouse=True)
+def _a_release_to_build_new_minds_from(monkeypatch):
+    """A mind is built from the release this machine is on, which the
+    environment (or the minds folder) names; the tests that make minds run on
+    one. The tests of how it is chosen unset this."""
+    monkeypatch.setenv("HIVE_MIND_BUILD_CONTEXT", RELEASE_CONTEXT)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_hive_db(scratch_database, monkeypatch):
     """Every test on an emptied scratch database, with the store open.

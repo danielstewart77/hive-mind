@@ -36,6 +36,14 @@ services:
       - HOST_UID=${HOST_UID:-1000}
       - HOST_GID=${HOST_GID:-1000}
     volumes:
+      # Every path below that names the host defaults to somewhere inside this
+      # checkout (or the operator's home), never to a folder of one person's
+      # machine. A machine that keeps the minds, the edge minds' folders or
+      # the development tree elsewhere says so in this folder's .env:
+      # HIVE_MIND_DIR (the install's minds/ and .env files; default is the
+      # checkout), HOST_DEV_DIR, SKIPPY_DIR and MORDECAI_DIR (an edge mind's
+      # checkout; unset, nothing is there and the console shows none),
+      # INFERENCE_PROXY_DIR, HIVE_INIT_DIR.
       - ./src:/app/src
       # The modules shared with the terminal site, live like ./src above.
       # The terminal mounts this same directory from its own compose.
@@ -46,7 +54,7 @@ services:
       # per-Mind default-model editor. Containerized minds
       # (ada/bob/bilby/nagatha/hex-bot) keep runtime.yaml under hive_mind's
       # minds/. Remote minds (arnold, zach, hex) have no local file here.
-      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind:ro
+      - ${HIVE_MIND_DIR:-../..}/minds:/minds_hive_mind:ro
       # Edge minds installed on this host keep their own runtime.yaml in
       # their hive-edge-minds checkout. Mounted per mind at its own name so
       # /minds_edge/<name>/runtime.yaml is uniform with the mount above, and
@@ -54,19 +62,19 @@ services:
       # PATCH /runtime API, which is the one path that also reaches a Mind
       # on another machine. These mounts are for display and for registering
       # a Mind that has never started.
-      - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/minds/skippy:/minds_edge/skippy:ro
-      - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/minds/mordecai:/minds_edge/mordecai:ro
+      - ${SKIPPY_DIR:-./data/no-edge/skippy}/minds/skippy:/minds_edge/skippy:ro
+      - ${MORDECAI_DIR:-./data/no-edge/mordecai}/minds/mordecai:/minds_edge/mordecai:ro
       # Same hive_mind minds/ dir, read-write, scoped to voice_ref.wav
       # uploads only (see api_settings_voice_upload) — kept as a second
       # mount rather than loosening the read-only one above, so the
       # blast radius of "settings can write files" stays legible in code.
-      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_voice:rw
-      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_config:rw
+      - ${HIVE_MIND_DIR:-../..}/minds:/minds_hive_mind_voice:rw
+      - ${HIVE_MIND_DIR:-../..}/minds:/minds_hive_mind_config:rw
       # The mountable roots for the per-Mind project folders control
       # (mind_mounts.py). Read-write because the control creates a folder and
       # mounts it in one action; what it may reach is this mount, so a root
       # added to MIND_MOUNT_ROOTS needs its own mount here and a recreate.
-      - ${HOST_DEV_DIR:-/home/daniel/Storage/Dev}:/dev_roots:rw
+      - ${HOST_DEV_DIR:-../..}:/dev_roots:rw
       # (see the HOST_UID/HOST_GID note in the environment block above)
       # hive-mind's own copy of the tools service (modules/hive-tools), read
       # only: the console shows what it offers and never writes it. Relative
@@ -75,21 +83,21 @@ services:
       # here: it lives outside the checkout (docker-compose.yml of the tools).
       - ../hive-tools:/hive_tools_repo:ro
       # Hive-init installer assets, read-only, served from the downloads tab.
-      - ${HIVE_INIT_DIR:-/home/daniel/Storage/Dev/hive-init}:/hive_init:ro
+      - ${HIVE_INIT_DIR:-../../installer}:/hive_init:ro
       # Fixed destination used by the Capability Nodes one-click clone action.
-      - ${INFERENCE_PROXY_DIR:-/home/daniel/Storage/Dev/inference-proxy}:/inference_proxy_repo:rw
+      - ${INFERENCE_PROXY_DIR:-../inference-proxy}:/inference_proxy_repo:rw
       # Shared-secret .env files for the /settings credentials tab. Each is
       # bind-mounted as a single file, read-write, so rotation can write a
       # new value in place — see credentials_data.py for which key lives in
       # which file and why they must move together.
-      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/nervous-system/.env:/env_nervous_system/.env:rw
-      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/.env:/env_hive_mind/.env:rw
-      - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/.env:/env_edge/skippy/.env:rw
-      - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/.env:/env_edge/mordecai/.env:rw
+      - ${HIVE_MIND_DIR:-../..}/nervous-system/.env:/env_nervous_system/.env:rw
+      - ${HIVE_MIND_DIR:-../..}/.env:/env_hive_mind/.env:rw
+      - ${SKIPPY_DIR:-./data/no-edge/skippy}/.env:/env_edge/skippy/.env:rw
+      - ${MORDECAI_DIR:-./data/no-edge/mordecai}/.env:/env_edge/mordecai/.env:rw
       - ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/.env:/env_hive_tools/.env:rw
       # The GitHub PAT's two live homes, for the same tab's paste-to-set flow.
-      - ${GIT_CREDENTIALS_FILE:-/home/daniel/.git-credentials}:/gh/.git-credentials:rw
-      - ${GH_HOSTS_FILE:-/home/daniel/.config/gh/hosts.yml}:/gh/hosts.yml:rw
+      - ${GIT_CREDENTIALS_FILE:-${HOME}/.git-credentials}:/gh/.git-credentials:rw
+      - ${GH_HOSTS_FILE:-${HOME}/.config/gh/hosts.yml}:/gh/hosts.yml:rw
     networks:
       - hivemind
     logging:

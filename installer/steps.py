@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import secrets as _random
+import os
 import shutil
 import time
 import uuid
@@ -167,7 +168,17 @@ def clone_repos(ctx: Ctx):
         # A clone a deadline killed half way: ours, unusable, redone.
         shutil.rmtree(path)
     if path.exists():
-        ctx.sh.run(["git", "-C", str(path), "pull", "--ff-only", "--quiet"], timeout=300)
+        release = os.environ.get("HIVE_RELEASE", "").strip()
+        on_branch = ctx.sh.run(["git", "-C", str(path), "symbolic-ref", "--quiet", "HEAD"],
+                               check=False).returncode == 0
+        if release:
+            # A named release: a tag or a commit, never a branch.
+            ctx.sh.run(["git", "-C", str(path), "fetch", "--quiet", "--tags", "origin"], timeout=300)
+            ctx.sh.run(["git", "-C", str(path), "checkout", "--quiet", "--detach", release])
+        elif on_branch:
+            ctx.sh.run(["git", "-C", str(path), "pull", "--ff-only", "--quiet"], timeout=300)
+        # else: a checkout on a release (scripts/release.sh put it there) stays
+        # on it. Going to another is `scripts/release.sh to <release>`.
     else:
         # Into a temporary name, renamed only once whole, so an
         # interrupted clone is never mistaken for a repository.
@@ -178,8 +189,12 @@ def clone_repos(ctx: Ctx):
                    timeout=900)
         if not _valid_repo(ctx, partial):
             raise StepFailed(f"the clone of {name} has no HEAD")
+        release = os.environ.get("HIVE_RELEASE", "").strip()
+        if release:
+            ctx.sh.run(["git", "-C", str(partial), "checkout", "--quiet", "--detach", release])
         partial.rename(path)
     head = ctx.sh.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    _name_the_release(ctx, path)
     # Every module, then each brought to the newest commit of its branch.
     # Under `timeout`, which signals the whole process group: a deadline that
     # killed only the shell would leave its git clones running on.
@@ -200,6 +215,16 @@ def clone_repos(ctx: Ctx):
     stale = [f"{ctx.home.repos / r} is no longer used" for r in (*REPOS, *MOVED_IN)
              if r != name and (ctx.home.repos / r).exists()]
     return ", ".join([f"{name}@{head}", *modules, *stale])
+
+
+def _name_the_release(ctx: Ctx, checkout: Path) -> None:
+    """Tell the console which release a mind it creates is built from: this
+    checkout's commit, at the address it is published at. A release cannot name
+    its own commit in its own files, so it is written beside the minds."""
+    commit = ctx.sh.run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
+    ctx.home.minds.mkdir(parents=True, exist_ok=True)
+    (ctx.home.minds / site.RELEASE_CONTEXT_FILE).write_text(
+        site.release_context(f"{REPO_BASE}/hive-mind.git", commit) + "\n")
 
 
 # ---- 2. dsh tree ------------------------------------------------------------

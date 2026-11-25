@@ -367,7 +367,7 @@ def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
 
 @pytest.mark.parametrize("harness,provider,model", _PAIRS)
 def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
-    client, harness, provider, model
+    client, harness, provider, model, monkeypatch
 ):
     """DECIDED 2026-11-15 by Daniel: a mind not owned by him never reaches his
     credentials. Its container is built from the published hive-mind tree
@@ -375,6 +375,9 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
     keyring or another mind - and keeps its keyring in that folder. The
     folder is its own to write; its compose folder and session credential are
     read-only inside it."""
+    release = "https://github.com/danielstewart77/hive-mind.git#" + "d" * 40
+    (client.minds_dir / ".release-context").write_text(release + "\n")
+    monkeypatch.delenv("HIVE_MIND_BUILD_CONTEXT")
     assert _create(client, harness=harness, provider=provider).status_code == 200
 
     service = yaml.safe_load(
@@ -391,9 +394,9 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
         "${HOST_PROJECT_DIR:-.}/install/workflow-skills:/usr/src/app/install/workflow-skills:ro",
     ]
     assert (client.minds_dir / "atlas" / home).is_dir()
-    # The published tree, at the branch it is published on, and the stage
-    # whose code is root's.
-    assert service["build"]["context"] == "https://github.com/danielstewart77/hive-mind.git#master"
+    # The published tree, at the release's commit and never a branch, and the
+    # stage whose code is root's.
+    assert service["build"]["context"] == release
     assert service["build"]["target"] == "locked-mind"
     environment = dict(item.split("=", 1) for item in service["environment"])
     assert environment["KEY_RING"] == f"{own}/data/keyring"
@@ -813,3 +816,26 @@ def test_on_a_hive_laid_out_as_the_installer_lays_it_out_a_new_mind_gets_its_key
     assert [r["name"] for r in registered] == ["atlas"]
     assert registered[0]["harness"] == "dsh"
 
+
+
+def test_a_mind_is_refused_when_the_hive_names_no_release_to_build_it_from(client, monkeypatch):
+    """No release file and no override: creating a mind is refused with the
+    reason, and nothing is written. A moving branch is never the fallback."""
+    monkeypatch.delenv("HIVE_MIND_BUILD_CONTEXT")
+
+    answer = _create(client)
+
+    assert answer.status_code >= 400
+    assert "release" in answer.text
+    assert not (client.minds_dir / "atlas").exists()
+
+
+def test_a_release_file_that_names_a_branch_is_not_taken_for_a_release(client, monkeypatch):
+    monkeypatch.delenv("HIVE_MIND_BUILD_CONTEXT")
+    (client.minds_dir / ".release-context").write_text(
+        "https://github.com/danielstewart77/hive-mind.git#master\n")
+
+    answer = _create(client)
+
+    assert answer.status_code >= 400
+    assert not (client.minds_dir / "atlas").exists()

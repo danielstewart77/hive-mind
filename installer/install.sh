@@ -3,7 +3,10 @@
 #
 # Checks the machine, clones hive-mind into $HIVE_HOME (default ~/hive), and
 # starts the installer detached, so an SSH session that drops does not take it
-# down. Prints the setup page's address, port and link. Nothing is written
+# down. Prints the setup page's address, port and link. HIVE_RELEASE=<tag or
+# commit> puts the clone on that release (detached); without it a fresh clone is
+# the default branch's tip at that moment and an existing one stays where it is
+# if it is on a release, else is fast-forwarded. Nothing is written
 # before every check has passed, and nothing is written outside $HIVE_HOME.
 #
 # Everything is inside main(), called on the last line: a download cut short
@@ -162,19 +165,31 @@ PY
   local repo="$HIVE_HOME/repos/hive-mind"
   if [ -d "$repo/.git" ]; then
     make_room_for_moved_modules "$repo"
-    git -C "$repo" pull --ff-only --quiet \
-      || fail "could not update $repo" "git -C $repo status — commit or discard local changes, then run again"
+    if [ -n "${HIVE_RELEASE:-}" ]; then
+      # A named release (a tag or a commit), never a branch tip.
+      git -C "$repo" fetch --quiet --tags origin \
+        && git -C "$repo" checkout --quiet --detach "$HIVE_RELEASE" \
+        || fail "could not put $repo on release $HIVE_RELEASE" "git -C $repo status — commit or discard local changes, check the name, then run again"
+    elif git -C "$repo" symbolic-ref --quiet HEAD >/dev/null; then
+      git -C "$repo" pull --ff-only --quiet \
+        || fail "could not update $repo" "git -C $repo status — commit or discard local changes, then run again"
+    fi
+    # else: on a release already (scripts/release.sh put it there); it stays.
   else
     rm -rf "$repo.partial"   # left by a clone the network cut short
     git clone --quiet "$HIVE_REPO_BASE/hive-mind.git" "$repo.partial" \
       || fail "could not clone hive-mind from $HIVE_REPO_BASE" "check the network (and any web proxy), then run again"
+    if [ -n "${HIVE_RELEASE:-}" ]; then
+      git -C "$repo.partial" checkout --quiet --detach "$HIVE_RELEASE" \
+        || fail "$HIVE_RELEASE is not a tag or commit of hive-mind" "name one: git ls-remote --tags $HIVE_REPO_BASE/hive-mind.git"
+    fi
     mv "$repo.partial" "$repo"
   fi
 
   local log="$HIVE_HOME/state/installer.log" mark=0
   [ -f "$log" ] && mark="$(wc -l < "$log")"
   cd "$repo"
-  HIVE_HOME="$HIVE_HOME" HIVE_REPO_BASE="$HIVE_REPO_BASE" \
+  HIVE_HOME="$HIVE_HOME" HIVE_REPO_BASE="$HIVE_REPO_BASE" HIVE_RELEASE="${HIVE_RELEASE:-}" \
     setsid nohup python3 -m installer --home "$HIVE_HOME" \
     >>"$HIVE_HOME/state/installer.out" 2>&1 </dev/null &
 

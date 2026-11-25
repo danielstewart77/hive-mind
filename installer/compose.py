@@ -500,7 +500,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                # and its image come from on this install. The web proxy goes
                # to its image build, which installs packages.
                **site.new_mind_settings(
-                   proxy_url=proxy_url(answers), build_context=str(repo("hive-mind")),
+                   proxy_url=proxy_url(answers),
                    # By reference: a web proxy's address can carry a
                    # password, and a mind's compose fragment is a file
                    # anyone on the host can read. The values are in .env.

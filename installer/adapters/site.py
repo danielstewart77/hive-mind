@@ -76,14 +76,31 @@ MINDS_STACK = "stack.yaml"
 MINDS_STACK_EMPTY = "include: []\n"
 
 
-def new_mind_settings(*, proxy_url: str, build_context: str,
+#: The file in the minds folder that names the release a new mind is built from.
+RELEASE_CONTEXT_FILE = ".release-context"
+
+
+def release_context(address: str, commit: str) -> str:
+    """The build context of a mind the console creates: the repository's
+    address at the exact commit the checkout is on, never a branch. Any
+    credential in the address is dropped: the file sits where anyone on the
+    host can read it, and the build fetches a public tree."""
+    import re
+    clean = re.sub(r"^(https?://)[^/@]*@", r"\1", address)
+    return f"{clean}#{commit}"
+
+
+def new_mind_settings(*, proxy_url: str,
                       build_args: dict[str, str], reserved: list[str]) -> dict[str, str]:
     """What the console's Add a Mind page needs to work on an installed hive.
 
     Unset, each of these means Daniel's workstation: a separate env file for
-    the minds, a stack file under a Dev folder, a proxy on the host, an image
-    built from GitHub. An installed hive has one `.env`, its own proxy, and
-    the hive-mind checkout the installer cloned.
+    the minds, a stack file under a Dev folder, a proxy on the host. An
+    installed hive has one `.env` and its own proxy.
+
+    What a new mind is built from is not set here: it is the release the
+    checkout is on, which `release_context` writes into the minds folder when
+    the checkout is put on it, and the console reads from there.
     """
     import json
     settings = {
@@ -93,7 +110,6 @@ def new_mind_settings(*, proxy_url: str, build_context: str,
         # Entries in that list are relative to it, and it sits among them.
         "HIVE_MIND_STACK_MINDS_PREFIX": ".",
         "HIVE_MIND_PROXY_URL": proxy_url,
-        "HIVE_MIND_BUILD_CONTEXT": build_context,
         "HIVE_MIND_RESERVED_NAMES": ",".join(reserved),
     }
     if build_args:

@@ -229,12 +229,46 @@ def _mind_build_args() -> dict[str, str]:
         raise ValueError("HIVE_MIND_BUILD_ARGS must be a JSON object")
     return {str(key): str(value) for key, value in parsed.items()}
 
-#: What a mind created here is built from: the published hive-mind tree, and
-#: only that. Built from the host checkout instead, the image carries every
-#: file `.dockerignore` misses - every other mind's folder, inference proxy
-#: keys in their runtime.yaml among them - into a container its owner can
-#: read. Overridable for an install whose hive-mind lives elsewhere.
-DEFAULT_MIND_BUILD_CONTEXT = "https://github.com/danielstewart77/hive-mind.git#master"
+#: What a mind created here is built from: the published hive-mind tree at
+#: the exact commit of the release this machine is on, and only that. Built
+#: from the host checkout instead, the image carries every file `.dockerignore`
+#: misses - every other mind's folder, inference proxy keys in their
+#: runtime.yaml among them - into a container its owner can read. Built from a
+#: branch, a mind made today and one made next week are different programs and
+#: going back a release would not reach new minds.
+#:
+#: A release cannot name its own commit in its own files, so the identity is
+#: read at run time from `.release-context` in the minds folder, which
+#: `scripts/release.sh` and the installer write when they put the checkout on a
+#: release: `<repository address>#<40-character commit>`. An operator's
+#: `HIVE_MIND_BUILD_CONTEXT` still wins, for an install whose hive-mind lives
+#: elsewhere or a staged deployment. With neither, creating a mind is refused,
+#: saying so: never a branch.
+RELEASE_CONTEXT_FILENAME = ".release-context"
+_RELEASE_CONTEXT_RE = re.compile(r"([a-z][a-z0-9+.-]*://[^\s#]+|git@[^\s#:]+:[^\s#]+)#[0-9a-f]{40}")
+
+
+def mind_build_context() -> str:
+    explicit = os.getenv("HIVE_MIND_BUILD_CONTEXT", "").strip()
+    if explicit:
+        return explicit
+    path = HIVE_MIND_MINDS_CONFIG_DIR / RELEASE_CONTEXT_FILENAME
+    try:
+        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        handle = None
+    if handle is not None:
+        with os.fdopen(handle) as stream:
+            if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                value = stream.read(512).strip()
+                if _RELEASE_CONTEXT_RE.fullmatch(value):
+                    return value
+    raise ValueError(
+        "This hive has no release to build a new Mind from: "
+        f"minds/{RELEASE_CONTEXT_FILENAME} is missing or does not name a commit. "
+        "Put the checkout on a release with scripts/release.sh (or the installer), "
+        "which writes it; a Mind is never built from a moving branch.")
+
 
 #: In-repository packages a mind's image installs from named build contexts
 #: (`COPY --from=<name>`), and where each sits inside hive-mind.
@@ -402,6 +436,8 @@ def scaffold_internal_mind(
         # one (`harness`, `example`) or the remains of an earlier mind, whose
         # links this console, writing as root, would follow.
         raise ValueError(f"minds/{name} already exists")
+    # Refused before anything is written, not after a half-made folder.
+    build_context = mind_build_context()
     uid = _mind_uid()
     build_args = _mind_build_args()
     proxy = mind_proxy_base_url()
@@ -452,13 +488,11 @@ def scaffold_internal_mind(
 
     own = f"/usr/src/app/minds/{name}"
     host = f"${{HOST_PROJECT_DIR:-.}}/minds/{name}"
-    build_context = (os.getenv("HIVE_MIND_BUILD_CONTEXT", "").strip()
-                     or DEFAULT_MIND_BUILD_CONTEXT)
     compose: dict[str, Any] = {
         "services": {
             name: {
                 # The published tree, never the host checkout: see
-                # DEFAULT_MIND_BUILD_CONTEXT. The code is the image's, so a
+                # mind_build_context. The code is the image's, so a
                 # change reaches this mind when it is rebuilt.
                 "build": {
                     "context": build_context,
