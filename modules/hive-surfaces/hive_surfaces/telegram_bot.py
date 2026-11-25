@@ -1720,13 +1720,15 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    session_id = await gateway.find_active_session(user_id, chat_id)
-
-    if session_id is None:
-        await update.message.reply_text("No active session.")
+    try:
+        session_id = await gateway.find_active_session(user_id, chat_id)
+        if session_id is None:
+            await update.message.reply_text("No active session.")
+            return
+        result = await gateway.interrupt_session(session_id)
+    except Exception as exc:
+        await update.message.reply_text(f"Could not interrupt: {exc}")
         return
-
-    result = await gateway.interrupt_session(session_id)
 
     refusal = result.get("error") or result.get("detail") if isinstance(result, dict) else "unexpected answer"
     if refusal:

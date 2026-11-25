@@ -265,3 +265,29 @@ async def test_discord_sessions_listing_still_works():
         out = await db._handle_server_command("/sessions", 7, 2)
 
     assert not out.startswith("Error")
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_reports_a_gateway_that_could_not_be_reached():
+    interaction, _ = _interaction()
+    interaction.followup.send = AsyncMock()
+    configure(SurfaceConfig(discord_allowed_users=[7]))
+    gw = MagicMock(find_active_session=AsyncMock(side_effect=ConnectionError("down")))
+    with patch.object(db, "gateway", gw):
+        await db.bot.tree.get_command("stop").callback(interaction)
+
+    assert "Could not interrupt" in interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_telegram_stop_reports_a_gateway_that_could_not_be_reached():
+    update = MagicMock()
+    update.effective_user.id, update.effective_chat.id = 123, 456
+    update.message.reply_text = AsyncMock()
+    gw = MagicMock(find_active_session=AsyncMock(side_effect=ConnectionError("down")))
+    configure(SurfaceConfig(telegram_allowed_users=[123]))
+    with patch.object(tb, "gateway", gw), \
+            patch.object(tb, "_auth_check", AsyncMock(return_value=True)):
+        await tb.cmd_stop(update, MagicMock())
+
+    assert "Could not interrupt" in update.message.reply_text.await_args.args[0]
