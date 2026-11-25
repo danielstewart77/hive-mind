@@ -62,7 +62,8 @@ def _variables(old, new):
              for prefix in ('COMMS', 'LUCENT', 'PROXY', 'TOOLS')}
     names[f'MIND_KEY_{stem_old}'] = f'MIND_KEY_{stem_new}'
     names[f'PROACTIVE_TOKEN_{stem_old}'] = f'PROACTIVE_TOKEN_{stem_new}'
-    names[f'{stem_old}_PROXY_KEY'] = f'{stem_new}_PROXY_KEY'
+    if stem_old not in ('MIND', 'SERVICE'):  # those spellings are the install's own keys
+        names[f'{stem_old}_PROXY_KEY'] = f'{stem_new}_PROXY_KEY'
     return names
 
 

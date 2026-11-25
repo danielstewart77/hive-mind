@@ -260,9 +260,10 @@ ONE_KEY_PREFIX = "MIND_KEY_"
 
 
 ONE_KEY_REFUSAL = (
-    "This mind holds one key for every service. A new key is pasted on the "
-    "mind's own page, so that all of them take the same one; it cannot be "
-    "replaced one service at a time here")
+    "This mind holds one key for every service, so it cannot be replaced "
+    "here one service at a time or by saving the proxy key alone. Replacing "
+    "a mind's key, so that every service takes the same new one, is a later "
+    "step of the one-key work")
 
 
 def one_key_variable(holder: str) -> str:
@@ -877,7 +878,7 @@ async def provision_mind(
                     f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
             _ensure_key(ENV_FILES[MIND_ENV_LABEL], key)
             if service.key == "proxy":
-                minted.append(await store_mind_proxy_key(name, owner, proxy_key))
+                minted.append(await store_mind_proxy_key(name, owner, proxy_key, creating=True))
                 continue
             minted.append(
                 await mint(
@@ -959,9 +960,14 @@ def name_has_old_proxy_line(path: Path, name: str) -> bool:
         path, variable_name(SERVICES["proxy"], name)) is not None
 
 
-async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, Any]:
+async def store_mind_proxy_key(name: str, owner: str, value: str, *, creating: bool = False) -> dict[str, Any]:
     """Persist an already verified key without minting or rotating it upstream."""
     path = ENV_FILES[MIND_ENV_LABEL]
+    if (credentials_data._read_env_value(path, one_key_variable(name)) is not None
+            and not creating):
+        # Writing only the line would leave the gateway, memory store and
+        # tools on the old value: the mind would go dark on its next start.
+        raise MintRefused(ONE_KEY_REFUSAL)
     # A mind that holds its one key keeps it on that line; one made before
     # still has its own proxy line, and the key goes there until it is moved.
     key = one_key_variable(name)

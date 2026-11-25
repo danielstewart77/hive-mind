@@ -319,7 +319,9 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     if mind and values["MIND_PROXY_KEY"] and on_one_key(home, answers):
         # The mind's one key is the key the proxy issued it (or the operator
         # typed): the compose file reads it under its own name.
-        values[mind_key_var(mind)] = values["MIND_PROXY_KEY"]
+        # Kept when already set: a replaced key lives on this line and a
+        # rerun must not put the old one back.
+        values[mind_key_var(mind)] = current.get(mind_key_var(mind)) or values["MIND_PROXY_KEY"]
     elif mind and on_one_key(home, answers):
         values.setdefault(mind_key_var(mind), "")
         values.setdefault(proactive_var(mind), "")
