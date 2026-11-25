@@ -457,7 +457,7 @@ async def _ensure_channel_session(
 ) -> str:
     """Resolve the session bound to a Discord channel, creating one if absent.
 
-    Deliberately the same two steps `GatewayClient.ensure_session` takes for
+    Deliberately the same two steps `hive_surfaces.gateway_client.GatewayClient.ensure_session` takes for
     an inbound Discord message — look for the active binding on
     (`discord:<mind_id>`, channel_id), create and bind only when there is
     none. The bot namespaces its client type by mind so two minds' bots in

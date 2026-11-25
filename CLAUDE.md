@@ -337,7 +337,6 @@ hive-mind/
 ├── core/                          # Internal libraries (not entry points)
 │   ├── secrets.py                # Shared get_credential() utility
 │   ├── keyring_backend.py        # Keyring backend for containerised minds
-│   ├── gateway_client.py         # Shared HTTP client for bots → hive-comms
 │   ├── notify_utils.py           # Shared Telegram notification utility
 │   ├── path_validation.py        # CWE-22 path traversal protection for skill agents
 │   ├── scheduled_skills.py       # Scheduler-driven skill runs

@@ -8,7 +8,7 @@ layout, endpoints, and how to run the test suites.
 
 The rest of this repo is the **consumer side**:
 
-- `core/gateway_client.py` — the bots' HTTP client for hive-comms.
+- `hive_surfaces.gateway_client` (`modules/hive-surfaces`) — the chat surfaces' HTTP client for hive-comms.
 - `minds/<name>/.claude/hooks/` (or `.codex/hooks/`) — the per-turn hook scripts each mind owns its own copy of: capture, retrieval, rotation. They call lucent directly with curl + bearer.
 
 ## Network wiring
