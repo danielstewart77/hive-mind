@@ -588,12 +588,21 @@ async def test_retirement_with_the_tools_unconfigured_still_closes_undo(old_hive
         await key_migration.undo_move("ada")
 
 
-async def test_a_retirement_the_console_cannot_send_leaves_undo_open(old_hive, monkeypatch):
+async def test_a_retirement_the_console_cannot_send_never_reaches_the_tools_and_leaves_undo_open(old_hive, monkeypatch):
     await _retirable(old_hive, monkeypatch)
     monkeypatch.delenv("TOOLS_ADMIN_BEARER_TOKEN")
+    sent = []
+    original = holder_credentials._request
+
+    async def watching(service, method, path, *args, **kwargs):
+        sent.append(path)
+        return await original(service, method, path, *args, **kwargs)
+
+    monkeypatch.setattr(holder_credentials, "_request", watching)
 
     with pytest.raises((key_migration.RetirementRefused, holder_credentials.MintRefused)):
         await key_migration.retire()
 
+    assert "/credentials/shared-token/retire" not in sent
     monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", ADMIN["tools"])
     assert (await key_migration.undo_move("ada"))["mind"] == "ada"
