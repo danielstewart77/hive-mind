@@ -473,7 +473,8 @@ def proxy_setup(ctx: Ctx):
     if compose.on_one_key(ctx.home, a):
         # The mind's one key is that key, read under the name its compose
         # file names; every service then accepts it as this mind.
-        ctx.set_env(**{compose.mind_key_var(a["mind_name"]): ctx.env()["MIND_PROXY_KEY"]})
+        var = compose.mind_key_var(a["mind_name"])
+        ctx.set_env(**{var: ctx.env().get(var) or ctx.env()["MIND_PROXY_KEY"]})
     # The hive's own services present a proxy key of their own, so none of
     # them holds a value that opens the gateway or the tools as the mind.
     services_key = proxy_adapter.mint_key(ctx.sh, ctx.compose, kind="app",
