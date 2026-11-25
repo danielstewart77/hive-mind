@@ -95,7 +95,8 @@ class Hive:
     def run(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
         # The console's report: by default, no mind is moved.
         full = {**os.environ, "HIVE_RELEASE_DOCKER": str(self.docker),
-                "HIVE_RELEASE_MINDS_REPORT": str(self.no_minds_moved), **(env or {})}
+                "HIVE_RELEASE_MINDS_REPORT": str(self.no_minds_moved),
+                "HIVE_RELEASE_CONTEXT_URL": "https://example.invalid/hive-mind.git", **(env or {})}
         return subprocess.run(
             ["bash", str(self.checkout / "scripts" / "release.sh"),
              "--state-dir", str(self.state), "--minds-dir", str(self.minds),
@@ -377,3 +378,72 @@ def test_going_back_also_returns_a_module_kept_in_its_own_repository_to_the_comm
 
     assert run.returncode == 0, run.stderr
     assert git("rev-parse", "HEAD", cwd=module) == first
+
+
+def test_an_unreadable_minds_report_that_exits_cleanly_still_refuses_going_to_an_older_release(hive, tmp_path):
+    assert hive.run("to", "v2").returncode == 0
+    report = tmp_path / "empty.sh"
+    report.write_text("#!/bin/sh\necho 'not json'\n")
+    report.chmod(0o755)
+
+    run = hive.run("to", "v1", env={"HIVE_RELEASE_MINDS_REPORT": str(report)})
+
+    assert run.returncode != 0
+    assert "report could not be read" in run.stderr
+    assert hive.commit() == hive.tag_commit("v2")
+
+
+def test_a_local_branch_name_is_not_a_release(hive):
+    before = hive.commit()
+
+    run = hive.run("to", "master")
+
+    assert run.returncode != 0
+    assert "is a branch" in run.stderr
+    assert hive.commit() == before
+
+
+def test_back_with_nothing_recorded_says_there_is_no_previous_release(hive):
+    run = hive.run("back")
+
+    assert run.returncode != 0
+    assert "no previous release is recorded" in run.stderr
+
+
+def test_an_old_clone_holding_commits_no_remote_has_stops_the_move(hive):
+    work = hive.origin_work
+    (work / "modules" / "hive-data").mkdir(parents=True)
+    (work / "modules" / "hive-data" / "pkg.py").write_text("files\n")
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "hive-data moves in", cwd=work)
+    git("tag", "v3", cwd=work)
+    git("push", "-q", "origin", "master", "--tags", cwd=work)
+    old = hive.checkout / "modules" / "hive-data"
+    git("clone", "-q", str(hive.bare), str(old), cwd=hive.root)
+    (old / "app.py").write_text("committed locally\n")
+    git("commit", "-q", "-am", "local only", cwd=old)
+    before = hive.commit()
+
+    run = hive.run("to", "v3")
+
+    assert run.returncode != 0
+    assert "no remote has" in run.stderr
+    assert hive.commit() == before
+    assert (old / "app.py").read_text() == "committed locally\n"
+
+
+def test_a_missing_option_value_is_an_error_not_a_hang(hive):
+    run = subprocess.run(["bash", str(hive.checkout / "scripts" / "release.sh"), "--state-dir"],
+                         cwd=hive.checkout, capture_output=True, text=True, timeout=20)
+
+    assert run.returncode != 0
+    assert "needs a value" in run.stderr
+
+
+def test_an_origin_a_console_build_cannot_fetch_from_writes_no_release_file_and_says_so(hive):
+    run = hive.run("to", "v1", env={"HIVE_RELEASE_CONTEXT_URL": ""})  # origin here is a local path
+
+    assert run.returncode != 0
+    assert "not an http(s) address" in run.stderr
+    assert not (hive.minds / ".release-context").exists()
+    assert hive.commit() == hive.tag_commit("v1")

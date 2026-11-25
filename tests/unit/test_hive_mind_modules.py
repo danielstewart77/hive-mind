@@ -303,3 +303,35 @@ def test_the_install_stops_when_a_module_cannot_be_brought_up(tmp_path, monkeypa
 
     with pytest.raises(steps.StepFailed, match="modules/inference-proxy"):
         steps.clone_repos(ctx)
+
+
+def test_a_module_on_a_branch_is_left_alone_and_named_with_the_commit_the_release_records(hive):
+    remotes, checkout = hive
+    assert modules_sh(checkout).returncode == 0
+    alpha = checkout / "modules" / "alpha"
+    git("checkout", "-q", "-b", "mine", cwd=alpha)
+    (alpha / "version").write_text("mine")
+    git("commit", "-q", "-am", "mine", cwd=alpha)
+    mine = git("rev-parse", "HEAD", cwd=alpha)
+
+    run = modules_sh(checkout)
+
+    assert run.returncode == 0, run.stderr
+    assert "left on mine" in run.stdout
+    assert git("rev-parse", "HEAD", cwd=alpha) == mine
+
+
+def test_a_module_with_uncommitted_changes_is_not_moved_and_the_run_fails(hive):
+    remotes, checkout = hive
+    assert modules_sh(checkout).returncode == 0
+    alpha = checkout / "modules" / "alpha"
+    newer = remotes.push_new("alpha", "next release")
+    git("update-index", "--cacheinfo", f"160000,{newer},modules/alpha", cwd=checkout)
+    git("commit", "-q", "-m", "release records a newer alpha", cwd=checkout)
+    (alpha / "version").write_text("edited")
+
+    run = modules_sh(checkout)
+
+    assert run.returncode != 0
+    assert "modules/alpha" in run.stderr
+    assert (alpha / "version").read_text() == "edited"

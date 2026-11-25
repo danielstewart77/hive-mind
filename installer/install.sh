@@ -58,6 +58,12 @@ main() {
     done
   }
 
+  release_is_not_a_branch() {
+    git -C "$1" show-ref --verify -q "refs/remotes/origin/$2" 2>/dev/null \
+      && fail "$2 is a branch, and a release is a tag or a commit" "name a tag (git ls-remote --tags $HIVE_REPO_BASE/hive-mind.git) or a commit"
+    return 0
+  }
+
   command -v git >/dev/null 2>&1 || fail "git is not installed" "sudo apt-get install -y git"
   command -v python3 >/dev/null 2>&1 || fail "python3 is not installed" "sudo apt-get install -y python3"
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
@@ -167,6 +173,7 @@ PY
     make_room_for_moved_modules "$repo"
     if [ -n "${HIVE_RELEASE:-}" ]; then
       # A named release (a tag or a commit), never a branch tip.
+      release_is_not_a_branch "$repo" "$HIVE_RELEASE"
       git -C "$repo" fetch --quiet --tags origin \
         && git -C "$repo" checkout --quiet --detach "$HIVE_RELEASE" \
         || fail "could not put $repo on release $HIVE_RELEASE" "git -C $repo status — commit or discard local changes, check the name, then run again"
@@ -180,6 +187,7 @@ PY
     git clone --quiet "$HIVE_REPO_BASE/hive-mind.git" "$repo.partial" \
       || fail "could not clone hive-mind from $HIVE_REPO_BASE" "check the network (and any web proxy), then run again"
     if [ -n "${HIVE_RELEASE:-}" ]; then
+      release_is_not_a_branch "$repo.partial" "$HIVE_RELEASE"
       git -C "$repo.partial" checkout --quiet --detach "$HIVE_RELEASE" \
         || fail "$HIVE_RELEASE is not a tag or commit of hive-mind" "name one: git ls-remote --tags $HIVE_REPO_BASE/hive-mind.git"
     fi

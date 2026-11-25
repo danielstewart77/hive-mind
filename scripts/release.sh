@@ -58,10 +58,12 @@ composes=()
 build=1; restart=0; record=1; dry=0; minds_checked=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --state-dir) state_dir="${2:-}"; shift 2 ;;
-    --minds-dir) minds_dir="${2:-}"; shift 2 ;;
-    --compose)   composes+=("${2:-}"); shift 2 ;;
-    --env-file)  env_file="${2:-}"; shift 2 ;;
+    --state-dir|--minds-dir|--compose|--env-file)
+      [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" ;;&
+    --state-dir) state_dir="$2"; shift 2 ;;
+    --minds-dir) minds_dir="$2"; shift 2 ;;
+    --compose)   composes+=("$2"); shift 2 ;;
+    --env-file)  env_file="$2"; shift 2 ;;
     --no-build)  build=0; shift ;;
     --restart)   restart=1; shift ;;
     --no-record) record=0; shift ;;
@@ -125,8 +127,10 @@ fi
 target_short="${target:0:9}"
 
 # ---- refusals before anything changes -------------------------------------
-dirty="$(git status --porcelain --untracked-files=no)"
-if [ -n "$dirty" ] && [ "$head_commit" != "$target" ]; then
+# A module left on a branch by a developer is not a change to this checkout
+# (modules.sh leaves it, and says so).
+dirty="$(git status --porcelain --untracked-files=no --ignore-submodules=all)"
+if [ -n "$dirty" ]; then
   echo "$dirty" >&2
   die "tracked files have uncommitted changes (listed above)" "commit them, or git stash, then run again"
 fi
@@ -202,17 +206,19 @@ fi
 # The release the console builds a new mind from: this commit, at the address
 # it is published at. Written beside the minds it creates; nothing here is a
 # secret. A tag cannot name its own commit, so this is read from the checkout.
-url="${HIVE_RELEASE_CONTEXT_URL:-$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://)[^/@]*@#\1#')}"
-if [ -n "$url" ] && [ -d "$minds_dir" ]; then
-  printf '%s#%s\n' "$url" "$target" > "$minds_dir/.release-context"
-elif [ -n "$url" ]; then
-  echo "release: $minds_dir does not exist, so the console's release file was not written" >&2
-fi
+url="${HIVE_RELEASE_CONTEXT_URL:-$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://)[^/]*@#\1#')}"
+case "$url" in
+  https://*|http://*)
+    mkdir -p "$minds_dir" 2>/dev/null || true
+    if [ -d "$minds_dir" ]; then printf '%s#%s\n' "$url" "$target" > "$minds_dir/.release-context"
+    else echo "release: cannot create $minds_dir, so the console's release file was not written" >&2; fail_ctx=1; fi ;;
+  *) echo "release: origin ($url) is not an http(s) address a console build can fetch from, so the console's release file was not written; set HIVE_RELEASE_CONTEXT_URL" >&2; fail_ctx=1 ;;
+esac
 
 echo "release: checkout is on $target ($(describe "$target")); previous recorded as $(cut -d' ' -f1 "$rel/previous" 2>/dev/null | cut -c1-9)"
 
 # ---- rebuild ---------------------------------------------------------------
-fail=0
+fail=${fail_ctx:-0}
 build_stack() {  # build_stack <label> <docker compose args...>
   local label="$1"; shift
   echo "release: building $label"

@@ -86,7 +86,7 @@ def release_context(address: str, commit: str) -> str:
     credential in the address is dropped: the file sits where anyone on the
     host can read it, and the build fetches a public tree."""
     import re
-    clean = re.sub(r"^(https?://)[^/@]*@", r"\1", address)
+    clean = re.sub(r"^(https?://)[^/]*@", r"\1", address)
     return f"{clean}#{commit}"
 
 

@@ -41,7 +41,7 @@ services:
       # machine. A machine that keeps the minds, the edge minds' folders or
       # the development tree elsewhere says so in this folder's .env:
       # HIVE_MIND_DIR (the install's minds/ and .env files; default is the
-      # checkout), HOST_DEV_DIR, SKIPPY_DIR and MORDECAI_DIR (an edge mind's
+      # checkout), HOST_DEV_DIR (default an empty folder: the whole checkout holds .env files and is not offered), SKIPPY_DIR and MORDECAI_DIR (an edge mind's
       # checkout; unset, nothing is there and the console shows none),
       # INFERENCE_PROXY_DIR, HIVE_INIT_DIR.
       - ./src:/app/src
@@ -74,7 +74,7 @@ services:
       # (mind_mounts.py). Read-write because the control creates a folder and
       # mounts it in one action; what it may reach is this mount, so a root
       # added to MIND_MOUNT_ROOTS needs its own mount here and a recreate.
-      - ${HOST_DEV_DIR:-../..}:/dev_roots:rw
+      - ${HOST_DEV_DIR:-./data/dev-roots}:/dev_roots:rw
       # (see the HOST_UID/HOST_GID note in the environment block above)
       # hive-mind's own copy of the tools service (modules/hive-tools), read
       # only: the console shows what it offers and never writes it. Relative

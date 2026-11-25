@@ -48,7 +48,7 @@ and terminal have their project names pinned in their compose files (`hive`,
 ## Part 1. A fresh machine (the installer)
 
 ```
-HIVE_RELEASE=<release-tag> curl -fsSL <published address>/install.sh | bash
+curl -fsSL <published address>/install.sh | HIVE_RELEASE=<release-tag> bash
 ```
 
 Without `HIVE_RELEASE` a fresh clone is the default branch's tip at that
@@ -116,7 +116,7 @@ Do these in order, one machine at a time. Steps 1 to 4 change nothing that runs.
    `SKIPPY_DIR`, `MORDECAI_DIR`, `INFERENCE_PROXY_DIR`, `HIVE_INIT_DIR`, now
    default to places inside the checkout or the home folder instead of one
    person's folders; a machine that keeps them elsewhere sets them in
-   `modules/hive/.env`. On a machine that already sets them nothing changes.)
+   `modules/hive/.env`. If `~/.git-credentials`, `~/.config/gh/hosts.yml` or an edge mind's `.env` does not exist, create it empty first, or Docker makes a root-owned directory of it. On a machine that already sets them nothing changes.)
 6. **Edit the compose files hive-mind does not track.** They cannot ride a pull
    request. Per machine: `docker-compose.yml` (and any `.pre-*` copies), each
    `minds/*/container/compose.yaml` that is hand-kept (for example

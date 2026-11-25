@@ -174,6 +174,9 @@ def clone_repos(ctx: Ctx):
         if release:
             # A named release: a tag or a commit, never a branch.
             ctx.sh.run(["git", "-C", str(path), "fetch", "--quiet", "--tags", "origin"], timeout=300)
+            if ctx.sh.run(["git", "-C", str(path), "show-ref", "--verify", "--quiet",
+                           f"refs/remotes/origin/{release}"], check=False).returncode == 0:
+                raise StepFailed(f"{release} is a branch; a release is a tag or a commit")
             ctx.sh.run(["git", "-C", str(path), "checkout", "--quiet", "--detach", release])
         elif on_branch:
             ctx.sh.run(["git", "-C", str(path), "pull", "--ff-only", "--quiet"], timeout=300)
@@ -191,6 +194,9 @@ def clone_repos(ctx: Ctx):
             raise StepFailed(f"the clone of {name} has no HEAD")
         release = os.environ.get("HIVE_RELEASE", "").strip()
         if release:
+            if ctx.sh.run(["git", "-C", str(partial), "show-ref", "--verify", "--quiet",
+                           f"refs/remotes/origin/{release}"], check=False).returncode == 0:
+                raise StepFailed(f"{release} is a branch; a release is a tag or a commit")
             ctx.sh.run(["git", "-C", str(partial), "checkout", "--quiet", "--detach", release])
         partial.rename(path)
     head = ctx.sh.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"]).stdout.strip()
@@ -222,6 +228,8 @@ def _name_the_release(ctx: Ctx, checkout: Path) -> None:
     checkout's commit, at the address it is published at. A release cannot name
     its own commit in its own files, so it is written beside the minds."""
     commit = ctx.sh.run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).stdout.strip()
+    if not REPO_BASE.startswith(("https://", "http://")):
+        return  # a console build cannot fetch from a local path; the operator names the context
     ctx.home.minds.mkdir(parents=True, exist_ok=True)
     (ctx.home.minds / site.RELEASE_CONTEXT_FILE).write_text(
         site.release_context(f"{REPO_BASE}/hive-mind.git", commit) + "\n")
