@@ -4124,7 +4124,8 @@ async def api_key_migration_retire(user: dict = Depends(require_admin_or_route_b
         return JSONResponse(
             {"retired": False, "blocking": exc.blocking,
              "retirement_warning": key_migration.RETIREMENT_WARNING}, status_code=409)
-    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed) as exc:
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed,
+            holder_credentials.MintUncertain) as exc:
         raise _migration_error(exc) from None
     log_event(log, "keys.retired", **_actor_fields(user),
               removed=len(result["old_lines_removed"]))
@@ -4137,7 +4138,8 @@ async def api_key_migration_tools_credential(holder: str, user: dict = Depends(r
     """Give a surface bot or the console a tools credential of its own."""
     try:
         result = await key_migration.issue_tools_credential(holder)
-    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed) as exc:
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed,
+            holder_credentials.MintUncertain) as exc:
         raise _migration_error(exc) from None
     log_event(log, "keys.tools_credential_issued", **_actor_fields(user), holder=result["holder"])
     credential_registry.forget_all()
@@ -4150,7 +4152,7 @@ async def api_key_migration_move(name: str, user: dict = Depends(require_admin_o
     try:
         result = await key_migration.move_mind(name)
     except (holder_credentials.MintRefused, holder_credentials.KeyHeldByAnother,
-            holder_credentials.ReplacementFailed) as exc:
+            holder_credentials.ReplacementFailed, holder_credentials.MintUncertain) as exc:
         raise _migration_error(exc) from None
     log_event(log, "mind.key_moved", **_actor_fields(user), mind=result["mind"])
     credential_registry.forget_all()
@@ -4162,7 +4164,8 @@ async def api_key_migration_undo(name: str, user: dict = Depends(require_admin_o
     """Put one moved mind back on its old per-service values."""
     try:
         result = await key_migration.undo_move(name)
-    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed) as exc:
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed,
+            holder_credentials.MintUncertain) as exc:
         raise _migration_error(exc) from None
     log_event(log, "mind.key_move_undone", **_actor_fields(user), mind=result["mind"])
     credential_registry.forget_all()

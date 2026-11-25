@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hitl
-from auth_api import generate_approver_token, generate_token
+from auth_api import generate_approver_token, generate_token, list_tokens as auth_api_tokens, revoke_token as revoke_one
 from tests.scratch import db, run
 
 ADMIN = "tools-admin-for-tests"  # secret-guard: allow - invented fixture
@@ -359,3 +359,17 @@ def test_retiring_again_leaves_the_key_a_mind_of_the_shared_holders_name_registe
 
     assert again.json()["revoked"] is False
     assert client.get("/hitl/none", headers=_bearer(ADA_KEY)).status_code == 404
+
+
+def test_retiring_revokes_the_live_shared_token_even_when_it_was_rotated_and_left_an_old_revoked_row(
+        client: TestClient) -> None:
+    old = run(generate_token("skippy"))
+    row = next(r for r in run(auth_api_tokens()) if r["name"] == "skippy")
+    run(revoke_one(row["id"]))
+    current = run(generate_token("skippy"))
+    assert client.get("/hitl/none", headers=_bearer(current)).status_code == 404
+
+    client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+
+    assert client.get("/hitl/none", headers=_bearer(current)).status_code == 401
+    assert client.get("/hitl/none", headers=_bearer(old)).status_code == 401

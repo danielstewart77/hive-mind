@@ -36,7 +36,7 @@ MIND_CANNOT_DECIDE = (
 #: caller's authority: the approver (so no console credential can make one),
 #: the internal replay secret, and the holder of the shared service token
 #: every consumer still presents until it is retired (story 884).
-RESERVED_HOLDERS = frozenset({APPROVER_HOLDER, "internal", "skippy"})
+RESERVED_HOLDERS = frozenset({APPROVER_HOLDER, "internal", "skippy", "shared-token-retired"})
 
 #: The holder the shared service token is registered under. Reserved until
 #: that token is retired; then a mind of that name may hold a key of its own.
@@ -129,14 +129,16 @@ async def revoke_credential(holder: str, *, remove: bool = False) -> dict[str, A
     return answer
 
 
+#: A revoked row under this name records that the shared token was retired.
+#: Reserved, so no route writes it; it lists as a revoked holder.
+RETIRED_MARKER = "shared-token-retired"
+
+
 async def shared_token_retired() -> bool:
-    """Whether the shared service token has been retired: its holder has a
-    revoked row. Nothing but `retire_shared_token` revokes that holder while
-    the name is reserved."""
-    for row in await store.holder_tokens():
-        if str(row["holder"]) == SHARED_HOLDER:
-            return row["revoked_at"] is not None
-    return False
+    """Whether the shared service token has been retired: the marker exists.
+    Not judged from the shared holder's own rows, which a mind of that name
+    registers into afterwards, or a rotation leaves beside a live one."""
+    return any(str(row["holder"]) == RETIRED_MARKER for row in await store.holder_tokens())
 
 
 async def retire_shared_token() -> dict[str, Any]:
@@ -148,14 +150,15 @@ async def retire_shared_token() -> dict[str, Any]:
     says so. A mind of the shared holder's name may register its own key from
     then on."""
     if await shared_token_retired():
-        # Already done. Revoking again would revoke the key a mind of this
-        # name registered since.
         return {"holder": SHARED_HOLDER, "revoked": False, "expired_requests": 0}
     now = int(time.time())
     async with store.transaction():
         await store.hold_holder(SHARED_HOLDER)
         revoked = await store.revoke_holder_tokens(SHARED_HOLDER, now)
         expired = await store.expire_pending_requests(SHARED_HOLDER, now)
+        await store.create_token(
+            RETIRED_MARKER, hashlib.sha256(secrets.token_bytes(32)).hexdigest(), now)
+        await store.revoke_holder_tokens(RETIRED_MARKER, now)
     return {"holder": SHARED_HOLDER, "revoked": revoked > 0,
             "expired_requests": expired}
 

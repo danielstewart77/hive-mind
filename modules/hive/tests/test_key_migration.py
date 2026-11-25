@@ -227,7 +227,6 @@ async def test_two_minds_with_the_same_proxy_key_are_both_named_and_neither_is_m
     report = await key_migration.account()
 
     by_name = {m["mind"]: m for m in report["minds"]}
-    assert by_name["ada"]["state"] == "not moved" and by_name["bob"]["state"] == "not moved"
     assert any("shares its proxy key with bob" in p for p in by_name["ada"]["problems"])
     assert any("shares its proxy key with ada" in p for p in by_name["bob"]["problems"])
     with pytest.raises(holder_credentials.KeyHeldByAnother):
@@ -470,3 +469,56 @@ def test_a_move_and_an_undo_through_the_routes_clear_the_credential_check_cache_
     assert (moved.status_code, undone.status_code) == (200, 200)
     assert len(cleared) == 2
     assert testing.run(_answers(old_hive, ADA_COMMS))["comms"] == 200
+
+
+async def test_differing_proxy_keys_alone_make_a_mind_not_moved_in_the_report(old_hive):
+    old_hive.env.write_text(old_hive.env.read_text() + "ADA_PROXY_KEY=a-third-distinct-key-0123456789\n")
+
+    report = await key_migration.account()
+
+    assert next(m for m in report["minds"] if m["mind"] == "ada")["state"] == "not moved"
+
+
+async def test_a_mind_cut_off_before_its_move_counts_as_moved_so_retirement_is_not_blocked_by_it(old_hive):
+    for name in ("comms", "lucent"):
+        await holder_credentials.revoke(holder_credentials.SERVICES[name], "ada")
+    await key_migration.move_mind("ada")
+
+    report = await key_migration.account()
+
+    ada = next(m for m in report["minds"] if m["mind"] == "ada")
+    assert ada["state"] == "moved"
+    assert any("cut off" in p for p in ada["problems"])
+
+
+async def test_after_retirement_no_mind_can_be_undone_even_where_an_old_line_was_kept(old_hive, monkeypatch):
+    stack = await _retirable(old_hive, monkeypatch)
+    stack.write_text("services:\n  ada-bot:\n    environment:\n"
+                     "      - A=${COMMS_TOKEN_ADA}\n      - B=${LUCENT_TOKEN_ADA}\n")
+    await key_migration.retire()
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.undo_move("ada")
+
+    answers = await _answers(old_hive, ADA_COMMS)
+    assert answers["comms"] in (401, 403)
+
+
+@pytest.mark.parametrize("holder", ["ada", "skippy", "Bad Name"])
+async def test_a_tools_credential_is_not_issued_to_a_mind_a_reserved_name_or_a_malformed_name(old_hive, holder):
+    before = dict(old_hive.tools.values)
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.issue_tools_credential(holder)
+
+    assert old_hive.tools.values == before
+
+
+async def test_a_tools_credential_issued_to_a_bot_is_registered_and_written_once_and_never_returned(old_hive):
+    issued = await key_migration.issue_tools_credential("telegram-bot")
+
+    written = credentials_data._read_env_value(old_hive.env, issued["variable"])
+    assert written and old_hive.tools.values["telegram-bot"] == written
+    assert written not in json.dumps(issued)
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.issue_tools_credential("telegram-bot")

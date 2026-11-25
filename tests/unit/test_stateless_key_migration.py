@@ -94,3 +94,25 @@ def test_without_the_operators_credential_nothing_is_sent(console, monkeypatch, 
 
     assert seen == []
     assert "KEY_MIGRATION_TOKEN" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_an_undo_asks_the_undo_route_and_a_tools_credential_the_tools_credential_route(console, capsys):
+    seen, answers = console
+    answers[("POST", "/api/settings/key-migration/ada/undo")] = (200, {"mind": "ada"})
+    answers[("POST", "/api/settings/key-migration/tools-credential/telegram-bot")] = (200, {"holder": "telegram-bot"})
+
+    assert tool.main(["undo", "ada"]) == 0
+    assert tool.main(["tools-credential", "Telegram-Bot"]) == 0
+
+    assert [(m, p) for m, p, _ in seen] == [
+        ("POST", "/api/settings/key-migration/ada/undo"),
+        ("POST", "/api/settings/key-migration/tools-credential/telegram-bot")]
+
+
+def test_a_401_from_the_console_is_reported_as_a_refused_credential_not_a_crash(console, capsys):
+    seen, answers = console
+    answers[("GET", "/api/settings/key-migration")] = (401, {"detail": "Authentication required"})
+
+    assert tool.main(["report"]) == 1
+
+    assert "refused" in json.loads(capsys.readouterr().out)["error"]

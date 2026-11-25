@@ -180,8 +180,8 @@ async def account() -> dict[str, Any]:
             names_by_service[service.key] = set()
             for row in rows:
                 holder = str(row.get("holder") or "").strip()
-                if not holder:
-                    continue
+                if not holder or holder == "shared-token-retired":
+                    continue  # the tools' own record that the shared token was retired
                 low = holder.lower()
                 names_by_service[service.key].add(low)
                 live = not (row.get("revoked_at") or row.get("live") is False)
@@ -229,9 +229,12 @@ async def account() -> dict[str, Any]:
             for service in services:
                 if service.key == "tools" and not _tools_applies(name):
                     continue
-                if row_state.get((service.key, name)) != "live":
+                seen = row_state.get((service.key, name))
+                if seen == "revoked":
+                    problems.append(f"cut off at {service.label} (kept cut off by the move)")
+                elif seen != "live":
                     state = "not moved"
-                    problems.append(f"holds its one key here but {service.label} has no live credential for it")
+                    problems.append(f"holds its one key here but {service.label} has no credential for it")
         elif not sources:
             state = "not moved"
             problems.append(
@@ -627,11 +630,18 @@ async def move_mind(name: str) -> dict[str, Any]:
             f"{reason}. Now: {sentence}. Check each service, then press move again; it is safe to repeat.")
 
 
+def _retired_marker() -> Path:
+    return key_journal.JOURNAL_DIR / "retired.marker"
+
+
 async def undo_move(name: str) -> dict[str, Any]:
     """Put a moved mind back on its old per-service values and remove its
     one-key registration. For that mind alone, and only until retirement: the
     old values are read from their own file, and are gone once retired."""
     holder = name.strip().lower()
+    if _retired_marker().exists():
+        raise MintRefused(
+            "the old keys were retired, so no mind can be put back on its old values")
     registry = await _registry()
     row = registry.get(holder)
     if row is None:
@@ -721,7 +731,14 @@ async def issue_tools_credential(holder: str) -> dict[str, Any]:
         if credentials_data._read_env_value(path, variable) is not None:
             raise MintRefused(f"{variable} is already in {path}; nothing was changed")
         value = secrets.token_urlsafe(32)
-        await hc._put(tools, name, "", value, "service", None)
+        try:
+            await hc._put(tools, name, "", value, "service", None)
+        except hc.MintUncertain:
+            try:
+                await hc._request(tools, "DELETE", f"/credentials/{name}?remove=true")
+            except Exception:  # noqa: BLE001
+                pass
+            raise MintRefused("the tools did not answer; nothing is kept. Check the tools and try again") from None
         try:
             hc._ensure_key(path, variable)
             with credentials_data._WRITE_LOCK:
@@ -729,6 +746,10 @@ async def issue_tools_credential(holder: str) -> dict[str, Any]:
             if not written["written"] or hc._loaded_value(hc.Location(hc.MIND_ENV_LABEL, variable)) != value:
                 raise MintRefused(f"{path} did not take the credential")
         except Exception as exc:  # noqa: BLE001 - the tools row would hold a value nobody has
+            try:
+                _line_remove(path, variable)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 await hc._request(tools, "DELETE", f"/credentials/{name}?remove=true")
             except Exception:  # noqa: BLE001
@@ -837,6 +858,11 @@ async def retire() -> dict[str, Any]:
                     continue
                 _line_remove(location.path, location.env_key)
                 removed.append(f"{location.file}:{location.env_key}")
+    try:
+        key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _retired_marker().write_text("retired\n")
+    except OSError:
+        pass
     still: list[str] = []
     for service, name, value in old_values:
         if await hc._accepts(service, value) is True:
@@ -861,5 +887,5 @@ async def retire() -> dict[str, Any]:
                                "still accepted" if shared_answer else "not checked here"),
         "old_values_still_accepted": still,
         "moved_minds": keys_ok,
-        "warning": RETIREMENT_WARNING,
+        "warning": RETIREMENT_WARNING + " " + REPOINT_NOTE,
     }
