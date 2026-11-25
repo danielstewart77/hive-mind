@@ -86,6 +86,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         try {
             const saved = await h.requestJson("/api/minds/" + encodeURIComponent(document.getElementById("mind-proxy-key").dataset.mindName) + "/proxy-key", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({proxy_key: form.elements.proxy_key.value})});
             form.elements.proxy_key.value = "";
+            document.getElementById("mind-proxy-key-attention").hidden = true;
             const list = document.getElementById("mind-proxy-key-services");
             if (saved.services) {
                 list.innerHTML = saved.services.map(function (item) { return "<li>" + h.escapeHtml(item.label) + ": " + h.escapeHtml(item.status) + "</li>"; }).join("");

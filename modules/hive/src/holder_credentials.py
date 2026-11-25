@@ -1176,10 +1176,10 @@ async def replace_mind_key(
                         f"Could not check that key against {service.label}. "
                         "Nothing was changed.")
                 accepted[service.key] = answer
-            if old is not None and any(accepted.values()):
-                # This mind's own key is `old`, which is not this value, so a
-                # service that accepts it has given it to some other holder.
-                raise KeyHeldByAnother(key_held_message(None))
+            # A service that accepts the value already has it for some holder:
+            # this mind's own row (a repeat paste) or another mind's. It is
+            # written first, and its own clash check refuses by naming the
+            # holder before anything has changed.
             # A mind whose key is not stored here may be pasting the key it
             # already has on some services (a repeat after a failure). A
             # service that accepts the value is written first: it either is
@@ -1232,8 +1232,11 @@ async def replace_mind_key(
                     + (f" ({written['reason']})" if written.get("reason") else ""))
 
         if failure is None:
-            key_journal.finish(record)
-            key_journal.clear(holder)
+            try:
+                key_journal.finish(record)
+                key_journal.clear(holder)
+            except OSError:
+                pass  # the replacement is complete; a stale record is harmless
             return {
                 "services": [{"service": s.key, "label": s.label, "status": "replaced"}
                              for s in services],
@@ -1248,7 +1251,7 @@ async def replace_mind_key(
                 continue
             row = rows[service.key]
             try:
-                if row is None and state[service.key] == "new":
+                if row is None and state[service.key] in ("new", "unknown"):
                     response = await _request(
                         service, "DELETE", f"/credentials/{holder}?remove=true")
                     if response.status_code >= 400:
