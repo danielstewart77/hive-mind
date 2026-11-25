@@ -142,6 +142,14 @@ async def lifespan(app: FastAPI):
               engine="postgres")
     await seed_first_user()
     mind_rename.recover_pending()
+    try:
+        for recovered in await holder_credentials.recover_replacements():
+            log_event(log, "mind.key.recovered", component="hive-control-plane",
+                      level=logging.INFO if recovered["recovered"] else logging.ERROR,
+                      mind=recovered["mind"], recovered=recovered["recovered"])
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "mind.key.recover_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
     # The ready-made roles, once per hive (story 10.18.3). A failure is
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
@@ -3978,26 +3986,62 @@ async def api_mind_voice_update(
 async def api_mind_proxy_key_update(
     name: str, request: Request, user: dict = Depends(require_auth)
 ):
-    try:
-        configuration = local_runtime_configuration(name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+    """Replace a mind's key.
+
+    A mind on one key gets the pasted key on the gateway, the memory store and
+    the tools in one step, the old one refused on its next request at each,
+    and its stored line rewritten where this console can write it. A mind
+    still on its older per-service lines, which only the move to one key
+    changes, keeps the old behaviour of saving the proxy key alone.
+    """
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object")
     try:
-        if configuration.get("provider_connection"):
-            key, warning = await holder_credentials.accept_mind_provider_token(body.get("proxy_key"), for_mind=name)
+        configuration = local_runtime_configuration(name)
+        local = True
+    except ValueError:
+        configuration, local = {}, False
+    older = local and holder_credentials.mind_is_not_yet_on_one_key(name)
+    provider_connection = bool(configuration.get("provider_connection"))
+    try:
+        if provider_connection:
+            key, warning = await holder_credentials.accept_mind_provider_token(
+                body.get("proxy_key"), for_mind=name, stored_here=older)
         else:
-            key, warning = await holder_credentials.validate_mind_proxy_key(body.get("proxy_key"), for_mind=name)
-        await holder_credentials.store_mind_proxy_key(
-            name, str(configuration.get("owner") or user["username"]), key,
-        )
+            key, warning = await holder_credentials.validate_mind_proxy_key(
+                body.get("proxy_key"), for_mind=name, stored_here=older)
+        if older:
+            await holder_credentials.store_mind_proxy_key(
+                name, str(configuration.get("owner") or user["username"]), key,
+            )
+            return {"saved": True, "restart_required": True, "warning": warning}
+        row = await core.get_mind_by_id_or_name(name)
+        if not row:
+            raise HTTPException(status_code=404, detail="Mind not found")
+        replaced = await holder_credentials.replace_mind_key(
+            str(row["name"]), str(row.get("owner") or user["username"]),
+            str(row["mind_id"]), key)
     except holder_credentials.KeyHeldByAnother as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
+    except holder_credentials.ReplacementFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
     except holder_credentials.MintRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    return {"saved": True, "restart_required": True, "warning": warning}
+    stored = replaced["stored"] == "written"
+    return {
+        "saved": True,
+        "restart_required": stored,
+        "services": replaced["services"],
+        "stored": replaced["stored"],
+        "restart_target": replaced["restart_target"],
+        "proxy_note": replaced["proxy_note"],
+        "next_step": (
+            "Recreate this mind so it reads its new key; until then its "
+            "requests are refused." if stored else
+            "Put the new key on the machine this mind runs on, where it reads "
+            "its key, and restart it; until then its requests are refused."),
+    }
 
 
 @app.patch("/api/minds/{name}/configuration")

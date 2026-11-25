@@ -18,7 +18,7 @@
         </form>
     </section>
     <div class="overview-stack" id="mind-content">
-        <section class="surface" id="mind-proxy-key" hidden><div class="surface-header"><h2>Mind’s provider token</h2></div><form class="surface-body overview-stack" id="mind-proxy-key-form"><div class="field"><label for="mind-proxy-key-input">Provider token</label><input id="mind-proxy-key-input" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" required><small>Paste the key this Mind should use. An already-used key is accepted with a warning.</small></div><div class="form-actions"><button class="button" type="submit">Save token</button></div><small id="mind-proxy-key-status" role="status"></small></form></section>
+        <section class="surface" id="mind-proxy-key" hidden><div class="surface-header"><h2>Mind’s key</h2></div><form class="surface-body overview-stack" id="mind-proxy-key-form"><div class="field"><label for="mind-proxy-key-input">New key</label><input id="mind-proxy-key-input" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" required><small>Paste the key this Mind should use. The gateway, the memory store and the tools take it at once and refuse the old one on its next request; no other Mind is touched. The hive does not make keys and does not change them at the proxy: the old key still buys inference billed to this Mind until whoever runs the proxy revokes it there, which matters most if it leaked. A Mind reads its key when it starts, so it must be recreated, or restarted where it runs, to carry the new one.</small></div><div class="form-actions"><button class="button" type="submit">Replace key</button></div><small id="mind-proxy-key-status" role="status"></small><ul id="mind-proxy-key-services" hidden></ul></form></section>
         <section class="surface" id="mind-down" hidden><div class="surface-header"><div><h2>This Mind is not answering</h2><p id="mind-down-text"></p></div><button class="button button-quiet" type="button" onclick="window.location.reload()">Check again</button></div></section>
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         {% if current_user.is_admin %}<section class="surface" id="mind-owner" hidden><div class="surface-header"><div><h2>Owner</h2><p>The user this Mind belongs to. They see it, and everything downstream of it, on their own console.</p></div></div><form class="surface-body overview-stack" id="mind-owner-form"><div class="field"><label for="mind-owner-user">Owner</label><select id="mind-owner-user" name="owner" required></select></div><div class="form-actions"><button class="button" type="submit">Move to this owner</button></div><small id="mind-owner-status"></small></form></section>{% endif %}
@@ -86,7 +86,15 @@ window.addEventListener("DOMContentLoaded", async function () {
         try {
             const saved = await h.requestJson("/api/minds/" + encodeURIComponent(document.getElementById("mind-proxy-key").dataset.mindName) + "/proxy-key", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({proxy_key: form.elements.proxy_key.value})});
             form.elements.proxy_key.value = "";
-            status.textContent = (saved.warning ? saved.warning + " " : "") + "Saved. Restart this Mind to use the key.";
+            const list = document.getElementById("mind-proxy-key-services");
+            if (saved.services) {
+                list.innerHTML = saved.services.map(function (item) { return "<li>" + h.escapeHtml(item.label) + ": " + h.escapeHtml(item.status) + "</li>"; }).join("");
+                list.hidden = false;
+                status.textContent = "Replaced on every service. " + saved.next_step + " " + saved.proxy_note;
+            } else {
+                list.hidden = true;
+                status.textContent = (saved.warning ? saved.warning + " " : "") + "Saved. Restart this Mind to use the key.";
+            }
         } catch (error) { status.textContent = error.message; }
         finally { button.disabled = false; }
     });
@@ -906,7 +914,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         const cfg = mind.local_config && mind.local_config.config || {};
         const proxySection = document.getElementById("mind-proxy-key");
         proxySection.dataset.mindName = mind.name;
-        proxySection.hidden = !mind.local_config || cfg.remote === true;
+        proxySection.hidden = false;
         document.getElementById("mind-title").textContent = mind.name;
         document.getElementById("mind-description").textContent = cfg.description || "Registered Hive mind";
         document.getElementById("mind-status").innerHTML = h.statusPill(mind.activity_status === "active", "Active session", "Registered");

@@ -54,6 +54,7 @@ from typing import Any
 import httpx
 
 import credentials_data
+import key_journal
 from credentials_data import ENV_FILES, Unreadable
 
 #: How long to wait on a service's own credential route. Longer than the
@@ -261,9 +262,8 @@ ONE_KEY_PREFIX = "MIND_KEY_"
 
 ONE_KEY_REFUSAL = (
     "This mind holds one key for every service, so it cannot be replaced "
-    "here one service at a time or by saving the proxy key alone. Replacing "
-    "a mind's key, so that every service takes the same new one, is a later "
-    "step of the one-key work")
+    "here one service at a time or by saving the proxy key alone. Paste the "
+    "new key on the mind's own page, which gives every service the same one")
 
 
 def one_key_variable(holder: str) -> str:
@@ -923,11 +923,14 @@ def _refuse_if_another_holds(value: str, own: str | None) -> None:
     except Unreadable:
         raise MintRefused("The Mind credential file could not be read") from None
     if places:
-        raise KeyHeldByAnother(KEY_HELD_MESSAGE)
+        named = holder_from_place(places[0])
+        raise KeyHeldByAnother(
+            f"{named} already holds that key. Paste this mind's own key."
+            if named else KEY_HELD_MESSAGE)
 
 
 async def validate_mind_proxy_key(
-    supplied: Any, *, for_mind: str | None = None,
+    supplied: Any, *, for_mind: str | None = None, stored_here: bool = True,
 ) -> tuple[str, None]:
     """Verify a pasted mind key before anything is written.
 
@@ -937,7 +940,7 @@ async def validate_mind_proxy_key(
     """
     value = _plain_key(supplied, "proxy key")
     path = ENV_FILES.get(MIND_ENV_LABEL)
-    if path is None or not path.is_file():
+    if stored_here and (path is None or not path.is_file()):
         raise MintRefused("This Hive is not configured to store Mind proxy keys yet")
     _refuse_if_another_holds(value, for_mind)
     service = SERVICES["proxy"]
@@ -984,6 +987,342 @@ async def store_mind_proxy_key(name: str, owner: str, value: str, *, creating: b
             "restart_target": RESTART_BY_FILE.get(MIND_ENV_LABEL, RESTART_BY_FILE["hive_mind"])}
 
 
+# ---------------------------------------------------------------------------
+# Replacing a mind's one key
+# ---------------------------------------------------------------------------
+
+#: What the page says about the proxy, every time: the hive does not hold the
+#: mind's inference account and does not change it there.
+PROXY_NOTE = (
+    "The old key still buys inference billed to this mind until whoever runs "
+    "the proxy revokes it there; do that now if the old key leaked."
+)
+
+_HELD_BY = re.compile(r"held by '([^']+)'")
+
+
+class ReplacementFailed(Exception):
+    """A replacement that stopped part-way and could not be fully put back.
+
+    The message says which service holds which key and what to do. It never
+    contains a key."""
+
+
+def _one_key_services() -> list[Service]:
+    """The services that each hold the mind's key: not the proxy, which is the
+    person's, and the tools only where this hive has them."""
+    return [s for s in SERVICES.values()
+            if s.key != "proxy" and (s.key != "tools" or s.configured())]
+
+
+def stored_key_location(holder: str) -> Location | None:
+    """Where this mind's one key is stored on this console, or None.
+
+    Only a `MIND_KEY_<NAME>` line counts: a mind not yet moved keeps separate
+    per-service lines, which are not one key and are not replaced here."""
+    one = one_key_variable(holder)
+    found = []
+    for label in ENV_FILES:
+        try:
+            if credentials_data._read_env_value(ENV_FILES[label], one) is not None:
+                found.append(Location(label, one))
+        except Unreadable:
+            raise MintRefused(
+                f"{ENV_FILES[label]} could not be read, so this mind's stored "
+                "key cannot be replaced safely. Nothing was changed") from None
+    if len(found) > 1:
+        raise MintRefused(
+            f"{', '.join(l.file for l in found)} each hold {one}, so which one "
+            "this mind reads cannot be told. Nothing was changed")
+    return found[0] if found else None
+
+
+def mind_holds_one_key_line(holder: str) -> bool:
+    return stored_key_location(holder) is not None
+
+
+def mind_is_not_yet_on_one_key(holder: str) -> bool:
+    """A local mind that still has its older per-service lines and no one key."""
+    path = ENV_FILES.get(MIND_ENV_LABEL)
+    if path is None or stored_key_location(holder) is not None:
+        return False
+    try:
+        return name_has_old_proxy_line(path, holder)
+    except Unreadable:
+        return False
+
+
+async def _holder_row(service: Service, holder: str) -> dict[str, Any] | None:
+    rows = await list_holders(service)
+    return next((r for r in rows if str(r.get("holder", "")).lower() == holder), None)
+
+
+async def _accepts(service: Service, value: str) -> bool | None:
+    """Whether the service already accepts `value` as someone's key; None when
+    it could not be asked."""
+    path = PROBE_PATHS.get(service.key)
+    try:
+        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
+            response = await client.get(
+                f"{await _service_url(service)}{path}",
+                headers={"Authorization": f"Bearer {value}"})
+    except (httpx.HTTPError, ValueError, UnicodeError):
+        return None
+    if response.status_code in PROBE_ACCEPTED:
+        return True
+    if response.status_code in (401, 403):
+        return False
+    return None
+
+
+async def _put_key(
+    service: Service, holder: str, owner: str, mind_id: str,
+    row: dict[str, Any] | None, value: str,
+) -> None:
+    username = str((row or {}).get("username") or owner)
+    await _put(service, holder, username, value, "mind",
+               str((row or {}).get("mind_id") or mind_id) or None)
+
+
+def _held_by_name(exc: BaseException) -> str | None:
+    found = _HELD_BY.search(str(exc))
+    return found.group(1) if found else None
+
+
+def holder_from_place(place: str) -> str | None:
+    """The mind a `label:VARIABLE` or `mind:VARIABLE` place from
+    `proxy_key_places` belongs to, so a refusal can name it."""
+    head, _, variable = place.partition(":")
+    if head not in ENV_FILES:
+        return head or None
+    for prefix in ("MIND_KEY_", "PROXY_TOKEN_"):
+        if variable.startswith(prefix):
+            return variable[len(prefix):].lower().replace("_", "-")
+    if variable.endswith("_PROXY_KEY") and variable != "MIND_PROXY_KEY":
+        return variable[:-len("_PROXY_KEY")].lower().replace("_", "-")
+    return None
+
+
+def key_held_message(holder: str | None) -> str:
+    if holder:
+        return (f"{holder} already holds that key. Paste this mind's own key. "
+                "Nothing was changed.")
+    return KEY_HELD_MESSAGE + " Nothing was changed."
+
+
+_STATE_WORDS = {
+    "new": "holds the new key",
+    "old": "holds the old key",
+    "none": "has no key for this mind",
+    "unknown": "did not answer, so its state is unknown, check before trying again",
+    "untouched": "was not changed and still holds the old key",
+    "unrestorable": "holds the new key and the old one is not known here to put back",
+}
+
+
+def _states_sentence(order: list[Service], state: dict[str, str]) -> str:
+    return "; ".join(f"{s.label} {_STATE_WORDS[state.get(s.key, 'untouched')]}" for s in order)
+
+
+async def replace_mind_key(
+    name: str, owner: str, mind_id: str, supplied: str,
+) -> dict[str, Any]:
+    """Give a mind a new key on the gateway, the memory store and the tools.
+
+    `supplied` is already a checked, plain key (the route validated its form,
+    that no other mind's stored line holds it, and that the proxy accepts it).
+    Each service replaces the mind's value in place and refuses the old one on
+    its very next request, so nothing is restarted. The mind's stored key is
+    then written, where this console can write it.
+
+    Raises `MintRefused` or `KeyHeldByAnother` when nothing changed, and
+    `ReplacementFailed` when something did and could not be fully put back.
+    The whole operation holds `_ROTATION_LOCK`, so two replacements, or a
+    replacement beside any rotation, never interleave; and it is written to
+    the journal first so a console stopped half-way puts the services back in
+    step with the stored key when it starts again.
+    """
+    holder = name.strip().lower()
+    value = supplied
+    services = _one_key_services()
+    async with _ROTATION_LOCK:
+        location = stored_key_location(holder)
+        old: str | None = None
+        if location is not None:
+            try:
+                old = _loaded_value(location)
+            except Unreadable:
+                raise MintRefused(
+                    f"{location.path} could not be read, so the old key could "
+                    "not be put back if something failed. Nothing was changed"
+                ) from None
+        # Before anything changes: every service must answer and accept this
+        # console's administrator credential, or a part-way failure is certain.
+        rows: dict[str, dict[str, Any] | None] = {}
+        for service in services:
+            try:
+                rows[service.key] = await _holder_row(service, holder)
+            except MintRefused as exc:
+                raise MintRefused(f"{exc}. Nothing was changed.") from None
+        same_as_stored = old is not None and secrets.compare_digest(old, value)
+        accepted: dict[str, bool] = {}
+        if not same_as_stored:
+            for service in services:
+                answer = await _accepts(service, value)
+                if answer is None:
+                    raise MintRefused(
+                        f"Could not check that key against {service.label}. "
+                        "Nothing was changed.")
+                accepted[service.key] = answer
+            if old is not None and any(accepted.values()):
+                # This mind's own key is `old`, which is not this value, so a
+                # service that accepts it has given it to some other holder.
+                raise KeyHeldByAnother(key_held_message(None))
+            # A mind whose key is not stored here may be pasting the key it
+            # already has on some services (a repeat after a failure). A
+            # service that accepts the value is written first: it either is
+            # this mind's own row, or it refuses by naming the holder before
+            # anything has changed.
+            services = sorted(services, key=lambda s: not accepted.get(s.key, False))
+        record = key_journal.begin("replace", holder, [s.key for s in services])
+        record["owner"], record["mind_id"] = owner, mind_id
+        key_journal.update(record)
+
+        state: dict[str, str] = {}
+        failure: Exception | None = None
+        for service in services:
+            try:
+                await _put_key(service, holder, owner, mind_id, rows[service.key], value)
+            except MintUncertain as exc:
+                state[service.key] = "unknown"
+                failure = exc
+                break
+            except Exception as exc:  # noqa: BLE001 - every failure is put back below
+                state[service.key] = "untouched"
+                failure = exc
+                break
+            state[service.key] = "new"
+            key_journal.update(record, switched=[k for k, v in state.items() if v == "new"])
+
+        stored = "not_writable"
+        if failure is None and location is not None:
+            with credentials_data._WRITE_LOCK:
+                written = credentials_data._write_location(
+                    location.path, location.env_key, value, location.file)
+                try:
+                    verified = bool(written["written"]) and _loaded_value(location) == value
+                except Unreadable:
+                    verified = False
+            if verified:
+                stored = "written"
+            else:
+                failure = MintRefused(
+                    f"{location.path} did not take the new key"
+                    + (f" ({written['reason']})" if written.get("reason") else ""))
+
+        if failure is None:
+            key_journal.finish(record)
+            key_journal.clear(holder)
+            return {
+                "services": [{"service": s.key, "label": s.label, "status": "replaced"}
+                             for s in services],
+                "stored": stored,
+                "restart_target": location.restart_target if location else None,
+                "proxy_note": PROXY_NOTE,
+            }
+
+        # Put back, in the reverse order, whatever may have taken the new key.
+        for service in reversed(services):
+            if state.get(service.key) not in ("new", "unknown"):
+                continue
+            row = rows[service.key]
+            try:
+                if old is not None:
+                    await _put_key(service, holder, owner, mind_id, row, old)
+                    state[service.key] = "old"
+                elif row is None:
+                    response = await _request(
+                        service, "DELETE", f"/credentials/{holder}?remove=true")
+                    if response.status_code >= 400:
+                        raise MintRefused("not removed")
+                    state[service.key] = "none"
+                else:
+                    state[service.key] = (
+                        "unrestorable" if state[service.key] == "new" else "unknown")
+            except Exception:  # noqa: BLE001 - reported below, by service
+                pass
+        file_ok = True
+        if location is not None and old is not None:
+            try:
+                if _loaded_value(location) != old:
+                    with credentials_data._WRITE_LOCK:
+                        credentials_data._write_location(
+                            location.path, location.env_key, old, location.file)
+                    file_ok = _loaded_value(location) == old
+            except Exception:  # noqa: BLE001
+                file_ok = False
+        clean = file_ok and all(
+            state.get(s.key, "untouched") in ("old", "none", "untouched") for s in services)
+        reason = _failure_sentence(failure)
+        if clean:
+            key_journal.finish(record)
+            holder_name = _held_by_name(failure)
+            if holder_name or "already held by" in str(failure):
+                raise KeyHeldByAnother(key_held_message(holder_name))
+            raise MintRefused(f"{reason}. Every service is back on the old key.")
+        sentence = _states_sentence(services, state)
+        if not file_ok:
+            sentence += f"; the stored key in {location.path} could not be put back"
+        key_journal.update(record, status="needs_attention", detail=sentence)
+        again = ("Paste the same new key again to finish; it is safe to repeat."
+                 if old is None else
+                 "Check each service, then paste the key you want this mind to use.")
+        raise ReplacementFailed(f"{reason}. Now: {sentence}. {again}")
+
+
+def _failure_sentence(exc: BaseException) -> str:
+    """One sentence about why, never carrying the key (the services' own
+    refusals are already cut down to their `error` sentence by `_put`)."""
+    text = str(exc).strip() or type(exc).__name__
+    return text[:300]
+
+
+async def recover_replacements() -> list[dict[str, Any]]:
+    """On console start: bring the services back in step with the stored key
+    for every replacement this console was stopped in the middle of.
+
+    The journal holds no key, so the one source is the mind's stored line:
+    every service is given that value, which finishes a replacement whose file
+    was already written and undoes one whose file was not. A mind whose key is
+    not stored here cannot be recovered from here and is marked for attention.
+    """
+    handled = []
+    for record in key_journal.unfinished():
+        holder = record["mind"]
+        try:
+            async with _ROTATION_LOCK:
+                location = stored_key_location(holder)
+                if location is None:
+                    raise MintRefused(
+                        "this mind's key is not stored on this console, so the "
+                        "services cannot be put back in step from here")
+                value = _loaded_value(location)
+                if not value:
+                    raise MintRefused("the stored key is empty")
+                for key in record.get("planned", []):
+                    service = SERVICES[key]
+                    row = await _holder_row(service, holder)
+                    await _put_key(service, holder, str(record.get("owner") or ""),
+                                   str(record.get("mind_id") or ""), row, value)
+            key_journal.finish(record)
+            handled.append({"mind": holder, "recovered": True})
+        except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
+            key_journal.update(record, status="needs_attention",
+                               detail=_failure_sentence(exc))
+            handled.append({"mind": holder, "recovered": False, "detail": _failure_sentence(exc)})
+    return handled
+
+
 async def _service_url(service: Service) -> str:
     if service.key == "proxy":
         import provider_data
@@ -1000,7 +1339,7 @@ async def _require_managed_proxy(service: Service, holder: str) -> None:
 
 
 async def accept_mind_provider_token(
-    supplied: Any, *, for_mind: str | None = None,
+    supplied: Any, *, for_mind: str | None = None, stored_here: bool = True,
 ) -> tuple[str, None]:
     """Accept a mind's key on a direct or custom provider; ask no upstream.
 
@@ -1015,7 +1354,7 @@ async def accept_mind_provider_token(
         raise MintRefused(str(exc)) from None
     value = _plain_key(value, "token")
     path = ENV_FILES.get(MIND_ENV_LABEL)
-    if path is None or not path.is_file():
+    if stored_here and (path is None or not path.is_file()):
         raise MintRefused("This Hive is not configured to store Mind tokens yet")
     _refuse_if_another_holds(value, for_mind)
     return value, None
