@@ -130,42 +130,69 @@ def steps(directory: Path | None = None) -> list[Step]:
 
 
 def _statements(sql: str) -> list[str]:
-    """Top-level statements of a step, comments gone. Dollar-quoted bodies
-    (function and DO blocks) are kept whole, so their inner semicolons do not
-    split them and their contents are not read as statements."""
-    text = _code(sql)
+    """Top-level statements of a step, for the step rule.
+
+    Comments (`--` and block) are dropped only outside quotes; the inside of a
+    single-quoted literal is emptied (a word in a string is not a keyword);
+    a double-quoted identifier keeps its text with anything but word
+    characters made `_` so it stays one token. A dollar-quoted body (function
+    and DO blocks) is kept whole and unread: its statements are not checked,
+    which the module docstring says. An unterminated one raises.
+    """
     out: list[str] = []
     buffer: list[str] = []
-    depth = 0
-    quote = None
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if quote:
-            buffer.append(char)
-            if text.startswith(quote, i) and (len(quote) > 1 or char == quote):
-                buffer.append(quote[1:])
-                i += len(quote) - 1
-                quote = None
-        elif char == "'":
-            quote = "'"
-            buffer.append(char)
-        elif char == "$":
-            tag = re.match(r"\$[A-Za-z_]*\$", text[i:])
+    i, n = 0, len(sql)
+    while i < n:
+        two = sql[i:i + 2]
+        char = sql[i]
+        if two == "--":
+            i = sql.find("\n", i)
+            i = n if i < 0 else i
+            continue
+        if two == "/*":
+            end = sql.find("*/", i + 2)
+            if end < 0:
+                raise ValueError("unterminated block comment in a step")
+            i = end + 2
+            buffer.append(" ")
+            continue
+        if char == "'":
+            j = i + 1
+            while True:
+                j = sql.find("'", j)
+                if j < 0:
+                    raise ValueError("unterminated string in a step")
+                if sql[j + 1:j + 2] == "'":
+                    j += 2
+                    continue
+                break
+            buffer.append("''")
+            i = j + 1
+            continue
+        if char == '"':
+            j = sql.find('"', i + 1)
+            if j < 0:
+                raise ValueError("unterminated quoted identifier in a step")
+            buffer.append(re.sub(r"\W", "_", sql[i + 1:j]) or "_")
+            i = j + 1
+            continue
+        if char == "$":
+            tag = re.match(r"\$[A-Za-z_]*\$", sql[i:])
             if tag:
-                quote = tag[0]
-                buffer.append(tag[0])
-                i += len(tag[0]) - 1
-            else:
-                buffer.append(char)
-        elif char == ";" :
+                end = sql.find(tag[0], i + len(tag[0]))
+                if end < 0:
+                    raise ValueError("unterminated dollar-quoted body in a step")
+                buffer.append("$$")
+                i = end + len(tag[0])
+                continue
+        if char == ";":
             out.append("".join(buffer).strip())
             buffer = []
         else:
             buffer.append(char)
         i += 1
     out.append("".join(buffer).strip())
-    return [s for s in out if s]
+    return [t for t in out if t]
 
 
 def _clauses(alter: str) -> list[str]:
@@ -211,7 +238,7 @@ def rule_violations(step: Step) -> list[str]:
     """
     found: list[str] = []
     statements = _statements(step.sql)
-    defaulted: set[str] = set()
+    defaulted: set[tuple[str, str]] = set()
     for statement in statements:
         match = _ALTER_TABLE.match(statement)
         if not match:
@@ -220,7 +247,7 @@ def rule_violations(step: Step) -> list[str]:
             col = _ALTER_COLUMN.match(clause)
             if col and re.match(r"^(SET\s+DEFAULT|ADD\s+GENERATED)\b",
                                 col[2], re.IGNORECASE):
-                defaulted.add(col[1].lower())
+                defaulted.add((match[1].lower(), col[1].lower()))
     for statement in statements:
         for pattern, why in _BANNED:
             hit = pattern.match(statement)
@@ -253,7 +280,7 @@ def rule_violations(step: Step) -> list[str]:
                 if re.match(r"^(SET\s+DATA\s+)?TYPE\b", action, re.IGNORECASE):
                     found.append(f"{table}: retypes column {col[1]}")
                 elif (re.match(r"^SET\s+NOT\s+NULL\b", action, re.IGNORECASE)
-                        and col[1].lower() not in defaulted):
+                        and (table.lower(), col[1].lower()) not in defaulted):
                     found.append(
                         f"{table}: sets {col[1]} NOT NULL without giving it "
                         "a default or identity in the same step")
