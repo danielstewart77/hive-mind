@@ -86,3 +86,10 @@ async def test_a_mind_the_tools_hold_no_key_for_is_not_reported_as_cut_off_there
 
     assert result["ok"] is False
     assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "no key here"
+
+
+async def test_a_mind_the_tools_know_only_by_the_shared_token_is_not_reported_as_cut_off(hive):
+    result = await holder_credentials.cut_off_mind("skippy")
+
+    assert result["ok"] is False
+    assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "shared token"

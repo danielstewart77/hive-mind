@@ -1370,16 +1370,12 @@ async def cut_off_mind(name: str) -> dict[str, Any]:
     holder = name.strip().lower()
     results: list[dict[str, Any]] = []
     async with _ROTATION_LOCK:
-        try:
-            # A replacement left unfinished must not be re-applied on the next
-            # start and quietly bring this mind back.
-            key_journal.clear(holder)
-        except OSError:
-            pass
         for service in _one_key_services():
             entry: dict[str, Any] = {"service": service.key, "label": service.label}
             if service.key == "tools" and holder in TOOLS_RESERVED_HOLDERS:
-                entry.update(status="not held", detail="the tools keep no key under this name")
+                entry.update(
+                    status="shared token",
+                    detail="the tools know this name by the shared service token, which is not cut off here")
                 results.append(entry)
                 continue
             try:
@@ -1412,6 +1408,17 @@ async def cut_off_mind(name: str) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001 - reported per service, the rest still runs
                 entry.update(status="unreachable", detail=str(exc)[:300] or type(exc).__name__)
             results.append(entry)
+    if any(r["status"] == "cut off" for r in results):
+        try:
+            # A replacement left unfinished must not be re-applied on the next
+            # start and quietly bring this mind back.
+            key_journal.clear(holder)
+        except OSError as exc:
+            results.append({
+                "service": "journal", "label": "the key journal",
+                "status": "still accepting",
+                "detail": f"an unfinished key replacement could not be cleared ({exc.__class__.__name__}); "
+                          "the next console start could bring this mind back"})
     if not any(r["service"] == "tools" for r in results):
         results.append({"service": "tools", "label": SERVICES["tools"].label,
                         "status": "not held", "detail": "this hive has no tools configured"})
