@@ -7,37 +7,65 @@ database actually lives is one configuration value in that process's
 environment — so pointing the hive at a different database is an environment
 change rather than an edit to anything.
 
-Every mind and every service tracks `main`. There are no pinned versions to
-carry per install, which makes the suite here a gate rather than an oracle:
-nothing merges red, because `main` is what every service in the hive is
-running.
+This package lives in hive-mind, at `modules/hive-data`, and is built and
+tested with the code that calls it, so a release cannot mix schema revisions:
+what hive-mind builds is the commit of this folder that sits beside the
+services. Its history from before the move is in hive-mind's own log (the import
+merge names the source commit); `git log --follow` reaches it. The old repository, danielstewart77/hive-data,
+is no longer where changes land.
 
 ## Install
 
-```
-pip install "hive-data @ git+https://github.com/danielstewart77/hive-data.git@main"
-```
-
-Upgrading needs `--force-reinstall --no-deps`, then a second pass over your
-own requirements:
+From a hive-mind checkout there is nothing to fetch. The images build it from
+the `hive_data` build context that compose points at this folder, and for
+development:
 
 ```
-pip install --force-reinstall --no-deps \
-    "hive-data @ git+https://github.com/danielstewart77/hive-data.git@main"
-pip install -r requirements.txt   # resolve anything this package now needs
+/opt/venv/bin/pip install -e modules/hive-data
 ```
 
-Both halves matter. The version in the metadata does not change between
-commits, so pip clones the repo, resolves `main` to a new commit, compares
-that unchanged version against what is installed and installs nothing —
-`--upgrade` included, since the comparison is the version and not the commit.
-And `--no-deps` means the day this package takes on a new dependency, a
-service that ran only the first command is running code whose driver is
-absent. In Docker the requirements layer is cached on the contents of
-`requirements.txt`, so a rebuild reuses the venv holding whatever commit was
-current when that file last changed: an `ADD` of the commit object busts that
-cache, and the force-reinstall has to run *before* `requirements.txt` is
-resolved.
+On its own, from a named version (a tag of hive-mind, see Versions):
+
+```
+pip install "hive-data @ git+https://github.com/danielstewart77/hive-mind.git@hive-data-v0.2.0#subdirectory=modules/hive-data"
+```
+
+The installed version is the one in `pyproject.toml` at that tag, so
+`pip install --upgrade` with a new tag installs the new package and
+`pip list` says which it is. The old `--force-reinstall` dance is gone: it
+existed because the version never moved. `--no-deps` is still right in an
+image whose requirements file already names `asyncpg`; elsewhere leave it
+off, so the driver arrives with the package.
+
+Installing from git clones hive-mind and initialises its submodules' paths,
+which is slow but needs nothing else; a machine that has a hive-mind checkout
+should install from the folder.
+
+## Versions
+
+The package has a real version, and it moves when the package does.
+
+* `pyproject.toml` `version` is `MAJOR.MINOR.PATCH`. Any change under
+  `modules/hive-data/hive_data/` (code, schema, steps) raises it in the same
+  pull request: PATCH for a fix that changes no operation or step, MINOR for a
+  new operation or step, MAJOR for anything that makes the previous release
+  stop working against a database this one migrated (which the step rule
+  below forbids, so MAJOR is for a deliberate two-release change).
+* A release is a tag of hive-mind named `hive-data-vMAJOR.MINOR.PATCH` on the
+  merge commit, where `pyproject.toml` says exactly `MAJOR.MINOR.PATCH`. The
+  prefix is what keeps this scheme apart from the tags other modules
+  (surfaces, the console, the terminal) and hive-mind itself carry in the same
+  repository: each uses its own `<name>-vX.Y.Z`, never a bare `vX.Y.Z`.
+* Whatever installs the package from git names a tag. A consumer that has to
+  track a branch while it develops installs from its checkout instead.
+* `tests/previous_release_columns.json` is the column list of the release just
+  gone, a JSON object of table to columns. When a release is tagged,
+  regenerate it from that release's `hive_data.schema.COLUMNS` (dump it with
+  `json.dump`), so the step rule test always compares against what the
+  previous release could do.
+
+`docs/setup/hive-data-versions.md` in hive-mind says the same thing for the
+other modules that follow this scheme.
 
 ## Use
 
@@ -472,6 +500,27 @@ which lets a database with no `memory` schema open because comms needs only
 the other three run, a current hive is a no-op, and a newer step is the only
 thing run on a hive that has the rest.
 
+## What a step may do
+
+A step runs on a database the previous release is still using, and going
+back a release does not undo it, so every step only adds. The previous
+release must still pass `schema.verify` and still write. In practice:
+
+* new tables, schemas, indexes, functions, triggers and roles are fine;
+* a new column is nullable or has a default (or is an identity);
+* `SET NOT NULL` on an existing column comes with a default or identity in
+  the same step;
+* nothing is dropped, renamed, retyped or truncated. A column that has to go
+  stops being used in one release and is dropped in the next.
+
+`hive_data.migrate.rule_violations(step)` is the rule as code, and
+`tests/test_migrate.py` runs it over every shipped step and then runs the
+previous release's `schema.verify` and an insert as that release against a
+database with every current step applied. The rule reads statements: it
+cannot see a new CHECK, UNIQUE constraint or trigger that would refuse an old
+release's row, so a step adding one says in its header why the previous
+release's writes still pass.
+
 ## The chief of staff's role
 
 Step 7 makes `hive_staff`, a NOLOGIN role that may connect, use the `staff`
@@ -577,9 +626,10 @@ package needs no ORM face.
 ## Tests
 
 ```
+cd modules/hive-data
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest
+HIVE_DATA_TEST_ADMIN_DSN=postgresql://... .venv/bin/python -m pytest
 ```
 
 The suite creates a database of its own per run and drops it afterwards — never
@@ -599,8 +649,8 @@ it: `board.design_sessions` has real foreign keys into `core.sessions` and
 while each store was its own SQLite file.
 
 `HIVE_DATA_TEST_ADMIN_DSN` points it at a server, with no default, because a
-default would be a credential in a tracked file. The suite skips cleanly
-without it, and sweeps any database a killed run left behind. The default is the hive's
+default would be a credential in a tracked file. The suite skips without it (a skipped suite proves nothing, so a gate run sets
+it), and sweeps any database a killed run left behind. The default is the hive's
 Postgres on its container network rather than loopback, and that is
 load-bearing for one test: `pg_hba.conf` trusts loopback and demands scram
 from everywhere else, so a wrong password over loopback *succeeds* and the
