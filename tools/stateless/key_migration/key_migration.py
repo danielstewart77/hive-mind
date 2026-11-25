@@ -41,7 +41,7 @@ import sys
 from typing import Any
 from urllib import error, parse, request
 
-_TIMEOUT = 120.0
+_TIMEOUT = 600.0
 _BASE = "/api/settings/key-migration"
 
 #: Printed with every `retire` answer and every refusal, in the console's words too.
@@ -103,6 +103,12 @@ def _call(method: str, path: str) -> Any:
         raise Refused(str(detail or f"the console answered {exc.code}")) from exc
     except error.URLError as exc:
         raise Refused(f"the console could not be reached: {exc.reason}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise Refused("the console did not finish answering; the operation may or may not have "
+                      "landed. Run `report` before trying again.") from exc
+    except ValueError as exc:
+        raise Refused("the console's answer was not readable; the operation may or may not have "
+                      "landed. Run `report` before trying again.") from exc
 
 
 def _name(parser_value: str) -> str:

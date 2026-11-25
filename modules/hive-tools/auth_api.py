@@ -147,6 +147,10 @@ async def retire_shared_token() -> dict[str, Any]:
     the internal secret stand as they were. Repeating it changes nothing and
     says so. A mind of the shared holder's name may register its own key from
     then on."""
+    if await shared_token_retired():
+        # Already done. Revoking again would revoke the key a mind of this
+        # name registered since.
+        return {"holder": SHARED_HOLDER, "revoked": False, "expired_requests": 0}
     now = int(time.time())
     async with store.transaction():
         await store.hold_holder(SHARED_HOLDER)

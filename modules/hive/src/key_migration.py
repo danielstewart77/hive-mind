@@ -40,6 +40,11 @@ from holder_credentials import MintRefused, ReplacementFailed
 #: What the tools' own routes call the holder of the shared service token.
 SHARED_HOLDER = "skippy"
 
+REPOINT_NOTE = (
+    "The report checks that each tools consumer other than a mind has a credential of its "
+    "own; it cannot see which one the consumer presents. Point each bot's and the console's "
+    "tools token at the credential issued for it before retiring, or it is refused afterwards.")
+
 RETIREMENT_WARNING = (
     "Retiring ends going back a release for every moved mind: the previous "
     "release's minds present per-service values that are gone, and the move "
@@ -208,7 +213,11 @@ async def account() -> dict[str, Any]:
         problems: list[str] = []
         found = by_mind.get(name, {}).get("found", [])
         stored = _stored(name)
-        sources = hc.mind_proxy_key_sources(name) if stored is None else []
+        try:
+            sources = hc.mind_proxy_key_sources(name) if stored is None else []
+        except Unreadable as exc:
+            sources = []
+            problems.append(f"a file that may hold its key could not be read: {exc}")
         distinct = {v for _, v in sources}
         local = _is_local(name)
         present = {s.key for s in services if row_state.get((s.key, name))}
@@ -291,7 +300,7 @@ async def account() -> dict[str, Any]:
         "tools_consumers_without_own_credential": tools_missing,
         "blocking": blocking,
         "ready_to_retire": ready,
-        "retirement_warning": RETIREMENT_WARNING,
+        "retirement_warning": RETIREMENT_WARNING + " " + REPOINT_NOTE,
     }
 
 
@@ -305,8 +314,8 @@ def _tools_consumers(by_service: list[dict[str, Any]]) -> list[str]:
         for holder in entry["holders"]:
             if holder["kind"] == "surface bot":
                 names.add(holder["holder"].lower())
-    extra = os.environ.get("HIVE_TOOLS_CONSUMERS")
-    for item in (extra if extra is not None else "hive-site").split(","):
+    extra = os.environ.get("HIVE_TOOLS_CONSUMERS") or "hive-site"
+    for item in extra.split(","):
         if item.strip():
             names.add(item.strip().lower())
     return sorted(names)
@@ -383,7 +392,10 @@ def _line_remove(path: Path, variable: str) -> None:
 async def _validated_value(name: str) -> str:
     """The proxy key this mind already holds, checked: one value across all the
     places it is kept, live at the proxy, and not another mind's."""
-    sources = hc.mind_proxy_key_sources(name)
+    try:
+        sources = hc.mind_proxy_key_sources(name)
+    except Unreadable as exc:
+        raise MintRefused(f"{exc} could not be read, so {name}'s key cannot be found. Nothing was changed") from None
     if not sources:
         raise MintRefused(
             f"{name} has no proxy key in any file this console reads"
@@ -512,6 +524,16 @@ async def move_mind(name: str) -> dict[str, Any]:
                     failure = MintRefused(f"the journal could not be written ({exc.strerror or exc})")
                     break
         compose = "not attempted"
+        if failure is None:
+            for service in services:
+                if hc._is_revoked(rows[service.key]) and service.key != "tools":
+                    # A put clears a revocation; a mind cut off before the move stays cut off.
+                    try:
+                        await hc._revoke_row(service, holder)
+                    except Exception as exc:  # noqa: BLE001
+                        failure = ReplacementFailed(
+                            f"{service.label} could not be cut off again after the move ({hc._failure_sentence(exc)})")
+                        break
         if failure is None:
             compose = compose_one_key(holder, add=True) if not own_label else "not needed: an edge mind reads its own file"
             try:
@@ -646,6 +668,8 @@ async def undo_move(name: str) -> dict[str, Any]:
                 else:
                     await hc._put_key(service, holder, str(row.get("owner") or owner), mind_id,
                                       rows[service.key], old[service.key])
+                    if hc._is_revoked(rows[service.key]):
+                        await hc._revoke_row(service, holder)
                 done.append(service.key)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{service.label}: {hc._failure_sentence(exc)}")
@@ -686,8 +710,14 @@ async def issue_tools_credential(holder: str) -> dict[str, Any]:
     path = hc.ENV_FILES.get(hc.MIND_ENV_LABEL)
     if path is None or not path.is_file():
         raise MintRefused("no shared env file to write the credential into; nothing was changed")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name):
+        raise MintRefused("a holder here is lowercase letters, digits and hyphens")
     variable = "TOOLS_TOKEN_" + name.replace("-", "_").upper()
     async with hc._ROTATION_LOCK:
+        if await hc._holder_row(tools, name) is not None:
+            raise MintRefused(
+                f"the tools already hold a credential for {name}; it is not replaced by this tool. "
+                "Nothing was changed")
         if credentials_data._read_env_value(path, variable) is not None:
             raise MintRefused(f"{variable} is already in {path}; nothing was changed")
         value = secrets.token_urlsafe(32)
@@ -712,22 +742,24 @@ async def issue_tools_credential(holder: str) -> dict[str, Any]:
 # Retirement
 # ---------------------------------------------------------------------------
 
-def _compose_texts() -> str:
+def _compose_texts() -> str | None:
     """The text of every compose file this console can read that names a
     mind's variables: the stack file and each mind's own. Read only to see
     which variables are still referenced; never printed."""
     texts: list[str] = []
     try:
         import configuration_data
-        files = [configuration_data.stack_compose_path()]
+        stack = Path(configuration_data.stack_compose_path())
+        files = [stack]
         files += sorted(Path(configuration_data.HIVE_MIND_MINDS_CONFIG_DIR).glob("*/container/compose.yaml"))
+        texts.append(stack.read_text())  # the stack file unreadable: None, and nothing is deleted
     except Exception:  # noqa: BLE001
-        return ""
-    for path in files:
+        return None
+    for path in files[1:]:
         try:
             texts.append(Path(path).read_text())
         except Exception:  # noqa: BLE001
-            continue
+            return None
     return "\n".join(texts)
 
 
@@ -751,15 +783,17 @@ async def retire() -> dict[str, Any]:
     touched. Repeating it is safe. Afterwards each moved mind's key is read
     back from every service, and each old value that can be read is probed:
     the result says which still answer."""
-    report = await account()
-    if not report["ready_to_retire"]:
-        raise RetirementRefused(report["blocking"])
     tools = hc.SERVICES["tools"]
     registry = await _registry()
     old_values: list[tuple[hc.Service, str, str]] = []
     removed: list[str] = []
     kept: list[str] = []
     async with hc._ROTATION_LOCK:
+        # Judged under the lock every move and undo takes, so a mind undone
+        # between the check and the revocation cannot be retired out from under.
+        report = await account()
+        if not report["ready_to_retire"]:
+            raise RetirementRefused(report["blocking"])
         for name in sorted(registry):
             for service in (hc.SERVICES["comms"], hc.SERVICES["lucent"]):
                 location = _old_location(service, name)
@@ -791,9 +825,10 @@ async def retire() -> dict[str, Any]:
         for name in sorted(registry):
             for service in (hc.SERVICES["comms"], hc.SERVICES["lucent"]):
                 location = _old_location(service, name)
-                if location is None or location.file != hc.MIND_ENV_LABEL:
+                if location is None or location.file not in (hc.MIND_ENV_LABEL, hc.own_file_label(name)):
                     continue
-                if "${" + location.env_key in compose_text:
+                if compose_text is None or re.search(
+                        r"\$\{?" + re.escape(location.env_key) + r"\b", compose_text):
                     # A bot reads the mind's old gateway value as its proactive
                     # token (`MIND_PROACTIVE_TOKEN=${COMMS_TOKEN_<MIND>}`). The
                     # service has refused the value since the move, so keeping

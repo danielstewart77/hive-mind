@@ -43,11 +43,16 @@ class MigrationTools(ToolsStandIn):
     def __init__(self):
         super().__init__()
         self.retired = False
+        self.services = {"hive-site", "scheduler"}
 
     def __call__(self, request):
         if request.url.path == "/credentials/shared-token/retire" and request.method == "POST":
             self.retired = True
             return httpx.Response(200, json={"holder": "skippy", "revoked": True})
+        if request.url.path == "/credentials" and request.method == "GET":
+            return httpx.Response(200, json=[
+                {"holder": h, "role": "service" if h in self.services else "mind", "live": True}
+                for h in self.values])
         return super().__call__(request)
 
 
@@ -79,9 +84,10 @@ def old_hive(tmp_path, monkeypatch, builtin_console):
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN["lucent"])
     monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", ADMIN["tools"])
     monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.invalid:8899")
-    monkeypatch.setenv("HIVE_TOOLS_CONSUMERS", "")
+    monkeypatch.setenv("HIVE_TOOLS_CONSUMERS", "hive-site")
 
     tools = MigrationTools()
+    tools.values["hive-site"] = "hive-site-tools-key-0123456789"  # the console's own credential
 
     def proxy(request):
         key = request.headers.get("authorization", "").split(" ", 1)[-1]
@@ -263,7 +269,7 @@ async def test_retirement_refuses_while_any_mind_is_not_moved_naming_it_and_chan
 
 
 async def test_retirement_refuses_while_a_tools_consumer_has_no_credential_of_its_own(old_hive, monkeypatch):
-    monkeypatch.setenv("HIVE_TOOLS_CONSUMERS", "hive-site")
+    old_hive.tools.values.pop("hive-site")
     await key_migration.move_mind("ada")
     await key_migration.move_mind("bob")
     await _carol_already_on_one_key(old_hive)
@@ -274,10 +280,13 @@ async def test_retirement_refuses_while_a_tools_consumer_has_no_credential_of_it
     assert report["ready_to_retire"] is False
 
 
-async def test_retirement_of_the_old_keys_leaves_service_holders_and_moved_minds_working(old_hive):
+async def test_retirement_of_the_old_keys_leaves_service_holders_and_moved_minds_working(old_hive, monkeypatch):
     await key_migration.move_mind("ada")
     await key_migration.move_mind("bob")
     await _carol_already_on_one_key(old_hive)
+    stack = old_hive.env.parent / "docker-compose.yml"
+    stack.write_text("services: {}\n")
+    monkeypatch.setattr(configuration_data, "stack_compose_path", lambda: stack)
 
     result = await key_migration.retire()
 
@@ -327,3 +336,38 @@ def test_the_migration_routes_answer_to_an_admin_or_the_operators_bearer_and_to_
     ok = anonymous.get(path, headers={"Authorization": "Bearer operator-bearer-0123456789"})  # secret-guard: allow
     assert ok.status_code == 200
     assert seen == ["report", "report"]
+
+
+async def test_a_mind_cut_off_before_the_move_is_still_cut_off_after_it_and_after_undo(old_hive):
+    for name in ("comms", "lucent"):
+        await holder_credentials.revoke(holder_credentials.SERVICES[name], "ada")
+
+    await key_migration.move_mind("ada")
+    moved = await _answers(old_hive, ADA_PROXY)
+    await key_migration.undo_move("ada")
+    undone = await _answers(old_hive, ADA_COMMS)
+
+    assert moved["comms"] in (401, 403) and moved["lucent"] in (401, 403)
+    assert undone["comms"] in (401, 403) and undone["lucent"] in (401, 403)
+
+
+async def test_issuing_a_tools_credential_never_replaces_one_a_holder_already_has(old_hive):
+    old_hive.tools.values["scheduler"] = "scheduler-tools-key-0123456789"
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.issue_tools_credential("scheduler")
+
+    assert old_hive.tools.values["scheduler"] == "scheduler-tools-key-0123456789"
+    assert credentials_data._read_env_value(old_hive.env, "TOOLS_TOKEN_SCHEDULER") is None
+
+
+async def test_retirement_keeps_a_line_when_the_stack_file_that_might_read_it_cannot_be_read(old_hive):
+    await key_migration.move_mind("ada")
+    await key_migration.move_mind("bob")
+    await _carol_already_on_one_key(old_hive)
+
+    result = await key_migration.retire()
+
+    # No stack file exists in this scenario, so nothing may be deleted on a guess.
+    assert result["old_lines_removed"] == []
+    assert credentials_data._read_env_value(old_hive.env, "COMMS_TOKEN_ADA") == ADA_COMMS

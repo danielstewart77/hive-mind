@@ -347,3 +347,15 @@ def test_retiring_the_shared_token_answers_only_to_the_administrator_credential(
         assert client.post("/credentials/shared-token/retire",
                            headers=_bearer(key)).status_code == 401, key
     assert client.get("/hitl/none", headers=_bearer(shared)).status_code == 404
+
+
+def test_retiring_again_leaves_the_key_a_mind_of_the_shared_holders_name_registered_since(
+        client: TestClient) -> None:
+    run(generate_token("skippy"))
+    client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+    assert _register(client, "skippy", ADA_KEY).status_code == 200
+
+    again = client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+
+    assert again.json()["revoked"] is False
+    assert client.get("/hitl/none", headers=_bearer(ADA_KEY)).status_code == 404
