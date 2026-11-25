@@ -7,28 +7,51 @@ named by `COMMS_URL` and read their own tokens from the environment, so what
 makes one install different from another is its configuration and its
 registered commands — not a fork of this code.
 
-Every mind tracks `main`. There are no pinned versions to carry per install,
-which means the test suite here is a gate and not an oracle: nothing merges
-red, because `main` is what every surface in the hive is running.
+Every install names a version. The package lives in hive-mind
+(`modules/hive-surfaces`), its version is in `pyproject.toml`, and a release is
+the tag `hive-surfaces-vX.Y.Z` on hive-mind, equal to that number (the rule is
+in `docs/setup/hive-data-versions.md`; the suite here is a gate for the commit
+a tag names). A change to the package's code raises the version in the same
+pull request, so a newer version is a plain upgrade: no `--force-reinstall`.
 
 ## Install
 
-```
-pip install git+https://github.com/danielstewart77/hive-surfaces.git
-```
+Both forms install this package alone, at a named version. Replace `0.2.0`.
 
-Upgrading needs `--force-reinstall --no-deps`. Every mind tracks `main`, so the
-version never changes — and pip, having cloned the repo and resolved `main` to
-a new commit, compares that unchanged version against what is installed and
-installs nothing. `--upgrade` alone does not help for the same reason. So a
-mind that re-ran its install would stay on whatever commit it first got, with
-no error and nothing in the output to say so:
+From a wheel (needs only pip; no git, no clone, the exact artefact the release
+published):
 
 ```
-pip install --force-reinstall --no-deps \
-    "hive-surfaces @ git+https://github.com/danielstewart77/hive-surfaces.git@main"
-pip install -r requirements.txt   # resolve anything the new core now needs
+pip install "https://github.com/danielstewart77/hive-mind/releases/download/hive-surfaces-v0.2.0/hive_surfaces-0.2.0-py3-none-any.whl"
 ```
+
+From git (needs pip and git). pip's subdirectory form initialises every
+submodule of hive-mind it can reach, so this clones more than the package and
+can ask for credentials a machine does not have; prefer the wheel there:
+
+```
+pip install "hive-surfaces @ git+https://github.com/danielstewart77/hive-mind.git@hive-surfaces-v0.2.0#subdirectory=modules/hive-surfaces"
+```
+
+Upgrading is the same line with a newer version, with `--upgrade`.
+
+Inside hive-mind the mind image installs the copy in the checkout through the
+`hive_surfaces` named build context; nothing is fetched at build time.
+
+## Cutting a release
+
+From a clean checkout of the merge commit, with `pyproject.toml` at the new
+number:
+
+```
+python scripts/build-package-release.py hive-surfaces-vX.Y.Z   # builds dist/ locally; refuses if the number differs from the tag
+git tag -a hive-surfaces-vX.Y.Z -m "hive-surfaces X.Y.Z"
+git push origin hive-surfaces-vX.Y.Z
+```
+
+The push runs `.github/workflows/hive-surfaces-release.yml`, which builds the
+same wheel and sdist and attaches them to the GitHub release of that tag. No
+other tag starts it.
 
 ## Use
 

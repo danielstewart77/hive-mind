@@ -6,6 +6,7 @@ one tag namespace; each is named by a prefix so a tag says what it releases.
 | Package | Folder | Tag |
 |---|---|---|
 | hive-data | `modules/hive-data` | `hive-data-vX.Y.Z` |
+| hive-surfaces | `modules/hive-surfaces` | `hive-surfaces-vX.Y.Z` |
 
 Later modules that move in (the surfaces, the console, the terminal, the
 tools) use the same form, `<name>-vX.Y.Z`, with their own prefix. A bare
@@ -50,3 +51,19 @@ A machine that cloned hive-data beside hive-mind, or whose `.env` sets
 `modules/hive-data` clone aside first, and refuses if it holds unsaved work).
 A per-machine `docker-compose.yml` (it is not tracked) takes the three
 `${HIVE_DATA_DIR:-../hive-data}` lines from `docker-compose.example.yml`.
+
+## Installing from a wheel (hive-surfaces)
+
+pip's git subdirectory form initialises every submodule of hive-mind, so a
+machine holding only pip and git can be better served by the wheel a tag
+publishes. `scripts/build-package-release.py <package>-vX.Y.Z` builds the wheel
+and sdist locally (refusing unless the tag's number is the `pyproject.toml`
+number), and `.github/workflows/hive-surfaces-release.yml` attaches them to the
+release when `hive-surfaces-vX.Y.Z` is pushed. Both install lines are in
+`modules/hive-surfaces/README.md`.
+
+A machine that cloned hive-surfaces beside hive-mind no longer uses it: the
+compose file builds `modules/hive-surfaces` (the installer moves an old
+`modules/hive-surfaces` clone aside first, as for hive-data). Until the edge
+minds move (a later story) they keep installing from the old repository's
+`main`, which stays in place.
