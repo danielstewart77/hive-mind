@@ -373,3 +373,17 @@ def test_retiring_revokes_the_live_shared_token_even_when_it_was_rotated_and_lef
 
     assert client.get("/hitl/none", headers=_bearer(current)).status_code == 401
     assert client.get("/hitl/none", headers=_bearer(old)).status_code == 401
+
+
+def test_the_retirement_record_cannot_be_registered_or_removed_through_the_credential_routes(
+        client: TestClient) -> None:
+    run(generate_token("skippy"))
+    client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+
+    put = _register(client, "shared-token-retired", "any-value-long-enough")
+    gone = client.delete("/credentials/shared-token-retired?remove=true", headers=_bearer(ADMIN))
+
+    assert (put.status_code, gone.status_code) == (400, 400)
+    listed = client.get("/credentials", headers=_bearer(ADMIN)).json()
+    marker = next(r for r in listed if r["holder"] == "shared-token-retired")
+    assert marker["live"] is False

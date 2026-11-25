@@ -738,7 +738,8 @@ async def issue_tools_credential(holder: str) -> dict[str, Any]:
                 await hc._request(tools, "DELETE", f"/credentials/{name}?remove=true")
             except Exception:  # noqa: BLE001
                 pass
-            raise MintRefused("the tools did not answer; nothing is kept. Check the tools and try again") from None
+            raise MintRefused("the tools did not answer, so whether a credential was registered is unknown; "
+                             "a removal was attempted. Check the tools' holder list before trying again") from None
         try:
             hc._ensure_key(path, variable)
             with credentials_data._WRITE_LOCK:
@@ -826,8 +827,22 @@ async def retire() -> dict[str, Any]:
         if tools.configured():
             import os
             shared_value = os.environ.get("HIVE_TOOLS_TOKEN") or None
-            retired = await hc._request(tools, "POST", "/credentials/shared-token/retire")
+            # Before the first irreversible step: once the marker exists no undo
+            # can bring an old value back, whatever fails after this.
+            try:
+                key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+                _retired_marker().write_text("retired\n")
+            except OSError as exc:
+                raise MintRefused(
+                    f"the record that retirement happened could not be written "
+                    f"({exc.strerror or exc}); nothing was retired") from None
+            try:
+                retired = await hc._request(tools, "POST", "/credentials/shared-token/retire")
+            except Exception:
+                _retired_marker().unlink(missing_ok=True)  # nothing retired: undo stays open
+                raise
             if retired.status_code >= 400:
+                _retired_marker().unlink(missing_ok=True)
                 raise MintRefused(
                     f"the tools did not retire the shared token (they answered {retired.status_code}); "
                     "the old mind keys were left as they were")
@@ -858,11 +873,6 @@ async def retire() -> dict[str, Any]:
                     continue
                 _line_remove(location.path, location.env_key)
                 removed.append(f"{location.file}:{location.env_key}")
-    try:
-        key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _retired_marker().write_text("retired\n")
-    except OSError:
-        pass
     still: list[str] = []
     for service, name, value in old_values:
         if await hc._accepts(service, value) is True:

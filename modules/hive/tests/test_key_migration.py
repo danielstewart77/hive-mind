@@ -522,3 +522,30 @@ async def test_a_tools_credential_issued_to_a_bot_is_registered_and_written_once
     assert written not in json.dumps(issued)
     with pytest.raises(holder_credentials.MintRefused):
         await key_migration.issue_tools_credential("telegram-bot")
+
+
+async def test_retirement_closes_undo_even_if_a_step_after_the_shared_token_retire_fails(old_hive, monkeypatch):
+    stack = await _retirable(old_hive, monkeypatch)
+    stack.write_text("services:\n  ada-bot:\n    environment:\n"
+                     "      - A=${COMMS_TOKEN_ADA}\n      - B=${LUCENT_TOKEN_ADA}\n")
+
+    def failing(*args, **kwargs):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(key_migration, "_line_remove", failing)
+    with pytest.raises(OSError):
+        await key_migration.retire()
+
+    assert old_hive.tools.retired is True
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.undo_move("ada")
+
+
+async def test_a_retirement_the_tools_refuse_leaves_undo_open(old_hive, monkeypatch):
+    await _retirable(old_hive, monkeypatch)
+    old_hive.tools.retire_status = 500
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await key_migration.retire()
+
+    assert (await key_migration.undo_move("ada"))["mind"] == "ada"
