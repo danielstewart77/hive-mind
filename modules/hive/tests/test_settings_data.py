@@ -128,10 +128,11 @@ def test_hive_tools_status_discovers_supported_capabilities(tmp_path, monkeypatc
 # ── hive-tools status ─────────────────────────────────────────────────
 
 
-def test_hive_tools_status_present_when_dir_holds_a_checkout(tmp_path, monkeypatch):
+def test_hive_tools_status_present_when_dir_holds_the_tools_source(tmp_path, monkeypatch):
     repo = tmp_path / "hive-tools"
-    (repo / ".git").mkdir(parents=True)
-    (repo / "README.md").write_text("hi")
+    repo.mkdir(parents=True)
+    (repo / "server.py").write_text("")
+    (repo / "Dockerfile").write_text("")
     monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", repo)
 
     assert settings_data.hive_tools_status()["present"] is True
