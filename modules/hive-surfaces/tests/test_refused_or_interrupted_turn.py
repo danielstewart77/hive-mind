@@ -216,9 +216,10 @@ async def test_discord_long_partial_answer_cut_off_shows_the_mark_in_a_message()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer, said", [
-    ({"error": "Session not found"}, "Could not interrupt"),
-    ({"detail": "no"}, "Could not interrupt"),
+    ({"error": "Session not found"}, "Could not interrupt: Session not found"),
+    ({"detail": "no"}, "Could not interrupt: no"),
     ({"ok": False}, "Could not interrupt"),
+    (None, "Could not interrupt: unexpected answer"),
     ({"ok": True, "message": "nothing_running"}, "Nothing running."),
     ({"ok": True}, "Interrupted."),
 ])
@@ -238,9 +239,10 @@ async def test_telegram_stop_words_each_outcome(answer, said):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer, said", [
-    ({"error": "Session not found"}, "Could not interrupt"),
-    ({"detail": "no"}, "Could not interrupt"),
+    ({"error": "Session not found"}, "Could not interrupt: Session not found"),
+    ({"detail": "no"}, "Could not interrupt: no"),
     ({"ok": False}, "Could not interrupt"),
+    (None, "Could not interrupt: unexpected answer"),
     ({"ok": True, "message": "nothing_running"}, "Nothing running."),
     ({"ok": True}, "Interrupted."),
 ])
