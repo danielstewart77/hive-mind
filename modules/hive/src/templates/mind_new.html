@@ -1,0 +1,229 @@
+{% extends "layout.html" %}
+{% block title %}Add Mind · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Core cognition</p><h1 class="page-title">Add a Mind</h1><p class="page-description">A containerised Mind in this Hive's own stack. Pick the harness and the provider; identity comes later, in conversation.</p></div>
+        <div class="page-actions"><a class="button button-quiet" href="/minds"><i data-lucide="arrow-left"></i>Cancel</a></div>
+    </header>
+    <div class="setup-grid edge-setup-grid">
+        <section class="surface">
+            <div class="settings-section-copy"><h2>Runtime</h2><p>This creates a runtime, not a personality. Soul, voice, and backstory are authored conversationally once the Mind is answering.</p></div>
+            <form class="surface-body overview-stack" id="mind-form">
+                <div class="form-grid">
+                    <div class="field"><label for="mind-name">Mind name</label><input id="mind-name" name="name" type="text" pattern="[a-z](?:[a-z0-9]|-){1,31}" placeholder="atlas" required><small id="mind-name-status">Lowercase letters, numbers, and hyphens.</small></div>
+                    <div class="field"><label for="mind-owner">Owner</label><select id="mind-owner" name="owner"></select><small>The user this Mind belongs to.</small></div>
+                    <div class="field"><label for="mind-description">Description</label><input id="mind-description" name="description" type="text" placeholder="What this Mind is for."></div>
+                </div>
+                <div class="field is-full"><label>Harness</label><div class="choice-grid">{% for harness in install_options.harnesses %}<label class="choice"><input type="radio" name="harness" value="{{ harness.value }}"{% if harness.value == install_options.default_harness %} checked{% endif %}><span class="choice-copy"><strong>{{ harness.label }}</strong><small>{{ harness.description }}</small></span></label>{% endfor %}</div></div>
+                <div class="form-grid">
+                    <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>Select a connection configured in <a href="/settings/providers">Settings → Providers</a>.</small></div>
+                    <div class="field"><label for="mind-default-model">Initial model</label><select id="mind-default-model" name="default_model" required><option value="">Select a provider first</option></select><small id="mind-model-status" role="status"></small><button class="button button-quiet" id="mind-model-refresh" type="button">Refresh models</button></div>
+                </div>
+                <div class="field is-full"><label for="mind-proxy-key">Mind’s provider token</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>This token belongs to the new Mind. Paste its key to load the models it can access. A provider that accepts unauthenticated connections can leave this blank. Reusing a key gives a warning and uses it as requested.</small></div>
+                <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
+                <div id="mind-error" class="error-state" hidden></div>
+                <div class="form-actions"><button class="button button-primary" type="submit" id="mind-submit"><i data-lucide="wand-sparkles"></i><span>Scaffold Mind</span></button><small id="mind-progress" role="status" hidden>Writing its folder, issuing its keys, listing it in the stack, registering it, then building and starting its container. The first build can take several minutes; leave this page open.</small></div>
+            </form>
+        </section>
+        <aside class="overview-stack">
+            <section class="surface">
+                <div class="surface-header"><div><h2>What gets written</h2><p>Two files, in this Hive's minds directory. If a step of making the Mind fails, everything is taken back and the Mind is not made.</p></div></div>
+                <ul class="service-list">
+                    <li class="service-row"><span class="service-icon"><i data-lucide="file-cog"></i></span><span class="service-copy"><strong>runtime.yaml</strong><small>Harness, provider, model, and the provider env block.</small></span></li>
+                    <li class="service-row"><span class="service-icon"><i data-lucide="container"></i></span><span class="service-copy"><strong>container/compose.yaml</strong><small>One service on the hivemind network.</small></span></li>
+                </ul>
+            </section>
+            <div class="notice"><i data-lucide="sparkles"></i><span>Identity is not scaffolded. A Mind with no soul answers as a blank harness until you give it one.</span></div>
+            <section class="surface" id="mind-result" hidden>
+                <div class="surface-header"><div><h2 id="mind-result-title">Made</h2><p>Every step of making it finished.</p></div></div>
+                <div class="surface-body overview-stack"><div id="mind-proxy-key-warning" role="status" hidden><div class="notice" id="mind-proxy-key-warning-text"></div></div><dl class="detail-grid" id="mind-identity"></dl><div id="mind-commands"></div><div id="mind-start"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-start-again" hidden><span>Try starting it again</span></button></div>
+            </section>
+        </aside>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole, form = document.getElementById("mind-form");
+    const submit = document.getElementById("mind-submit"), progress = document.getElementById("mind-progress");
+    // One creation at a time, and something moving for as long as it runs:
+    // the request does not answer until the container has been built and
+    // started, which is minutes, and a still page reads as a dead one.
+    let made = null;
+    // The container's start, on its own: started, waiting on an approval, or
+    // not started and why — never "Started" over something that did not.
+    function showStart(data) {
+        const box = document.getElementById("mind-start"), again = document.getElementById("mind-start-again");
+        if (data.started) box.innerHTML = '<div><p class="command-label">Its container is started</p></div>';
+        else if (data.start_operation) box.innerHTML = '<div class="notice"><span>Its container is not started yet: the start is waiting on your approval in Hive Tools.' + (data.start_error ? " " + h.escapeHtml(data.start_error) : "") + '</span></div>';
+        else box.innerHTML = '<div class="error-state">Its container did not start: ' + h.escapeHtml(data.start_error || "no reason was given") + '</div>';
+        again.hidden = !!data.started;
+        document.getElementById("mind-next-step").textContent = data.next_step || "";
+    }
+
+    function setBusy(busy) {
+        submit.disabled = busy;
+        submit.classList.toggle("is-busy", busy);
+        submit.setAttribute("aria-busy", busy ? "true" : "false");
+        // Drawn in CSS rather than as an icon: the icon set comes from the
+        // internet, and a hive without it must still show something moving.
+        submit.innerHTML = (busy ? '<span class="button-spinner" aria-hidden="true"></span>' : '<i data-lucide="wand-sparkles"></i>') + '<span>' + (busy ? "Scaffolding…" : "Scaffold Mind") + '</span>';
+        progress.hidden = !busy;
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    }
+    let connections = [], modelGeneration = 0, modelTimer, previousProvider = "";
+
+    function selectedHarness() { return form.querySelector('[name="harness"]:checked').value; }
+
+    function renderProviders() {
+        const select = form.elements.provider, previous = select.value;
+        const harness = selectedHarness();
+        const allowed = connections.filter(function (p) {
+            return p.kind === "proxy" || harness === "dsh" ||
+                (harness === "claude_cli" ? p.api_format === "anthropic" : p.api_format !== "anthropic");
+        });
+        select.innerHTML = '<option value="">Select a provider</option>' + allowed.map(function (p) {
+            return '<option value="' + h.escapeHtml(p.id) + '">' + h.escapeHtml(p.name) + '</option>';
+        }).join("");
+        select.value = allowed.some(p => p.id === previous) ? previous : (allowed[0] && allowed[0].id) || "";
+        onProviderChange();
+    }
+
+    function onProviderChange() {
+        const provider = form.elements.provider.value;
+        // A token entered for one endpoint must never be forwarded to a
+        // different endpoint merely because the dropdown changed.
+        if (previousProvider && previousProvider !== provider) form.elements.proxy_key.value = "";
+        previousProvider = provider;
+        form.elements.default_model.innerHTML = '<option value="">Select a model</option>';
+        loadModels();
+    }
+
+    async function loadModels() {
+        clearTimeout(modelTimer);
+        const generation = ++modelGeneration, provider = form.elements.provider.value;
+        const select = form.elements.default_model, status = document.getElementById("mind-model-status");
+        if (!provider) { status.textContent = "Configure a provider in Settings to continue."; return; }
+        const previous = select.value;
+        select.disabled = true; status.textContent = "Loading models…";
+        try {
+            const data = await h.requestJson("/api/settings/providers/" + encodeURIComponent(provider) + "/models", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: form.elements.proxy_key.value, harness: selectedHarness()})});
+            if (generation !== modelGeneration) return;
+            select.innerHTML = '<option value="">Select a model</option>' + (data.models || []).map(function (m) { return '<option value="' + h.escapeHtml(m.id) + '">' + h.escapeHtml(m.label || m.id) + '</option>'; }).join("");
+            if ((data.models || []).some(m => m.id === previous)) select.value = previous;
+            status.textContent = (data.models || []).length ? "Models served by this provider using this Mind’s token." : "This provider returned no models for this Mind.";
+        } catch (error) { if (generation === modelGeneration) status.textContent = error.message; }
+        finally { if (generation === modelGeneration) select.disabled = false; }
+    }
+    form.elements.proxy_key.addEventListener("input", function () {
+        ++modelGeneration;
+        clearTimeout(modelTimer); modelTimer = setTimeout(loadModels, 500);
+    });
+    document.getElementById("mind-model-refresh").addEventListener("click", loadModels);
+
+    form.addEventListener("change", function (event) {
+        if (event.target.name === "harness") renderProviders();
+        if (event.target.name === "provider") onProviderChange();
+    });
+
+    // Catch a collision before the scaffold runs, not after.
+    form.elements.name.addEventListener("blur", async function () {
+        const value = form.elements.name.value.trim().toLowerCase();
+        const status = document.getElementById("mind-name-status");
+        if (!value) { status.textContent = "Lowercase letters, numbers, and hyphens."; return; }
+        try {
+            const data = await h.requestJson("/api/settings/new-mind/check-name?name=" + encodeURIComponent(value));
+            status.textContent = data.available ? value + " is available." : value + " is already taken.";
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    (async function () { try {
+        const roles = ((await h.requestJson("/api/roles")).roles || []).filter(function (r) { return r.id !== null; });
+        const box = document.getElementById("mind-roles");
+        box.innerHTML = roles.map(function (r) {
+            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-model="' + h.escapeHtml(r.model || "") + '"' + (r.general ? ' data-general="true"' : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind; tick it alone to manage this Mind by general only)" : "") + '</label>';
+        }).join("");
+        box.addEventListener("change", function (event) {
+            const model = event.target.dataset && event.target.dataset.model;
+            if (event.target.checked && model) {
+                if (Array.from(form.elements.default_model.options).some(o => o.value === model)) form.elements.default_model.value = model;
+                else document.getElementById("mind-model-status").textContent = "The role’s model is not listed by this provider for this Mind. Select an available model.";
+            }
+        });
+    } catch (error) { document.getElementById("mind-roles").textContent = "Roles could not be read: " + error.message; } })();
+
+    form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const errorBox = document.getElementById("mind-error");
+        errorBox.hidden = true;
+        if (form.elements.default_model.disabled) { errorBox.hidden = false; errorBox.textContent = "Wait for the provider’s model list to finish loading."; return; }
+        const body = {
+            name: form.elements.name.value,
+            owner: form.elements.owner.value,
+            description: form.elements.description.value,
+            harness: selectedHarness(),
+            provider_id: form.elements.provider.value,
+            default_model: form.elements.default_model.value,
+            provider_token: form.elements.proxy_key.value,
+            role_ids: Array.from(document.querySelectorAll("#mind-roles input:checked:not([data-general])")).map(function (i) { return Number(i.value); }),
+            roles_managed: document.querySelectorAll("#mind-roles input:checked").length > 0
+        };
+        document.getElementById("mind-result").hidden = true;
+        setBusy(true);
+        try {
+            const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            form.elements.proxy_key.value = "";
+            document.getElementById("mind-proxy-key-warning-text").textContent = data.proxy_key_warning || "";
+            document.getElementById("mind-proxy-key-warning").hidden = !data.proxy_key_warning;
+            document.getElementById("mind-result-title").textContent = data.registration.name + " is made";
+            document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+            // Making a Mind is all or nothing, so these are only ever steps
+            // that finished: one that failed is the error above the button,
+            // with the Mind not made. Starting its container is said
+            // separately, because it can fail, or wait, with the Mind made.
+            made = data.registration.name;
+            const steps = [
+                "Credentials issued: " + ((data.credentials || []).map(function (row) { return row.service; }).join(", ") || "none"),
+                "Listed in the stack",
+                "Its node is in the graph",
+                "Registered with the gateway"
+            ];
+            document.getElementById("mind-commands").innerHTML = steps.map(function (step) {
+                return '<div><p class="command-label">' + h.escapeHtml(step) + '</p></div>';
+            }).join("");
+            showStart(data);
+            document.getElementById("mind-result").hidden = false;
+        } catch (error) { errorBox.hidden = false; errorBox.textContent = error.message; }
+        finally { setBusy(false); }
+    });
+
+
+    document.getElementById("mind-start-again").addEventListener("click", async function (event) {
+        const button = event.currentTarget, box = document.getElementById("mind-start");
+        if (!made) return;
+        button.disabled = true;
+        button.innerHTML = '<span class="button-spinner" aria-hidden="true"></span><span>Starting…</span>';
+        try { showStart(await h.requestJson("/api/minds/" + encodeURIComponent(made) + "/start", {method: "POST"})); }
+        catch (error) { box.innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
+        finally { button.disabled = false; button.innerHTML = '<span>Try starting it again</span>'; }
+    });
+
+    // The user a new Mind belongs to; the admin creating it unless another is picked.
+    async function loadOwners(select, current) {
+        try {
+            const users = (await h.requestJson("/api/admin/users")).users || [];
+            select.innerHTML = users.filter(function (u) { return !u.disabled; }).map(function (u) {
+                return '<option value="' + h.escapeHtml(u.username) + '"' + (u.username === current ? " selected" : "") + '>' + h.escapeHtml(u.username) + '</option>';
+            }).join("");
+        } catch (error) {
+            select.innerHTML = '<option value="' + h.escapeHtml(current) + '">' + h.escapeHtml(current) + '</option>';
+        }
+    }
+    loadOwners(document.getElementById("mind-owner"), {{ current_user.username | tojson }});
+    (async function () {
+        try { connections = (await h.requestJson("/api/settings/providers")).providers || []; renderProviders(); }
+        catch (error) { document.getElementById("mind-model-status").textContent = error.message; }
+    })();
+});
+</script>
+{% endblock %}

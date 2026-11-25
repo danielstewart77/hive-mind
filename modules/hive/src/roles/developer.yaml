@@ -1,0 +1,12 @@
+name: Developer
+tools:
+  - shell
+  - files
+  - sub-minds
+  - web
+skills:
+  - code
+  - code-review
+  - security-review
+  - simplify
+hooks: []

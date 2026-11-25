@@ -1,0 +1,20 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+capabilities/
+
+# Deck photos are personal, not machinery.
+decks/assets/
+
+# Build-orchestrator run artifacts. The decomposition and its per-story
+# state belong to the run that produced them, not to the repo.
+STORIES.md
+build-state.json
+stories/
+
+backlog-import/
+
+# setuptools build metadata from the editable install of hive_site
+*.egg-info/

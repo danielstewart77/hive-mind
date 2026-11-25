@@ -31,7 +31,7 @@ main() {
   # remote has, is never moved: the install stops and says so.
   make_room_for_moved_modules() {
     local repo="$1" name path stamp
-    for name in hive-data hive-surfaces; do
+    for name in hive-data hive-surfaces hive terminal; do
       path="modules/$name"
       [ -e "$repo/$path/.git" ] || continue
       git -C "$repo" ls-tree HEAD -- "$path" | grep -q '^160000 ' || continue
@@ -51,7 +51,7 @@ main() {
       stamp="$(date +%Y%m%d%H%M%S)"
       mv "$repo/$path" "$repo/modules/.$name.moved-aside-$stamp" \
         || fail "could not move $repo/$path aside" "move it away by hand, then run again"
-      echo "$name is now part of hive-mind: the old clone was moved to $repo/modules/.$name.moved-aside-$stamp (safe to delete)."
+      echo "$name is now part of hive-mind: the old clone was moved to $repo/modules/.$name.moved-aside-$stamp (safe to delete once you have carried its untracked .env and data/ into modules/$name)."
     done
   }
 

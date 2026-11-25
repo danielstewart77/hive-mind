@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Hive{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ request.url_for('static', path='favicon-32.png') }}?v={{ asset_versions['favicon-32.png'] }}">
+    <link rel="apple-touch-icon" href="{{ request.url_for('static', path='apple-touch-icon.png') }}?v={{ asset_versions['apple-touch-icon.png'] }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ asset_versions['style.css'] }}">
+    <link rel="stylesheet" href="{{ request.url_for('static', path='console.css') }}?v={{ asset_versions['console.css'] }}">
+    <script>
+    (function () {
+        var nativeFetch = window.fetch.bind(window);
+        var redirecting = false;
+        window.fetch = function (input, init) {
+            return nativeFetch(input, init).then(function (resp) {
+                if (resp && resp.status === 401 && !redirecting && window.location.pathname !== "/login") {
+                    redirecting = true;
+                    window.location.assign("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search));
+                }
+                // A user who must change their password is sent there by
+                // every route; a fetch follows that redirect silently.
+                if (resp && resp.redirected && !redirecting && new URL(resp.url).pathname === "/password") {
+                    redirecting = true;
+                    window.location.assign("/password");
+                }
+                return resp;
+            });
+        };
+    })();
+    </script>
+</head>
+<body class="{% if current_user %}console-body{% else %}auth-body{% endif %}">
+{% if current_user %}
+{% set path = request.url.path %}
+<div class="console-app" data-console-app>
+    <aside class="console-sidebar" id="console-sidebar">
+        <div class="console-brand-row">
+            <a href="/overview" class="console-brand" aria-label="Hive overview">
+                <img src="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}" alt="">
+                <span><strong>Hive</strong><small>Control center</small></span>
+            </a>
+            <button class="icon-button sidebar-close" type="button" data-sidebar-close aria-label="Close navigation"><i data-lucide="x"></i></button>
+        </div>
+
+        <div class="console-nav" role="navigation" aria-label="Main navigation">
+            {% if feature_enabled['chief-of-staff'] %}<a href="/chief-of-staff" class="console-nav-link {% if path == '/chief-of-staff' %}is-active{% endif %}"><i data-lucide="users-round"></i><span>Chief of Staff</span></a>{% endif %}
+            {% if feature_enabled['overview'] %}<a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>{% endif %}
+            {% if feature_enabled['minds'] %}<a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>{% endif %}
+            {% if feature_enabled['usage'] %}<a href="/usage" class="console-nav-link {% if path.startswith('/usage') %}is-active{% endif %}"><i data-lucide="gauge"></i><span>Usage</span></a>{% endif %}
+            {% if current_user.is_admin %}
+            {% if feature_enabled['roles'] %}<a href="/roles" class="console-nav-link {% if path.startswith('/roles') %}is-active{% endif %}"><i data-lucide="badge-check"></i><span>Roles</span></a>{% endif %}
+            {% if feature_enabled['bots'] %}<a href="/bots" class="console-nav-link {% if path.startswith('/bots') %}is-active{% endif %}"><i data-lucide="bot"></i><span>Bots</span></a>{% endif %}
+            {% if feature_enabled['activity'] %}<a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>{% endif %}
+            {% if feature_enabled['dashboard'] %}<a href="/dashboard" class="console-nav-link {% if path == '/dashboard' %}is-active{% endif %}"><i data-lucide="radio-tower"></i><span>Dashboard</span></a>{% endif %}
+
+            {% if feature_enabled['hive-errors'] %}<a href="/hive-errors" class="console-nav-link {% if path == '/hive-errors' %}is-active{% endif %}"><i data-lucide="triangle-alert"></i><span>Hive Errors</span></a>{% endif %}
+
+            {% if feature_enabled['edge-minds'] or feature_enabled['capability-nodes'] %}<p class="console-nav-label">Topology</p>{% endif %}
+            {% if feature_enabled['edge-minds'] %}<a href="/edge-minds" class="console-nav-link {% if path.startswith('/edge-minds') %}is-active{% endif %}"><i data-lucide="orbit"></i><span>Edge Minds</span></a>{% endif %}
+            {% if feature_enabled['capability-nodes'] %}<a href="/capability-nodes" class="console-nav-link {% if path == '/capability-nodes' %}is-active{% endif %}"><i data-lucide="network"></i><span>Capability Nodes</span></a>{% endif %}
+
+            {% if feature_enabled['graph'] or feature_enabled['memory'] or feature_enabled['rules'] or feature_enabled['sentinel'] or feature_enabled['training'] or feature_enabled['harness-runs'] %}<p class="console-nav-label">Knowledge</p>{% endif %}
+            {% if feature_enabled['graph'] %}<a href="/graph" class="console-nav-link {% if path == '/graph' %}is-active{% endif %}"><i data-lucide="share-2"></i><span>Graph</span></a>{% endif %}
+            {% if feature_enabled['memory'] %}<a href="/memory" class="console-nav-link {% if path == '/memory' %}is-active{% endif %}"><i data-lucide="database"></i><span>Memory</span></a>{% endif %}
+            {% if feature_enabled['rules'] %}<a href="/rules" class="console-nav-link {% if path == '/rules' %}is-active{% endif %}"><i data-lucide="list-checks"></i><span>Rules</span></a>{% endif %}
+            {% if feature_enabled['sentinel'] %}<a href="/sentinel" class="console-nav-link {% if path == '/sentinel' %}is-active{% endif %}"><i data-lucide="shield-check"></i><span>Sentinel</span></a>{% endif %}
+            {% if feature_enabled['training'] %}<a href="/training" class="console-nav-link {% if path == '/training' %}is-active{% endif %}"><i data-lucide="graduation-cap"></i><span>Training</span></a>{% endif %}
+            {% if feature_enabled['harness-runs'] %}<a href="/harness-runs" class="console-nav-link {% if path == '/harness-runs' %}is-active{% endif %}"><i data-lucide="flask-conical"></i><span>Harness runs</span></a>{% endif %}
+
+            {% if feature_enabled['kanban'] or feature_enabled['canvas'] or feature_enabled['design'] %}<p class="console-nav-label">Workspace</p>{% endif %}
+            {% if feature_enabled['kanban'] %}<div class="console-nav-flyout">
+                <button type="button" class="console-nav-link console-nav-toggle{% if path.startswith('/kanban') %} is-active{% endif %}" aria-expanded="false" data-nav-flyout-toggle><i data-lucide="square-kanban"></i><span>Kanban</span><i class="nav-flyout-caret" data-lucide="chevron-right"></i></button>
+                <div class="console-nav-submenu">
+                    {% if feature_enabled['kanban-backlog'] %}<a href="/kanban/backlog" class="console-nav-sublink {% if path == '/kanban/backlog' %}is-active{% endif %}">Backlog</a>{% endif %}
+                    {% if feature_enabled['kanban-board'] %}<a href="/kanban/board" class="console-nav-sublink {% if path == '/kanban/board' %}is-active{% endif %}">Board</a>{% endif %}
+                </div>
+            </div>{% endif %}
+            {% if feature_enabled['canvas'] %}<a href="/canvas" class="console-nav-link {% if path == '/canvas' %}is-active{% endif %}"><i data-lucide="pencil-ruler"></i><span>Canvas</span></a>{% endif %}
+            {% if feature_enabled['design'] %}<a href="/design" class="console-nav-link {% if path.startswith('/design') %}is-active{% endif %}"><i data-lucide="drafting-compass"></i><span>Design</span></a>{% endif %}
+            {% endif %}
+            {% if terminal_url and feature_enabled['terminal'] %}<a href="{{ terminal_url }}" target="_blank" rel="noopener noreferrer" class="console-nav-link"><i data-lucide="square-terminal"></i><span>Terminal</span><i class="nav-external" data-lucide="external-link"></i></a>{% endif %}
+        </div>
+
+        <div class="console-sidebar-footer">
+            <div class="remote-access-shortcut"><button class="button" type="button" data-remote-toggle disabled>Remote access</button><a href="/settings/remote-access" aria-label="Configure remote access">Configure</a><small data-remote-status role="status"></small></div>
+            {% if current_user.is_admin and feature_enabled['setup'] %}<a href="/setup" class="setup-link {% if path == '/setup' %}is-active{% endif %}"><i data-lucide="circle-check-big"></i><span>Setup guide</span></a>{% endif %}
+            <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="console-nav-link {% if path.startswith('/settings') %}is-active{% endif %}"><i data-lucide="settings"></i><span>Settings</span></a>
+            <div class="console-user">
+                <img src="{{ request.url_for('static', path='images/cyborg_me.png') }}" alt="">
+                <span><strong>{{ current_user.username }}</strong><small>{{ 'Admin' if current_user.is_admin else 'Member' }}</small></span>
+                <form action="/logout" method="post"><button class="icon-button" type="submit" title="Log out" aria-label="Log out"><i data-lucide="log-out"></i></button></form>
+            </div>
+        </div>
+    </aside>
+    <div class="console-overlay" data-sidebar-close></div>
+    <div class="console-main">
+        <header class="console-mobile-header">
+            <button class="icon-button" type="button" data-sidebar-open aria-label="Open navigation"><i data-lucide="menu"></i></button>
+            <a href="/overview" class="mobile-brand"><img src="{{ request.url_for('static', path='favicon.svg') }}" alt="">Hive</a>
+            <div class="console-mobile-actions">
+                <a href="/settings/remote-access" class="icon-button" aria-label="Remote access"><i data-lucide="globe"></i></a>
+                {% block mobile_header_actions %}{% endblock %}
+                <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
+            </div>
+        </header>
+        <div class="console-content">
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+</div>
+{% else %}
+{% block auth_content %}{% block content_unauth %}{% endblock %}{% endblock %}
+            {% endif %}
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+<script src="{{ request.url_for('static', path='console.js') }}?v={{ asset_versions['console.js'] }}"></script>
+{% if current_user %}<script src="{{ request.url_for('static', path='remote-access.js') }}?v={{ asset_versions['remote-access.js'] }}"></script>{% endif %}
+<script src="{{ request.url_for('static', path='scripts.js') }}?v={{ asset_versions['scripts.js'] }}"></script>
+</body>
+</html>

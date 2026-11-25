@@ -1,0 +1,11 @@
+name: Operator
+tools:
+  - shell
+  - files
+  - sub-minds
+  - web
+skills:
+  - add-hive-tool
+  - restart-service
+  - set-up-a-workflow
+hooks: []

@@ -61,6 +61,10 @@ services:
       # exec, which Docker's tmpfs default is not: dsh's native loader dlopens
       # a copy of its addon from /tmp (see CLAUDE.md, "What a dsh mind needs").
       - /tmp:exec,mode=1777
+      # The modules hold the console's and terminal's .env and data/, the tools
+      # .env and credentials: not a mind's to read (see the installer's masks).
+      - /usr/src/app/modules:ro
+      - /usr/src/app/.git/modules:ro
     # One mind server runs claude, codex and dsh, and routes each conversation
     # to the harness it names; runtime.yaml's `harness` is only the default.
     command: ["/opt/venv/bin/python3", "-m", "minds.mind_server"]

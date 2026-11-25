@@ -222,3 +222,10 @@ minds/*/session_token
 # mind's bind mount of it would otherwise create root-owned.
 /install/workflow-skills/*
 !/install/workflow-skills/.gitkeep
+
+# The console and terminal are tracked folders of hive-mind: their compose
+# files and planning documents are part of them.
+!modules/hive/docker-compose.yml
+!modules/terminal/docker-compose.yml
+!modules/hive/plans/
+!modules/terminal/plans/

@@ -1,0 +1,333 @@
+"""Web-terminal reattach routing.
+
+A reconnecting terminal tile once guessed at "some live session on this
+mind" and adopted whichever sibling it found — crossing two conversations
+and migrating one tile's name and colour onto the other's session. It now
+reattaches to the session it is on and to nothing else: a rotation replaces
+the harness conversation under that row rather than minting a successor, so
+the id a tile reattaches to is the id it already had.
+
+The routing lives in ``src/static/terminal-routing.js`` and is exercised by
+``tests/js/terminal_routing_test.mjs``, run here so one ``pytest`` covers
+both sides.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+import pytest
+from starlette.testclient import TestClient
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+import auth
+from hive_site import testing as accounts
+import main as main_mod
+
+
+def _authed_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
+    client = TestClient(main_mod.app)
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
+    return client
+
+
+def _fake_gateway(monkeypatch, sessions):
+    async def _gateway_json(path, *a, **kw):
+        if path == "/broker/minds":
+            return [{"id": "mind-uuid", "name": "skippy"}]
+        if path == "/sessions":
+            return sessions
+        return []
+
+    monkeypatch.setattr(main_mod, "_gateway_json", _gateway_json)
+
+
+def test_a_conversation_that_has_ended_is_not_offered(tmp_path, monkeypatch):
+    """The gateway removes an ended conversation's row, but the store still
+    holds rows a kill marked closed before it did. Either way the tile must
+    not be offered one — opening it answers 4410 straight back."""
+    client = _authed_client(tmp_path, monkeypatch)
+    _fake_gateway(monkeypatch, [
+        {"id": "old", "mind_id": "mind-uuid", "status": "closed", "last_active": 1},
+        {"id": "new", "mind_id": "mind-uuid", "status": "running", "last_active": 2},
+    ])
+
+    rows = client.get("/api/terminal/sessions").json()
+
+    assert [r["id"] for r in rows] == ["new"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_browser_reattach_routing_rules():
+    script = os.path.join(os.path.dirname(__file__), "js", "terminal_routing_test.mjs")
+    result = subprocess.run(
+        [shutil.which("node"), script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_template_uses_the_routing_module():
+    """Guard against the inline guess creeping back into the template."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "TerminalRouting.pickReattachTarget" in body
+    assert "terminal-routing.js" in body
+    # The old heuristic: any live session belonging to the same mind.
+    assert "r.mind_id === mindId" not in body
+
+
+def _template_code() -> str:
+    """The template with its JS comments stripped.
+
+    Asserting against the raw file lets a commented-out call satisfy every
+    check — which is how the previous version of this test went green against
+    a tile that reattached forever on all five permanent codes.
+    """
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    return "\n".join(
+        line for line in lines if not line.lstrip().startswith("//")
+    )
+
+
+def test_template_stops_retrying_a_mind_that_has_answered():
+    """Which codes are permanent, and what each one says, is asserted against
+    the function itself in tests/js/terminal_routing_test.mjs. What this checks
+    is that the template consults it rather than keeping a second ladder."""
+    body = _template_code()
+
+    # The call and the use of its result, both on live lines.
+    assert "TerminalRouting.permanentClose(" in body
+    assert "stopWith(permanent.message)" in body
+    # Retries to the same session go through the backoff, never straight
+    # back into attach().
+    assert "TerminalRouting.retryDelayMs" in body
+    assert "cancelReattachLoop(); attach(); return;" not in body
+
+
+def test_template_forwards_mobile_ime_text_before_enter():
+    """Mobile soft keyboards route typed words through an IME composition
+    that isn't closed before Enter fires; xterm.js discards that buffered
+    text instead of sending it, so the whole line silently vanishes. Guard
+    against the capture-phase forwarder (verified against the real vendored
+    xterm.js with a scripted CompositionEvent/InputEvent replay) regressing
+    or being dropped."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert 'e.key !== "Enter" && e.keyCode !== 13' in body
+    # Must be capture-phase (the trailing `true`) on an ancestor of the
+    # textarea (xtermEl), not the textarea itself -- a same-element listener
+    # still runs after xterm's own, which is registered first.
+    idx = body.index('xtermEl.addEventListener("keydown"')
+    listener_call = body[idx : idx + 500]
+    assert "}, true);" in listener_call
+
+
+def test_enter_forwards_only_the_open_composition_not_the_whole_box():
+    """xterm never clears its helper textarea between words, so the box
+    holds the whole line while each composition has already gone to the pty
+    as it ended. The first cut of the Enter forwarder sent the box
+    wholesale, and the pty echoed the typed paragraph concatenated with a
+    copy of itself. Only the open composition is owed."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "TerminalRouting.pendingImeText(" in body
+    # The whole value must never be what goes on the wire.
+    assert "encode(helperTa.value)" not in body
+    # The toolbar's return key bypasses xterm's keydown path entirely, so
+    # it has to settle the same debt.
+    assert 'if (text === "\\r") flushPendingIme();' in body
+
+
+def test_vendored_xterm_still_exposes_the_composition_state_we_read():
+    """`pendingImeText` is fed from xterm's own composition state rather
+    than a private guess at it. Those are internals: if xterm is
+    re-vendored and renames them, the terminal would silently go back to
+    swallowing every dictated line. Fail here instead, pointing at
+    `pendingImeText` in terminal.html."""
+    bundle = os.path.join(
+        os.path.dirname(__file__), "..", "src", "static", "vendor", "xterm", "xterm.js"
+    )
+    with open(bundle, encoding="utf-8") as fh:
+        body = fh.read()
+
+    for symbol in (
+        "_compositionHelper",
+        "_compositionPosition",
+        "_isComposing",
+        "_isSendingComposition",
+        "_dataAlreadySent",
+    ):
+        assert symbol in body, f"vendored xterm no longer has {symbol}"
+
+
+def test_composition_view_wraps_on_mobile():
+    """xterm's IME preview bubble ships with white-space: nowrap and no
+    width cap; on a phone it runs off the screen edge instead of wrapping."""
+    css_path = os.path.join(
+        os.path.dirname(__file__), "..", "src", "static", "style.css"
+    )
+    with open(css_path, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert ".composition-view" in body
+    assert "pre-wrap" in body
+
+
+def test_terminal_refits_on_container_resize_not_just_window_resize():
+    """A window "resize" event alone misses layout changes that don't
+    resize the window itself -- a foldable unfolding, an on-screen keyboard
+    opening. Each panel must watch its own tile's box via ResizeObserver so
+    xterm's cols/rows actually grow when the tile does, instead of staying
+    pinned to whatever size it was at mount."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "new ResizeObserver(scheduleFit)" in body
+    assert "resizeObserver.observe(xtermEl)" in body
+    assert "resizeObserver.disconnect()" in body
+    # The old global-only trigger must be gone, not just supplemented --
+    # leaving it would be redundant dead weight now that each panel fits
+    # itself.
+    assert 'window.addEventListener("resize"' not in body
+
+
+def test_terminal_has_redundant_refit_signals_for_foldables():
+    """ResizeObserver alone was verified (in a headless Chromium run
+    against the real production page, both mount-then-widen and
+    already-wide-then-mount) to refit correctly, but a foldable unfolding
+    is reported to still leave the terminal at a stale narrower width on
+    some real mobile browser that a Chromium run doesn't reproduce. Since
+    the failing signal can't be pinned down without the device, refitting
+    must not depend on any single browser event: visualViewport resize,
+    orientationchange, and a periodic self-check are independent
+    fallbacks alongside the per-panel ResizeObserver."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "window.visualViewport.addEventListener(\"resize\"" in body
+    assert 'window.addEventListener("orientationchange"' in body
+    assert "setInterval(refitAllPanels" in body
+
+
+def test_mobile_toolbar_can_reach_the_tiles_scrollback():
+    """A phone has no visible scrollbar and no PageUp key. Without deliberate
+    controls a reply taller than the screen is simply cut off, which is how
+    a whole answer became unreadable on mobile. Where the scrolling has to
+    happen depends on the buffer -- a TUI on the alternate screen holds its
+    own history and only it can move it, so the panel routes through
+    pageScrollAction rather than always moving the local viewport."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert 'data-scroll="-1"' in body and 'data-scroll="1"' in body
+    assert "target.scrollPage(Number(btn.dataset.scroll));" in body
+    # The scroll buttons route through scrollPage, not the byte-sending key path.
+    idx = body.index('toolbar.addEventListener("click"')
+    handler = body[idx : body.index("\n    });", idx)]
+    assert handler.index("target.scrollPage(") < handler.index("target.sendBytes(")
+    assert "TerminalRouting.pageScrollAction(" in body
+
+    css_path = os.path.join(
+        os.path.dirname(__file__), "..", "src", "static", "style.css"
+    )
+    with open(css_path, encoding="utf-8") as fh:
+        css = fh.read()
+
+    # Ten keys over five columns; four would strand two on a half row.
+    assert re.search(
+        r"\.term-mobile-toolbar\s*\{[^}]*grid-template-columns:\s*repeat\(5,", css
+    )
+    # A vertical drag scrolls the terminal instead of rubber-banding the page.
+    viewport = re.search(
+        r"\.term-panel \.xterm \.xterm-viewport\s*\{([^}]*)\}", css
+    )
+    assert viewport, "no viewport rule"
+    assert "touch-action: pan-y" in viewport.group(1)
+    assert "overscroll-behavior: contain" in viewport.group(1)
+
+
+def test_speaker_off_sends_nothing_to_the_voice_server():
+    """Requirement 3: a silent tile costs no GPU.
+
+    Two independent gates, because either alone leaves a hole. The stream is
+    only opened while the speaker is on, so nothing arrives to speak; and the
+    flush checks again before posting, because the toggle can go off while a
+    buffered block is waiting on its timer.
+    """
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    # The stream is subscribed to only when the speaker is on.
+    assert "if (speakerOn) openTtsStream();" in body
+    # And the post is gated again at the moment of sending.
+    idx = body.index("async function flushTtsNow()")
+    flush = body[idx : idx + 700]
+    assert "if (!speakerOn || !text) return;" in flush
+    assert flush.index("if (!speakerOn") < flush.index("/api/terminal/tts"), (
+        "the voice server is called before the speaker toggle is consulted"
+    )
+
+
+def test_a_whole_block_is_spoken_without_waiting_for_the_next():
+    """Requirement 1, browser half: prose is spoken as it appears.
+
+    The 1.5s debounce exists for the chat path, which streams partial
+    deltas and needs a quiet gap to tell a finished sentence from a paused
+    one. A terminal's blocks arrive whole and carry `block_complete`, so
+    waiting on them would put the speech a beat behind the writing — which
+    is the behaviour being replaced.
+    """
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "if (event.block_complete) flushTtsNow();" in body
+    assert "else scheduleTtsFlush();" in body
+
+
+def test_the_speaker_strips_through_the_shared_module():
+    """Guard against the stripping being reinlined in the template, where
+    the node suite cannot reach it."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "TerminalRouting.speakable(ttsBuffer)" in body
+    assert "function speakable(" not in body

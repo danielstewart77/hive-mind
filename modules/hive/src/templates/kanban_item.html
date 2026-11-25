@@ -1,0 +1,291 @@
+{% extends "layout.html" %}
+{% block title %}{{ item.title }} · Hive{% endblock %}
+{% block content %}
+<style>
+.item-page { max-width: 1100px; margin: 0 auto; display:grid; gap:1rem; }
+.item-layout { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:1rem; align-items:start; }
+.item-relations { display:grid; gap:.75rem; padding:1rem; }
+.item-relations h2 { font-size:1rem; margin:0; }
+.item-relations hr { border:0; border-top:1px solid var(--console-line, #333); margin:.25rem 0; }
+.relation-row { display:flex; gap:.4rem; align-items:center; min-width:0; }
+.relation-row span { min-width:0; overflow-wrap:anywhere; }
+.relation-row .button { flex:0 0 auto; padding:.25rem .5rem; font-size:.8rem; min-height:0; }
+.relation-row select { min-width:0; max-width:100%; }
+@media(max-width:800px){.item-layout{grid-template-columns:minmax(0,1fr)}}
+.item-field { display:grid; gap:.4rem; }
+.item-field textarea { width:100%; overflow:hidden; resize:none; }
+.item-form-header { display:flex; justify-content:flex-end; align-items:center; gap:.75rem; margin-bottom:.25rem; }
+.item-title-input { font-size:1.4rem; font-weight:650; padding:.3rem .4rem; width:100%; }
+.item-id { margin:0 0 .75rem; color:var(--console-faint,#69747c); font-size:.78rem; font-family:ui-monospace,monospace; user-select:text; overflow-wrap:anywhere; }
+.item-actions { display:flex; gap:.5rem; align-items:center; }
+.item-feedback { min-height:1.5em; }
+.item-back-nav { position:static; background:none; padding:0; min-height:0; z-index:auto; }
+.item-back-nav a { color:var(--console-cyan, #4cc9d9); text-decoration:none; font-size:.9rem; }
+.item-back-nav a:hover { text-decoration:underline; }
+.item-description-head { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+.item-description-toggle { padding:.2rem .6rem; font-size:.8rem; min-height:0; }
+.item-description-view { padding:.6rem .75rem; border:1px solid var(--console-line, #333); border-radius:var(--console-radius, 7px); min-height:2.5rem; }
+.item-attachments { display:grid; gap:.75rem; padding:1rem; }
+.item-attachments-header { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; }
+.item-attachments-header h2 { font-size:1rem; margin:0; }
+.item-attachment-list { display:grid; gap:.75rem; }
+.item-attachment figure { margin:0; display:grid; gap:.3rem; }
+.item-attachment img { max-width:100%; height:auto; border:1px solid var(--console-line, #333); border-radius:4px; }
+.item-attachment figcaption, .item-attachment a { font-size:.85rem; overflow-wrap:anywhere; }
+</style>
+<main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}" data-item-number="{{ item.backlog_number }}">
+  <nav class="item-back-nav"><a href="/kanban/backlog">Back to backlog</a></nav>
+  <p>{{ item.kind | capitalize }}</p>
+  <p class="item-number" id="item-number" aria-label="Backlog item number"></p>
+  <div class="item-layout">
+  <form id="item-form" class="surface item-field">
+    <div class="item-actions item-form-header"><select id="status-choice" aria-label="Status" hidden></select><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
+    <label class="item-field">Title<input class="item-title-input" type="text" name="title" value="{{ item.title }}" required></label>
+    <div class="item-field" id="description-field">
+      <div class="item-description-head"><span id="description-label">Description</span><button class="button item-description-toggle" type="button" id="description-toggle">Edit</button></div>
+      <div class="item-description-view" id="description-view"></div>
+      <textarea name="description" id="description-input" aria-labelledby="description-label" hidden></textarea>
+    </div>
+    <label class="item-field">Requirements<textarea name="requirements">{{ item.requirements }}</textarea></label>
+    <label class="item-field">Acceptance criteria<textarea name="acceptance_criteria">{{ item.acceptance_criteria }}</textarea></label>
+    <label class="item-field">QA tests<textarea name="qa_tests">{{ item.qa_tests }}</textarea></label>
+  </form>
+  <aside class="surface item-relations" id="item-relations" aria-label="Parent and children">
+    <h2>Type</h2>
+    <div class="relation-row"><select id="type-choice" aria-label="Item type"></select></div>
+    <hr>
+    <h2>Parent</h2>
+    <div id="parent-slot"></div>
+    <div class="relation-row"><select id="parent-choice" aria-label="Choose a parent"></select></div>
+    <hr>
+    <h2>Children</h2>
+    <div id="children-slot"></div>
+    <div class="relation-row"><select id="child-choice" aria-label="Choose a child to add"></select><button class="button" type="button" id="child-add">Add child</button></div>
+  </aside>
+  </div>
+  <section class="surface item-attachments" id="item-attachments" aria-label="Attachments">
+    <div class="item-attachments-header"><h2>Attachments</h2><label class="button" for="attachment-file">Attach a file</label><input type="file" id="attachment-file" multiple hidden><span id="attachment-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
+    <div id="attachment-list" class="item-attachment-list"></div>
+  </section>
+</main>
+<script type="application/json" id="description-source">{{ item.description | tojson }}</script>
+<script src="{{ request.url_for('static', path='markdown.js') }}?v={{ asset_versions['markdown.js'] }}"></script>
+<script>
+(() => {
+  'use strict';
+  const form = document.getElementById('item-form');
+  const feedback = document.getElementById('item-feedback');
+  const page = document.getElementById('item-page');
+  const kinds = {epic: 'epics', feature: 'features', story: 'stories', task: 'tasks'};
+  const itemId = page.dataset.itemId;
+  async function loadBacklogNumber(){
+    const response = await fetch('/api/kanban/numbers', {headers: {'Accept': 'application/json'}});
+    const numbers = await response.json();
+    document.getElementById('item-number').textContent = numbers[itemId] || '';
+  }
+  const kindName = {epic: 'Epic', feature: 'Feature', story: 'Story', task: 'Task'};
+  function autoGrow(el){el.style.height='auto';el.style.height=`${el.scrollHeight}px`;}
+  const growers = form.querySelectorAll('textarea');
+  // The description is handed over as JSON rather than as the textarea's
+  // text, which the HTML parser would strip a leading newline from.
+  const descriptionInput = document.getElementById('description-input');
+  const descriptionView = document.getElementById('description-view');
+  const descriptionToggle = document.getElementById('description-toggle');
+  descriptionInput.value = JSON.parse(document.getElementById('description-source').textContent) ?? '';
+  // What the store holds, as the textarea reports it. Save leaves the
+  // description out unless it differs, so displaying an item never rewrites
+  // it and a save of another field cannot overwrite a newer description.
+  let savedDescription = descriptionInput.value;
+  function showDescription(editing){
+    descriptionInput.hidden = !editing;
+    descriptionView.hidden = editing;
+    descriptionToggle.textContent = editing ? 'Preview' : 'Edit';
+    descriptionToggle.setAttribute('aria-label', editing ? 'Preview description' : 'Edit description');
+    if (editing) autoGrow(descriptionInput);
+    else if (window.hiveMarkdown) window.hiveMarkdown.render(descriptionView, descriptionInput.value);
+    else { descriptionView.className = 'item-description-view md-source'; descriptionView.textContent = descriptionInput.value; }
+  }
+  descriptionToggle.addEventListener('click', () => showDescription(descriptionInput.hidden));
+  showDescription(!savedDescription.trim());
+  for (const t of growers) { autoGrow(t); t.addEventListener('input', () => autoGrow(t)); }
+  window.addEventListener('resize', () => { for (const t of growers) autoGrow(t); });
+  async function loadRelations(){
+    const r = await (await fetch(`/api/kanban/relations/${encodeURIComponent(itemId)}`, {headers: {'Accept': 'application/json'}})).json();
+    const parentSlot = document.getElementById('parent-slot');
+    parentSlot.replaceChildren();
+    if (r.parent) {
+      const row = document.createElement('div'); row.className = 'relation-row';
+      const label = document.createElement('span'); label.textContent = r.parent.title;
+      const remove = document.createElement('button'); remove.className = 'button'; remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove parent');
+      remove.addEventListener('click', () => patch({parent: 'none'}, 'Parent removed.'));
+      row.append(label, remove); parentSlot.append(row);
+    } else {
+      const none = document.createElement('p'); none.textContent = 'None (unassigned)'; parentSlot.append(none);
+    }
+    latestRelations = r;
+    fillParentChoices();
+    const childChoice = document.getElementById('child-choice');
+    childChoice.replaceChildren();
+    for (const c of r.addable || []) { const o = document.createElement('option'); o.value = c.id; o.textContent = `${kindName[c.kind || 'story']}: ${c.title}`; o.dataset.kind = c.kind || ''; childChoice.append(o); }
+    childChoice.disabled = !(r.addable || []).length;
+    document.getElementById('child-add').disabled = !(r.addable || []).length;
+    const childrenSlot = document.getElementById('children-slot');
+    childrenSlot.replaceChildren();
+    if (r.children.length === 0) { const none = document.createElement('p'); none.textContent = 'No children'; childrenSlot.append(none); }
+    for (const c of r.children) {
+      const row = document.createElement('div'); row.className = 'relation-row';
+      const label = document.createElement('span'); label.textContent = c.title;
+      const remove = document.createElement('button'); remove.className = 'button'; remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove child ${c.title}`);
+      remove.addEventListener('click', () => patchChild(c, {parent: 'none'}, 'Child removed.'));
+      row.append(label, remove); childrenSlot.append(row);
+    }
+  }
+  async function patch(body, message){
+    const url = `/api/kanban/${kinds[page.dataset.itemKind]}/${encodeURIComponent(itemId)}`;
+    const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
+    if (!response.ok) { feedback.textContent = `Not saved: ${(await response.json()).detail || response.status}`; return; }
+    feedback.textContent = message; await loadRelations();
+  }
+  async function patchChild(child, body, message){
+    const kind = child.kind || (child.subtype !== undefined ? 'stories' : 'features');
+    const url = `/api/kanban/${kind}/${encodeURIComponent(child.id)}`;
+    const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
+    if (!response.ok) { feedback.textContent = `Not saved: ${(await response.json()).detail || response.status}`; return; }
+    feedback.textContent = message; await loadRelations();
+  }
+  document.getElementById('child-add').addEventListener('click', () => {
+    const choice = document.getElementById('child-choice').value;
+    if (!choice) return;
+    const kind = page.dataset.itemKind === 'epic' ? (document.querySelector(`#child-choice option[value="${choice}"]`)?.dataset.kind === 'feature' ? 'features' : 'stories') : 'stories';
+    const field = page.dataset.itemKind === 'epic' ? 'epic_id' : 'feature_id';
+    fetch(`/api/kanban/${kind}/${encodeURIComponent(choice)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify({[field]: itemId})})
+      .then(async r => { feedback.textContent = r.ok ? 'Child added.' : `Not saved: ${(await r.json()).detail || r.status}`; await loadRelations(); });
+  });
+  function currentType(){return page.dataset.itemKind==='story'&&page.dataset.itemSubtype==='bug'?'bug':page.dataset.itemKind;}
+  let latestRelations = {parents_for_type: {}};
+  function fillParentChoices(){
+    const parentChoice = document.getElementById('parent-choice');
+    const options = latestRelations.all || [];
+    parentChoice.replaceChildren();
+    const none = document.createElement('option'); none.value = ''; none.textContent = 'No parent'; parentChoice.append(none);
+    for (const c of options) { if (c.id === itemId) continue; const o = document.createElement('option'); o.value = c.id; o.textContent = `${c.kind ? kindName[c.kind] : 'Item'}: ${c.title}`; o.selected = !!(latestRelations.parent && latestRelations.parent.id === c.id); parentChoice.append(o); }
+    parentChoice.disabled = false;
+  }
+  function fillTypes(){const sel=document.getElementById('type-choice');sel.replaceChildren();const kinds=['epic','feature','story','bug','task'];for(const k of kinds){const o=document.createElement('option');o.value=k;o.textContent=k.charAt(0).toUpperCase()+k.slice(1);if(k===currentType())o.selected=true;sel.append(o);}sel.onchange=fillParentChoices;}
+  const statusLabel = {backlog: 'Backlog', committed: 'Committed', in_progress: 'Work In Progress', done: 'Done'};
+  function fillStatus(){
+    // Every type carries a status (story 3.7.1), so every item page offers it.
+    const sel = document.getElementById('status-choice');
+    sel.hidden = false;
+    sel.replaceChildren();
+    for (const value of Object.keys(statusLabel)) { const o = document.createElement('option'); o.value = value; o.textContent = statusLabel[value]; o.selected = value === page.dataset.itemStatus; sel.append(o); }
+  }
+  fillTypes();
+  fillStatus();
+  loadBacklogNumber();
+  loadRelations();
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(form).entries());
+    if (body.description === savedDescription) delete body.description;
+    const type = document.getElementById('type-choice').value;
+    if (type !== currentType()) body.type = type;
+    const parent = document.getElementById('parent-choice').value;
+    const current = latestRelations.parent ? latestRelations.parent.id : '';
+    if (parent !== current) body.parent_id = parent || null;
+    const status = document.getElementById('status-choice').value;
+    if (status !== page.dataset.itemStatus) body.status = status;
+    const url = `/api/kanban/${kinds[page.dataset.itemKind]}/${encodeURIComponent(page.dataset.itemId)}`;
+    feedback.textContent = 'Saving…';
+    try {
+      const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
+      if (!response.ok) throw new Error((await response.json()).detail || `Request failed (${response.status})`);
+      const updated = await response.json();
+      if ('status' in updated) page.dataset.itemStatus = updated.status;
+      if ('description' in updated) {
+        // The store's copy becomes the page's, unless the description was
+        // typed into while the save was in flight: that text stays put.
+        const untouched = descriptionInput.value === ('description' in body ? body.description : savedDescription);
+        const stored = (updated.description ?? '').replace(/\r\n?/g, '\n');
+        savedDescription = stored;
+        if (untouched) { descriptionInput.value = stored; showDescription(!stored.trim()); }
+      }
+      feedback.textContent = 'Saved.';
+    } catch (err) {
+      feedback.textContent = `Not saved: ${err.message}`;
+    }
+  });
+})();
+</script>
+<script>
+(() => {
+  'use strict';
+  // An item's files. The list shown is always the server's, read again after
+  // every upload whether it was refused or not: a file is only ever shown as
+  // attached once the server says it holds it, and a refusal is shown with
+  // the server's own reason.
+  const itemId = document.getElementById('item-page').dataset.itemId;
+  const base = `/api/kanban/items/${encodeURIComponent(itemId)}/attachments`;
+  const list = document.getElementById('attachment-list');
+  const feedback = document.getElementById('attachment-feedback');
+  const input = document.getElementById('attachment-file');
+  const size = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  async function loadAttachments(){
+    let rows;
+    try {
+      const response = await fetch(base, {headers: {'Accept': 'application/json'}});
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      rows = await response.json();
+    } catch (err) { return `Could not load attachments: ${err.message}`; }
+    list.replaceChildren();
+    if (!rows.length) { const none = document.createElement('p'); none.textContent = 'No attachments'; list.append(none); return ''; }
+    for (const a of rows) {
+      const url = `${base}/${encodeURIComponent(a.id)}`;
+      const row = document.createElement('div'); row.className = 'item-attachment';
+      if (a.is_image) {
+        const figure = document.createElement('figure');
+        const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener';
+        const img = document.createElement('img'); img.src = url; img.alt = a.filename; img.loading = 'lazy';
+        link.append(img);
+        const caption = document.createElement('figcaption'); caption.textContent = `${a.filename} · ${size(a.size_bytes)}`;
+        figure.append(link, caption); row.append(figure);
+      } else {
+        const link = document.createElement('a'); link.href = url; link.download = a.filename;
+        link.textContent = `${a.filename} · ${size(a.size_bytes)}`;
+        row.append(link);
+      }
+      list.append(row);
+    }
+    return '';
+  }
+  input.addEventListener('change', async () => {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    const failed = [];
+    let kept = 0;
+    let stale = '';
+    for (const file of files) {
+      feedback.textContent = `Attaching ${file.name}…`;
+      const body = new FormData(); body.append('file', file, file.name);
+      try {
+        const response = await fetch(base, {method: 'POST', headers: {'Accept': 'application/json'}, body});
+        if (!response.ok) {
+          let detail = `Request failed (${response.status})`;
+          try { detail = (await response.json()).detail || detail; } catch (_) {}
+          failed.push(`${file.name}: ${detail}`);
+        } else { kept += 1; }
+      } catch (err) { failed.push(`${file.name}: ${err.message}`); }
+      // After every attempt, kept or not: the list is whatever the server
+      // now holds, so a reply lost on the way back cannot hide a kept file.
+      stale = await loadAttachments();
+    }
+    const outcome = failed.length
+      ? `Not kept: ${failed.join('; ')}${kept ? ` (${kept} attached)` : ''}`
+      : `Attached ${kept === 1 ? '1 file' : `${kept} files`}.`;
+    feedback.textContent = stale ? `${outcome} ${stale}; the list shown may be out of date.` : outcome;
+  });
+  loadAttachments().then(problem => { if (problem) feedback.textContent = problem; });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,45 @@
+# The project name is pinned: the directory is modules/terminal inside
+# hive-mind, and a project named after any other directory would not be the
+# one the running terminal belongs to. Container name, port and network are
+# unchanged. This site is its own project, so updating the console never
+# recreates it.
+name: terminal
+
+services:
+  terminal:
+    build:
+      context: .
+      additional_contexts:
+        # The modules this site shares with the console — accounts,
+        # sessions, the store and the authorization middleware — and the
+        # access layer underneath them. Both are folders of hive-mind beside
+        # this one, relative to this file, so a fresh checkout builds with no
+        # sibling folder. HIVE_SITE_DIR and HIVE_DATA_DIR left in .env are
+        # ignored.
+        hive_site: ../hive/hive_site
+        hive_data: ../hive-data
+    container_name: terminal-site
+    restart: unless-stopped
+    ports:
+      - "8711:8711"
+    env_file: .env
+    environment:
+      - TERMINAL_HOST=0.0.0.0
+      # The hive's one Postgres, through `hive_data`, where the accounts
+      # this site shares with the console live. Required: the site refuses
+      # to start without it.
+      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:?set HIVE_DATABASE_URL in .env}
+      # Parent domain so the session cookie is shared with the hive site,
+      # which reads the same accounts and secret.
+      - HIVE_COOKIE_DOMAIN=sparktobloom.com
+      - GATEWAY_API_URL=http://hive-comms:8424
+      - VOICE_API_URL=${VOICE_API_URL:-http://hive-mind-voice:8422}
+    volumes:
+      - ./src:/app/src
+    networks:
+      - hivemind
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind
