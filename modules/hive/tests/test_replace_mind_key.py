@@ -166,10 +166,11 @@ async def test_a_replacement_the_tools_cannot_take_puts_the_old_key_back_on_the_
     answers = await hive.status(OLD)
     assert answers["comms"] == 200 and answers["lucent"] == 200
     assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
     assert holder_credentials.key_journal.unfinished() == []
 
 
-async def test_a_key_another_mind_already_holds_is_refused_and_ada_keeps_hers(hive):
+async def test_pasting_a_key_another_mind_holds_changes_nothing_and_both_minds_keep_theirs(hive):
     with pytest.raises(holder_credentials.KeyHeldByAnother):
         await _replace(BOB)
 
