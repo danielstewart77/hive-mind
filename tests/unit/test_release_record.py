@@ -289,3 +289,37 @@ def test_installed_commit_is_not_read_from_a_container_unless_asked(tmp_path, mo
     _, record, fake = _record(tmp_path, monkeypatch, exec_ok=False)
     assert _service(record, "app")["extra_sources"][0]["installed_commit"] is None
     assert not any(c[:2] == ["docker", "exec"] for c in fake.calls)
+
+
+def test_identity_is_incomplete_when_one_service_has_no_image_id(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    base = Fake(root, config=_config(root, tmp_path / "src"))
+
+    def no_db_image(argv, cwd=None):
+        if argv[:3] == ["docker", "image", "inspect"] and argv[3] == "pgvector/pgvector:pg17":
+            return 1, ""
+        return base(argv, cwd)
+
+    monkeypatch.setattr(rr, "run", no_db_image)
+    record = rr.build_record(root, [], [], [])
+    assert record["identity"]["complete"] is False
+    assert record["identity"]["string"] is None
+
+
+def test_writable_bind_mount_is_not_reported_read_only(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    config = _config(root, tmp_path / "src")
+    config["services"]["app"]["volumes"][0]["read_only"] = False
+    monkeypatch.setattr(rr, "run", Fake(root, config=config))
+    record = rr.build_record(root, [], [], [])
+    assert _service(record, "app")["mounts"][0]["read_only"] is False
+
+
+def test_list_form_environment_keeps_names_and_drops_values(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    config = _config(root, tmp_path / "src")
+    config["services"]["app"]["environment"] = [f"API_KEY={TOKEN}", "OTHER=x"]
+    monkeypatch.setattr(rr, "run", Fake(root, config=config))
+    record = rr.build_record(root, [], [], [])
+    assert _service(record, "app")["env_var_names"] == ["API_KEY", "OTHER"]
+    assert TOKEN not in json.dumps(record)

@@ -33,8 +33,9 @@ Record fields (the manual for the whole record: docs/setup/release-record.md)
     schema_version        1
     recorded_at           UTC time of the run
     identity              the release's identity and nothing else (`complete`
-                          is false and `string` is null when no commit or no
-                          image id could be read, so a failed read never looks
+                          is false and `string` is null when the commit, a
+                          compose config or any service's image id could not
+                          be read, so a failed read never looks
                           like a release):
                           `hive_mind_commit` (full commit id of --root),
                           `image_ids_hash` (sha256 over the sorted lines
@@ -589,10 +590,11 @@ def container_only(name: str, c: dict, cache: dict, images: dict) -> dict:
     }
 
 
-def identity_of(commit: str | None, services: list[dict]) -> dict:
+def identity_of(commit: str | None, services: list[dict], read_failed: bool = False) -> dict:
     lines = sorted(f"{s['stack']}/{s['service']}={s['image_id'] or 'none'}" for s in services)
     digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
-    complete = bool(commit) and any(s["image_id"] for s in services)
+    complete = (bool(commit) and bool(services) and not read_failed
+                and all(s["image_id"] for s in services))
     return {"hive_mind_commit": commit, "image_ids_hash": digest,
             "complete": complete,
             "string": f"{commit}+{digest}" if complete else None}
@@ -683,7 +685,8 @@ def build_record(root: Path, compose: list[Path], repos: list[Path],
     record = {
         "schema_version": SCHEMA_VERSION,
         "recorded_at": now.replace(microsecond=0).isoformat(),
-        "identity": identity_of((hm or {}).get("commit"), services),
+        "identity": identity_of((hm or {}).get("commit"), services,
+                              any("failed" in n for n in notes)),
         "information_only": {"branch": (hm or {}).get("_branch"),
                              "meaning": "a label for people, never an identity"},
         "hive_mind": _public(hm),
