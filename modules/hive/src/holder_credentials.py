@@ -1047,7 +1047,9 @@ def mind_is_not_yet_on_one_key(holder: str) -> bool:
     if path is None or stored_key_location(holder) is not None:
         return False
     try:
-        return name_has_old_proxy_line(path, holder)
+        return any(
+            credentials_data._read_env_value(path, variable_name(service, holder)) is not None
+            for service in SERVICES.values())
     except Unreadable:
         return False
 
@@ -1184,9 +1186,14 @@ async def replace_mind_key(
             # this mind's own row, or it refuses by naming the holder before
             # anything has changed.
             services = sorted(services, key=lambda s: not accepted.get(s.key, False))
-        record = key_journal.begin("replace", holder, [s.key for s in services])
-        record["owner"], record["mind_id"] = owner, mind_id
-        key_journal.update(record)
+        try:
+            record = key_journal.begin("replace", holder, [s.key for s in services])
+            record["owner"], record["mind_id"] = owner, mind_id
+            key_journal.update(record)
+        except OSError as exc:
+            raise MintRefused(
+                f"the journal of key changes could not be written "
+                f"({exc.strerror or exc}). Nothing was changed.") from None
 
         state: dict[str, str] = {}
         failure: Exception | None = None
@@ -1202,7 +1209,11 @@ async def replace_mind_key(
                 failure = exc
                 break
             state[service.key] = "new"
-            key_journal.update(record, switched=[k for k, v in state.items() if v == "new"])
+            try:
+                key_journal.update(record, switched=[k for k, v in state.items() if v == "new"])
+            except OSError as exc:
+                failure = MintRefused(f"the journal could not be written ({exc.strerror or exc})")
+                break
 
         stored = "not_writable"
         if failure is None and location is not None:
@@ -1237,7 +1248,13 @@ async def replace_mind_key(
                 continue
             row = rows[service.key]
             try:
-                if old is not None:
+                if row is None and state[service.key] == "new":
+                    response = await _request(
+                        service, "DELETE", f"/credentials/{holder}?remove=true")
+                    if response.status_code >= 400:
+                        raise MintRefused("not removed")
+                    state[service.key] = "none"
+                elif old is not None:
                     await _put_key(service, holder, owner, mind_id, row, old)
                     state[service.key] = "old"
                 elif row is None:
@@ -1265,7 +1282,10 @@ async def replace_mind_key(
             state.get(s.key, "untouched") in ("old", "none", "untouched") for s in services)
         reason = _failure_sentence(failure)
         if clean:
-            key_journal.finish(record)
+            try:
+                key_journal.finish(record)
+            except OSError:
+                pass
             holder_name = _held_by_name(failure)
             if holder_name or "already held by" in str(failure):
                 raise KeyHeldByAnother(key_held_message(holder_name))
@@ -1273,7 +1293,10 @@ async def replace_mind_key(
         sentence = _states_sentence(services, state)
         if not file_ok:
             sentence += f"; the stored key in {location.path} could not be put back"
-        key_journal.update(record, status="needs_attention", detail=sentence)
+        try:
+            key_journal.update(record, status="needs_attention", detail=sentence)
+        except OSError:
+            pass
         again = ("Paste the same new key again to finish; it is safe to repeat."
                  if old is None else
                  "Check each service, then paste the key you want this mind to use.")
@@ -1317,8 +1340,11 @@ async def recover_replacements() -> list[dict[str, Any]]:
             key_journal.finish(record)
             handled.append({"mind": holder, "recovered": True})
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
-            key_journal.update(record, status="needs_attention",
-                               detail=_failure_sentence(exc))
+            try:
+                # Left as started: the next start tries again.
+                key_journal.update(record, detail=_failure_sentence(exc))
+            except OSError:
+                pass
             handled.append({"mind": holder, "recovered": False, "detail": _failure_sentence(exc)})
     return handled
 

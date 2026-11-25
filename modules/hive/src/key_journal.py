@@ -82,6 +82,8 @@ def unfinished() -> list[dict[str, Any]]:
 
 
 def needing_attention(mind: str | None = None) -> list[dict[str, Any]]:
+    """Records the person has to look at: a put-back that failed, or a
+    recovery on start that could not finish (it is tried again on every start)."""
     found = []
     if JOURNAL_DIR.is_dir():
         for path in sorted(JOURNAL_DIR.glob("*.json")):
@@ -89,7 +91,7 @@ def needing_attention(mind: str | None = None) -> list[dict[str, Any]]:
                 record = json.loads(path.read_text())
             except (OSError, ValueError):
                 continue
-            if record.get("status") == "needs_attention" and (mind is None or record.get("mind") == mind):
+            if record.get("detail") and (mind is None or record.get("mind") == mind):
                 found.append(record)
     return found
 

@@ -142,14 +142,7 @@ async def lifespan(app: FastAPI):
               engine="postgres")
     await seed_first_user()
     mind_rename.recover_pending()
-    try:
-        for recovered in await holder_credentials.recover_replacements():
-            log_event(log, "mind.key.recovered", component="hive-control-plane",
-                      level=logging.INFO if recovered["recovered"] else logging.ERROR,
-                      mind=recovered["mind"], recovered=recovered["recovered"])
-    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
-        log_event(log, "mind.key.recover_failed", level=logging.ERROR,
-                  component="hive-control-plane", error=str(exc))
+    recovering = asyncio.create_task(_recover_key_replacements())
     # The ready-made roles, once per hive (story 10.18.3). A failure is
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
@@ -184,7 +177,12 @@ async def lifespan(app: FastAPI):
         log_event(log, "service.stopped", component="hive-control-plane")
         # Before the store closes: what it had not taken back stays recorded
         # for the next start.
+        recovering.cancel()
         sweeping.cancel()
+        try:
+            await recovering
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
         try:
             await sweeping
         except (asyncio.CancelledError, Exception):  # noqa: BLE001 - cancelled, or reported
@@ -1490,6 +1488,20 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         },
         **_start_report(name, start),
     }
+
+
+async def _recover_key_replacements() -> None:
+    """Finish or undo a key replacement this console was stopped in the middle
+    of. A task of its own: each service may take seconds to answer, and the
+    console must be answering meanwhile."""
+    try:
+        for recovered in await holder_credentials.recover_replacements():
+            log_event(log, "mind.key.recovered", component="hive-control-plane",
+                      level=logging.INFO if recovered["recovered"] else logging.ERROR,
+                      mind=recovered["mind"], recovered=recovered["recovered"])
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "mind.key.recover_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
 
 
 async def _sweep_interrupted_creations() -> None:
@@ -3980,6 +3992,15 @@ async def api_mind_voice_update(
         "voice": str(configuration.get("voice") or voice),
         "voice_engine": str(configuration.get("voice_engine") or engine),
     }
+
+
+@app.get("/api/minds/{name}/proxy-key")
+async def api_mind_proxy_key_status(name: str, user: dict = Depends(require_auth)):
+    """What a key replacement left undone for this mind, in words; nothing
+    when there is none. Never a key."""
+    return {"needs_attention": [
+        record["detail"] for record in
+        holder_credentials.key_journal.needing_attention(name.strip().lower())]}
 
 
 @app.put("/api/minds/{name}/proxy-key")
