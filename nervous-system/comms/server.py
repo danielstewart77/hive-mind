@@ -1155,14 +1155,22 @@ async def put_holder_credential(holder: str, body: CredentialRequest):
     "/credentials/{holder}",
     dependencies=[Depends(require_admin_bearer)],
 )
-async def delete_holder_credential(holder: str):
+async def delete_holder_credential(holder: str, remove: bool = False):
     """Revoke one holder's credential, and only that holder's.
 
     Lands on its next request: the gate reads the table per call, so there is
     nothing to restart and no cache to clear. The row is kept rather than
     deleted, so the screen can say "revoked" where it would otherwise have to
     say "never had one" — different facts with different remedies.
+
+    `remove=true` deletes a mind's row instead: the undo of a creation, and a
+    mind deleted. A revoked row keeps the digest, which then stays refused
+    for every other holder; a key whose only holder is gone must be pasteable
+    again. A cut-off uses the plain revoke above and keeps its row.
     """
+    if remove:
+        removed = await user_access.remove_mind_credential(holder)
+        return {"holder": holder.strip().lower(), "removed": removed}
     revoked = await user_access.revoke_credential(holder)
     return {"holder": holder.strip().lower(), "revoked": revoked}
 

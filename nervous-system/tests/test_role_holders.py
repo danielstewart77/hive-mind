@@ -139,3 +139,29 @@ def test_the_answer_names_each_holder_by_id_and_name_and_nothing_else(world):
     entry = world.ask().json()["minds"][0]
 
     assert set(entry) == {"mind_id", "name"}
+
+
+def test_a_removed_mind_credential_frees_its_key_for_another_mind_but_a_revoked_one_does_not(
+        comms_db):
+    """A failed creation removes the row it made, so the pasted key can be
+    pasted again; a cut-off keeps its row and the key stays refused."""
+    from comms import user_access
+
+    key = f"pasted-{uuid.uuid4().hex}"  # secret-guard: allow
+    first, second, third = (f"h-{uuid.uuid4().hex[:8]}" for _ in range(3))
+
+    async def go():
+        import hive_data
+        await hive_data.connect()
+        try:
+            await user_access.put_credential(first, "daniel", key, role="mind")
+            await user_access.revoke_credential(first)
+            with pytest.raises(ValueError, match="already held"):
+                await user_access.put_credential(second, "daniel", key, role="mind")
+            assert await user_access.remove_mind_credential(first) is True
+            await user_access.put_credential(third, "daniel", key, role="mind")
+            return (await user_access.credential_for_token(key)).holder
+        finally:
+            await hive_data.close(drain_timeout=5.0)
+
+    assert asyncio.run(go()) == third

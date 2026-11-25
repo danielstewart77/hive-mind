@@ -325,3 +325,44 @@ async def test_one_account_id_on_two_surfaces_is_two_accounts(
     assert [r["surface"] for r in
             await broker_ops.surface_accounts_of("sloan")
             if r["account_ref"] == ref] == ["telegram"]
+
+
+async def test_removing_a_mind_credential_frees_its_digest_for_another_holder(
+        connected, inspector, clock):
+    """A revoked row keeps the digest and refuses it to everyone for good; the
+    removal a failed creation or a deleted mind needs deletes the row."""
+    mind, other = _name("m-"), _name("o-")
+    digest = _name("sha-")
+    await core.upsert_credential(
+        holder=mind, username="u", role="mind", token_sha=digest,
+        created_at=clock)
+
+    await broker_ops.revoke_live_credential(mind, clock + 1)
+    assert await broker_ops.holder_of_digest(digest) == mind
+
+    removed = await broker_ops.delete_mind_credential(mind)
+
+    assert removed["rows"] == 1
+    assert await broker_ops.holder_of_digest(digest) is None
+    await core.upsert_credential(
+        holder=other, username="u", role="mind", token_sha=digest,
+        created_at=clock)
+    assert await inspector.fetchval(
+        'SELECT holder FROM core."credentials" WHERE token_sha = $1',
+        digest) == other
+
+
+async def test_removing_a_mind_credential_never_removes_a_service_or_person_row(
+        connected, inspector, clock):
+    service, person = _name("s-"), _name("p-")
+    for holder, role in ((service, "service"), (person, "person")):
+        await core.upsert_credential(
+            holder=holder, username="u", role=role, token_sha=_name("sha-"),
+            created_at=clock)
+
+    removed = [await broker_ops.delete_mind_credential(h) for h in (service, person)]
+
+    assert [r["rows"] for r in removed] == [0, 0]
+    assert await inspector.fetchval(
+        'SELECT count(*) FROM core."credentials" WHERE holder = ANY($1)',
+        [service, person]) == 2

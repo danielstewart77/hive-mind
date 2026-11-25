@@ -193,6 +193,22 @@ async def revoke_live_credential(holder: str, revoked_at: float, *,
         holder, revoked_at)
 
 
+async def delete_mind_credential(holder: str, *,
+                                 unit: Unit | None = None) -> Row:
+    """Remove a mind's credential row, so its digest is free again.
+
+    Revoking keeps the row and with it the digest, which stays refused for
+    every other holder. A creation that failed, or a mind that was deleted,
+    left nothing that should keep a pasted key burned, so those remove the
+    row. Only a row typed `mind` goes: a service's or a person's credential
+    is never this call's to delete, whatever name it is asked for under.
+    """
+    return await _execute(
+        unit,
+        'DELETE FROM core."credentials" WHERE "holder" = $1 AND "role" = \'mind\'',
+        holder)
+
+
 async def list_credentials(*, unit: Unit | None = None) -> list[Row]:
     """Every credential, revoked ones included, never the digest.
 

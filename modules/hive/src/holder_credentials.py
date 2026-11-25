@@ -401,8 +401,13 @@ async def mint(
     role: str,
     mind_id: str | None = None,
     location: Location | None = None,
+    value: str | None = None,
 ) -> dict[str, Any]:
-    """Give one holder a new value and write it where that holder reads it.
+    """Give one holder a value and write it where that holder reads it.
+
+    `value` is a value the person supplied, used byte for byte; left out, one
+    is generated. A mind's creation always supplies one: the hive does not
+    invent a mind's key.
 
     `role` and `mind_id` are passed explicitly, never left to be inferred. A
     holder minted before its broker row exists is typed `person` by comms,
@@ -413,7 +418,7 @@ async def mint(
     if location is None:
         location = locate(service, holder)
     await _require_managed_proxy(service, holder)
-    new_value = secrets.token_urlsafe(32)
+    new_value = value if value is not None else secrets.token_urlsafe(32)
 
     async with _ROTATION_LOCK:
         if location is None:
@@ -681,37 +686,105 @@ async def name_held_by_something_else(name: str) -> str | None:
     return None
 
 
+class KeyHeldByAnother(ValueError):
+    """The pasted key already belongs to another mind. Nothing was made."""
+
+
+KEY_HELD_MESSAGE = (
+    "Another mind already holds that key. Paste this mind's own key."
+)
+KEY_MISSING_MESSAGE = "Paste the mind's key; a mind cannot be made without one."
+#: Short enough to allow any real key, long enough that a stray character
+#: cannot become a gateway credential.
+MIN_KEY_LENGTH = 8
+
+_KEY_VARIABLE = re.compile(
+    r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+|[A-Z0-9_]*_PROXY_KEY|MIND_PROXY_KEY"
+    r"|PROXY_CREDENTIAL_ADMIN_KEY)\s*=")
+
+
+def _mind_runtime_files() -> list[Path]:
+    try:
+        import configuration_data
+        root = Path(configuration_data.HIVE_MIND_MINDS_CONFIG_DIR)
+        return sorted(root.glob("*/runtime.yaml"))
+    except Exception:  # noqa: BLE001 - a missing folder holds no keys
+        return []
+
+
+def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
+    """Every place on this machine a mind's proxy key is kept that holds
+    `value`, by name and never by content: the variables of every env file
+    this console reads (`PROXY_TOKEN_<NAME>`, `<NAME>_PROXY_KEY`,
+    `MIND_PROXY_KEY`) and the `env` of every mind's runtime.yaml.
+
+    `own` is the mind the value is being given to; its own places are not a
+    clash. Used by creation here and by moving existing minds, so the two
+    agree on what "held by another mind" means.
+    """
+    mine = variable_name(SERVICES["proxy"], own) if own else None
+    found: list[str] = []
+    for label, path in ENV_FILES.items():
+        try:
+            if not Path(path).is_file():
+                continue
+            text = credentials_data._read_text(path)
+        except Exception:  # noqa: BLE001 - an unreadable file is reported below
+            raise Unreadable(f"{path}") from None
+        for variable in _KEY_VARIABLE.findall(text):
+            if variable == mine:
+                continue
+            existing = _loaded_value(Location(label, variable))
+            if existing and secrets.compare_digest(existing, value):
+                found.append(f"{label}:{variable}")
+    for path in _mind_runtime_files():
+        if own and path.parent.name == own.strip().lower():
+            continue
+        try:
+            import yaml
+            env = (yaml.safe_load(path.read_text()) or {}).get("env") or {}
+        except Exception:  # noqa: BLE001 - a runtime file that does not parse holds no key
+            continue
+        if not isinstance(env, dict):
+            continue
+        for variable, existing in env.items():
+            if (_KEY_VARIABLE.match(f"{variable}=") and isinstance(existing, str)
+                    and existing and secrets.compare_digest(existing, value)):
+                found.append(f"{path.parent.name}:{variable}")
+    return found
+
+
 async def provision_mind(
-    name: str, mind_id: str, owner: str, *, proxy_key: str | None = None,
-    issue_proxy_key: bool = True,
+    name: str, mind_id: str, owner: str, *, proxy_key: str | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Give a brand-new containerised mind its own credentials, one per service.
+    """Give a brand-new containerised mind its one key, on every service.
+
+    The person pasted the key; the hive invents nothing. The gateway and the
+    memory store are each made to accept exactly that value as this mind, and
+    it is written to the three variables the mind's generated compose file
+    reads. The proxy is sent nothing: the key is already its client's.
 
     Role and provenance are stated, never inferred. A mind is minted before it
-    has a broker row — it gets one by registering itself on first boot — and
-    comms types a holder it cannot find as a `person`, which is refused every
-    machinery route the mind will ever call, including the registration that
-    would have fixed it. On the memory-store side the provenance is the mind's
-    uuid, because every hook sends `$MIND_ID`; minted under its name instead,
-    the mind authenticates and is then refused its own memory.
+    has a broker row, and comms types a holder it cannot find as a `person`;
+    the memory store keys a mind's rows by the uuid every hook sends.
 
-    Every value lands in the shared `hive_mind/.env` under this mind's own
-    variables, which is where its generated compose file reads them from:
-    its gateway and memory-store credentials, and its inference-proxy key,
-    which is what meters every call it makes to it and nobody else.
+    A service refusing the value because another holder has it raises
+    `KeyHeldByAnother` (a 400 for the page); the caller's undo removes
+    whatever landed on the services before it.
     """
+    if not proxy_key:
+        raise MintRefused(KEY_MISSING_MESSAGE)
     minted: list[dict[str, Any]] = []
     failures: list[str] = []
+    held = False
     for service in SERVICES.values():
         try:
-            if service.key == "proxy" and not issue_proxy_key and proxy_key is None:
-                continue
             key = variable_name(service, name)
             if MIND_ENV_LABEL not in ENV_FILES:
                 raise MintRefused(
                     f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
             _ensure_key(ENV_FILES[MIND_ENV_LABEL], key)
-            if service.key == "proxy" and proxy_key is not None:
+            if service.key == "proxy":
                 minted.append(await store_mind_proxy_key(name, owner, proxy_key))
                 continue
             minted.append(
@@ -722,52 +795,59 @@ async def provision_mind(
                     role="mind",
                     mind_id=mind_id,
                     location=Location(MIND_ENV_LABEL, key),
+                    value=proxy_key,
                 )
             )
         except Exception as exc:
+            if "already held by" in str(exc):
+                held = True
             # Each service on its own. One of the two landing is a different
             # state from neither — a mind with a gateway credential and no
             # memory-store one authenticates, answers, and silently remembers
             # nothing — and the caller is told which it has.
             failures.append(f"{service.label}: {exc}")
+    if held:
+        raise KeyHeldByAnother(KEY_HELD_MESSAGE)
     return minted, ("; ".join(failures) if failures else None)
 
 
-async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None]:
-    """Verify a pasted inference key before creation makes any changes.
-
-    A blank field retains automatic issuance. This read uses the supplied
-    key, never the credential-management API, and never echoes its response.
-    Reuse returns a warning alongside the accepted key, without blocking it.
-    """
-    if supplied is None:
-        return None, None
+def _plain_key(supplied: Any, what: str) -> str:
+    if supplied is None or (isinstance(supplied, str) and not supplied.strip()):
+        raise MintRefused(KEY_MISSING_MESSAGE)
     if not isinstance(supplied, str):
-        raise MintRefused("Paste the proxy key as text")
+        raise MintRefused(f"Paste the {what} as text")
     value = supplied.strip()
-    if not value:
-        return None, None
     if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,4096}", value):
-        raise MintRefused("Paste only the proxy key, without quotes or embedded whitespace")
+        raise MintRefused(f"Paste only the {what}, without quotes or embedded whitespace")
+    if len(value) < MIN_KEY_LENGTH:
+        raise MintRefused(f"That is too short to be a mind's key. {KEY_MISSING_MESSAGE}")
+    return value
+
+
+def _refuse_if_another_holds(value: str, own: str | None) -> None:
+    try:
+        places = proxy_key_places(value, own=own)
+    except Unreadable:
+        raise MintRefused("The Mind credential file could not be read") from None
+    if places:
+        raise KeyHeldByAnother(KEY_HELD_MESSAGE)
+
+
+async def validate_mind_proxy_key(
+    supplied: Any, *, for_mind: str | None = None,
+) -> tuple[str, None]:
+    """Verify a pasted mind key before anything is written.
+
+    A key is required. One another mind already holds is refused, not
+    warned about. This read uses the supplied key, never the
+    credential-management API, and never echoes its response.
+    """
+    value = _plain_key(supplied, "proxy key")
     path = ENV_FILES.get(MIND_ENV_LABEL)
     if path is None or not path.is_file():
         raise MintRefused("This Hive is not configured to store Mind proxy keys yet")
+    _refuse_if_another_holds(value, for_mind)
     service = SERVICES["proxy"]
-    warning = None
-    try:
-        text = credentials_data._read_text(path)
-        known = re.findall(r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+|MIND_PROXY_KEY|PROXY_CREDENTIAL_ADMIN_KEY)=", text)
-        for key in known:
-            existing = _loaded_value(Location(MIND_ENV_LABEL, key))
-            if existing and secrets.compare_digest(existing, value):
-                warning = (
-                    "This proxy key is already configured elsewhere in this Hive. "
-                    "The new Mind will use it as requested. Minds sharing a key "
-                    "share its proxy identity and limits; rotating it affects all of them."
-                )
-                break
-    except Unreadable:
-        raise MintRefused("The Mind credential file could not be read") from None
     try:
         async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
             response = await client.get(
@@ -779,7 +859,7 @@ async def validate_mind_proxy_key(supplied: Any) -> tuple[str | None, str | None
         raise MintRefused("The proxy rejected that key. Check the key and try again")
     if response.status_code != 200:
         raise MintRefused("The proxy could not verify that key. Try again when it is available")
-    return value, warning
+    return value, None
 
 
 async def store_mind_proxy_key(name: str, owner: str, value: str) -> dict[str, Any]:
@@ -812,29 +892,34 @@ async def _require_managed_proxy(service: Service, holder: str) -> None:
             raise MintRefused("This Mind uses a direct or custom provider. Manage its key with that provider, then paste it on the Mind's page")
 
 
-async def accept_mind_provider_token(supplied: Any) -> tuple[str | None, str | None]:
-    """Accept a Mind-owned token; report reuse without asking an upstream."""
+async def accept_mind_provider_token(
+    supplied: Any, *, for_mind: str | None = None,
+) -> tuple[str, None]:
+    """Accept a mind's key on a direct or custom provider; ask no upstream.
+
+    A key is required and one another mind holds is refused. The value is
+    known to whoever runs that provider, and the same value opens the hive's
+    services as this mind; the page says so.
+    """
     import provider_data
-    value = provider_data.normalize_token(supplied)
-    if not value:
-        return None, None
+    try:
+        value = provider_data.normalize_token(supplied)
+    except ValueError as exc:
+        raise MintRefused(str(exc)) from None
+    value = _plain_key(value, "token")
     path = ENV_FILES.get(MIND_ENV_LABEL)
     if path is None or not path.is_file():
         raise MintRefused("This Hive is not configured to store Mind tokens yet")
-    warning = None
-    text = credentials_data._read_text(path)
-    for key in re.findall(r"(?m)^(PROXY_TOKEN_[A-Z0-9_]+)=", text):
-        existing = _loaded_value(Location(MIND_ENV_LABEL, key))
-        if existing and secrets.compare_digest(existing, value):
-            warning = "This token is already used by another Mind. It will be used as requested; sharing it also shares its identity and limits."
-            break
-    return value, warning
+    _refuse_if_another_holds(value, for_mind)
+    return value, None
 
 
 async def unprovision_mind(name: str) -> list[str]:
-    """Undo `provision_mind` for a mind whose creation failed: each service
-    stops accepting the value it issued, and the mind's three lines leave the
-    shared env file. Returns what could not be undone, in words; empty is all
+    """Undo `provision_mind` for a mind whose creation failed, or a mind
+    deleted: the gateway and the memory store drop the mind's row outright
+    (a revoked row would keep the pasted key refused for every other mind),
+    and the mind's three lines leave the shared env file. The proxy is sent
+    nothing: its client is the person's, and was never the hive's to revoke. Returns what could not be undone, in words; empty is all
     of it.
 
     Each service and each line on its own, as minting is: one failing must
@@ -843,20 +928,15 @@ async def unprovision_mind(name: str) -> list[str]:
     """
     failures: list[str] = []
     holder = name.strip().lower()
-    try:
-        import configuration_data
-        connection = configuration_data.local_runtime_configuration(name).get("provider_connection") or {}
-        direct = bool(connection) and connection.get("kind") != "proxy"
-    except ValueError:
-        direct = False
     for service in SERVICES.values():
         key = variable_name(service, holder)
         try:
             # A service this console holds no admin credential for is one it
             # cannot have issued anything at: the value there, if any, was
             # pasted in, and is its owner's to keep.
-            response = (await _request(service, "DELETE", f"/credentials/{holder}")
-                        if service.admin_token() and not (direct and service.key == "proxy") else None)
+            response = (await _request(
+                service, "DELETE", f"/credentials/{holder}?remove=true")
+                if service.admin_token() and service.key != "proxy" else None)
             if (response is not None and response.status_code >= 400
                     and response.status_code != 404):
                 failures.append(

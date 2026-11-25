@@ -658,6 +658,20 @@ async def credential_revoke(*, holder: str, at: Any = UNSET,
         holder, _now() if at is UNSET else at)
 
 
+async def credential_delete(*, holder: str,
+                            unit: Unit | None = None) -> dict[str, Any]:
+    """Remove a mind's credential row, so its digest is free again.
+
+    `credential_revoke` keeps the row and with it the digest, which stays
+    refused for every other holder. A failed creation or a deleted mind
+    leaves nothing that should keep a pasted key burned. Only a row typed
+    `mind` goes; a service's credential is never this call's to delete.
+    """
+    return await _execute(
+        unit, f'DELETE FROM {qualified("memory.credentials")} '
+        'WHERE "holder" = $1 AND "role" = \'mind\'', holder)
+
+
 async def credential_by_token(*, token_sha: str,
                               unit: Unit | None = None
                               ) -> dict[str, Any] | None:

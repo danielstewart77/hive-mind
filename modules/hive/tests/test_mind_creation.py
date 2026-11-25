@@ -25,6 +25,9 @@ import accounts
 
 # A container mind starts on a model the inference proxy serves, since that
 # is what it calls (story 2.1.9).
+#: The one key the person pastes; the hive makes none.
+PASTED_KEY = "pasted-mind-key-for-tests-0123456789"
+
 _PAIRS = [
     ("claude_cli", "anthropic", "claude-sonnet-5"),
     ("claude_cli", "ollama", "gpt-oss:20b-32k"),
@@ -173,7 +176,8 @@ def client(tmp_path, monkeypatch):
 
 
 def _create(client, **overrides):
-    body = {"name": "atlas", "harness": "claude_cli", "provider": "anthropic"}
+    body = {"name": "atlas", "harness": "claude_cli", "provider": "anthropic",
+            "proxy_key": PASTED_KEY}
     body.update(overrides)
     return client.post("/api/minds", json=body)
 
@@ -730,10 +734,12 @@ def test_a_creation_that_fails_at_a_step_says_not_made_names_the_step_and_leaves
     assert _everything_a_creation_writes(client, tmp_path) == before
     sent = client.services.received
     if refused != ("PUT", "/credentials/atlas"):
-        # The keys it had been issued are taken back at each service too.
-        revoked = [r for r in sent
+        # The rows it made are removed, not merely revoked, on the gateway and
+        # the memory store; the proxy is sent nothing, its key is the person's.
+        removed = [r for r in sent
                    if (r["method"], r["path"]) == ("DELETE", "/credentials/atlas")]
-        assert len(revoked) == 3
+        assert len(removed) == 2
+        assert all(r["query"] == {"remove": ["true"]} for r in removed)
     if refused == ("POST", "/graph/upsert"):
         # The gateway had the mind by then, and no longer does.
         assert client.services.registered == []

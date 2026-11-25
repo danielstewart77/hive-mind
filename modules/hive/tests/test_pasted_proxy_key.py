@@ -74,17 +74,13 @@ def body(key, harness="codex_cli", provider="openai"):
             "default_model": "fixture-model", "proxy_key": key}
 
 
-def test_existing_mind_can_save_a_reused_proxy_key_without_exposing_it(creation, caplog):
+def test_existing_mind_cannot_save_a_key_another_mind_holds_and_nothing_is_exposed(creation, caplog):
     client, minds, env, _, _ = creation
     (minds / "existing/runtime.yaml").write_text("name: existing\nowner: daniel\nremote: false\n")
     env.write_text(env.read_text() + f"PROXY_TOKEN_OTHER={KEY}\n")
     response = client.put("/api/minds/existing/proxy-key", json={"proxy_key": KEY})
-    assert response.status_code == 200, response.text
-    assert response.json()["saved"] is True
-    assert response.json()["restart_required"] is True
-    assert response.json()["warning"]
-    assert credentials_data._read_env_value(env, "PROXY_TOKEN_EXISTING") == KEY
-    assert credentials_data._read_env_value(env, "PROXY_TOKEN_OTHER") == KEY
+    assert response.status_code == 409, response.text
+    assert credentials_data._read_env_value(env, "PROXY_TOKEN_EXISTING") is None
     assert KEY not in response.text and KEY not in caplog.text
 
 
@@ -160,28 +156,31 @@ def test_add_mind_defaults_to_dsh(creation):
 
 
 @pytest.mark.parametrize("existing_variable", [
-    "PROXY_TOKEN_OTHER_MIND", "MIND_PROXY_KEY", "PROXY_CREDENTIAL_ADMIN_KEY",
-    "PROXY_TOKEN_PASTED_KEY_FIXTURE",
+    "PROXY_TOKEN_OTHER_MIND", "MIND_PROXY_KEY", "PROXY_CREDENTIAL_ADMIN_KEY", "OTHER_PROXY_KEY",
 ])
-def test_reused_proxy_key_warns_and_is_used_without_changing_existing_keys(
+def test_a_key_another_mind_holds_is_refused_and_nothing_is_made(
     creation, caplog, existing_variable,
 ):
     client, minds, env, stack, _ = creation
     env.write_text(env.read_text() + f"{existing_variable}={KEY}\n")
+    before = env.read_text(), stack.read_text()
     response = client.post("/api/minds", json=body(KEY, "dsh", "openai"))
-    assert response.status_code == 200, response.text
-    warning = response.json()["proxy_key_warning"]
-    assert warning and "already" in warning.lower() and "will use" in warning.lower()
+    assert response.status_code == 409, response.text
+    assert "already holds" in response.json()["detail"]
     assert KEY not in response.text and KEY not in caplog.text
-    assert credentials_data._read_env_value(env, existing_variable) == KEY
-    parsed = subprocess.run(
-        ["docker", "compose", "--env-file", str(env), "-f", str(stack), "config", "--format", "json"],
-        capture_output=True, text=True,
-    )
-    assert parsed.returncode == 0, parsed.stderr
-    service = json.loads(parsed.stdout)["services"]["pasted-key-fixture"]
-    assert service["environment"]["DSH_API_KEY"] == KEY
-    assert (minds / "pasted-key-fixture/runtime.yaml").exists()
+    assert not (minds / "pasted-key-fixture").exists()
+    assert (env.read_text(), stack.read_text()) == before
+
+
+@pytest.mark.parametrize("key", [None, "", "   ", "abc"])
+def test_a_missing_or_tiny_key_is_refused_saying_to_paste_the_minds_key(creation, key):
+    client, minds, env, stack, _ = creation
+    before = env.read_text(), stack.read_text()
+    response = client.post("/api/minds", json=body(key))
+    assert response.status_code == 400
+    assert "Paste the mind" in response.json()["detail"]
+    assert not (minds / "pasted-key-fixture").exists()
+    assert (env.read_text(), stack.read_text()) == before
 
 
 @pytest.mark.parametrize("key", ["bad key", "bad\nINJECTED=value", {"key": "bad"}, "x" * 4097])

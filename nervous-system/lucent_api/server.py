@@ -176,9 +176,16 @@ def _register_credential_routes(app: FastAPI) -> None:
     @app.delete(
         "/credentials/{holder}", dependencies=[Depends(require_admin_bearer)]
     )
-    async def revoke_credential(holder: str):
+    async def revoke_credential(holder: str, remove: bool = False):
         """Lands on that holder's next request: the store reads the table per
-        call, so there is nothing to restart and no cache to clear."""
+        call, so there is nothing to restart and no cache to clear.
+
+        `remove=true` deletes a mind's row instead of keeping it revoked, so
+        its digest can be pasted for another mind: the undo of a creation,
+        and a mind deleted. A cut-off keeps its row."""
+        if remove:
+            removed = await holder_access.remove_mind_credential(holder)
+            return {"holder": holder.strip().lower(), "removed": removed}
         revoked = await holder_access.revoke_credential(holder)
         return {"holder": holder.strip().lower(), "revoked": revoked}
 

@@ -20,7 +20,7 @@
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>Select a connection configured in <a href="/settings/providers">Settings → Providers</a>.</small></div>
                     <div class="field"><label for="mind-default-model">Initial model</label><select id="mind-default-model" name="default_model" required><option value="">Select a provider first</option></select><small id="mind-model-status" role="status"></small><button class="button button-quiet" id="mind-model-refresh" type="button">Refresh models</button></div>
                 </div>
-                <div class="field is-full"><label for="mind-proxy-key">Mind’s provider token</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096"><small>This token belongs to the new Mind. Paste its key to load the models it can access. A provider that accepts unauthenticated connections can leave this blank. Reusing a key gives a warning and uses it as requested.</small></div>
+                <div class="field is-full"><label for="mind-proxy-key">Mind’s key</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" required><small>Paste the new Mind’s own key. It is its inference key, and the gateway, the memory store and the tools accept the same value as this Mind. The Hive does not make one for you. A key another Mind holds is refused. On a provider someone else runs, whoever runs it also learns this value, and it opens this Hive’s services as this Mind.</small></div>
                 <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit" id="mind-submit"><i data-lucide="wand-sparkles"></i><span>Scaffold Mind</span></button><small id="mind-progress" role="status" hidden>Writing its folder, issuing its keys, listing it in the stack, registering it, then building and starting its container. The first build can take several minutes; leave this page open.</small></div>
@@ -37,7 +37,7 @@
             <div class="notice"><i data-lucide="sparkles"></i><span>Identity is not scaffolded. A Mind with no soul answers as a blank harness until you give it one.</span></div>
             <section class="surface" id="mind-result" hidden>
                 <div class="surface-header"><div><h2 id="mind-result-title">Made</h2><p>Every step of making it finished.</p></div></div>
-                <div class="surface-body overview-stack"><div id="mind-proxy-key-warning" role="status" hidden><div class="notice" id="mind-proxy-key-warning-text"></div></div><dl class="detail-grid" id="mind-identity"></dl><div id="mind-commands"></div><div id="mind-start"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-start-again" hidden><span>Try starting it again</span></button></div>
+                <div class="surface-body overview-stack"><dl class="detail-grid" id="mind-identity"></dl><div id="mind-commands"></div><div id="mind-start"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-start-again" hidden><span>Try starting it again</span></button></div>
             </section>
         </aside>
     </div>
@@ -173,8 +173,6 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
             form.elements.proxy_key.value = "";
-            document.getElementById("mind-proxy-key-warning-text").textContent = data.proxy_key_warning || "";
-            document.getElementById("mind-proxy-key-warning").hidden = !data.proxy_key_warning;
             document.getElementById("mind-result-title").textContent = data.registration.name + " is made";
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
             // Making a Mind is all or nothing, so these are only ever steps
