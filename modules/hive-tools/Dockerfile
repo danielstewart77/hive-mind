@@ -48,11 +48,11 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright
 
-# The hive's data-access layer, from a build context of its own rather than
-# from git: the repository is private, so installing it by URL would need a
-# credential at build time. `--no-deps` is deliberate - its dependencies are
-# declared in requirements.txt above, where this image's resolver can see
-# them beside everything else.
+# The hive's data-access layer, from a build context of its own: hive-mind's
+# modules/hive-data, beside this folder in the same checkout (docker-compose.yml
+# names it). No git install and no credential in the build. `--no-deps` is
+# deliberate - its dependencies are declared in requirements.txt above, where
+# this image's resolver can see them beside everything else.
 COPY --from=hive_data . /tmp/hive-data
 RUN pip install --no-cache-dir --no-deps /tmp/hive-data && rm -rf /tmp/hive-data
 

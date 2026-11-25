@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from capability_install import has_checkout
+from capability_install import has_checkout, has_hive_tools_source
 
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 EDGE_MINDS_DIR = Path("/minds_edge")
@@ -118,18 +118,16 @@ def build_mind_registry(broker_minds: list[dict]) -> list[dict]:
 
 
 def hive_tools_status() -> dict[str, Any]:
-    """Whether the hive-tools repo is present on this host.
+    """Whether hive-mind's copy of the tools source is readable here.
 
-    Presence means a git checkout, not merely a non-empty directory: compose
-    auto-creates both the mount root and a `.env` placeholder inside it on a
-    host that never cloned, so counting entries would report a bare mount as
-    installed and hide the Capability Nodes clone action that fixes it.
+    Presence means the service's own files are there, not merely a non-empty
+    directory: a mount of a path that does not exist is an empty folder.
     """
     if not HIVE_TOOLS_REPO_DIR.is_dir():
         return {"present": False, "path": str(HIVE_TOOLS_REPO_DIR), "capabilities": []}
-    # One predicate for "installed" across the console: a bare .git left by an
-    # interrupted clone is not a checkout. See capability_install.has_checkout.
-    present = has_checkout(HIVE_TOOLS_REPO_DIR)
+    # The tools source is plain files of hive-mind (modules/hive-tools), so
+    # presence is the source being readable, not a `.git`.
+    present = has_hive_tools_source(HIVE_TOOLS_REPO_DIR)
     tools_dir = HIVE_TOOLS_REPO_DIR / "tools"
     capabilities = []
     if tools_dir.is_dir():

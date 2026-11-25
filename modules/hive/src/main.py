@@ -83,7 +83,6 @@ from auth import (
 from capability_install import (
     HIVE_TOOLS_PLACEMENT_NOTE,
     InstallInProgress,
-    clone_hive_tools,
     clone_inference_proxy,
     hive_tools_install_status,
     inference_proxy_status,
@@ -2588,21 +2587,6 @@ async def api_inference_proxy_install(user: dict = Depends(require_auth)):
     del user
     try:
         result = await asyncio.to_thread(clone_inference_proxy)
-    except InstallInProgress as exc:
-        # Transient: the operator double-clicked, or has two tabs open.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return result
-
-
-@app.post("/api/capability-nodes/hive-tools/install")
-async def api_hive_tools_install(user: dict = Depends(require_auth)):
-    del user
-    try:
-        result = await asyncio.to_thread(clone_hive_tools)
     except InstallInProgress as exc:
         # Transient: the operator double-clicked, or has two tabs open.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -5293,18 +5277,14 @@ async def _capability_node_specs() -> list[dict]:
             "health_path": "/health",
             "auto_discover": True,
             "configured": bool(os.getenv("HIVE_TOOLS_URL")),
+            # Not installed from here: the source is hive-mind's own
+            # modules/hive-tools, read-only, and nothing is fetched.
             "installable": True,
+            "bundled": True,
             "installed": tools_installation["installed"],
-            "installing": tools_installation["installing"],
+            "installing": False,
             "repository": tools_installation["repository"],
             "path": tools_installation["path"],
-            # Recreate, not restart: both the bind mount source and this
-            # container's own HIVE_TOOLS_DIR are fixed when the container is
-            # created, so `docker restart` re-reads neither.
-            "path_hint": (
-                "Set HIVE_TOOLS_DIR in the Hive's .env, then recreate the Hive "
-                "container (docker compose up -d) to clone somewhere else."
-            ),
             "placement_note": HIVE_TOOLS_PLACEMENT_NOTE,
             "configure_url": _hive_tools_console_url(),
             "configure_label": "Configure",

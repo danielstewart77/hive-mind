@@ -4,8 +4,8 @@ As built: build args UID, GID, DOCKER_GID; CPU-safe (no NVIDIA runtime).
 Port 9421, GET /health. Required env HIVE_DATABASE_URL (tools schema),
 HT_SECRET_KEY, HT_ADMIN_PASSWORD; INFERENCE_PROXY_URL and INFERENCE_PROXY_KEY
 (its model calls go through the proxy, never Ollama — story 10.16.1) and
-HIVE_TOOLS_DEFAULT_MODEL naming a chat model the proxy serves. Build context the repo plus the extra context
-`hive_data`. Every mount optional. A token is minted inside the container
+HIVE_TOOLS_DEFAULT_MODEL naming a chat model the proxy serves. Build context its own folder, modules/hive-tools of hive-mind, plus the
+extra context `hive_data` (modules/hive-data). Every mount optional. A token is minted inside the container
 with `auth_api.generate_token(name)`, which adds a new token on every call —
 so the installer mints once and keeps what it got.
 """

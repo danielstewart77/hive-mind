@@ -10,7 +10,7 @@ Each mind is its own named identity — self-chosen, not scripted — running Cl
 
 **Memory is a first-class system, not an afterthought.** Two things drove this. The first is practical: when you say "remember this" or "do you remember," there needs to be a real mechanism behind it — not a chat log search. Every piece of information is classified by data type, stored as a semantic embedding, and retrieved by meaning, not recency. The second runs deeper. A mind's personality is designed to grow organically over time, and a static file can't do that. Semantic memories and knowledge graph relationships are the infrastructure a person would actually need to develop a continuous identity — not simulate one.
 
-**Sensitive capabilities deliberately isolated.** Email, calendar, Docker Compose, and other write/destructive operations live in the external [`hive-tools`](https://github.com/danielstewart77/hive-mind-tools) service — a separate FastAPI process with bearer auth and a HITL approval gate. Minds reach it over HTTP; they cannot perform these operations in-process. A compromised mind can ask, but can't execute without explicit human approval routed through Telegram.
+**Sensitive capabilities deliberately isolated.** Email, calendar, Docker Compose, and other write/destructive operations live in the external [`hive-tools`](modules/hive-tools) service (its own container, built from this repository) — a separate FastAPI process with bearer auth and a HITL approval gate. Minds reach it over HTTP; they cannot perform these operations in-process. A compromised mind can ask, but can't execute without explicit human approval routed through Telegram.
 
 ## Architecture
 
@@ -50,12 +50,11 @@ All services run on a shared Docker network (`hivemind`). The gateway (`hive-com
 ## Modules (`modules/`)
 
 Every repository hive-mind depends on is a module in its manifest,
-[`.gitmodules`](.gitmodules): hive-tools, hive (the console),
-terminal, inference-proxy, hive-harness-dsh and auth-service
+[`.gitmodules`](.gitmodules): inference-proxy, hive-harness-dsh and auth-service
 (where people sign in to the hive, with local accounts or third-party
-sign-in; every hive runs it), each under `modules/<name>`. hive-data (the shared data package) and hive-surfaces (the chat
-surfaces) are not modules any more: they are ordinary files of this repository at
-`modules/hive-data` and `modules/hive-surfaces`, versioned by tags `hive-data-vX.Y.Z` and `hive-surfaces-vX.Y.Z` (see
+sign-in; every hive runs it), each under `modules/<name>`. hive-data (the shared data package), hive-surfaces (the chat
+surfaces), hive (the console), terminal and hive-tools are not modules any more: they are ordinary files of this repository at
+`modules/hive-data`, `modules/hive-surfaces`, `modules/hive`, `modules/terminal` and `modules/hive-tools`; the first two are versioned by tags `hive-data-vX.Y.Z` and `hive-surfaces-vX.Y.Z` (see
 [docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Clone hive-mind and bring them all in at the latest:
 
 ```bash

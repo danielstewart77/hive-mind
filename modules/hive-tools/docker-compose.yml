@@ -1,14 +1,31 @@
+# This folder is modules/hive-tools of hive-mind. The project name is pinned:
+# it used to come from the folder's name, and the folder is now one of
+# hive-mind's modules, so any other name would be a second project beside the
+# running one, with its own (empty) volumes. Service, container, port and the
+# volume names are unchanged. Brought up on its own, never with another
+# service: `deploy.sh` here builds and starts it and nothing else.
+#
+# Where the tools keep what is secret or theirs: HIVE_TOOLS_STATE_DIR, default
+# ~/.config/hive-tools, holding `.env`, `credentials/` and `data/`. It is
+# outside hive-mind's checkout on purpose. Minds and bots mount the checkout
+# (or the dev root it sits in), so anything inside it is theirs to read; the
+# tools' sign-in secrets, Google tokens and token store must not be. A
+# HIVE_DATA_DIR left in an old .env is ignored.
+name: hive-tools
+
 services:
   hive-tools:
     build:
-      context: .
+      # HIVE_TOOLS_BUILD_CONTEXT / HIVE_DATA_BUILD_CONTEXT: set by deploy.sh to
+      # an export of the committed tree, so the image is built from a commit
+      # and not from files a mind that mounts the checkout could have edited.
+      context: ${HIVE_TOOLS_BUILD_CONTEXT:-.}
       additional_contexts:
-        # The access layer lives in its own repository and is private, so it
-        # arrives as a second build context rather than as a git install
-        # needing a credential in the build.
-        hive_data: ${HIVE_DATA_DIR:?set HIVE_DATA_DIR in .env}
+        # The access layer is hive-mind's own modules/hive-data, a second
+        # build context beside this folder in the same checkout.
+        hive_data: ${HIVE_DATA_BUILD_CONTEXT:-../hive-data}
     container_name: hive-tools
-    env_file: .env
+    env_file: ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/.env
     # Shutdown waits for approved calls still replaying, then records the
     # rest as cut off and tells the asking mind. Docker's default 10s would
     # SIGKILL it partway through that.
@@ -16,9 +33,11 @@ services:
     ports:
       - "9421:9421"
     volumes:
-      - ./credentials:/app/credentials:ro
+      - ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/credentials:/app/credentials:ro
+      # The one hive service that holds the host's Docker socket (root-
+      # equivalent on the host). No other compose file in hive-mind may.
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./data:/app/data
+      - ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/data:/app/data
       - ${HOST_DEV_DIR:?set HOST_DEV_DIR in .env}:${HOST_DEV_DIR}:ro
       # The training pipeline writes curation verdicts back onto
       # training_turns.db, appends to the run ledger, and drops exported
@@ -124,3 +143,5 @@ networks:
 
 volumes:
   sms-gateway-db-data:
+    # Pinned to what the folder-name project already made.
+    name: hive-tools_sms-gateway-db-data

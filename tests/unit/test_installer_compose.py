@@ -213,6 +213,7 @@ def test_services_build_from_hive_minds_modules_and_minds_cannot_read_them(tmp_p
 
     builds = {name: svc["build"]["context"] for name, svc in services.items() if "build" in svc}
     assert builds["hive-tools"] == str(modules / "hive-tools")
+    assert services["hive-tools"]["build"]["additional_contexts"]["hive_data"] == str(modules / "hive-data")
     assert builds[compose.CONSOLE] == str(modules / "hive")
     assert builds[compose.TERMINAL] == str(modules / "terminal")
     assert builds["inference-proxy"] == str(modules / "inference-proxy")

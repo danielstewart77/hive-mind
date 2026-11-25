@@ -4,7 +4,9 @@
 
 `hive-tools` is a separate FastAPI service (`http://hive-tools:9421`) that provides authenticated REST access to external integrations: Gmail, Google Calendar, Docker compose control, browser automation, and HITL approval UI.
 
-It runs outside the Hive Mind container stack and is not mounted into any mind container. Access is via HTTP only.
+Its source is `modules/hive-tools` of this repository, but it still runs as its own container (own image, own compose project `hive-tools`, built and restarted alone with `modules/hive-tools/deploy.sh`). It is not mounted into any mind container: minds and bots that mount the checkout see `modules/` hidden by a tmpfs, and the tools' `.env`, `credentials/` and `data/` live outside the checkout (`~/.config/hive-tools`). Access is via HTTP only.
+
+The tools service is the only hive service that mounts the host's Docker socket. A test over every tracked compose file and the installer's rendered stack holds that line.
 
 ## Why it exists
 

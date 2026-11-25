@@ -229,3 +229,4 @@ minds/*/session_token
 !modules/terminal/docker-compose.yml
 !modules/hive/plans/
 !modules/terminal/plans/
+!modules/hive-tools/docker-compose.yml

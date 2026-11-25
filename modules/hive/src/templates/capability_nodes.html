@@ -40,6 +40,14 @@ window.addEventListener("DOMContentLoaded", function () {
         // the in-flight install, so every tab holds the button shut for the
         // duration rather than the one that clicked it losing its progress
         // line and the others offering a click that can only earn a 503.
+        // Part of hive-mind: nothing to clone. Show where the source is read
+        // from, and say so plainly when the mount is not there.
+        if (node.bundled) {
+            const where = node.installed ? 'Source: ' + h.escapeHtml(node.repository) + ' (' + h.escapeHtml(node.path) + ')' : 'The source in hive-mind is not visible to the console at ' + h.escapeHtml(node.path) + '. Mount modules/hive-tools there, read-only.';
+            const open = node.installed && node.configure_url ? '<a class="button button-quiet" href="' + h.escapeHtml(node.configure_url) + '" target="_blank" rel="noopener">' + h.escapeHtml(node.configure_label || "Configure") + '</a>' : '';
+            const reach = node.configure_url ? '' : '<small>' + h.escapeHtml(node.configure_hint || "") + '</small>';
+            return '<div class="capability-install">' + open + '<small>' + where + '</small>' + reach + placement + '</div>';
+        }
         if (node.installing) return '<div class="capability-install"><button class="button" type="button" disabled>Clone source</button><small data-capability-install-status>Cloning source…</small>' + placement + '</div>';
         if (node.installed) {
             // No usable url means the operator has not told the Hive where the

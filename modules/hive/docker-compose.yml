@@ -68,13 +68,12 @@ services:
       # added to MIND_MOUNT_ROOTS needs its own mount here and a recreate.
       - ${HOST_DEV_DIR:-/home/daniel/Storage/Dev}:/dev_roots:rw
       # (see the HOST_UID/HOST_GID note in the environment block above)
-      # Hive-tools repo. Read-write because the Capability Nodes clone action
-      # installs into it; a missing host path is auto-created empty by
-      # compose, which doubles as the "not cloned yet" signal. The default is
-      # relative to this file so a fresh checkout of the hive resolves it on
-      # any OS — set HIVE_TOOLS_DIR in .env to put the repo elsewhere, then
-      # recreate (up -d): this source is fixed when the container is created.
-      - ${HIVE_TOOLS_DIR:-./capabilities/hive-tools}:/hive_tools_repo:rw
+      # hive-mind's own copy of the tools service (modules/hive-tools), read
+      # only: the console shows what it offers and never writes it. Relative
+      # to this file, so a fresh checkout resolves it on any OS. A
+      # HIVE_TOOLS_DIR left in .env is ignored. Tools' .env is not mounted
+      # here: it lives outside the checkout (docker-compose.yml of the tools).
+      - ../hive-tools:/hive_tools_repo:ro
       # Hive-init installer assets, read-only, served from the downloads tab.
       - ${HIVE_INIT_DIR:-/home/daniel/Storage/Dev/hive-init}:/hive_init:ro
       # Fixed destination used by the Capability Nodes one-click clone action.
@@ -87,7 +86,7 @@ services:
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/.env:/env_hive_mind/.env:rw
       - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/.env:/env_edge/skippy/.env:rw
       - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/.env:/env_edge/mordecai/.env:rw
-      - ${HIVE_TOOLS_DIR:-./capabilities/hive-tools}/.env:/env_hive_tools/.env:rw
+      - ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/.env:/env_hive_tools/.env:rw
       # The GitHub PAT's two live homes, for the same tab's paste-to-set flow.
       - ${GIT_CREDENTIALS_FILE:-/home/daniel/.git-credentials}:/gh/.git-credentials:rw
       - ${GH_HOSTS_FILE:-/home/daniel/.config/gh/hosts.yml}:/gh/hosts.yml:rw

@@ -209,11 +209,11 @@ def _mirrored_hive(tmp_path, monkeypatch) -> Remotes:
     """A hive-mind whose manifest names GitHub-style URLs that do not resolve
     here, served from a local mirror the installer is pointed at."""
     remotes = Remotes(tmp_path)
-    remotes.create("hive-tools", "master")
+    remotes.create("inference-proxy", "main")
     remotes.create("hive-data", "main")
-    remotes.superproject({"hive-tools": "master", "hive-data": "main"}, with_script=True)
+    remotes.superproject({"inference-proxy": "main", "hive-data": "main"}, with_script=True)
     work = remotes.scratch / "hive-mind"
-    for name in ("hive-tools", "hive-data"):
+    for name in ("inference-proxy", "hive-data"):
         git("config", "-f", ".gitmodules", f"submodule.modules/{name}.url",
             f"https://upstream.invalid/{name}.git", cwd=work)
     git("commit", "-q", "-am", "manifest names upstream", cwd=work)
@@ -227,15 +227,15 @@ def _mirrored_hive(tmp_path, monkeypatch) -> Remotes:
 
 def test_the_installer_clones_hive_mind_with_every_module_at_the_latest(tmp_path, monkeypatch):
     remotes = _mirrored_hive(tmp_path, monkeypatch)
-    newest = remotes.push_new("hive-tools", "2")
+    newest = remotes.push_new("inference-proxy", "2")
     inst = installer_at(tmp_path / "install", answers())
 
     steps.clone_repos(steps.Ctx(inst, Shell(inst.home.log)))
 
-    tools = inst.home.root / "repos" / "hive-mind" / "modules" / "hive-tools"
-    assert inst.home.repo("hive-tools") == tools
+    tools = inst.home.root / "repos" / "hive-mind" / "modules" / "inference-proxy"
+    assert inst.home.repo("inference-proxy") == tools
     assert git("rev-parse", "HEAD", cwd=tools) == newest
-    assert git("branch", "--show-current", cwd=tools) == "master"
+    assert git("branch", "--show-current", cwd=tools) == "main"
     assert (inst.home.repo("hive-data") / "version").read_text() == "1"
 
 
@@ -244,10 +244,10 @@ def test_the_install_stops_when_a_module_cannot_be_brought_up(tmp_path, monkeypa
     inst = installer_at(tmp_path / "install", answers())
     ctx = steps.Ctx(inst, Shell(inst.home.log))
     steps.clone_repos(ctx)
-    tools = inst.home.repo("hive-tools")
+    tools = inst.home.repo("inference-proxy")
     (tools / "version").write_text("local")
     git("commit", "-q", "-am", "local only", cwd=tools)
-    remotes.push_new("hive-tools", "upstream")
+    remotes.push_new("inference-proxy", "upstream")
 
-    with pytest.raises(steps.StepFailed, match="modules/hive-tools"):
+    with pytest.raises(steps.StepFailed, match="modules/inference-proxy"):
         steps.clone_repos(ctx)

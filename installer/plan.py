@@ -63,7 +63,7 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
           modes=(NONE, HERE, EXISTING)),
     # Its model calls go through the proxy, like every other service's.
     Piece("tools", "Tools service", needs=("postgres", "proxy"),
-          repos=("hive-tools",)),
+          repos=("hive-mind",)),
     # A bot is claimed by its person on the console, which mints the pass
     # phrase it is claimed with; without the console nobody can claim it.
     Piece("telegram", "Telegram bot", needs=("comms", "console", "mind"),

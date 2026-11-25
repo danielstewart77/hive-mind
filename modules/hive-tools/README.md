@@ -128,6 +128,24 @@ phones.
   equivalent access to the host daemon. Run this service only on a host you
   trust it with, and keep `9421` off the public internet.
 
+## Deploying from hive-mind
+
+This folder is `modules/hive-tools` of hive-mind, a tracked directory with its
+history. It is built and started on its own, from the one checkout, and
+nothing else is rebuilt:
+
+```bash
+modules/hive-tools/deploy.sh          # build from the committed tree, recreate hive-tools
+```
+
+The image is built from an export of the committed tree (this folder and
+`modules/hive-data`), never from working files that a mind with the checkout
+mounted could have edited. Its `.env`, `credentials/` and `data/` live in
+`~/.config/hive-tools` (`HIVE_TOOLS_STATE_DIR`), outside the checkout. The
+folder must stay named `hive-tools`: `tools/docker_ops.py` refuses to compose
+down a project whose folder has that name. This is the only hive service that
+mounts the Docker socket.
+
 ## Development
 
 ```bash
