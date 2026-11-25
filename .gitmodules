@@ -8,16 +8,6 @@
 	url = https://github.com/danielstewart77/hive-tools.git
 	branch = master
 	ignore = all
-[submodule "modules/hive"]
-	path = modules/hive
-	url = https://github.com/danielstewart77/hive.git
-	branch = main
-	ignore = all
-[submodule "modules/terminal"]
-	path = modules/terminal
-	url = https://github.com/danielstewart77/terminal.git
-	branch = main
-	ignore = all
 [submodule "modules/inference-proxy"]
 	path = modules/inference-proxy
 	url = https://github.com/danielstewart77/inference-proxy.git
