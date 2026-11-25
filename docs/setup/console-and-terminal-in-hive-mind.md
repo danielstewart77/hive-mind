@@ -35,3 +35,7 @@ delete them from each site's `.env`.
 7. An old clone moved aside by the installer (`modules/.hive.moved-aside-*`)
    still holds the untracked `.env` and `data/`; carry them over before
    deleting it.
+8. The installer's tools service mounts the whole install folder (it runs
+   `docker compose` against it, with the docker socket, which is already
+   root on the host), so it is the one mount of the checkout without the
+   modules mask.
