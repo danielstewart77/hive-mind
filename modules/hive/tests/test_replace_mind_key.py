@@ -43,8 +43,17 @@ class ToolsStandIn:
     def __init__(self):
         self.values = {}
         self.fail = False
+        self.down = False
+        self.revoked = []
 
     def __call__(self, request):
+        if self.down:
+            raise httpx.ConnectError("the tools are down", request=request)
+        if request.url.path.startswith("/credentials/") and request.method == "DELETE":
+            holder = request.url.path.rsplit("/", 1)[-1]
+            self.values.pop(holder, None)
+            self.revoked.append(holder)
+            return httpx.Response(200, json={"holder": holder, "revoked": True})
         if request.url.path == "/credentials" and request.method == "GET":
             return httpx.Response(200, json=[{"holder": h, "role": "mind", "live": True}
                                              for h in self.values])

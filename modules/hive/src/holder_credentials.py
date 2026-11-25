@@ -1352,6 +1352,64 @@ async def recover_replacements() -> list[dict[str, Any]]:
     return handled
 
 
+async def cut_off_mind(name: str) -> dict[str, Any]:
+    """Refuse a mind's key on the gateway, the memory store and the tools.
+
+    One action, each service on its own: a service that cannot be reached or
+    refuses does not stop the others being cut off, and the answer says which
+    one still accepts the key. Each revocation keeps the holder's row marked
+    revoked (nothing is deleted, the key stays burned for every other mind)
+    and lands on the service's next request, so nothing is restarted. The
+    stored key lines stay, so the page can still say where the mind reads,
+    and pasting a key for the mind again brings it back. Revoking a holder
+    already cut off is a success. The proxy is never called here: cutting off
+    inference belongs to whoever runs the proxy and is its own step.
+
+    `ok` is true only when every service answered that the holder is cut off.
+    """
+    holder = name.strip().lower()
+    results: list[dict[str, Any]] = []
+    async with _ROTATION_LOCK:
+        for service in _one_key_services():
+            entry: dict[str, Any] = {"service": service.key, "label": service.label}
+            if service.key == "tools" and holder in TOOLS_RESERVED_HOLDERS:
+                entry.update(status="not held", detail="the tools keep no key under this name")
+                results.append(entry)
+                continue
+            try:
+                response = await _request(service, "DELETE", f"/credentials/{holder}")
+            except MintRefused as exc:
+                entry.update(status="unreachable", detail=str(exc)[:300])
+            else:
+                if response.status_code >= 400:
+                    entry.update(
+                        status="still accepting",
+                        detail=f"{service.label} answered {response.status_code} to the cut-off")
+                else:
+                    entry.update(status="cut off")
+            results.append(entry)
+    return {
+        "mind": holder,
+        "ok": all(r["status"] in ("cut off", "not held") for r in results),
+        "services": results,
+    }
+
+
+async def inference_cut_off_step(name: str) -> dict[str, Any]:
+    """Where this mind's inference is cut off, for the page to say.
+
+    `offered` is true when the mind runs on this hive's proxy and this console
+    holds the proxy's key-management credential, so the page may offer the
+    proxy revoke as its own button; otherwise `where` names who to ask."""
+    import provider_data
+    connection = await provider_data.connection_for_mind(name.strip().lower())
+    if connection and connection["id"] != "hive-proxy":
+        return {"offered": False, "where": str(connection.get("name") or "its provider")}
+    if not SERVICES["proxy"].admin_token():
+        return {"offered": False, "where": "whoever runs the inference proxy"}
+    return {"offered": True, "where": "the inference proxy"}
+
+
 async def _service_url(service: Service) -> str:
     if service.key == "proxy":
         import provider_data

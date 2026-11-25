@@ -521,6 +521,10 @@ TABLE.add(
     "POST /api/settings/holders/{service}/{holder}/check",
     "POST /api/settings/holders/{service}/{holder}/rotate",
     "POST /api/settings/holders/{service}/{holder}/revoke",
+    # Cutting a mind off from the hive: the same power as revoking each of
+    # its holders by hand, in one action.
+    "GET /api/minds/{name}/cut-off",
+    "POST /api/minds/{name}/cut-off",
     "GET /downloads/{filename}",
     "POST /api/voices/sample",
     # users and groups
