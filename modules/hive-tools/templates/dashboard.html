@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+{% block title %}HiveTools — Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:12px; margin-bottom:28px;">
+
+    <a href="/tools" style="text-decoration:none;">
+        <div class="card" style="padding:20px; cursor:pointer; transition:box-shadow 0.15s;" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,0.12)'" onmouseout="this.style.boxShadow=''">
+            <div style="font-size:24px; margin-bottom:8px;">&#128295;</div>
+            <div style="font-weight:600; color:#1e1e2e;">Tools</div>
+            <div style="font-size:12px; color:#6c7086; margin-top:4px;">HITL settings per tool</div>
+        </div>
+    </a>
+
+    <a href="/tokens" style="text-decoration:none;">
+        <div class="card" style="padding:20px; cursor:pointer; transition:box-shadow 0.15s;" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,0.12)'" onmouseout="this.style.boxShadow=''">
+            <div style="font-size:24px; margin-bottom:8px;">&#128272;</div>
+            <div style="font-weight:600; color:#1e1e2e;">Tokens</div>
+            <div style="font-size:12px; color:#6c7086; margin-top:4px;">API token management</div>
+        </div>
+    </a>
+
+    <a href="/hitl-ui" style="text-decoration:none;">
+        <div class="card" style="padding:20px; cursor:pointer; transition:box-shadow 0.15s;" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,0.12)'" onmouseout="this.style.boxShadow=''">
+            <div style="font-size:24px; margin-bottom:8px;">&#9201;</div>
+            <div style="font-weight:600; color:#1e1e2e;">Approvals</div>
+            <div style="font-size:12px; color:#6c7086; margin-top:4px;">Pending HITL requests</div>
+        </div>
+    </a>
+
+</div>
+<p style="color:#6c7086; font-size:13px;">Signed in as <strong>{{ user.username }}</strong></p>
+{% endblock %}

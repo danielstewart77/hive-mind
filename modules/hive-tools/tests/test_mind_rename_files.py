@@ -1,0 +1,147 @@
+"""P1/P2: physical rename and recovery preserve opaque Mind state."""
+
+import pytest
+import json
+import subprocess
+import yaml
+
+
+@pytest.fixture
+def project(tmp_path):
+    root = tmp_path / 'hive'
+    folder = root / 'minds' / 'original'
+    (folder / 'container').mkdir(parents=True)
+    (folder / 'data').mkdir()
+    (folder / 'data' / 'conversation.json').write_bytes(b'original is user-authored content\x00')
+    runtime = {'name': 'original', 'mind_id': 'uuid-kept', 'gateway_url': 'http://original:8420',
+               'default_model': 'model-kept', 'rotation_threshold_percent': 82, 'runtime_config_dir': '/usr/src/app/minds/original/.dsh'}
+    (folder / 'runtime.yaml').write_text(yaml.safe_dump(runtime))
+    compose = {'services': {'original': {'image': 'hive/mind:original', 'container_name': 'hive-mind-original',
+        'environment': ['MIND_NAME=original', 'DSH_HOME=/usr/src/app/minds/original/.dsh', 'MIND_PROXY_KEY=${PROXY_TOKEN_ORIGINAL}'],
+        'volumes': ['${HOST_PROJECT_DIR}/minds/original:/usr/src/app/minds/original'], 'networks': ['hivemind']}}}
+    (folder / 'container' / 'compose.yaml').write_text(yaml.safe_dump(compose))
+    (root / 'docker-compose.yml').write_text('include:\n  - minds/original/container/compose.yaml\nservices: {}\nnetworks:\n  hivemind:\n    external: true\n')
+    (root / '.env').write_text('HOST_PROJECT_DIR=' + str(root) + '\nPROXY_TOKEN_ORIGINAL=unchanged-key\nUNRELATED=keep\n')
+    return root
+
+
+def test_physical_rename_preserves_conversation_settings_and_internal_paths(project):
+    from tools import mind_rename
+    operation = mind_rename.reserve(project, 'op-a', 'uuid-kept', 'original', 'renamed', 'hive-site')
+    mind_rename.rename_files(project, operation)
+    folder = project / 'minds' / 'renamed'
+    assert not (project / 'minds' / 'original').exists()
+    assert (folder / 'data' / 'conversation.json').read_bytes() == b'original is user-authored content\x00'
+    runtime = yaml.safe_load((folder / 'runtime.yaml').read_text())
+    assert runtime == {'name': 'renamed', 'mind_id': 'uuid-kept', 'gateway_url': 'http://renamed:8420',
+        'default_model': 'model-kept', 'rotation_threshold_percent': 82, 'runtime_config_dir': '/usr/src/app/minds/original/.dsh'}
+    compose = yaml.safe_load((folder / 'container' / 'compose.yaml').read_text())
+    service = compose['services']['renamed']
+    assert service['container_name'] == 'hive-mind-renamed'
+    assert '${HOST_PROJECT_DIR}/minds/renamed:/usr/src/app/minds/original' in service['volumes']
+    assert '${HOST_PROJECT_DIR}/minds/renamed:/usr/src/app/minds/renamed' in service['volumes']
+    assert 'DSH_HOME=/usr/src/app/minds/original/.dsh' in service['environment']
+    assert 'MIND_PROXY_KEY=${PROXY_TOKEN_RENAMED}' in service['environment']
+    assert 'PROXY_TOKEN_RENAMED=unchanged-key' in (project / '.env').read_text()
+    # The suite blocks engine mutations. This CLI call only parses this
+    # disposable configuration, and the test container has no Docker socket.
+    process = subprocess.Popen(['docker', 'compose', '-f', str(project / 'docker-compose.yml'), 'config', '--format', 'json'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    output, errors = process.communicate(timeout=20)
+    assert process.returncode == 0, errors
+    consumed = json.loads(output)['services']['renamed']
+    assert consumed['environment']['MIND_PROXY_KEY'] == 'unchanged-key'
+    assert {volume['target'] for volume in consumed['volumes']} == {'/usr/src/app/minds/original', '/usr/src/app/minds/renamed'}
+    # Another service's edit while the operation is pending must survive undo.
+    with (project / '.env').open('a') as stream:
+        stream.write('ADDED_LATER=keep-too\n')
+    mind_rename.rollback_files(project, operation)
+    assert (project / 'minds' / 'original' / 'data' / 'conversation.json').read_bytes() == b'original is user-authored content\x00'
+    assert not folder.exists()
+    assert 'PROXY_TOKEN_ORIGINAL=unchanged-key' in (project / '.env').read_text()
+    assert 'ADDED_LATER=keep-too' in (project / '.env').read_text()
+
+
+def test_destination_collision_changes_nothing(project):
+    from tools import mind_rename
+    (project / 'minds' / 'renamed').mkdir()
+    before = (project / '.env').read_bytes()
+    with pytest.raises(ValueError, match='exists'):
+        mind_rename.reserve(project, 'op-a', 'uuid-kept', 'original', 'renamed', 'hive-site')
+    assert (project / '.env').read_bytes() == before
+    assert yaml.safe_load((project / 'minds' / 'original' / 'runtime.yaml').read_text())['name'] == 'original'
+
+
+def test_failed_container_start_restores_files_and_restarts_exact_original(project, monkeypatch):
+    from tools import mind_rename
+    operation = mind_rename.reserve(project, 'op-a', 'uuid-kept', 'original', 'renamed', 'hive-site')
+    operation['stage'] = 'authorized'
+    mind_rename.save(project, operation)
+    engine = {'original_running': True}
+    before_runtime = (project / 'minds/original/runtime.yaml').read_bytes()
+    def docker_boundary(command, **kwargs):
+        rc, stdout = 0, ''
+        if command[1] == 'ps':
+            stdout = 'hive-mind-original\n'
+        elif command[1:3] == ['inspect', 'hive-mind-original']:
+            stdout = json.dumps([{'Config': {'Labels': {'com.docker.compose.service': 'original'}}, 'Image': 'sha256:exact-original', 'State': {'Running': engine['original_running']}}])
+        elif command[1] == 'stop':
+            engine['original_running'] = False
+        elif 'up' in command:
+            rc = 1  # external Docker cannot start the new container
+        elif command[1:3] == ['inspect', 'hive-mind-renamed']:
+            rc = 1  # no new container exists
+        elif command[1] == 'start':
+            engine['original_running'] = True
+        return subprocess.CompletedProcess(command, rc, stdout, '')
+    monkeypatch.setattr(subprocess, 'run', docker_boundary)
+    with pytest.raises(ValueError, match='container operation failed'):
+        mind_rename.transition(project, operation)
+    assert engine['original_running']
+    assert (project / 'minds/original/runtime.yaml').read_bytes() == before_runtime
+    assert not (project / 'minds/renamed').exists()
+    assert mind_rename.load(project, 'op-a')['stage'] == 'rolled_back'
+
+
+def test_rename_waits_for_approval_then_replays_the_selected_project_and_requires_idle_gate(project, monkeypatch):
+    """P2: real API/replay cannot bypass approval or the safe-turn boundary."""
+    import httpx
+    import hitl
+    from auth_api import generate_approver_token, generate_token
+    from fastapi.testclient import TestClient
+    from server import create_app
+    from tests.scratch import run
+    from tools import mind_rename
+
+    monkeypatch.setenv('HIVE_RENAME_PROJECT_DIR', str(project))
+    # Only the external notification transport is substituted. Replay enters
+    # the actual authorization route and writes the real filesystem journal.
+    monkeypatch.setattr(hitl, '_COMMS_TRANSPORT', httpx.MockTransport(
+        lambda request: httpx.Response(200, json=[])))
+    app = create_app()
+    monkeypatch.setattr(hitl, '_REPLAY_TRANSPORT', httpx.ASGITransport(app=app))
+    with TestClient(app) as client:
+        caller = {'Authorization': 'Bearer ' + run(generate_token('ada'))}
+        approved_by = {'Authorization': 'Bearer ' + run(generate_approver_token())}
+        params = {'path': str(project)}
+        reserved = client.post('/docker/mind-renames/reserve', params=params,
+            headers=caller, json={'operation_id': 'op-approved', 'mind_id': 'uuid-kept',
+                                 'old': 'original', 'new': 'renamed'})
+        assert reserved.status_code == 200
+        asked = client.post('/docker/mind-renames/op-approved/authorize',
+                            params=params, headers=caller)
+        assert asked.status_code == 202
+        assert mind_rename.load(project, 'op-approved')['stage'] == 'reserved'
+        request_id = asked.json()['hitl_request_id']
+        decided = client.post(f'/hitl/{request_id}/respond',
+                              json={'action': 'approve'}, headers=approved_by)
+        assert decided.status_code == 200
+        run(hitl.settle_replays(timeout=10))
+        outcome = client.get(f'/hitl/{request_id}', headers=caller).json()['outcome']
+        assert outcome['success'], outcome
+        assert mind_rename.load(project, 'op-approved')['stage'] == 'authorized'
+        blocked = client.post('/docker/mind-renames/op-approved/continue',
+                              params=params, headers=caller)
+        assert blocked.status_code == 409
+        assert mind_rename.load(project, 'op-approved')['stage'] == 'authorized'
+        assert (project / 'minds/original/data/conversation.json').read_bytes() == b'original is user-authored content\x00'
+        assert not (project / 'minds/renamed').exists()

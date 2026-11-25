@@ -1,0 +1,13 @@
+# Apply beside docker-compose.yml on a host that offers Mind rename.
+# The existing Dev-root mount stays read-only; only managed Mind resources
+# and operation journals need writes. Precreate updates/mind-renames owned
+# by the hive-tools UID, with mode 700.
+services:
+  hive-tools:
+    environment:
+      HIVE_RENAME_PROJECT_DIR: ${HIVE_RENAME_PROJECT_DIR:?set the host Hive stack directory}
+    volumes:
+      - ${HIVE_RENAME_PROJECT_DIR}/minds:${HIVE_RENAME_PROJECT_DIR}/minds:rw
+      - ${HIVE_RENAME_PROJECT_DIR}/docker-compose.yml:${HIVE_RENAME_PROJECT_DIR}/docker-compose.yml:rw
+      - ${HIVE_RENAME_PROJECT_DIR}/.env:${HIVE_RENAME_PROJECT_DIR}/.env:rw
+      - ${HIVE_RENAME_PROJECT_DIR}/updates/mind-renames:${HIVE_RENAME_PROJECT_DIR}/updates/mind-renames:rw

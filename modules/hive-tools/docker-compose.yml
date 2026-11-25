@@ -1,0 +1,126 @@
+services:
+  hive-tools:
+    build:
+      context: .
+      additional_contexts:
+        # The access layer lives in its own repository and is private, so it
+        # arrives as a second build context rather than as a git install
+        # needing a credential in the build.
+        hive_data: ${HIVE_DATA_DIR:?set HIVE_DATA_DIR in .env}
+    container_name: hive-tools
+    env_file: .env
+    # Shutdown waits for approved calls still replaying, then records the
+    # rest as cut off and tells the asking mind. Docker's default 10s would
+    # SIGKILL it partway through that.
+    stop_grace_period: 30s
+    ports:
+      - "9421:9421"
+    volumes:
+      - ./credentials:/app/credentials:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - ${HOST_DEV_DIR:?set HOST_DEV_DIR in .env}:${HOST_DEV_DIR}:ro
+      # The training pipeline writes curation verdicts back onto
+      # training_turns.db, appends to the run ledger, and drops exported
+      # JSONL beside them. Same host path as the read-only mount above,
+      # re-mounted read-write and scoped to that one directory so the
+      # blast radius of "hive-tools can write into hive_mind" stays legible.
+      - ${HIVE_MIND_DIR:?set HIVE_MIND_DIR in .env}/data:${HIVE_MIND_DIR}/data:rw
+    # The fine-tune planner decides whether a run can start by asking
+    # nvidia-smi how much VRAM is free. Without the nvidia runtime that
+    # binary does not exist in here, every plan comes back "no GPU visible",
+    # and the Launch button can never do anything. `utility` injects the
+    # management library and nvidia-smi only — no CUDA runtime, because
+    # nothing in this container computes; the trainer container it starts is
+    # the one that gets the whole GPU.
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=utility
+      # Handed to docker run when a fine-tune launches, so it has to be the
+      # path as the host sees it. Left unset, this container would derive
+      # one from its own home directory, Docker would create that on the
+      # host, and every run would re-download the base model.
+      - HF_HOME=${HF_HOME:?set HF_HOME in .env}
+    # The inference proxy runs as a host process, and deploy pushes a trained
+    # adapter to the Ollama on the machine that trained it — this host. Both
+    # are reached through the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - hivemind
+      - sms-private
+
+  sms-gateway-db:
+    image: mariadb:lts
+    container_name: sms-gateway-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${SMS_GATEWAY_DB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=sms
+      - MYSQL_USER=sms
+      - MYSQL_PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - sms-gateway-db-data:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      - sms-private
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sms-gateway:
+    image: capcom6/sms-gateway:latest
+    container_name: sms-gateway
+    environment:
+      - HTTP__LISTEN=0.0.0.0:3000
+      - DATABASE__HOST=sms-gateway-db
+      - DATABASE__PORT=3306
+      - DATABASE__USER=sms
+      - DATABASE__PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - DATABASE__DATABASE=sms
+      - GATEWAY__MODE=private
+      - GATEWAY__PRIVATE_TOKEN=${SMS_GATEWAY_PRIVATE_TOKEN}
+      - JWT__SECRET=${SMS_GATEWAY_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - sms-private
+    depends_on:
+      sms-gateway-db:
+        condition: service_healthy
+
+  sms-gateway-worker:
+    image: capcom6/sms-gateway:latest
+    container_name: sms-gateway-worker
+    command: ["/app/app", "worker"]
+    environment:
+      - HTTP__LISTEN=0.0.0.0:3000
+      - DATABASE__HOST=sms-gateway-db
+      - DATABASE__PORT=3306
+      - DATABASE__USER=sms
+      - DATABASE__PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - DATABASE__DATABASE=sms
+      - GATEWAY__MODE=private
+      - GATEWAY__PRIVATE_TOKEN=${SMS_GATEWAY_PRIVATE_TOKEN}
+      - JWT__SECRET=${SMS_GATEWAY_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - sms-private
+    depends_on:
+      sms-gateway-db:
+        condition: service_healthy
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind
+  sms-private:
+    external: true
+    name: sms-private
+
+volumes:
+  sms-gateway-db-data:

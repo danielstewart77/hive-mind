@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiveTools — Sign In</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 0;
+            background: #1e1e2e;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .login-wrap {
+            background: #ffffff;
+            border-radius: 12px;
+            padding: 44px 40px;
+            width: 340px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+        }
+        .logo {
+            font-size: 22px;
+            font-weight: 700;
+            color: #1e1e2e;
+            margin-bottom: 6px;
+        }
+        .logo span { color: #89b4fa; }
+        .subtitle { font-size: 13px; color: #6c7086; margin-bottom: 28px; }
+        label { display: block; font-size: 12px; font-weight: 600; color: #4a4a6a; margin-bottom: 5px; }
+        input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 7px;
+            font-size: 14px;
+            margin-bottom: 16px;
+            transition: border-color 0.15s;
+        }
+        input:focus { outline: none; border-color: #89b4fa; box-shadow: 0 0 0 3px rgba(137,180,250,0.15); }
+        button {
+            width: 100%;
+            padding: 11px;
+            background: #89b4fa;
+            color: #1e1e2e;
+            border: none;
+            border-radius: 7px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 4px;
+            transition: opacity 0.15s;
+        }
+        button:hover { opacity: 0.88; }
+    </style>
+</head>
+<body>
+    <div class="login-wrap">
+        <div class="logo">&#9729; Hive<span>Tools</span></div>
+        <div class="subtitle">Management console</div>
+        <form method="POST" action="/login">
+            <label for="username">Username</label>
+            <input id="username" type="text" name="username" autocomplete="username" required>
+            <label for="password">Password</label>
+            <input id="password" type="password" name="password" autocomplete="current-password" required>
+            <button type="submit">Sign In</button>
+        </form>
+    </div>
+</body>
+</html>
