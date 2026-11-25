@@ -73,6 +73,12 @@ async def rename_mind(mind_id: str, old: str, new: str) -> Row:
         raise ValueError('Invalid Mind name: use 2–32 lowercase letters, digits or hyphens')
     async with transaction() as unit:
         await unit.hold(f'hive:mind:{mind_id}')
+        for holder in sorted({old, new}):
+            # `hold` allows one key per unit; the rest are taken the same
+            # way, before any read, so they protect what is read below.
+            await unit.fetch_one(
+                'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+                f'tools:token:{holder}')
         row = await get_mind(mind_id, unit=unit)
         if not row or row['name'] not in (old, new):
             raise ValueError('The Mind changed since this rename was requested')
@@ -98,6 +104,10 @@ async def rename_mind(mind_id: str, old: str, new: str) -> Row:
             await unit.execute(f'UPDATE {table} SET holder=$2 WHERE holder=$1', old, new)
         # The tools know a mind by the name its key was registered under.
         await unit.execute('UPDATE tools.api_tokens SET name=$2 WHERE lower(name)=$1', old, new)
+        # What the old name was granted or still waiting on moves with it:
+        # left behind, whoever is later given the old name would inherit it.
+        await unit.execute('UPDATE tools.sudo_grants SET caller_mind=$2 WHERE lower(caller_mind)=$1', old, new)
+        await unit.execute('UPDATE tools.hitl_requests SET caller_mind=$2 WHERE lower(caller_mind)=$1 AND status=$3', old, new, 'pending')
         await unit.execute('UPDATE core.secret_scopes SET mind_name=$2 WHERE mind_name=$1', old, new)
         await unit.execute('UPDATE core.session_memory SET mind_name=$2 WHERE mind_id=$1', mind_id, new)
         await unit.execute('UPDATE memory.nodes SET name=$2 WHERE mind_id=$1 AND type=$3', mind_id, new, 'Mind')
