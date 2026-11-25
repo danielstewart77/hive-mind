@@ -167,7 +167,20 @@ def roles_token() -> str:
     return os.getenv("ROLES_PUSH_TOKEN", "")
 
 
+def key_migration_token() -> str:
+    """The credential the operator's key-migration command moves minds with.
+
+    Moving a mind, undoing it and retiring the old keys are the operator's,
+    and a command-line run has no browser session. Deliberately its own, with
+    no fallback to any house token: every mind holds those, and a mind must
+    never reach these routes. Unset means these routes admit no bearer and
+    only a signed-in admin reaches them.
+    """
+    return os.getenv("KEY_MIGRATION_TOKEN", "")
+
+
 CANVAS = "canvas"
+KEY_MIGRATION = "key_migration"
 DESIGN = "design"
 CUTOVER = "cutover"
 BOARD = "board"
@@ -205,6 +218,10 @@ TABLE = RouteTable(
         ),
         ROLES: BearerToken(
             roles_token, unset_status=401,
+            unset_message="Authentication required",
+        ),
+        KEY_MIGRATION: BearerToken(
+            key_migration_token, unset_status=401,
             unset_message="Authentication required",
         ),
     },
@@ -386,6 +403,18 @@ TABLE.add(
 TABLE.add(
     Rule(ADMIN, bearer=BOARD),
     "DELETE /api/kanban/{kind}/{record_id}",
+)
+
+# Moving existing minds onto one key, and retiring the old keys: the
+# operator's, by a signed-in admin or by the operator's own bearer, never a
+# mind's (feature 834, story 884).
+TABLE.add(
+    Rule(ADMIN, bearer=KEY_MIGRATION),
+    "GET /api/settings/key-migration",
+    "POST /api/settings/key-migration/retire",
+    "POST /api/settings/key-migration/tools-credential/{holder}",
+    "POST /api/settings/key-migration/{name}/move",
+    "POST /api/settings/key-migration/{name}/undo",
 )
 
 # Roles: defining one, changing any part of one, and the three repo choices.

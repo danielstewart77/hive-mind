@@ -38,6 +38,10 @@ MIND_CANNOT_DECIDE = (
 #: every consumer still presents until it is retired (story 884).
 RESERVED_HOLDERS = frozenset({APPROVER_HOLDER, "internal", "skippy"})
 
+#: The holder the shared service token is registered under. Reserved until
+#: that token is retired; then a mind of that name may hold a key of its own.
+SHARED_HOLDER = "skippy"
+
 #: What a holder's name may be once lowercased and trimmed.
 _HOLDER_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
@@ -54,9 +58,9 @@ def normalize_holder(holder: str) -> str:
     return str(holder or "").strip().lower()
 
 
-def _checked_holder(holder: str) -> str:
+def _checked_holder(holder: str, *, shared_retired: bool = False) -> str:
     name = normalize_holder(holder)
-    if name in RESERVED_HOLDERS:
+    if name in RESERVED_HOLDERS and not (name == SHARED_HOLDER and shared_retired):
         raise CredentialRefused(
             f"{name!r} is not a holder this route manages; its credential is "
             "made and kept another way")
@@ -83,7 +87,7 @@ async def register_credential(holder: str, value: str) -> dict[str, Any]:
     Any value the holder had is cut off in the same step. A request it was
     waiting on stays decidable: the holder is the same mind, with a new key.
     """
-    name = _checked_holder(holder)
+    name = _checked_holder(holder, shared_retired=await shared_token_retired())
     raw = str(value or "").strip()
     if len(raw) < MIN_VALUE_LENGTH or re.search(r"\s", raw):
         raise CredentialRefused(
@@ -110,7 +114,7 @@ async def revoke_credential(holder: str, *, remove: bool = False) -> dict[str, A
     the holder's rows so its digest may be given to a mind again: the undo of
     a creation.
     """
-    name = _checked_holder(holder)
+    name = _checked_holder(holder, shared_retired=await shared_token_retired())
     now = int(time.time())
     async with store.transaction():
         await store.hold_holder(name)
@@ -123,6 +127,33 @@ async def revoke_credential(holder: str, *, remove: bool = False) -> dict[str, A
     if remove:
         answer["removed"] = removed > 0
     return answer
+
+
+async def shared_token_retired() -> bool:
+    """Whether the shared service token has been retired: its holder has a
+    revoked row. Nothing but `retire_shared_token` revokes that holder while
+    the name is reserved."""
+    for row in await store.holder_tokens():
+        if str(row["holder"]) == SHARED_HOLDER:
+            return row["revoked_at"] is not None
+    return False
+
+
+async def retire_shared_token() -> dict[str, Any]:
+    """Revoke the shared service token every consumer presented before each
+    held a credential of its own, and expire what its holder was waiting on.
+
+    Nothing else is touched: every other holder, the approver credential and
+    the internal secret stand as they were. Repeating it changes nothing and
+    says so. A mind of the shared holder's name may register its own key from
+    then on."""
+    now = int(time.time())
+    async with store.transaction():
+        await store.hold_holder(SHARED_HOLDER)
+        revoked = await store.revoke_holder_tokens(SHARED_HOLDER, now)
+        expired = await store.expire_pending_requests(SHARED_HOLDER, now)
+    return {"holder": SHARED_HOLDER, "revoked": revoked > 0,
+            "expired_requests": expired}
 
 
 async def list_credentials() -> list[dict[str, Any]]:

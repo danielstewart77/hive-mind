@@ -180,6 +180,11 @@ def create_app() -> FastAPI:
         except auth_api.CredentialRefused as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    @app.post("/credentials/shared-token/retire", dependencies=[Depends(require_admin_bearer)])
+    async def retire_shared_service_token() -> Any:
+        """Revoke the shared service token (story 884); every other holder stands."""
+        return await auth_api.retire_shared_token()
+
     @app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
     async def list_holder_credentials() -> Any:
         """Which holders have a credential and whether it is live. Never a value."""

@@ -52,6 +52,7 @@ import design_data
 import design_delivery
 import design_graph
 import holder_credentials
+import key_migration
 import chief_of_staff
 import kanban_data
 import mind_creation
@@ -862,6 +863,7 @@ _BEARER_USERS = {
     console_access.BOARD: "board-bearer",
     console_access.BOARD_PLANNER: "board-planner-bearer",
     console_access.ROLES: "roles-bearer",
+    console_access.KEY_MIGRATION: "key-migration-operator",
 }
 
 
@@ -4094,6 +4096,77 @@ async def api_mind_cut_off(name: str, user: dict = Depends(require_auth)):
     except Exception:  # noqa: BLE001 - the cut-off landed; never mask it
         result["inference"] = None
     return JSONResponse(result, status_code=200 if result["ok"] else 207)
+
+
+def _migration_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, holder_credentials.KeyHeldByAnother):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, holder_credentials.ReplacementFailed):
+        return HTTPException(status_code=502, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/settings/key-migration")
+async def api_key_migration_report(user: dict = Depends(require_admin_or_route_bearer)):
+    """Every holder of an old key on the gateway, the memory store and the
+    tools, each with a state. Names, files, variables and digest prefixes; never a value."""
+    del user
+    return await key_migration.account()
+
+
+@app.post("/api/settings/key-migration/retire")
+async def api_key_migration_retire(user: dict = Depends(require_admin_or_route_bearer)):
+    """Retire the old per-service mind keys and the shared tools token. Refused,
+    naming each, while any mind is not moved."""
+    try:
+        result = await key_migration.retire()
+    except key_migration.RetirementRefused as exc:
+        return JSONResponse(
+            {"retired": False, "blocking": exc.blocking,
+             "retirement_warning": key_migration.RETIREMENT_WARNING}, status_code=409)
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "keys.retired", **_actor_fields(user),
+              removed=len(result["old_lines_removed"]))
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/tools-credential/{holder}")
+async def api_key_migration_tools_credential(holder: str, user: dict = Depends(require_admin_or_route_bearer)):
+    """Give a surface bot or the console a tools credential of its own."""
+    try:
+        result = await key_migration.issue_tools_credential(holder)
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "keys.tools_credential_issued", **_actor_fields(user), holder=result["holder"])
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/{name}/move")
+async def api_key_migration_move(name: str, user: dict = Depends(require_admin_or_route_bearer)):
+    """Move one existing mind onto the proxy key it already holds."""
+    try:
+        result = await key_migration.move_mind(name)
+    except (holder_credentials.MintRefused, holder_credentials.KeyHeldByAnother,
+            holder_credentials.ReplacementFailed) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "mind.key_moved", **_actor_fields(user), mind=result["mind"])
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/{name}/undo")
+async def api_key_migration_undo(name: str, user: dict = Depends(require_admin_or_route_bearer)):
+    """Put one moved mind back on its old per-service values."""
+    try:
+        result = await key_migration.undo_move(name)
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "mind.key_move_undone", **_actor_fields(user), mind=result["mind"])
+    credential_registry.forget_all()
+    return result
 
 
 @app.patch("/api/minds/{name}/configuration")

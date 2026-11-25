@@ -86,6 +86,13 @@
                 </div>
                 <div id="credential-registry"><p class="loading-state">Loading credentials…</p></div>
             </section>
+            <section class="surface" id="key-migration">
+                <div class="surface-header">
+                    <div><h2>Move minds to one key</h2><p>Each existing mind keeps the inference key it already holds and gives it to the gateway, the memory store and the tools. Move one at a time. Names, files and digest prefixes are shown; never a key.</p></div>
+                    <button id="migration-refresh" class="icon-button" type="button" aria-label="Refresh the report"><i data-lucide="refresh-cw"></i></button>
+                </div>
+                <div id="migration-report"><p class="loading-state">Loading the report…</p></div>
+            </section>
         {% elif settings_section == 'users' %}
             <section class="surface">
                 <div class="surface-header"><div><h2>Users</h2><p>A new user signs in with the temporary password you set and must change it. Users are disabled, never deleted.</p></div><button id="users-refresh" class="icon-button" type="button" aria-label="Refresh users"><i data-lucide="refresh-cw"></i></button></div>
@@ -650,7 +657,47 @@ window.addEventListener("DOMContentLoaded", function () {
     document.getElementById("credential-filter").addEventListener("input", renderCredentials);
     document.getElementById("credential-status-filter").addEventListener("change", renderCredentials);
     document.getElementById("credentials-refresh").addEventListener("click", function () { loadCredentials(true); });
-    loadCredentials(false); }
+    loadCredentials(false);
+    const migrationBox = document.getElementById("migration-report");
+    function migrationHtml(report) {
+        const mindRows = report.minds.map(function (m) {
+            const problems = (m.problems || []).concat(m.edge_mind_note ? [m.edge_mind_note] : []).concat(m.shared_tools_note ? [m.shared_tools_note] : []);
+            let button = "";
+            if (m.state === "moved") button = '<button class="button button-quiet" type="button" data-migration-undo="' + h.escapeHtml(m.mind) + '">Undo</button>';
+            else if (m.state === "not moved" && !(m.problems || []).length) button = '<button class="button button-quiet" type="button" data-migration-move="' + h.escapeHtml(m.mind) + '">Move</button>';
+            return '<tr><td><strong>' + h.escapeHtml(m.mind) + '</strong></td><td>' + h.escapeHtml(m.state) + '</td>'
+                + '<td><small>' + h.escapeHtml(m.where_it_reads || (m.proxy_key_found || []).map(function (f) { return f.place + " " + f.digest; }).join(", ")) + '</small></td>'
+                + '<td><small>' + problems.map(h.escapeHtml).join("; ") + '</small></td><td>' + button + '</td></tr>';
+        }).join("");
+        const holders = report.services.map(function (service) {
+            if (service.error) return '<p class="error-state">' + h.escapeHtml(service.label) + ': ' + h.escapeHtml(service.error) + '</p>';
+            const others = service.holders.filter(function (x) { return x.kind !== "mind"; }).map(function (x) { return h.escapeHtml(x.holder) + ' (' + h.escapeHtml(x.kind) + (x.live ? '' : ', revoked') + ')'; });
+            return '<p><strong>' + h.escapeHtml(service.label) + '</strong> — not minds: <small>' + (others.join(", ") || "none") + '</small></p>';
+        }).join("");
+        const blocking = report.blocking.length ? '<div class="error-state"><strong>Retirement is blocked:</strong><br>' + report.blocking.map(h.escapeHtml).join("<br>") + '</div>' : '<p>Every mind is accounted for.</p>';
+        const retire = report.ready_to_retire ? '<p><button class="button" type="button" id="migration-retire">Retire the old keys</button></p>' : '';
+        return '<table class="credential-table"><thead><tr><th>Mind</th><th>State</th><th>Where its key is</th><th>Notes</th><th></th></tr></thead><tbody>' + mindRows + '</tbody></table>'
+            + holders + blocking + '<p class="faint">' + h.escapeHtml(report.retirement_warning) + '</p>' + retire;
+    }
+    async function loadMigration() {
+        try { migrationBox.innerHTML = migrationHtml(await h.requestJson("/api/settings/key-migration")); }
+        catch (error) { migrationBox.innerHTML = '<p class="error-state">' + h.escapeHtml(error.message) + '</p>'; }
+    }
+    document.getElementById("migration-refresh").addEventListener("click", loadMigration);
+    migrationBox.addEventListener("click", async function (event) {
+        const move = event.target.closest("[data-migration-move]"), undo = event.target.closest("[data-migration-undo]"), retire = event.target.closest("#migration-retire");
+        const base = "/api/settings/key-migration/";
+        let url, question;
+        if (move) { url = base + encodeURIComponent(move.dataset.migrationMove) + "/move"; question = "Move " + move.dataset.migrationMove + " onto the proxy key it already holds? Its old per-service values stop being accepted now, and it must be recreated to read the new one."; }
+        else if (undo) { url = base + encodeURIComponent(undo.dataset.migrationUndo) + "/undo"; question = "Put " + undo.dataset.migrationUndo + " back on its old values?"; }
+        else if (retire) { url = base + "retire"; question = "Retire the old per-service keys and the shared tools token? This cannot be undone and ends going back a release for every moved mind."; }
+        else return;
+        if (!window.confirm(question)) return;
+        try { const result = await h.requestJson(url, {method: "POST"}); window.alert(result.next_step || result.warning || "Done."); }
+        catch (error) { window.alert(error.message); }
+        loadMigration();
+    });
+    loadMigration(); }
     if (section === "advanced") loadDownloads();
     if (section === "users") {
         const usersRows = document.getElementById("users-rows");

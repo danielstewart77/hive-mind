@@ -271,6 +271,21 @@ def one_key_variable(holder: str) -> str:
     return ONE_KEY_PREFIX + holder.strip().lower().replace("-", "_").upper()
 
 
+#: What an edge mind's own env file holds its one key under (it holds one
+#: mind's values only, so the name carries no mind).
+ONE_KEY_PLAIN = "MIND_KEY"
+
+
+def is_one_key_variable(variable: str) -> bool:
+    return variable == ONE_KEY_PLAIN or variable.startswith(ONE_KEY_PREFIX)
+
+
+def own_file_label(holder: str) -> str | None:
+    """The env file this mind has to itself (an edge mind on this host), if any."""
+    label = SERVICES["comms"].own_files.get(holder.strip().lower())
+    return label if label in ENV_FILES and label != "hive_tools" else None
+
+
 def _loaded_value(location: Location) -> str | None:
     """The value the holder's own process loads, not the file's spelling of it.
 
@@ -298,7 +313,7 @@ class Ambiguous(Exception):
     """
 
 
-def locate(service: Service, holder: str) -> Location | None:
+def locate(service: Service, holder: str, *, old_only: bool = False) -> Location | None:
     """Where this holder reads its value, or None if nowhere this console can
     write.
 
@@ -312,7 +327,11 @@ def locate(service: Service, holder: str) -> Location | None:
     own = service.own_files.get(holder.strip().lower())
     one = one_key_variable(holder)
     held: list[Location] = []
-    for label in ENV_FILES:
+    own_label = own_file_label(holder)
+    if (not old_only and own_label
+            and credentials_data._read_env_value(ENV_FILES[own_label], ONE_KEY_PLAIN) is not None):
+        held.append(Location(own_label, ONE_KEY_PLAIN))
+    for label in ENV_FILES if not old_only else ():
         # A mind that holds one key reads that, whatever the service: the
         # per-service lines are what a mind not yet moved still has.
         try:
@@ -491,7 +510,7 @@ async def mint(
     if location is None:
         location = locate(service, holder)
     await _require_managed_proxy(service, holder)
-    if value is None and location is not None and location.env_key.startswith(ONE_KEY_PREFIX):
+    if value is None and location is not None and is_one_key_variable(location.env_key):
         # One line is every service's value for this mind. A fresh value
         # written to it and sent to one service leaves the others holding a
         # key nothing now matches. Replacing a mind's key is done from the
@@ -686,7 +705,7 @@ async def holder_rows(service: Service) -> list[dict[str, Any]]:
             reason = f"a file that may hold this holder's value could not be read: {exc}"
         except Ambiguous as exc:
             reason = str(exc)
-        if location is not None and location.env_key.startswith(ONE_KEY_PREFIX):
+        if location is not None and is_one_key_variable(location.env_key):
             reason = ONE_KEY_REFUSAL
         rows.append(
             {
@@ -795,34 +814,48 @@ def _mind_runtime_files() -> list[Path]:
         return []
 
 
-def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
-    """Every place on this machine a mind's proxy key is kept that holds
-    `value`, by name and never by content: the variables of every env file
-    this console reads (`MIND_KEY_<NAME>`, `PROXY_TOKEN_<NAME>`,
-    `<NAME>_PROXY_KEY`, `MIND_PROXY_KEY`) and the `env` of every mind's runtime.yaml.
+#: Names a mind's runtime.yaml `env:` may carry its proxy key under, and the
+#: names an edge mind's own env file may (it holds nothing else).
+_RUNTIME_KEY_NAMES = frozenset({
+    "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY", "MIND_PROXY_KEY"})
 
-    `own` is the mind the value is being given to; its own places are not a
-    clash. Used by creation here and by moving existing minds, so the two
-    agree on what "held by another mind" means.
+
+#: The env file label an edge mind on this host has to itself, and whose it is.
+_OWN_FILE_HOLDERS = {label: holder for holder, label in SERVICES["comms"].own_files.items()
+                     if label != "hive_tools"}
+
+
+def key_places() -> list[tuple[str, str, str]]:
+    """Every place on this machine a mind's proxy key may be kept, as
+    `(place, variable, value)`, by name and never printed.
+
+    The one enumeration creation and the move of existing minds share: the
+    variables of every env file this console reads (`MIND_KEY_<NAME>`,
+    `PROXY_TOKEN_<NAME>`, `<NAME>_PROXY_KEY`, `MIND_PROXY_KEY`) and the `env`
+    of every mind's runtime.yaml (`OPENAI_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+    `DSH_API_KEY`, `MIND_PROXY_KEY`). `place` is `<file label>:<VARIABLE>` for
+    an env file and `<mind>:<VARIABLE>` for a runtime.yaml; an unreadable env
+    file raises `Unreadable`, since a key hiding there cannot be ruled out.
     """
-    mine = {variable_name(SERVICES["proxy"], own), one_key_variable(own)} if own else set()
-    found: list[str] = []
+    found: list[tuple[str, str, str]] = []
     for label, path in ENV_FILES.items():
         try:
             if not Path(path).is_file():
                 continue
             text = credentials_data._read_text(path)
-        except Exception:  # noqa: BLE001 - an unreadable file is reported below
+        except Exception:  # noqa: BLE001 - an unreadable file is reported by the caller
             raise Unreadable(f"{path}") from None
-        for variable in _KEY_VARIABLE.findall(text):
-            if variable in mine:
-                continue
+        variables = list(_KEY_VARIABLE.findall(text))
+        if label in _OWN_FILE_HOLDERS:
+            # An edge mind's own file holds nobody else's: its proxy key may be
+            # under any of the names its harnesses read.
+            variables += [n for n in sorted(_RUNTIME_KEY_NAMES)
+                          if re.search(rf"(?m)^{n}\s*=", text) and n not in variables]
+        for variable in variables:
             existing = _loaded_value(Location(label, variable))
-            if existing and secrets.compare_digest(existing, value):
-                found.append(f"{label}:{variable}")
+            if existing:
+                found.append((f"{label}:{variable}", variable, existing))
     for path in _mind_runtime_files():
-        if own and path.parent.name == own.strip().lower():
-            continue
         try:
             import yaml
             env = (yaml.safe_load(path.read_text()) or {}).get("env") or {}
@@ -831,9 +864,54 @@ def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
         if not isinstance(env, dict):
             continue
         for variable, existing in env.items():
-            if (_KEY_VARIABLE.match(f"{variable}=") and isinstance(existing, str)
-                    and existing and secrets.compare_digest(existing, value)):
-                found.append(f"{path.parent.name}:{variable}")
+            if ((_KEY_VARIABLE.match(f"{variable}=") or variable in _RUNTIME_KEY_NAMES)
+                    and isinstance(existing, str) and existing
+                    and not existing.startswith("$")):
+                found.append((f"{path.parent.name}:{variable}", str(variable), existing))
+    return found
+
+
+def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
+    """Every place that holds `value`, by name and never by content.
+
+    `own` is the mind the value is being given to; its own places are not a
+    clash. Used by creation here and by moving existing minds, so the two
+    agree on what "held by another mind" means.
+    """
+    mine = {variable_name(SERVICES["proxy"], own), one_key_variable(own)} if own else set()
+    own_name = own.strip().lower() if own else None
+    own_file = own_file_label(own) if own else None
+    found: list[str] = []
+    for place, variable, existing in key_places():
+        head = place.partition(":")[0]
+        if head in ENV_FILES:
+            # This mind's own places: its named variables, a variable that
+            # names it (`ADA_PROXY_KEY`), and the whole of a file it has to
+            # itself (an edge mind's own `.env`).
+            if (variable in mine or head == own_file
+                    or (own_name and holder_from_place(place) == own_name)):
+                continue
+        elif own_name and head == own_name:
+            continue
+        if secrets.compare_digest(existing, value):
+            found.append(place)
+    return found
+
+
+def mind_proxy_key_sources(name: str) -> list[tuple[str, str]]:
+    """Where this mind's existing proxy key is kept and what it is, as
+    `(place, value)`: the places `key_places` names for this mind, which for
+    an edge mind with an env file of its own include the names that file may
+    carry it under."""
+    holder = name.strip().lower()
+    found: list[tuple[str, str]] = []
+    for place, variable, value in key_places():
+        head = place.partition(":")[0]
+        if head in ENV_FILES:
+            if holder_from_place(place) == holder:
+                found.append((place, value))
+        elif head == holder:
+            found.append((place, value))
     return found
 
 
@@ -1022,10 +1100,14 @@ def stored_key_location(holder: str) -> Location | None:
     per-service lines, which are not one key and are not replaced here."""
     one = one_key_variable(holder)
     found = []
+    own_label = own_file_label(holder)
     for label in ENV_FILES:
         try:
             if credentials_data._read_env_value(ENV_FILES[label], one) is not None:
                 found.append(Location(label, one))
+            if label == own_label and credentials_data._read_env_value(
+                    ENV_FILES[label], ONE_KEY_PLAIN) is not None:
+                found.append(Location(label, ONE_KEY_PLAIN))
         except Unreadable:
             raise MintRefused(
                 f"{ENV_FILES[label]} could not be read, so this mind's stored "
@@ -1107,6 +1189,8 @@ def holder_from_place(place: str) -> str | None:
     head, _, variable = place.partition(":")
     if head not in ENV_FILES:
         return head or None
+    if head in _OWN_FILE_HOLDERS:
+        return _OWN_FILE_HOLDERS[head]
     for prefix in ("MIND_KEY_", "PROXY_TOKEN_"):
         if variable.startswith(prefix):
             return variable[len(prefix):].lower().replace("_", "-")

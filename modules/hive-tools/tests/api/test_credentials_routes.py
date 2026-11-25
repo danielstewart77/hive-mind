@@ -308,3 +308,42 @@ def test_cutting_a_holder_off_ends_its_sudo_grants_and_a_new_holder_of_the_name_
     client.delete("/credentials/ada?remove=true", headers=_bearer(ADMIN))
 
     assert run(_tools.active_grant("gmail_create_label", "ada", now)) is None
+
+
+def test_retiring_the_shared_token_refuses_it_and_leaves_every_other_holder_and_the_approver_standing(
+        client: TestClient) -> None:
+    shared = run(generate_token("skippy"))
+    approver = run(generate_approver_token())
+    _register(client, "ada", ADA_KEY)
+    assert client.get("/hitl/none", headers=_bearer(shared)).status_code == 404
+
+    retired = client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+
+    assert retired.status_code == 200 and retired.json()["revoked"] is True
+    assert client.get("/hitl/none", headers=_bearer(shared)).status_code == 401
+    assert client.get("/hitl/none", headers=_bearer(ADA_KEY)).status_code == 404
+    assert client.get("/credentials", headers=_bearer(approver)).status_code == 401
+    again = client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+    assert again.status_code == 200 and again.json()["revoked"] is False
+
+
+def test_the_shared_tokens_holder_name_stays_reserved_until_it_is_retired_and_then_a_mind_may_take_it(
+        client: TestClient) -> None:
+    run(generate_token("skippy"))
+    assert _register(client, "skippy", ADA_KEY).status_code == 400
+
+    client.post("/credentials/shared-token/retire", headers=_bearer(ADMIN))
+
+    assert _register(client, "skippy", ADA_KEY).status_code == 200
+    assert client.get("/hitl/none", headers=_bearer(ADA_KEY)).status_code == 404
+
+
+def test_retiring_the_shared_token_answers_only_to_the_administrator_credential(
+        client: TestClient) -> None:
+    shared = run(generate_token("skippy"))
+    _register(client, "ada", ADA_KEY)
+
+    for key in (shared, ADA_KEY, "wrong"):
+        assert client.post("/credentials/shared-token/retire",
+                           headers=_bearer(key)).status_code == 401, key
+    assert client.get("/hitl/none", headers=_bearer(shared)).status_code == 404
