@@ -832,6 +832,8 @@ async def retire() -> dict[str, Any]:
         # whatever fails after this. A marker that already existed (a repeat) is
         # never taken away.
         existed = _retired_marker().exists()
+        # Defence in depth: the readiness report above already refuses when the tools
+        # cannot be asked, so this is not reachable today and has no test.
         if tools.configured() and not tools.admin_token():
             raise MintRefused(
                 f"this console holds no {tools.admin_env}, so it cannot retire the shared "
