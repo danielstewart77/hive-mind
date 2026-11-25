@@ -56,7 +56,11 @@ class ToolsStandIn:
         if request.url.path.startswith("/credentials/") and request.method == "DELETE":
             holder = request.url.path.rsplit("/", 1)[-1]
             if self.error_status:
-                return httpx.Response(self.error_status, json={})
+                # An error answer whose body claims the revoke: the status, not
+                # the body, must decide.
+                self.values.pop(holder, None)
+                self.revoked.append(holder)
+                return httpx.Response(self.error_status, json={"revoked": True})
             if self.refuse_with_revoked:
                 return httpx.Response(500, json={"revoked": True})
             if self.ignore_delete:
