@@ -47,6 +47,7 @@ class ToolsStandIn:
         self.revoked = []
         self.refuse_delete = False
         self.ignore_delete = False
+        self.error_status = None
         self.refuse_with_revoked = False
 
     def __call__(self, request):
@@ -54,6 +55,8 @@ class ToolsStandIn:
             raise httpx.ConnectError("the tools are down", request=request)
         if request.url.path.startswith("/credentials/") and request.method == "DELETE":
             holder = request.url.path.rsplit("/", 1)[-1]
+            if self.error_status:
+                return httpx.Response(self.error_status, json={})
             if self.refuse_with_revoked:
                 return httpx.Response(500, json={"revoked": True})
             if self.ignore_delete:

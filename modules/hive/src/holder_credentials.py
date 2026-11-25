@@ -1327,6 +1327,11 @@ async def recover_replacements() -> list[dict[str, Any]]:
         holder = record["mind"]
         try:
             async with _ROTATION_LOCK:
+                if not key_journal._path(record["operation_id"]).exists():
+                    # Settled while this waited for the lock (a cut-off clears
+                    # it): re-applying the stored key would bring a cut-off
+                    # mind back.
+                    continue
                 location = stored_key_location(holder)
                 if location is None:
                     raise MintRefused(

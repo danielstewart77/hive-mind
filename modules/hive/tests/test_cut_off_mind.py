@@ -111,3 +111,24 @@ async def test_an_error_answer_is_still_accepting_even_when_its_body_claims_revo
 
     assert result["ok"] is False
     assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "still accepting"
+
+
+@pytest.mark.parametrize("status", [400, 403, 500])
+async def test_a_service_answering_the_cut_off_with_an_error_is_still_accepting(hive, status):
+    hive.tools.error_status = status
+
+    result = await holder_credentials.cut_off_mind("ada")
+
+    assert result["ok"] is False
+    assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "still accepting"
+
+
+async def test_a_replacement_settled_by_a_cut_off_is_not_re_applied_when_the_console_recovers(hive):
+    record = holder_credentials.key_journal.begin("replace", "ada", ["comms", "lucent", "tools"])
+    await holder_credentials.cut_off_mind("ada")
+
+    handled = await holder_credentials.recover_replacements()
+
+    assert handled == []
+    for service, code in (await hive.status(OLD)).items():
+        assert code in (401, 403), service
