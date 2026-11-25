@@ -38,12 +38,15 @@ class Fake:
         self.app_image = app_image
         self.config = config
         self.calls: list[list[str]] = []
+        self.git_ok = True
 
     def __call__(self, argv, cwd=None):
         self.calls.append(list(argv))
         prog = argv[0]
         if prog == "git":
-            sub = argv[3:]
+            if not self.git_ok:
+                return 128, ""
+            sub = argv[argv.index("-C") + 2:]
             if sub[:2] == ["rev-parse", "--show-toplevel"]:
                 return 0, str(self.root) + "\n"
             if sub[:2] == ["rev-parse", "HEAD"]:
@@ -116,11 +119,11 @@ def _config(root: Path, src: Path) -> dict:
     }
 
 
-def _record(tmp_path, monkeypatch, **kw):
+def _record(tmp_path, monkeypatch, exec_ok=True, **kw):
     root = _tree(tmp_path)
     fake = Fake(root, config=_config(root, tmp_path / "src"), **kw)
     monkeypatch.setattr(rr, "run", fake)
-    return root, rr.build_record(root, [], [], []), fake
+    return root, rr.build_record(root, [], [], [], exec_ok=exec_ok), fake
 
 
 def _service(record, name):
@@ -224,3 +227,65 @@ def test_out_inside_a_git_work_tree_is_refused_and_nothing_is_written(tmp_path, 
     target = tmp_path / "src" / "record.json"
     assert rr.main(["--root", str(root), "--out", str(target)]) == 2
     assert not target.exists()
+
+
+def test_identity_is_not_a_release_when_nothing_could_be_read(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    monkeypatch.setattr(rr, "run", lambda argv, cwd=None: (127, ""))
+    record = rr.build_record(root, [], [], [])
+    assert record["identity"]["complete"] is False
+    assert record["identity"]["string"] is None
+
+
+def test_identity_ignores_the_branch_name(tmp_path, monkeypatch):
+    _, first, _ = _record(tmp_path, monkeypatch)
+    renamed = Fake.__call__
+
+    def other_branch(self, argv, cwd=None):
+        if argv[0] == "git" and "--abbrev-ref" in argv:
+            return 0, "another-branch\n"
+        return renamed(self, argv, cwd)
+
+    monkeypatch.setattr(Fake, "__call__", other_branch)
+    _, second, _ = _record(tmp_path, monkeypatch)
+    assert second["information_only"]["branch"] == "another-branch"
+    assert second["identity"] == first["identity"]
+
+
+def test_url_password_with_at_sign_or_in_a_url_context_is_removed():
+    assert rr.scrub_url("https://user:p@ss@host/org/repo@main") == "https://host/org/repo@main"
+    assert PASSWORD not in rr.scrub_url(f"git+https://u:{PASSWORD}@h/x.git@main")
+
+
+def test_mind_settings_file_is_named_with_variable_names_only(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    mind = root / "minds" / "ada"
+    mind.mkdir(parents=True)
+    (mind / "runtime.yaml").write_text(f"env:\n  ADA_PROXY_KEY: {TOKEN}\n  OTHER: 1\nname: ada\n")
+    monkeypatch.setattr(rr, "run", Fake(root, config=_config(root, tmp_path / "src")))
+    record = rr.build_record(root, [], [], [])
+    assert record["local_differences"]["mind_settings_files"] == [
+        {"path": str(mind / "runtime.yaml"), "tracked_by_git": False,
+         "env_variable_names": ["ADA_PROXY_KEY", "OTHER"]}]
+    assert TOKEN not in json.dumps(record)
+
+
+def test_out_writes_the_record_when_outside_a_work_tree(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    fake = Fake(root, config=_config(root, tmp_path / "src"))
+
+    def not_a_tree(argv, cwd=None):
+        if argv[0] == "git" and "--is-inside-work-tree" in argv:
+            return 128, ""
+        return fake(argv, cwd)
+
+    monkeypatch.setattr(rr, "run", not_a_tree)
+    target = tmp_path / "state.json"
+    assert rr.main(["--root", str(root), "--out", str(target)]) == 0
+    assert json.loads(target.read_text())["identity"]["hive_mind_commit"] == COMMIT
+
+
+def test_installed_commit_is_not_read_from_a_container_unless_asked(tmp_path, monkeypatch):
+    _, record, fake = _record(tmp_path, monkeypatch, exec_ok=False)
+    assert _service(record, "app")["extra_sources"][0]["installed_commit"] is None
+    assert not any(c[:2] == ["docker", "exec"] for c in fake.calls)

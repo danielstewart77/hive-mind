@@ -2,15 +2,16 @@
 """Write a release record: what this machine's hive runs, from exactly which source.
 
     release_record.py [--root DIR] [--compose FILE ...] [--repo DIR ...]
-                      [--container NAME ...] [--out FILE]
+                      [--container NAME ...] [--read-installed-commits] [--out FILE]
 
 Run on the host that runs the hive, as the operator. It prints one JSON
 record on stdout and exits 0 (`--out FILE` also writes it there). It only
 reads: it never builds, starts, stops, pulls or changes anything, and the
 only file it ever writes is `--out`. `docker` is called to read with
-`compose config`, `ps`, `inspect`, `image inspect` and, for the one question
-the image cannot answer by other means (which commit a branch-named install
-fetched), `exec <running container> python3 -c <fixed read-only snippet>`.
+`compose config`, `ps`, `inspect` and `image inspect`. Only with
+`--read-installed-commits` does it also `exec` one fixed read-only python
+snippet in a running container, to learn which commit a branch-named install
+fetched; without it that commit is left null.
 `git` is called to read (`rev-parse`, `status --porcelain`, `remote get-url`,
 `ls-files`). It runs on the host, so no mind container gains Docker access
 from it.
@@ -31,7 +32,10 @@ What it covers
 Record fields (the manual for the whole record: docs/setup/release-record.md)
     schema_version        1
     recorded_at           UTC time of the run
-    identity              the release's identity and nothing else:
+    identity              the release's identity and nothing else (`complete`
+                          is false and `string` is null when no commit or no
+                          image id could be read, so a failed read never looks
+                          like a release):
                           `hive_mind_commit` (full commit id of --root),
                           `image_ids_hash` (sha256 over the sorted lines
                           `project/service=<image id or none>`), and
@@ -45,6 +49,8 @@ Record fields (the manual for the whole record: docs/setup/release-record.md)
     compose_files         per file: path, sha256 of its bytes, tracked by git
                           or not, role (compose, override, include).
     local_differences     compose files git does not track, override files,
+                          mind settings files (`minds/*/runtime.yaml`, names
+                          of their `env:` entries only),
                           includes, env files read, names of the variables set
                           in each env file, and path variables that point
                           outside the checkout.
@@ -134,7 +140,7 @@ def run(argv: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
 
 def scrub_url(text: str) -> str:
     """Remove the user and password part of any URL in text."""
-    return re.sub(r"(://)[^/@\s\"']*@", r"\1", text)
+    return re.sub(r"(://)[^/\s\"']*@", r"\1", text)
 
 
 def _json(text: str):
@@ -152,12 +158,12 @@ def git_state(path: str | Path, cache: dict) -> dict | None:
     if key in cache:
         return cache[key]
     state = None
-    rc, top = run(["git", "-C", key, "rev-parse", "--show-toplevel"])
+    rc, top = run(["git", "--no-optional-locks", "-C", key, "rev-parse", "--show-toplevel"])
     if rc == 0 and top.strip():
-        rc, commit = run(["git", "-C", key, "rev-parse", "HEAD"])
-        _, status = run(["git", "-C", key, "status", "--porcelain", "--", "."])
-        _, remote = run(["git", "-C", key, "remote", "get-url", "origin"])
-        _, branch = run(["git", "-C", key, "rev-parse", "--abbrev-ref", "HEAD"])
+        rc, commit = run(["git", "--no-optional-locks", "-C", key, "rev-parse", "HEAD"])
+        _, status = run(["git", "--no-optional-locks", "-C", key, "status", "--porcelain", "--", "."])
+        _, remote = run(["git", "--no-optional-locks", "-C", key, "remote", "get-url", "origin"])
+        _, branch = run(["git", "--no-optional-locks", "-C", key, "rev-parse", "--abbrev-ref", "HEAD"])
         lines = [x for x in status.splitlines() if x.strip()]
         untracked = sum(1 for x in lines if x.startswith("??"))
         tracked = len(lines) - untracked
@@ -270,6 +276,25 @@ def _env_path_vars(path: Path, root: Path) -> list[dict]:
             out.append({"variable": m.group(1), "path": str(resolved),
                         "env_file": str(path)})
     return out
+
+
+def _runtime_env_names(path: Path) -> list[str]:
+    """Names (never values) under the top-level `env:` map of a runtime.yaml."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    names, inside = [], False
+    for line in lines:
+        if re.match(r"^env:\s*$", line):
+            inside = True
+        elif inside:
+            m = re.match(r"^\s+([A-Za-z_][A-Za-z0-9_]*)\s*:", line)
+            if m:
+                names.append(m.group(1))
+            elif line.strip() and not line.startswith((" ", "\t", "#")):
+                inside = False
+    return sorted(set(names))
 
 
 def _compose_config(files: list[Path], notes: list[str]) -> dict | None:
@@ -421,7 +446,7 @@ def _env_files(value, base: Path) -> list[str]:
 
 def build_service(stack: str, name: str, spec: dict, base_dir: Path,
                   containers: list[dict], project: str | None,
-                  cache: dict, images: dict) -> dict:
+                  cache: dict, images: dict, exec_ok: bool = False) -> dict:
     container = None
     for c in containers:
         labels = (c.get("Config") or {}).get("Labels") or {}
@@ -451,7 +476,11 @@ def build_service(stack: str, name: str, spec: dict, base_dir: Path,
         image_id = info.get("Id") or image_id
 
     contexts, extra = [], []
-    if context:
+    if context and "://" in str(context):
+        contexts.append({"name": "context", "path": scrub_url(str(context)),
+                         "commit": None, "dirty": None,
+                         "note": "a URL context; its commit is not read"})
+    elif context:
         ctx = Path(context) if os.path.isabs(context) else base_dir / context
         contexts.append({"name": "context", "path": str(ctx),
                          **(_public(git_state(ctx, cache)) or {"commit": None, "dirty": None})})
@@ -482,7 +511,9 @@ def build_service(stack: str, name: str, spec: dict, base_dir: Path,
                      "installed_commit": ref if is_commit else None}
             if not is_commit:
                 entry["note"] = "the build named a branch or tag, not a commit"
-                if running:
+                if not exec_ok:
+                    entry["note"] += "; run with --read-installed-commits to read which commit was installed"
+                if running and exec_ok:
                     entry["installed_commit"] = _installed_commit(
                         (container.get("Name") or "").lstrip("/"), dist)
             extra.append(entry)
@@ -519,6 +550,22 @@ def build_service(stack: str, name: str, spec: dict, base_dir: Path,
     }
 
 
+def _inspect_mounts(c: dict, cache: dict) -> list[dict]:
+    out = []
+    for m in c.get("Mounts") or []:
+        if m.get("Type") != "bind":
+            continue
+        src = Path(m.get("Source", ""))
+        st = git_state(src, cache) if src.exists() else None
+        out.append({"host": str(src), "container": m.get("Destination"),
+                    "read_only": not m.get("RW", True),
+                    "commit": (st or {}).get("commit"),
+                    "dirty": (st or {}).get("dirty"),
+                    "tracked_changes": (st or {}).get("tracked_changes"),
+                    "untracked": (st or {}).get("untracked")})
+    return out
+
+
 def container_only(name: str, c: dict, cache: dict, images: dict) -> dict:
     labels = (c.get("Config") or {}).get("Labels") or {}
     workdir = labels.get("com.docker.compose.project.working_dir")
@@ -536,7 +583,8 @@ def container_only(name: str, c: dict, cache: dict, images: dict) -> dict:
         "dockerfile": None, "target": None, "base_image": None,
         "contexts": [dict(_public(state) or {"commit": None, "dirty": None},
                           name="compose project directory")],
-        "extra_sources": [], "mounts": [], "env_var_names": [], "env_files": [],
+        "extra_sources": [], "mounts": _inspect_mounts(c, cache),
+        "env_var_names": [], "env_files": [],
         "found_by": "container name; no compose file given for it",
     }
 
@@ -544,12 +592,15 @@ def container_only(name: str, c: dict, cache: dict, images: dict) -> dict:
 def identity_of(commit: str | None, services: list[dict]) -> dict:
     lines = sorted(f"{s['stack']}/{s['service']}={s['image_id'] or 'none'}" for s in services)
     digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    complete = bool(commit) and any(s["image_id"] for s in services)
     return {"hive_mind_commit": commit, "image_ids_hash": digest,
-            "string": f"{commit}+{digest}"}
+            "complete": complete,
+            "string": f"{commit}+{digest}" if complete else None}
 
 
 def build_record(root: Path, compose: list[Path], repos: list[Path],
-                 extra_names: list[str], now: datetime.datetime | None = None) -> dict:
+                 extra_names: list[str], now: datetime.datetime | None = None,
+                 exec_ok: bool = False) -> dict:
     root = Path(root).resolve()
     now = now or datetime.datetime.now(datetime.timezone.utc)
     notes: list[str] = []
@@ -587,6 +638,12 @@ def build_record(root: Path, compose: list[Path], repos: list[Path],
         if role == "include":
             differences["include_files"].append(str(path))
 
+    differences["mind_settings_files"] = []
+    for rt in sorted((root / "minds").glob("*/runtime.yaml")):
+        differences["mind_settings_files"].append(
+            {"path": str(rt), "tracked_by_git": _is_tracked(rt),
+             "env_variable_names": _runtime_env_names(rt)})
+
     for label, files in stacks_files:
         config = _compose_config(files, notes)
         project = (config or {}).get("name")
@@ -601,7 +658,7 @@ def build_record(root: Path, compose: list[Path], repos: list[Path],
             differences["path_variables_outside_checkout"] += _env_path_vars(dotenv, root)
         for name, spec in sorted(((config or {}).get("services") or {}).items()):
             svc = build_service(label, name, spec or {}, files[0].parent,
-                                containers, project, cache, images)
+                                containers, project, cache, images, exec_ok)
             services.append(svc)
             matched.add(name)
             if svc["container"]:
@@ -660,6 +717,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="another checkout to record the commit of (repeatable)")
     parser.add_argument("--container", action="append", default=[],
                         help="another container name to look for (repeatable)")
+    parser.add_argument("--read-installed-commits", action="store_true",
+                        help="also run one fixed read-only python snippet inside each "
+                             "running container to read which commit a branch-named "
+                             "install fetched (docker exec; off by default)")
     parser.add_argument("--out", type=Path, default=None,
                         help="also write the record here (never inside a checkout)")
     args = parser.parse_args(argv)
@@ -675,7 +736,8 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
 
-    record = build_record(args.root, args.compose, args.repo, args.container)
+    record = build_record(args.root, args.compose, args.repo, args.container,
+                          exec_ok=args.read_installed_commits)
     text = json.dumps(record, indent=2, sort_keys=True) + "\n"
     if args.out is not None:
         args.out.write_text(text)
