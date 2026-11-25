@@ -8,7 +8,7 @@ The build refuses unless the number in that folder's pyproject.toml equals the
 tag's number, so a tag can never name a version the files do not hold. Prints
 the paths of what it built, one per line, and their sha256.
 
-Needs `pip` and nothing else (it runs `pip wheel` and builds the sdist with
+Needs Python 3.11+ and `pip` and nothing else (it runs `pip wheel` and builds the sdist with
 setuptools through the same isolated build backend).
 """
 from __future__ import annotations
@@ -16,8 +16,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -53,16 +55,22 @@ def main(argv: list[str]) -> int:
     ap.add_argument("tag")
     ap.add_argument("--out", default="dist")
     args = ap.parse_args(argv)
-    folder = check_tag(args.tag)
+    source = check_tag(args.tag)
     out = Path(args.out).resolve()
-    out.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(out, ignore_errors=True)  # only this tag's files, never stale ones
+    out.mkdir(parents=True)
+    # Build from a copy so no build/ or *.egg-info is left in the checkout and
+    # no stale build/lib leaks into the wheel.
+    work = Path(tempfile.mkdtemp(prefix="pkg-build-"))
+    folder = work / source.name
+    shutil.copytree(source, folder, ignore=shutil.ignore_patterns("build", "dist", "*.egg-info", "__pycache__", ".git"))
     py = sys.executable
     subprocess.run([py, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", str(out), str(folder)], check=True)
     subprocess.run([py, "-m", "pip", "install", "--quiet", "--target", str(out / ".sdist-tool"), "build"], check=True)
     env = {**__import__("os").environ, "PYTHONPATH": str(out / ".sdist-tool")}
     subprocess.run([py, "-m", "build", "--sdist", "--outdir", str(out), str(folder)], check=True, env=env)
-    import shutil
     shutil.rmtree(out / ".sdist-tool", ignore_errors=True)
+    shutil.rmtree(work, ignore_errors=True)
     for f in sorted(out.iterdir()):
         print(f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {f}")
     return 0
