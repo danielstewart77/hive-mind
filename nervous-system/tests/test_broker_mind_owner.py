@@ -256,7 +256,7 @@ def test_a_mind_with_its_own_key_is_refused_on_the_administrator_only_routes(app
         assert response.status_code == 401, path
 
 
-def test_a_mind_reads_only_its_own_live_sessions_and_wake_state(app_client) -> None:
+def test_a_mind_reads_only_its_own_live_sessions_and_wake_state(app_client, monkeypatch) -> None:
     """The chief of staff gave up the administrator key: its own key reads its
     own mind's rows on the two routes it needs, and another mind's are refused
     or left out."""
@@ -280,7 +280,7 @@ def test_a_mind_reads_only_its_own_live_sessions_and_wake_state(app_client) -> N
     async def _board():
         return board
 
-    server_module.session_mgr.live_dashboard = _board  # the feed is outside what is tested
+    monkeypatch.setattr(server_module.session_mgr, "live_dashboard", _board)  # the feed is outside what is tested
     mine = app_client.get("/sessions/live", headers=kid).json()
     assert [r["session_id"] for r in mine["sessions"]] == ["s-own"]
     assert [r["session_id"] for r in mine["idle"]] == ["i-own"]
