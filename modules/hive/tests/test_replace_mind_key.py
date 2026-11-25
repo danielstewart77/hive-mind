@@ -45,18 +45,24 @@ class ToolsStandIn:
         self.fail = False
         self.down = False
         self.revoked = []
+        self.refuse_delete = False
 
     def __call__(self, request):
         if self.down:
             raise httpx.ConnectError("the tools are down", request=request)
         if request.url.path.startswith("/credentials/") and request.method == "DELETE":
             holder = request.url.path.rsplit("/", 1)[-1]
-            self.values.pop(holder, None)
-            self.revoked.append(holder)
-            return httpx.Response(200, json={"holder": holder, "revoked": True})
+            if self.refuse_delete:
+                return httpx.Response(500, json={"error": "the tools could not revoke"})
+            live = self.values.pop(holder, None) is not None
+            if live:
+                self.revoked.append(holder)
+            return httpx.Response(200, json={"holder": holder, "revoked": live})
         if request.url.path == "/credentials" and request.method == "GET":
-            return httpx.Response(200, json=[{"holder": h, "role": "mind", "live": True}
-                                             for h in self.values])
+            return httpx.Response(200, json=
+                [{"holder": h, "role": "mind", "live": True} for h in self.values]
+                + [{"holder": h, "role": "mind", "live": False} for h in self.revoked
+                   if h not in self.values])
         if request.url.path.startswith("/credentials/") and request.method == "PUT":
             holder = request.url.path.rsplit("/", 1)[-1]
             value = json.loads(request.content)["token"]

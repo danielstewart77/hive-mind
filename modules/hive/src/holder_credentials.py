@@ -1370,6 +1370,12 @@ async def cut_off_mind(name: str) -> dict[str, Any]:
     holder = name.strip().lower()
     results: list[dict[str, Any]] = []
     async with _ROTATION_LOCK:
+        try:
+            # A replacement left unfinished must not be re-applied on the next
+            # start and quietly bring this mind back.
+            key_journal.clear(holder)
+        except OSError:
+            pass
         for service in _one_key_services():
             entry: dict[str, Any] = {"service": service.key, "label": service.label}
             if service.key == "tools" and holder in TOOLS_RESERVED_HOLDERS:
@@ -1378,16 +1384,37 @@ async def cut_off_mind(name: str) -> dict[str, Any]:
                 continue
             try:
                 response = await _request(service, "DELETE", f"/credentials/{holder}")
-            except MintRefused as exc:
-                entry.update(status="unreachable", detail=str(exc)[:300])
-            else:
                 if response.status_code >= 400:
                     entry.update(
                         status="still accepting",
                         detail=f"{service.label} answered {response.status_code} to the cut-off")
                 else:
-                    entry.update(status="cut off")
+                    try:
+                        revoked = bool(response.json().get("revoked"))
+                    except (ValueError, AttributeError):
+                        revoked = False
+                    if revoked:
+                        entry.update(status="cut off")
+                    else:
+                        # Nothing was live: either already cut off, or this
+                        # service never held a key for the mind.
+                        row = await _holder_row(service, holder)
+                        if row is not None and row.get("live") is False:
+                            entry.update(status="cut off")
+                        elif row is None:
+                            entry.update(
+                                status="no key here",
+                                detail=f"{service.label} holds no key for this mind, so "
+                                       "it may reach it by another credential")
+                        else:
+                            entry.update(status="still accepting",
+                                         detail=f"{service.label} did not revoke it")
+            except Exception as exc:  # noqa: BLE001 - reported per service, the rest still runs
+                entry.update(status="unreachable", detail=str(exc)[:300] or type(exc).__name__)
             results.append(entry)
+    if not any(r["service"] == "tools" for r in results):
+        results.append({"service": "tools", "label": SERVICES["tools"].label,
+                        "status": "not held", "detail": "this hive has no tools configured"})
     return {
         "mind": holder,
         "ok": all(r["status"] in ("cut off", "not held") for r in results),

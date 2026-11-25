@@ -4089,7 +4089,10 @@ async def api_mind_cut_off(name: str, user: dict = Depends(require_auth)):
         services={r["service"]: r["status"] for r in result["services"]},
     )
     credential_registry.forget_all()
-    result["inference"] = await holder_credentials.inference_cut_off_step(result["mind"])
+    try:
+        result["inference"] = await holder_credentials.inference_cut_off_step(result["mind"])
+    except Exception:  # noqa: BLE001 - the cut-off landed; never mask it
+        result["inference"] = None
     return JSONResponse(result, status_code=200 if result["ok"] else 207)
 
 

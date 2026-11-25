@@ -67,3 +67,22 @@ async def test_pasting_a_key_for_a_cut_off_mind_brings_it_back_and_touches_no_ot
 
     assert await hive.status(new) == {"comms": 200, "lucent": 200, "tools": 404}
     assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
+
+
+async def test_a_service_that_refuses_the_cut_off_is_reported_as_still_accepting(hive):
+    hive.tools.refuse_delete = True
+
+    result = await holder_credentials.cut_off_mind("ada")
+
+    assert result["ok"] is False
+    assert {s["service"]: s["status"] for s in result["services"]} == {
+        "comms": "cut off", "lucent": "cut off", "tools": "still accepting"}
+
+
+async def test_a_mind_the_tools_hold_no_key_for_is_not_reported_as_cut_off_there(hive):
+    hive.tools.values.pop("ada")  # a mind still on the shared tools token
+
+    result = await holder_credentials.cut_off_mind("ada")
+
+    assert result["ok"] is False
+    assert {s["service"]: s["status"] for s in result["services"]}["tools"] == "no key here"
