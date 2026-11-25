@@ -1250,9 +1250,11 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
 
     try:
         if connection:
-            proxy_key, proxy_key_warning = await holder_credentials.accept_mind_provider_token(body.pop("provider_token", body.pop("proxy_key", None)))
+            proxy_key, _ = await holder_credentials.accept_mind_provider_token(body.pop("provider_token", body.pop("proxy_key", None)), for_mind=name)
         else:
-            proxy_key, proxy_key_warning = await holder_credentials.validate_mind_proxy_key(body.pop("proxy_key", None))
+            proxy_key, _ = await holder_credentials.validate_mind_proxy_key(body.pop("proxy_key", None), for_mind=name)
+    except holder_credentials.KeyHeldByAnother as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except (holder_credentials.MintRefused, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -1370,7 +1372,6 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         creation.mark("credentials")
         minted, credential_error = await holder_credentials.provision_mind(
             name, mind_id, owner, proxy_key=proxy_key,
-            **({"issue_proxy_key": connection["id"] == "hive-proxy"} if connection else {}),
         )
         if credential_error:
             raise _CreationStepFailed(credential_error)
@@ -1438,6 +1439,13 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             mind_id=mind_id, harness=harness, provider=provider, step=step,
             reason=why[:500], left_behind=leftovers,
         )
+        if isinstance(exc, holder_credentials.KeyHeldByAnother):
+            # One plain sentence: the step it failed on is not the person's
+            # concern, and the undo has already removed what landed.
+            detail = f"{name} was not made. {why}" + (
+                " Left behind, and to be removed by hand: " + "; ".join(leftovers) + "."
+                if leftovers else "")
+            raise HTTPException(status_code=409, detail=detail) from exc
         detail = f"{name} was not made. {step} failed: {why.rstrip('.')}. " + (
             "Left behind, and to be removed by hand: " + "; ".join(leftovers) + "."
             if leftovers else "Everything written for it has been removed.")
@@ -1464,7 +1472,6 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         "roles": role_ids,
         "written": written,
         "credentials": minted,
-        "proxy_key_warning": proxy_key_warning,
         "registration": {
             "name": name,
             "mind_id": mind_id,
@@ -3980,14 +3987,14 @@ async def api_mind_proxy_key_update(
         raise HTTPException(status_code=400, detail="Request body must be an object")
     try:
         if configuration.get("provider_connection"):
-            key, warning = await holder_credentials.accept_mind_provider_token(body.get("proxy_key"))
+            key, warning = await holder_credentials.accept_mind_provider_token(body.get("proxy_key"), for_mind=name)
         else:
-            key, warning = await holder_credentials.validate_mind_proxy_key(body.get("proxy_key"))
-        if key is None:
-            raise holder_credentials.MintRefused("Paste the proxy key this Mind should use")
+            key, warning = await holder_credentials.validate_mind_proxy_key(body.get("proxy_key"), for_mind=name)
         await holder_credentials.store_mind_proxy_key(
             name, str(configuration.get("owner") or user["username"]), key,
         )
+    except holder_credentials.KeyHeldByAnother as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except holder_credentials.MintRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"saved": True, "restart_required": True, "warning": warning}

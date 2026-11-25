@@ -284,6 +284,27 @@ async def test_the_stored_digest_resolves_and_a_revoked_one_does_not(
     assert await graph.credential_by_token(token_sha=digest) is None
 
 
+async def test_removing_a_mind_memory_credential_frees_its_digest_and_spares_a_service(
+        connected):
+    mind, service, other = (f"holder-{uuid.uuid4().hex[:8]}" for _ in range(3))
+    digest = f"sha-{uuid.uuid4().hex}"
+    await graph.credential_put(
+        holder=mind, username="u", role="mind", token_sha=digest, mind_id=None)
+    await graph.credential_put(
+        holder=service, username="u", role="service",
+        token_sha=f"sha-{uuid.uuid4().hex}", mind_id=None)
+    await graph.credential_revoke(holder=mind)
+    assert await graph.credential_holder_of_digest(
+        token_sha=digest, other_than=other) == mind
+
+    removed = await graph.credential_delete(holder=mind)
+    spared = await graph.credential_delete(holder=service)
+
+    assert (removed["rows"], spared["rows"]) == (1, 0)
+    assert await graph.credential_holder_of_digest(
+        token_sha=digest, other_than=other) is None
+
+
 async def test_the_pruner_reads_the_rows_it_then_deletes(
         connected, inspector, a_mind):
     """The prune's read and its delete have to be the same store.

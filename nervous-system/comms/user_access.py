@@ -311,6 +311,20 @@ async def revoke_credential(holder: str) -> bool:
     return result["rows"] > 0
 
 
+async def remove_mind_credential(holder: str) -> bool:
+    """Delete a mind's credential row outright, freeing its digest.
+
+    For a creation that failed and a mind that was deleted. A revoked row
+    keeps the digest and refuses it to every other holder for good; a key
+    cut off from a mind stays revoked, but one that never made a mind, or
+    belongs to one that is gone, must be pasteable again. Only a row typed
+    `mind` is removed.
+    """
+    key = normalize_holder(holder)
+    result = await broker_ops.delete_mind_credential(key)
+    return result["rows"] > 0
+
+
 async def credential_for_token(token: str) -> Credential | None:
     """The holder a presented credential belongs to, or None.
 

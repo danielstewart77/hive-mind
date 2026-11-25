@@ -367,6 +367,17 @@ async def revoke_credential(holder: str) -> bool:
     return int(written.get("rows", 0)) > 0
 
 
+async def remove_mind_credential(holder: str) -> bool:
+    """Delete a mind's credential row outright, freeing its digest.
+
+    See `comms.user_access.remove_mind_credential`: a failed creation or a
+    deleted mind must not keep a pasted key burned, and only a `mind` row
+    is removed.
+    """
+    written = await graph.credential_delete(holder=normalize_holder(holder))
+    return int(written.get("rows", 0)) > 0
+
+
 async def all_credentials() -> list[dict]:
     """Every holder and whether it is live. Never the value.
 
