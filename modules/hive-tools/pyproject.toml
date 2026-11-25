@@ -5,7 +5,8 @@ requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+# ../hive-data: the data package is the checkout's own modules/hive-data.
+pythonpath = [".", "../hive-data"]
 
 [tool.mypy]
 python_version = "3.12"

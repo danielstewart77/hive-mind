@@ -51,7 +51,7 @@ main() {
       stamp="$(date +%Y%m%d%H%M%S)"
       mv "$repo/$path" "$repo/modules/.$name.moved-aside-$stamp" \
         || fail "could not move $repo/$path aside" "move it away by hand, then run again"
-      echo "$name is now part of hive-mind: the old clone was moved to $repo/modules/.$name.moved-aside-$stamp (safe to delete once you have carried its untracked .env and data/ into modules/$name)."
+      echo "$name is now part of hive-mind: the old clone was moved to $repo/modules/.$name.moved-aside-$stamp (safe to delete once you have carried its untracked .env and data/ into modules/$name; hive-tools is the exception: its .env, credentials/ and data/ go to ~/.config/hive-tools, never into the checkout)."
     done
   }
 

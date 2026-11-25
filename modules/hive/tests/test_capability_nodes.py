@@ -67,18 +67,6 @@ def _authed_client(tmp_path, monkeypatch) -> TestClient:
     return client
 
 
-INSTALL_ROUTE = "/api/capability-nodes/hive-tools/install"
-
-
-# The tools source is part of hive-mind: the console does not fetch it, so the
-# route that used to clone it from a branch is gone and the card is not a
-# clone button.
-def test_the_console_has_no_route_that_fetches_hive_tools(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
-    assert client.post(INSTALL_ROUTE).status_code in (404, 405)
-    assert not hasattr(main_mod, "clone_hive_tools")
-
-
 async def test_the_hive_tools_card_is_bundled_and_offers_no_clone():
     node = await _hive_tools_node()
     assert node["bundled"] is True
@@ -151,6 +139,7 @@ def test_the_bundled_card_names_its_source_and_offers_no_clone_button(tmp_path):
 
     missing = _render_installation_controls({**node, "installed": False})
     assert "not visible to the console" in missing
+    assert "kept outside the checkout" in missing
     assert "data-capability-install=" not in missing
 
 

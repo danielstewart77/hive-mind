@@ -17,7 +17,8 @@ SOCKET = "docker.sock"
 def _mounts_socket(service: dict) -> bool:
     for volume in service.get("volumes") or []:
         source = volume.get("source", "") if isinstance(volume, dict) else str(volume).split(":", 1)[0]
-        if source.endswith(SOCKET):
+        # The socket itself, or a parent that carries it with it.
+        if source.endswith(SOCKET) or source.rstrip("/") in ("", "/var/run", "/run"):
             return True
     return False
 
@@ -30,7 +31,7 @@ def _tracked_compose_files() -> list[Path]:
     listed = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True,
                             check=True).stdout.split()
     return [ROOT / f for f in listed
-            if Path(f).name.startswith(("docker-compose", "compose")) and f.endswith((".yml", ".yaml"))]
+            if f.endswith((".yml", ".yaml")) and "compose" in Path(f).name]
 
 
 def test_in_every_tracked_compose_file_only_the_tools_service_mounts_the_docker_socket():

@@ -90,7 +90,7 @@ def docker_mutate_gate(tool_name: str):
     ) -> str:
         if caller_mind == "internal":
             return caller_mind
-        if os.path.basename(path.rstrip("/")) in MUTATE_BLOCKED:
+        if os.path.basename(os.path.normpath(path)) in MUTATE_BLOCKED:
             raise BlockedProjectError(
                 f"Mutating operations on '{path}' are blocked. This project "
                 "runs the service handling the request, so composing it "

@@ -440,7 +440,6 @@ TABLE.add(
     "PUT /api/capability-nodes/{node_id}/configuration",
     "DELETE /api/capability-nodes/{node_id}/configuration",
     "POST /api/capability-nodes/inference-proxy/install",
-    "POST /api/capability-nodes/hive-tools/install",
     "GET /api/capability-nodes/ollama/models",
     "POST /api/capability-nodes/ollama/models/pull",
     "DELETE /api/capability-nodes/ollama/models",
