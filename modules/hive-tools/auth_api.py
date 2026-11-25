@@ -80,9 +80,8 @@ async def register_credential(holder: str, value: str) -> dict[str, Any]:
     """Make `value` the holder's one working credential, as supplied.
 
     Registering a value another holder has is refused, naming that holder.
-    Any value the holder had is cut off in the same step, and so are its
-    requests still waiting on a person: a mind does not keep a way to be
-    approved after its key was replaced by someone else's choice.
+    Any value the holder had is cut off in the same step. A request it was
+    waiting on stays decidable: the holder is the same mind, with a new key.
     """
     name = _checked_holder(holder)
     raw = str(value or "").strip()
@@ -105,15 +104,19 @@ async def revoke_credential(holder: str, *, remove: bool = False) -> dict[str, A
 
     Its approved-but-unrun requests are not touched (they already ran or are
     running); its pending ones are made undecidable, so approving one later
-    cannot replay a call as a mind that no longer has a key. `remove` deletes
+    cannot replay a call as a mind that no longer has a key, and its sudo
+    grants are deleted so a mind later given the name starts with none.
+    `remove` deletes
     the holder's rows so its digest may be given to a mind again: the undo of
     a creation.
     """
     name = _checked_holder(holder)
     now = int(time.time())
     async with store.transaction():
+        await store.hold_holder(name)
         revoked = await store.revoke_holder_tokens(name, now)
         expired = await store.expire_pending_requests(name, now)
+        await store.clear_sudo_grants(name)
         removed = await store.remove_holder_tokens(name) if remove else 0
     answer: dict[str, Any] = {"holder": name, "revoked": revoked > 0,
                               "expired_requests": expired}

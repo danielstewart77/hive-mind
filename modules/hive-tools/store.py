@@ -239,6 +239,15 @@ async def expire_pending_requests(caller_mind: str, now: int) -> int:
                                                     unit=_live()))["rows"])
 
 
+async def clear_sudo_grants(caller_mind: str) -> int:
+    return int((await tools.clear_sudo_grants(caller_mind, unit=_live()))["rows"])
+
+
+async def hold_holder(name: str) -> None:
+    """Serialize against a register for the same holder."""
+    await _live().hold(f"tools:token:{name}")
+
+
 async def mind_names() -> set[str]:
     """Every registered mind's name, lowercased."""
     return {str(row["name"] or "").strip().lower()

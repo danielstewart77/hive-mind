@@ -433,6 +433,14 @@ async def revoke_holder_tokens(name: str, at: int, *,
         name.strip().lower(), at)
 
 
+async def clear_sudo_grants(caller_mind: str, *,
+                            unit: Unit | None = None) -> Row:
+    """Delete every sudo grant a caller holds, so none outlives its key."""
+    return await _execute(
+        unit, f'DELETE FROM {qualified(GRANTS)} WHERE lower("caller_mind") = $1',
+        caller_mind.strip().lower())
+
+
 async def remove_holder_tokens(name: str, *, unit: Unit | None = None) -> Row:
     """Delete one holder's rows outright, so its digest is free again."""
     return await _execute(

@@ -27,6 +27,11 @@ from .unit import Unit
 Row = dict[str, Any]
 
 
+#: Names the tools keep for their own holders. A mind renamed to one would
+#: carry its tools key onto it: the approver's power or the replay secret's.
+TOOLS_RESERVED_NAMES = frozenset({'hitl-approver', 'internal', 'skippy'})
+
+
 async def preflight_mind_rename(mind_id: str, old: str, new: str) -> None:
     """Check every database destination without changing any live row."""
     row = await get_mind(mind_id)
@@ -36,6 +41,10 @@ async def preflight_mind_rename(mind_id: str, old: str, new: str) -> None:
         raise ValueError('Invalid Mind name')
     if old == new or await get_mind_by_name(new):
         raise ValueError('The destination name is occupied')
+    if new in TOOLS_RESERVED_NAMES:
+        raise ValueError('That name is kept for the tools')
+    if await _fetch_one(None, 'SELECT 1 FROM tools.api_tokens WHERE lower(name)=$1', new):
+        raise ValueError('The destination credential holder is occupied')
     for table in ('core.credentials', 'memory.credentials'):
         if await _fetch_one(None, f'SELECT holder FROM {table} WHERE holder=$1', new):
             raise ValueError('The destination credential holder is occupied')
@@ -67,6 +76,8 @@ async def rename_mind(mind_id: str, old: str, new: str) -> Row:
         row = await get_mind(mind_id, unit=unit)
         if not row or row['name'] not in (old, new):
             raise ValueError('The Mind changed since this rename was requested')
+        if new in TOOLS_RESERVED_NAMES:
+            raise ValueError('That name is kept for the tools')
         collision = await get_mind_by_name(new, unit=unit)
         if collision and collision['mind_id'] != mind_id:
             raise ValueError('The destination name is occupied')

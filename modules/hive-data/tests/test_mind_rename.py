@@ -70,3 +70,13 @@ async def test_late_provider_collision_rolls_back_registry_and_credentials(conne
     assert dict(await inspector.fetchrow('SELECT * FROM core.minds WHERE mind_id=$1', a_mind)) == before
     assert await inspector.fetchval('SELECT holder FROM core.credentials WHERE holder=$1', before['name']) == before['name']
     assert await inspector.fetchval('SELECT holder FROM core.credentials WHERE holder=$1', destination) is None
+
+
+@pytest.mark.parametrize("reserved", ["hitl-approver", "internal", "skippy"])
+async def test_a_mind_cannot_be_renamed_to_a_name_the_tools_keep(connected, a_mind, reserved):
+    """Its tools key would become the approver's, or the replay secret's."""
+    row = await core.get_mind(a_mind)
+    with pytest.raises(ValueError, match="kept for the tools"):
+        await core.preflight_mind_rename(a_mind, row['name'], reserved)
+    with pytest.raises(ValueError, match="kept for the tools"):
+        await core.rename_mind(a_mind, row['name'], reserved)

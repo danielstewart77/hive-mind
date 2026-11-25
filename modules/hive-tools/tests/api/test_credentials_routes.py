@@ -293,3 +293,18 @@ def test_a_registered_mind_of_someone_else_is_refused_before_any_tool_runs(
     assert refused.status_code == 403
     assert "sloan" in refused.json()["detail"]
     assert db.execute("SELECT count(*) AS n FROM hitl_requests").fetchone()["n"] == 0
+
+
+def test_cutting_a_holder_off_ends_its_sudo_grants_and_a_new_holder_of_the_name_starts_without(
+        client: TestClient) -> None:
+    import time as _time
+
+    from hive_data import tools as _tools
+
+    _register(client, "ada", ADA_KEY)
+    now = int(_time.time())
+    run(_tools.grant_sudo("gmail_create_label", "ada", now, now + 900))
+
+    client.delete("/credentials/ada?remove=true", headers=_bearer(ADMIN))
+
+    assert run(_tools.active_grant("gmail_create_label", "ada", now)) is None
