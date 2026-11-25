@@ -3,11 +3,6 @@
 # its `branch` and leaves it checked out on that branch. To pin one for a
 # reason, add `pin = <commit>` to its entry. `ignore = all` keeps the commit
 # hive-mind records from drifting into unrelated hive-mind commits.
-[submodule "modules/hive-tools"]
-	path = modules/hive-tools
-	url = https://github.com/danielstewart77/hive-tools.git
-	branch = master
-	ignore = all
 [submodule "modules/inference-proxy"]
 	path = modules/inference-proxy
 	url = https://github.com/danielstewart77/inference-proxy.git
