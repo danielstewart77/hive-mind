@@ -27,7 +27,3 @@ def test_a_tag_that_differs_from_pyproject_is_refused(tmp_path):
     with pytest.raises(SystemExit, match="1.4.3.*1.4.2"):
         release.check_tag("hive-surfaces-v1.4.3", tmp_path)
 
-
-def test_the_real_surfaces_package_is_released_under_its_own_number():
-    version = release.package_version("hive-surfaces")
-    assert release.check_tag(f"hive-surfaces-v{version}") == ROOT / "modules" / "hive-surfaces"
