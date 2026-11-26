@@ -250,6 +250,24 @@ hold, a mind at a time.
    services take it at once and the mind must be recreated to read it. The old
    key still bills at the proxy until whoever runs the proxy revokes it.
 
+### Limits worth knowing before you move a mind
+
+- **The inference names are the mind's key.** Requirement 12: the key pasted is
+  the mind's inference key. A moved mind has `MIND_PROXY_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` and `DSH_API_KEY` set to it at start,
+  and the `runtime.yaml` `env:` block's values for those names are ignored
+  (those are the names the claude, codex and dsh harnesses read to reach the
+  proxy, so they cannot also carry something else). A mind that needs a real
+  outside OpenAI or Anthropic key for something that is not its inference
+  (a tool script, say) must keep that key under another name, for example
+  `OUTSIDE_OPENAI_API_KEY`, and the script must read that name. A mind not yet
+  moved is untouched. Move such a mind only after renaming.
+- **The console runs as one process.** The lock that serialises key
+  replacement, cut-off, move, retirement and mind creation (`_ROTATION_LOCK`)
+  is an in-process lock. Do not run the console as several processes or
+  replicas: two of them would not exclude one another and two operations on one
+  key could interleave. This is how the console is deployed today.
+
 ## The work machine (the other machine)
 
 Written, not performed. There, there is no installer stack from this repository

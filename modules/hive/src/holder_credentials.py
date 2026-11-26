@@ -946,7 +946,21 @@ async def provision_mind(
     minted: list[dict[str, Any]] = []
     failures: list[str] = []
     held = False
+    # The page's early "does another mind hold this key" read is not the guard
+    # on its own: two creations pasting one key both pass it before either has
+    # written anything. The guard is this read and the line that records the
+    # key, made together under the rotation lock, first and before any service
+    # is told: the second creation finds the first's line and is refused here
+    # with nothing of its own written.
+    if MIND_ENV_LABEL not in ENV_FILES:
+        raise MintRefused(f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
+    async with _ROTATION_LOCK:
+        _refuse_if_another_holds(proxy_key, name)
+        _ensure_key(ENV_FILES[MIND_ENV_LABEL], one_key_variable(name))
+        minted.append(_store_mind_proxy_key_locked(name, owner, proxy_key, creating=True))
     for service in SERVICES.values():
+        if service.key == "proxy":
+            continue
         if service.key == "tools" and not service.configured():
             continue
         try:
@@ -955,9 +969,6 @@ async def provision_mind(
                 raise MintRefused(
                     f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
             _ensure_key(ENV_FILES[MIND_ENV_LABEL], key)
-            if service.key == "proxy":
-                minted.append(await store_mind_proxy_key(name, owner, proxy_key, creating=True))
-                continue
             minted.append(
                 await mint(
                     service,
@@ -1043,6 +1054,12 @@ def name_has_old_proxy_line(path: Path, name: str) -> bool:
 
 async def store_mind_proxy_key(name: str, owner: str, value: str, *, creating: bool = False) -> dict[str, Any]:
     """Persist an already verified key without minting or rotating it upstream."""
+    async with _ROTATION_LOCK:
+        return _store_mind_proxy_key_locked(name, owner, value, creating=creating)
+
+
+def _store_mind_proxy_key_locked(name: str, owner: str, value: str, *, creating: bool = False) -> dict[str, Any]:
+    """`store_mind_proxy_key` for a caller already holding `_ROTATION_LOCK`."""
     path = ENV_FILES[MIND_ENV_LABEL]
     if (credentials_data._read_env_value(path, one_key_variable(name)) is not None
             and not creating):
@@ -1054,12 +1071,11 @@ async def store_mind_proxy_key(name: str, owner: str, value: str, *, creating: b
     key = one_key_variable(name)
     if credentials_data._read_env_value(path, key) is None and name_has_old_proxy_line(path, name):
         key = variable_name(SERVICES["proxy"], name)
-    async with _ROTATION_LOCK:
-        with credentials_data._WRITE_LOCK:
-            _ensure_key(path, key)
-            written = credentials_data._write_location(path, key, value, MIND_ENV_LABEL)
-            if not written["written"] or _loaded_value(Location(MIND_ENV_LABEL, key)) != value:
-                raise MintRefused("The pasted proxy key could not be saved; creation cannot use it")
+    with credentials_data._WRITE_LOCK:
+        _ensure_key(path, key)
+        written = credentials_data._write_location(path, key, value, MIND_ENV_LABEL)
+        if not written["written"] or _loaded_value(Location(MIND_ENV_LABEL, key)) != value:
+            raise MintRefused("The pasted proxy key could not be saved; creation cannot use it")
     return {"service": "proxy", "holder": name, "username": owner, "role": "mind",
             "file": MIND_ENV_LABEL, "path": str(path), "env_key": key,
             "restart_target": RESTART_BY_FILE.get(MIND_ENV_LABEL, RESTART_BY_FILE["hive_mind"])}

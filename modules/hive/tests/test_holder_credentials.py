@@ -342,7 +342,7 @@ def test_one_service_refusing_still_reports_the_credential_that_landed(hive, ser
         holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED)
     )
 
-    assert [entry["service"] for entry in minted] == ["comms", "proxy", "tools"]
+    assert sorted(entry["service"] for entry in minted) == ["comms", "proxy", "tools"]
     assert "memory store" in failed
 
 
@@ -374,6 +374,24 @@ def test_pasting_a_key_another_mind_holds_in_the_env_file_is_refused_whatever_va
         _run(holder_credentials.validate_mind_proxy_key(PASTED, for_mind="quokka"))
     with pytest.raises(holder_credentials.KeyHeldByAnother):
         _run(holder_credentials.accept_mind_provider_token(PASTED, for_mind="quokka"))
+
+
+def test_two_creations_pasting_the_same_key_cannot_both_get_it(hive, service):
+    """Both pass the page's early read before either writes. The refusal that
+    stands is the one made under the rotation lock, so exactly one mind ends
+    holding the key and the other writes nothing."""
+    async def both():
+        return await asyncio.gather(
+            holder_credentials.provision_mind("quokka", "uuid-1", "daniel", proxy_key=PASTED),
+            holder_credentials.provision_mind("wombat", "uuid-2", "daniel", proxy_key=PASTED),
+            return_exceptions=True)
+
+    results = _run(both())
+
+    refused = [r for r in results if isinstance(r, holder_credentials.KeyHeldByAnother)]
+    assert len(refused) == 1
+    holders = [n for n in ("QUOKKA", "WOMBAT") if _value(hive["shared"], f"MIND_KEY_{n}") == PASTED]
+    assert len(holders) == 1
 
 
 def test_a_blank_or_tiny_key_is_refused_with_the_paste_the_minds_key_sentence(hive):

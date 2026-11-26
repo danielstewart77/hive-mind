@@ -114,22 +114,22 @@ def proactive_token(environ: Mapping[str, str] | None = None, started_with: str 
     The bot's credential is its own (`MIND_PROACTIVE_TOKEN`), never the mind's
     key: a bot given the key would be a holder of the mind's inference key.
 
-    Without one, a mind started the old way keeps what it always compared
-    against: the gateway value it was started with (`started_with`, read before
-    the key was applied), so a bot not yet given its own credential keeps
-    working through the transition. A value equal to the one key is never
-    accepted, and a mind with a key and nothing else answers nobody (a value
-    nothing can present) rather than the open route a mind with no credential
-    at all has.
+    Without one, a mind started the old way (no `MIND_KEY`) keeps what it
+    always compared against: the gateway value it was started with
+    (`started_with`, read before the key was applied), so a bot not yet given
+    its own credential keeps working through the transition. A mind on the one
+    key never takes that old gateway value: once the old keys retire it would
+    be a retired credential still collecting the mind's messages. Such a mind
+    with no `MIND_PROACTIVE_TOKEN` answers nobody (a value nothing can present)
+    rather than the open route a mind with no credential at all has.
     """
     source = os.environ if environ is None else environ
     own = str(source.get("MIND_PROACTIVE_TOKEN") or "").strip()
     if own and own != key(source):
         return own
-    carried = started_with.strip()
     if key(source):
-        return carried if carried and carried != key(source) else secrets.token_urlsafe(32)
-    return carried or None
+        return secrets.token_urlsafe(32)
+    return started_with.strip() or None
 
 
 def generic_environment(reference: str) -> dict[str, str]:

@@ -85,7 +85,9 @@ and `DSH_API_KEY` from it, so the harness binaries and the per-mind hook copies
 (which read those names) are unchanged. A mind started without `MIND_KEY` keeps
 the per-service variables above: that is the transition, until a mind's key is
 moved and the old values are retired. A `runtime.yaml` `env:` block is not where
-a key lives; with `MIND_KEY` set, any key-bearing name in it is ignored. To
+a key lives; with `MIND_KEY` set, any key-bearing name in it is ignored, and
+the inference names above are the mind's key, not a place for an outside
+credential (keep one of those under another name). To
 replace a mind's key, paste the new one on the mind's page and recreate the
 mind: the file is read at start.
 
