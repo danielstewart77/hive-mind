@@ -77,6 +77,10 @@ def test_after_a_good_key_an_empty_or_garbled_file_keeps_the_last_good_key_and_l
 
     with caplog.at_level(logging.WARNING, logger="hive-mind.mind_key"):
         _place(folder, bad)
+        # What the process holds is dropped, so only the file reader's own
+        # memory of the last good key can supply it.
+        for name in ("MIND_KEY", *mind_key.GENERIC_NAMES):
+            os.environ.pop(name, None)
         for _ in range(5):
             assert runtime_api._own_key() == FIRST
 
@@ -92,6 +96,8 @@ def test_after_a_good_key_a_file_that_goes_missing_or_unreadable_keeps_the_last_
 
     with caplog.at_level(logging.WARNING, logger="hive-mind.mind_key"):
         folder.unlink()
+        for name in ("MIND_KEY", *mind_key.GENERIC_NAMES):
+            os.environ.pop(name, None)
         assert runtime_api._own_key() == FIRST
         assert runtime_api._own_key() == FIRST
         folder.write_bytes(b"\xff\xfe\x00bad")

@@ -909,6 +909,17 @@ def new_mind_obstacle(name: str, harness: str) -> str | None:
     if path is None:
         return (f"this console was given no {label} env file (HIVE_ENV_FILES), "
                 "so a new Mind's keys have nowhere to go")
+    import mind_key_files
+    if not mind_key_files.configured():
+        return ("this console was given no folder for mind keys (HIVE_KEY_ROOT mounted "
+                "read-write), so a new Mind's key has nowhere to go")
+    try:
+        key_dir = credentials_data._read_env_value(path, "HOST_KEY_DIR")
+    except credentials_data.Unreadable:
+        return f"{path} could not be read"
+    if not key_dir:
+        return (f"{path} sets no HOST_KEY_DIR, the host folder behind the key root, which a "
+                "new Mind's compose file mounts its key folder from")
     stack = stack_compose_path()
     if not stack.is_file():
         return (f"the stack file {stack} is not there, so a new Mind cannot "

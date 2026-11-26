@@ -584,3 +584,14 @@ def test_a_service_that_removes_is_reported_clean(hive, service):
     service["state"]["honours_remove"] = True
 
     assert _run(holder_credentials.unprovision_mind("quokka")) == []
+
+
+def test_forgetting_a_mind_takes_its_key_file_and_folder_away(hive, service):
+    _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
+    assert mind_key_files.exists("quokka")
+
+    failures = _run(holder_credentials.unprovision_mind("quokka"))
+
+    assert not mind_key_files.exists("quokka")
+    assert not mind_key_files.folder("quokka").exists()
+    assert not [f for f in failures if "key file" in f]

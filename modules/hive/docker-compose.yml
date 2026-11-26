@@ -34,6 +34,8 @@ services:
       # the bind source root-owned, and there is nothing to match.
       - DESIGN_PUSH_TOKEN=${DESIGN_PUSH_TOKEN:-}
       - HOST_UID=${HOST_UID:-1000}
+      - HIVE_KEY_ROOT=/mind_keys
+      - HIVE_MIND_UID=${HIVE_MIND_UID:-1000}
       - HOST_GID=${HOST_GID:-1000}
     volumes:
       # Every path below that names the host defaults to somewhere inside this
@@ -70,6 +72,10 @@ services:
       # blast radius of "settings can write files" stays legible in code.
       - ${HIVE_MIND_DIR:-../..}/minds:/minds_hive_mind_voice:rw
       - ${HIVE_MIND_DIR:-../..}/minds:/minds_hive_mind_config:rw
+      # Each mind's key, one folder per mind, OUTSIDE the checkout every mind
+      # mounts: written here and only here (requirement 21); a mind mounts its
+      # own folder read-only. HOST_KEY_DIR is the same folder in .env.
+      - ${HOST_KEY_DIR:-./data/mind-keys}:/mind_keys:rw
       # The mountable roots for the per-Mind project folders control
       # (mind_mounts.py). Read-write because the control creates a folder and
       # mounts it in one action; what it may reach is this mount, so a root

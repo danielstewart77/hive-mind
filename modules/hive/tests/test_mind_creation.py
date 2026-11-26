@@ -148,7 +148,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main_mod, "_broker_minds_safe", AsyncMock(return_value=[]))
     env_file = tmp_path / ".env"
     env_file.write_text(
-        f"HOST_PROJECT_DIR={tmp_path}\nPROXY_CREDENTIAL_ADMIN_KEY=stand-in-proxy-admin\n")
+        f"HOST_PROJECT_DIR={tmp_path}\nHOST_KEY_DIR={tmp_path}/keys\nPROXY_CREDENTIAL_ADMIN_KEY=stand-in-proxy-admin\n")
     files = {"hive_mind": env_file}
     monkeypatch.setattr(credentials_data, "ENV_FILES", files)
     monkeypatch.setattr(holder_credentials, "ENV_FILES", files)

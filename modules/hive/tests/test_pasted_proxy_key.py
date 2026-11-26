@@ -26,7 +26,7 @@ def creation(tmp_path, monkeypatch, builtin_console):
     minds = tmp_path / "minds"
     minds.mkdir()
     env = tmp_path / ".env"
-    env.write_text(f"HOST_PROJECT_DIR={tmp_path}\nUNRELATED=keep\n")
+    env.write_text(f"HOST_PROJECT_DIR={tmp_path}\nHOST_KEY_DIR={tmp_path}/keys\nUNRELATED=keep\n")
     stack = tmp_path / "docker-compose.yml"
     existing = minds / "existing/container"
     existing.mkdir(parents=True)
