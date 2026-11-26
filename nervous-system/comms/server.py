@@ -2437,6 +2437,14 @@ async def _refuse_foreign_registration(caller, body) -> None:
     for mind_id, name in existing:
         keys = {str(mind_id or ""), user_access.normalize_username(name)}
         if caller.holder not in keys:
+            # An operator mind may re-register a mind of its own owner
+            # (requirement 20); never another person's.
+            if await user_access.operator_may_change(caller.holder, mind_id):
+                if (str(mind_id or "") == asked_id
+                        and user_access.normalize_username(name) != asked_name):
+                    raise HTTPException(
+                        403, f"{caller.holder!r} may not rename {name!r}; the admin does")
+                continue
             raise HTTPException(
                 403,
                 f"{caller.holder!r} may only register itself, not "
@@ -2457,6 +2465,32 @@ async def _refuse_foreign_registration(caller, body) -> None:
             f"{caller.holder!r} may only register itself, not "
             f"{body.name or body.mind_id!r}",
         )
+
+
+async def _refuse_address_change(caller, body) -> None:
+    """An ordinary mind's own key may not move its own address (requirement 20).
+
+    The console sends a person's key to the address a mind registered, so a
+    mind that could re-register a different `gateway_url` could capture it.
+    A first registration, a refresh of the same address and a session-token
+    refresh keep working; the admin (which this function is never asked
+    about), the owner's key (admin route on the console) and an operator mind
+    - read from the roles tables now - may change it.
+    """
+    row = await core.get_mind_by_id_or_name(str(body.mind_id or "").strip())
+    if not row:
+        return
+    old = str(row["gateway_url"] or "").strip().rstrip("/")
+    new = str(body.gateway_url or "").strip().rstrip("/")
+    if old == new or not old:
+        return
+    if await user_access.operator_may_change(caller.holder, row["mind_id"]):
+        return
+    raise HTTPException(
+        403,
+        f"{caller.holder!r} may not change its own address from {old!r}; "
+        "an operator changes it",
+    )
 
 
 @app.post("/broker/minds")
@@ -2496,6 +2530,7 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
                 403, f"{caller.holder!r} may only register a mind of {mine!r}"
             )
         body.owner = mine or None
+        await _refuse_address_change(caller, body)
     try:
         await broker.register_mind(
             mind_id=body.mind_id,
@@ -2536,7 +2571,7 @@ async def broker_owner_key_check(request: Request, body: OwnerKeyCheck):
     caller = _caller(request)
     if caller.is_admin or caller.role != user_access.MIND or not caller.holder:
         raise HTTPException(401, "Invalid token")
-    return {"owned": await user_access.holds_user_key_of(caller.holder, body.key)}
+    return {"owned": await user_access.key_opens_settings_of(caller.holder, body.key)}
 
 
 async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:

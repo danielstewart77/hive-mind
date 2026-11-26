@@ -545,6 +545,57 @@ async def holds_user_key_of(mind_holder: str, presented: str) -> bool:
     )
 
 
+#: The role slug the hive records for an operator mind (the same slug the
+#: console's role pages and `GET /roles/operator/holders` use).
+OPERATOR_ROLE = "operator"
+
+
+async def is_operator_mind(holder: str) -> bool:
+    """Whether the mind this holder names holds the operator role right now.
+
+    Read from the roles tables on every call, never cached: a role taken away
+    on the console makes the mind's key an ordinary mind's key on its next
+    request (feature 834, requirement 20).
+    """
+    from hive_data import roles
+
+    row = await core.get_mind_by_id_or_name(str(holder or "").strip())
+    if not row:
+        return False
+    return any(r["slug"] == OPERATOR_ROLE for r in await roles.roles_of(row["mind_id"]))
+
+
+async def operator_may_change(operator_holder: str, target: str) -> bool:
+    """Whether an operator mind may change this other mind's settings.
+
+    The smallest safe reading (Cypher, requirement 20): only a mind owned by
+    the same person as the operator mind, as the registry records it. Never
+    another person's mind, never an ownerless one, the mind itself passes trivially (its own key already speaks for it).
+    """
+    if not await is_operator_mind(operator_holder):
+        return False
+    mine = await owner_of_mind(operator_holder)
+    theirs = await owner_of_mind(target)
+    return bool(mine and theirs and mine == theirs)
+
+
+async def key_opens_settings_of(mind_holder: str, presented: str) -> bool:
+    """Whether `presented` may change this mind's settings besides its own key.
+
+    Yes for its owner's person key (requirement 19), and for the live key of an
+    operator mind owned by the same person (requirement 20). A yes or a no,
+    never whose key it was.
+    """
+    if not presented:
+        return False
+    if await holds_user_key_of(mind_holder, presented):
+        return True
+    found = await credential_for_token(presented)
+    if not found or found.role != MIND:
+        return False
+    return await operator_may_change(found.holder, mind_holder)
+
+
 async def owns_mind(caller: Caller, mind_id: str) -> bool:
     if caller.sees_everything():
         return True

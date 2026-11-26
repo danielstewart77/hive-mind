@@ -318,6 +318,36 @@ changes to the mind it owns." Built as feature 834 requirement 19.
   record beside the key journal (`/data/key-journal`, a volume), holding the
   mind's name and no key.
 
+## An operator mind's key, and a mind's address (requirement 20)
+
+Daniel, 2026-11-26: a mind's key is rejected for another mind's settings
+"except if that mind is an operator"; the owner's key and an operator mind's key
+are both kept at the gateway and accepted when making changes to other minds'
+settings.
+
+- An operator mind is a mind that holds the role with slug `operator`, read
+  from the roles tables at every request (no cache). Its key is an ordinary
+  mind key, held, revoked and cut off like any other. Remove the role and its
+  key is an ordinary mind's key on its next request.
+- The question a mind puts to the gateway ("is this key one I should accept?",
+  `POST /broker/owner-key-check`) now answers yes for the owner's key and for
+  the live key of an operator mind owned by the same person as the asking mind.
+  Decision (Daniel did not say; the smallest safe reading): an operator mind
+  reaches only minds owned by the same person as itself, as the registry
+  records, never another person's mind and never an ownerless one.
+- The gateway refuses (403, plain message) an ordinary mind's own key that
+  re-registers a different `gateway_url` for an already registered mind, its
+  own or another's, because the console sends a person's key to the registered
+  address. A first registration, the same address again (boot registration) and
+  a session-token refresh keep working. The admin and an operator mind of the
+  same owner may change an address; an operator mind may not rename a mind.
+- When a mind legitimately moves to a new address: the operator changes it
+  with the admin credential (the console's mind page, or `POST /broker/minds`
+  with the admin token) or from an operator mind of the same owner, before or
+  at the move; then starts the mind at the new address. Until that, the mind's
+  own boot registration with the new address is refused (403, in its log) and
+  the gateway keeps sending to the old address.
+
 ## Things this does not do
 
 - It does not pin base images, apt, npm, PyPI or llama.cpp; a build needs the
