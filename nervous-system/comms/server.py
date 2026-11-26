@@ -2663,7 +2663,7 @@ def _forward_base(registered: object) -> str | None:
     if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username or parts.password:
         return None
     shown = f"[{host}]" if ":" in host else host
-    return f"{parts.scheme}://{shown}" + (f":{port}" if port else "")
+    return f"{parts.scheme}://{shown}" + (f":{port}" if port is not None else "")
 
 
 @app.api_route("/broker/minds/{mind_id}/forward/{tail:path}", methods=list(_FORWARD_METHODS))
