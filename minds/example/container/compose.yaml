@@ -15,13 +15,13 @@ services:
       - HIVE_PROJECT_DIR=/usr/src/app
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
       - COMMS_URL=http://hive-comms:8424
-      # This mind's one key, the value its owner pasted when it was made. The
-      # gateway, the memory store, the tools and the inference proxy each
-      # accept it as this mind; the mind sets every per-service name its
-      # harnesses and hooks read from it. Left empty the mind is started on
-      # the per-service values it had before (the transition); set it in the
-      # install's .env as MIND_KEY_EXAMPLE.
-      - MIND_KEY=${MIND_KEY_EXAMPLE:-}
+      # This mind's one key, the value its owner pasted when it was made, is a
+      # FILE in a folder of its own (mounted read-only below, outside this
+      # checkout): the mind reads it at each request and sets every per-service
+      # name its harnesses and hooks read from it, so a replaced key needs no
+      # restart. A mind with no key file started on the per-service values it
+      # had before (the transition).
+      - MIND_KEY_FILE=/run/mind-key/key
       # A mind re-registers from its own runtime.yaml on every start with its
       # own key; the gateway accepts that for its own row. No hive-wide
       # administrator key is ever given to a mind.
@@ -58,6 +58,8 @@ services:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
       - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
+      # This mind's own key folder and no other mind's.
+      - ${HOST_KEY_DIR:?set HOST_KEY_DIR to a folder outside the checkout}/example:/run/mind-key:ro
       # The dsh harness tree, read-only: a launcher must not rewrite the tree
       # it boots from.
       - ${HOST_DSH_DIR:-/opt/dsh}:/opt/dsh:ro

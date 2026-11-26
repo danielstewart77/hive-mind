@@ -249,7 +249,9 @@ def proactive_token(environ: Mapping[str, str] | None = None, started_with: str 
     own = str(source.get("MIND_PROACTIVE_TOKEN") or "").strip()
     if own and own != key(source):
         return own
-    if key(source):
+    if key(source) or str(source.get(KEY_FILE) or "").strip():
+        # On the one key, or told where its key file is (which may not be
+        # readable yet): never the old gateway value.
         return secrets.token_urlsafe(32)
     return started_with.strip() or None
 

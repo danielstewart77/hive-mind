@@ -222,7 +222,8 @@ gateway and memory store. An older release's mind presents the old values, so:
 - Put each moved mind back first:
   `python3 tools/stateless/key_migration/key_migration.py undo <mind>`, then
   recreate that mind. It registers the old values again from the file where they
-  were kept.
+  were kept, and removes the mind's key file (the recreated mind reads its old
+  per-service values again).
 - **After the old keys are retired (`key_migration.py retire`, item 842) undo is
   impossible and the previous release's minds have no accepted keys.** Going back
   then does not work for them. Retire only when you will not go back.
@@ -238,8 +239,15 @@ hold, a mind at a time.
    holder on the gateway, memory store and tools and every mind with a state.
    Names plainly any mind on another machine not yet registered (paste its key
    on its page), any mind sharing a key and any holder it cannot place. It shows digests only, never a value.
-3. `... move <mind>` for the pilot mind, then recreate it, then check it works
-   and an untouched control mind still does. Then the rest.
+3. `... move <mind>` for the pilot mind. A container mind made before key files
+   has no key folder mounted: the move writes its key to its own key file under
+   the key root and adds the two compose lines (`MIND_KEY_FILE` and the read-only
+   mount of its folder), and then **recreate it once** so it mounts the folder.
+   Check it works and an untouched control mind still does. Then the rest. An
+   installer-made install gets the key root (`<install>/keys`, one folder per
+   mind) and `HOST_KEY_DIR` in its `.env` from the installer; a hand-kept install
+   sets `HOST_KEY_DIR` to a folder outside the checkout and `HIVE_KEY_ROOT` on
+   the console (read-write) to the same folder.
 4. `... tools-credential hive-site` and one per surface bot. Each is written
    once to `TOOLS_TOKEN_<HOLDER>` in the shared env file. The gate cannot see
    what a consumer presents: repoint each bot's and the console's compose tools
@@ -247,8 +255,13 @@ hold, a mind at a time.
 5. `... retire` only when the report's `ready_to_retire` is true. It stops the
    shared tools token and the old per-service values. It cannot be undone.
 6. A mind's key is replaced afterward by pasting a new one on its page; the
-   services take it at once and the mind must be recreated to read it. The old
-   key still bills at the proxy until whoever runs the proxy revokes it.
+   services take it at once and the console writes it to the mind's key file,
+   which the mind reads at its next request: **no restart and no recreate**. A
+   mind on another machine is changed by a person placing the new key in the
+   mind's key file there. The old key still bills at the proxy until whoever runs
+   the proxy revokes it. Retirement also removes the `MIND_KEY_<NAME>` lines an
+   earlier console kept in the shared `.env` (the file wins either way) once the
+   mind's own compose mounts its key folder.
 
 ### Limits worth knowing before you move a mind
 

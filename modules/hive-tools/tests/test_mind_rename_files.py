@@ -145,3 +145,37 @@ def test_rename_waits_for_approval_then_replays_the_selected_project_and_require
         assert mind_rename.load(project, 'op-approved')['stage'] == 'authorized'
         assert (project / 'minds/original/data/conversation.json').read_bytes() == b'original is user-authored content\x00'
         assert not (project / 'minds/renamed').exists()
+
+
+def test_a_renamed_mind_takes_its_key_folder_with_it_and_mounts_it_by_its_new_name(project, tmp_path):
+    """Requirement 21: a mind's key is a file in a folder named for it. The
+    rename moves that folder and its compose line, so the console (which looks
+    the key up by name) and the container (which mounts it) both still find it,
+    and no other mind's folder is touched."""
+    from tools import mind_rename
+    keys = tmp_path / 'keys'
+    (keys / 'original').mkdir(parents=True)
+    (keys / 'original' / 'key').write_text('the-minds-key-0123456789\n')
+    (keys / 'other').mkdir()
+    (keys / 'other' / 'key').write_text('another-key-0123456789\n')
+    with (project / '.env').open('a') as stream:
+        stream.write(f'HOST_KEY_DIR={keys}\n')
+    compose_path = project / 'minds' / 'original' / 'container' / 'compose.yaml'
+    document = yaml.safe_load(compose_path.read_text())
+    document['services']['original']['volumes'].append('${HOST_KEY_DIR}/original:/run/mind-key:ro')
+    compose_path.write_text(yaml.safe_dump(document))
+
+    operation = mind_rename.reserve(project, 'op-k', 'uuid-kept', 'original', 'renamed', 'hive-site')
+    mind_rename.rename_files(project, operation)
+
+    assert (keys / 'renamed' / 'key').read_text() == 'the-minds-key-0123456789\n'
+    assert not (keys / 'original').exists()
+    assert (keys / 'other' / 'key').read_text() == 'another-key-0123456789\n'
+    service = yaml.safe_load((project / 'minds' / 'renamed' / 'container' / 'compose.yaml'
+                              ).read_text())['services']['renamed']
+    assert '${HOST_KEY_DIR}/renamed:/run/mind-key:ro' in service['volumes']
+
+    mind_rename.rollback_files(project, operation)
+
+    assert (keys / 'original' / 'key').read_text() == 'the-minds-key-0123456789\n'
+    assert not (keys / 'renamed').exists()

@@ -282,7 +282,8 @@ async def account() -> dict[str, Any]:
         mind_rows.append({
             "mind": name, "state": state,
             "where_it_reads": (
-                f"{stored.file}:{stored.env_key}" if stored is not None else None),
+                ("its key file" if stored.is_key_file else f"{stored.file}:{stored.env_key}")
+                if stored is not None else None),
             "note": note,
             "proxy_key_found": [
                 {"place": f["place"], "variable": f["variable"], "digest": f["digest"]}
@@ -405,14 +406,20 @@ def compose_one_key(name: str, *, add: bool) -> str:
     if add:
         if _has_line(text, setting) and _has_line(text, mount):
             return "already present"
-        envs, vols = list(_ENV_HEAD.finditer(text)), list(_VOLUMES_HEAD.finditer(text))
+        # The compose stops interpolating the key: every line an older
+        # console wrote that reads `${MIND_KEY_<NAME>}` goes (the mind sets
+        # those names from its file), so the key is in no creation setting and
+        # no .env line is read for it.
+        updated = re.sub(
+            r"(?m)^[ \t]+-[ \t]+['\"]?[A-Z_]+=\$\{" + re.escape(hc.one_key_variable(name))
+            + r"(:-[^}]*)?\}['\"]?[ \t]*\n", "", text)
+        envs, vols = list(_ENV_HEAD.finditer(updated)), list(_VOLUMES_HEAD.finditer(updated))
         if len(envs) != 1 or len(vols) != 1:
             return ("left alone: the file does not have exactly one environment list and one "
                     f"volumes list; add the lines {setting} and {mount} by hand")
-        updated = text
         # The later one first, so the earlier offset still holds.
         edits = sorted(
-            [(envs[0], setting, _has_line(text, setting)), (vols[0], mount, _has_line(text, mount))],
+            [(envs[0], setting, _has_line(updated, setting)), (vols[0], mount, _has_line(updated, mount))],
             key=lambda e: e[0].start("first"), reverse=True)
         for match, line, present in edits:
             if not present:
@@ -973,7 +980,8 @@ async def retire() -> dict[str, Any]:
             if current is None or not current.is_key_file:
                 continue
             for leftover in hc.legacy_key_lines(name):
-                if compose_text is None or not compose_has_key_mount(name):
+                if (compose_text is None or not compose_has_key_mount(name)
+                        or re.search(r"\$\{?" + re.escape(leftover.env_key) + r"\b", compose_text)):
                     kept.append(f"{leftover.file}:{leftover.env_key}")
                     continue
                 _line_remove(leftover.path, leftover.env_key)

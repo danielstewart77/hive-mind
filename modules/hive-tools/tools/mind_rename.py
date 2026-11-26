@@ -165,6 +165,36 @@ def _write_compose(root, name, content):
             raise ValueError('The protected deployment file could not be updated')
 
 
+KEY_MOUNT = '/run/mind-key'
+
+
+def _key_folder(root, name):
+    """This mind's key folder on the host (requirement 21), when the install's
+    `.env` names a key root that exists here: `<HOST_KEY_DIR>/<name>`. None
+    otherwise (a mind with no key folder, or a key root this service cannot
+    see; then the operator moves the folder with the rename)."""
+    try:
+        text = (root / '.env').read_text()
+    except OSError:
+        return None
+    found = re.findall(r"^\s*(?:export\s+)?HOST_KEY_DIR\s*=\s*['\"]?([^'\"\n]+)['\"]?\s*$", text, flags=re.M)
+    if not found:
+        return None
+    folder = Path(found[-1].strip()) / name
+    return folder if folder.parent.is_dir() else None
+
+
+def _move_key_folder(root, old, new):
+    """Rename a mind's key folder with the mind: its compose mounts the folder
+    by the mind's name, and the console looks it up by name."""
+    source, target = _key_folder(root, old), _key_folder(root, new)
+    if source is None or target is None or not source.is_dir():
+        return
+    if os.path.lexists(target):
+        raise ValueError('The destination key folder already exists')
+    source.rename(target)
+
+
 def rename_files(root, operation):
     """Called only with a stopped Mind. User-authored files are moved intact."""
     old, new = operation['old'], operation['new']
@@ -180,6 +210,7 @@ def rename_files(root, operation):
         if os.path.lexists(target):
             raise ValueError('The destination folder already exists')
         source.rename(target)
+    _move_key_folder(root, old, new)
     runtime = yaml.safe_load((directory / 'runtime.backup').read_text())
     runtime.update(name=new, gateway_url=f'http://{new}:8420')
     (target / 'runtime.yaml').write_text(yaml.safe_dump(runtime, sort_keys=False))
@@ -205,6 +236,9 @@ def rename_files(root, operation):
         if isinstance(volume, str):
             source_mount, separator, destination = volume.partition(':/')
             source_mount = re.sub(r'/minds/' + re.escape(old) + r'(?=/|$)', '/minds/' + new, source_mount)
+            if separator and destination.startswith(KEY_MOUNT[1:]):
+                # The mind's key folder, mounted by the mind's name.
+                source_mount = re.sub(r'/' + re.escape(old) + r'$', '/' + new, source_mount)
             migrated = source_mount + separator + destination
             volumes.append(migrated)
             # Both internal paths point at the same persisted files. Historic
@@ -214,6 +248,8 @@ def rename_files(root, operation):
         elif isinstance(volume, dict):
             migrated = dict(volume)
             migrated['source'] = re.sub(r'/minds/' + re.escape(old) + r'(?=/|$)', '/minds/' + new, str(volume.get('source', '')))
+            if str(volume.get('target', '')) == KEY_MOUNT:
+                migrated['source'] = re.sub(r'/' + re.escape(old) + r'$', '/' + new, migrated['source'])
             volumes.append(migrated)
             destination = str(volume.get('target', ''))
             if destination.startswith('/usr/src/app/minds/' + old):
@@ -253,6 +289,10 @@ def rollback_files(root, operation):
                 (source / relative).write_bytes((directory / backup).read_bytes())
     _patch_environment(root, new, old)
     _patch_stack(root, new, old)
+    try:
+        _move_key_folder(root, new, old)
+    except (OSError, ValueError):
+        pass
 
 
 def _docker(root, arguments):
