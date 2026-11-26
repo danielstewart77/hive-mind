@@ -10,7 +10,8 @@ OWN = "the-bots-own-0123456789"  # secret-guard: allow - invented fixture
 def test_a_mind_on_its_one_key_never_accepts_the_old_gateway_value_from_its_bot():
     token = mind_key.proactive_token({"MIND_KEY": ONE_KEY}, OLD_GATEWAY)
 
-    assert token and token not in (OLD_GATEWAY, ONE_KEY)
+    assert len(token) >= 32 and token not in (OLD_GATEWAY, ONE_KEY)
+    assert token != mind_key.proactive_token({"MIND_KEY": ONE_KEY}, OLD_GATEWAY)
 
 
 def test_a_mind_on_its_one_key_accepts_the_bots_own_credential():

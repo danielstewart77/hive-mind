@@ -252,7 +252,12 @@ hold, a mind at a time.
 
 ### Limits worth knowing before you move a mind
 
-- **The inference names are the mind's key.** Requirement 12: the key pasted is
+- **A moved mind's bot needs its own credential.** A mind on its one key no longer
+  accepts the old gateway value from its bot on `/proactive`. Before you retire,
+  give the mind and its bots one shared `MIND_PROACTIVE_TOKEN` (a new value, not
+  the key; fresh installs already do). Without it the bot's polls are refused and
+  the mind's unsolicited messages are never delivered.
+- **The inference names are the mind's key.** The key pasted is
   the mind's inference key. A moved mind has `MIND_PROXY_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` and `DSH_API_KEY` set to it at start,
   and the `runtime.yaml` `env:` block's values for those names are ignored
@@ -263,7 +268,8 @@ hold, a mind at a time.
   `OUTSIDE_OPENAI_API_KEY`, and the script must read that name. A mind not yet
   moved is untouched. Move such a mind only after renaming.
 - **The console runs as one process.** The lock that serialises key
-  replacement, cut-off, move, retirement and mind creation (`_ROTATION_LOCK`)
+  replacement, cut-off, move and retirement, and the key check and write inside
+  mind creation (`_ROTATION_LOCK`)
   is an in-process lock. Do not run the console as several processes or
   replicas: two of them would not exclude one another and two operations on one
   key could interleave. This is how the console is deployed today.
