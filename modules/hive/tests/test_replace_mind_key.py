@@ -267,3 +267,60 @@ async def test_a_cut_off_mind_whose_old_key_is_unknown_is_not_left_live_on_the_n
 
     answers = await hive.status(NEW)
     assert answers["comms"] == 401 and answers["lucent"] == 401
+
+
+def _every_file_holding(root, value):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*")
+                  if p.is_file() and value.encode() in p.read_bytes())
+
+
+async def test_after_a_replacement_no_file_under_the_install_holds_the_old_key(hive, tmp_path):
+    # The install also kept this mind's key as the installer's proxy key, as the
+    # hive's services' proxy key where they share it, quoted, and in a copy the
+    # console made of the env file before an earlier write (requirement 22).
+    hive.env.write_text(
+        f"UNRELATED=keep\nMIND_PROXY_KEY='{OLD}'\nSERVICE_PROXY_KEY={OLD}\n"
+        f"SOMETHING_ELSE={BOB}\n")
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / "hive_mind-MIND_PROXY_KEY-20261126T000000Z.env").write_text(
+        f"MIND_PROXY_KEY={OLD}\n")
+    assert _every_file_holding(tmp_path, OLD)  # the scan finds it while it is there
+
+    await _replace()
+
+    assert _every_file_holding(tmp_path, OLD) == []
+    text = hive.env.read_text()
+    assert f"MIND_PROXY_KEY={NEW}" in text and f"SERVICE_PROXY_KEY={NEW}" in text
+    assert f"SOMETHING_ELSE={BOB}" in text and "UNRELATED=keep" in text
+    assert mind_key_files.read("ada") == NEW
+    assert _every_file_holding(tmp_path, BOB)  # another mind's key is left alone
+
+
+async def test_a_replacement_the_tools_refuse_leaves_the_old_key_in_every_file_it_was_in(hive, tmp_path):
+    hive.env.write_text(f"MIND_PROXY_KEY={OLD}\nSERVICE_PROXY_KEY={OLD}\n")
+    hive.tools.fail = True
+
+    with pytest.raises(holder_credentials.MintRefused):
+        await _replace()
+
+    assert hive.env.read_text() == f"MIND_PROXY_KEY={OLD}\nSERVICE_PROXY_KEY={OLD}\n"
+    assert _every_file_holding(tmp_path, NEW) == []
+    assert mind_key_files.read("ada") == OLD
+
+
+async def test_a_mind_file_that_holds_the_key_literally_stops_a_replacement_before_anything_changes(hive, tmp_path, monkeypatch):
+    import configuration_data
+    minds = tmp_path / "minds"
+    (minds / "ada" / "container").mkdir(parents=True)
+    (minds / "ada" / "runtime.yaml").write_text("env: {}\n")
+    (minds / "ada" / "container" / "compose.yaml").write_text(
+        f"services:\n  ada:\n    environment:\n      - MIND_PROXY_KEY={OLD}\n")
+    monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_CONFIG_DIR", minds)
+
+    with pytest.raises(holder_credentials.MintRefused, match="container/compose.yaml"):
+        await _replace()
+
+    assert mind_key_files.read("ada") == OLD
+    assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
+    assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}

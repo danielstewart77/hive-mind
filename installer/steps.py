@@ -504,6 +504,10 @@ def proxy_setup(ctx: Ctx):
     key = proxy_adapter.mint_key(ctx.sh, ctx.compose, client=a["mind_name"])
     if key:
         ctx.set_env(MIND_PROXY_KEY=key)
+    elif not ctx.env().get("MIND_PROXY_KEY") and _key_file_value(ctx, a["mind_name"]):
+        # The `.env` lost the line (the installer's own copy never keeps the
+        # mind's key, requirement 22): the mind's key file is where it is.
+        ctx.set_env(MIND_PROXY_KEY=_key_file_value(ctx, a["mind_name"]))
     elif not ctx.env().get("MIND_PROXY_KEY"):
         raise StepFailed(f"the proxy already has a key for {a['mind_name']!r} that this install "
                          f"did not record; revoke it on {_proxy_admin(ctx)} and run again")
@@ -932,6 +936,13 @@ def dsh_hooks(ctx: Ctx):
         why = proc.stdout.strip().splitlines()[-1:] or [proc.stderr.strip()[-300:]]
         raise StepFailed(f"the dsh hooks could not be written: {why[0]}")
     return "hooks written"
+
+
+def _key_file_value(ctx: Ctx, name: str) -> str:
+    try:
+        return (ctx.home.mind_keys(name) / compose.KEY_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _mind_key_from_file(ctx: Ctx, name: str) -> str:

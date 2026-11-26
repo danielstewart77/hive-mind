@@ -270,6 +270,15 @@ hold, a mind at a time.
   give the mind and its bots one shared `MIND_PROACTIVE_TOKEN` (a new value, not
   the key; fresh installs already do). Without it the bot's polls are refused and
   the mind's unsolicited messages are never delivered.
+- **A replacement changes the key everywhere.** A mind has one key. Replacing it
+  on the mind's page rewrites its key file and every line of the install's
+  `.env` that holds the same value (the installer's `MIND_PROXY_KEY`, and the
+  hive's `SERVICE_PROXY_KEY` where it equals the mind's), in the same operation,
+  and removes the console's own pre-write copies of the old value. The
+  installer's `state/secrets.env` never keeps the mind's key. A replacement
+  stops, changing nothing, if the mind's `runtime.yaml` or its container
+  compose file holds the key literally: take it out there first. After it, no
+  file under the install holds the old key.
 - **The inference names are the mind's key.** The key pasted is
   the mind's inference key. A moved mind has `MIND_PROXY_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` and `DSH_API_KEY` set to it at start,

@@ -208,7 +208,8 @@ def _rewrite_in_place(path: Path, updated: str, original: str) -> None:
         raise
 
 
-def _write_env_value(path: Path, key: str, new_value: str, label: str = "env") -> bool:
+def _write_env_value(path: Path, key: str, new_value: str, label: str = "env",
+                     backup: bool = True) -> bool:
     """Replace KEY=... in place. Returns False if the key isn't in this file.
 
     The write preserves the inode (see BACKUP_DIR's note): mode and ownership
@@ -230,7 +231,8 @@ def _write_env_value(path: Path, key: str, new_value: str, label: str = "env") -
     )
     if not count:
         return False
-    _backup(text, label, key)
+    if backup:
+        _backup(text, label, key)
     _rewrite_in_place(path, updated_text, text)
     return True
 
@@ -254,8 +256,12 @@ def _unwritable_reason(path: Path) -> str | None:
     return None
 
 
-def _write_location(path: Path, key: str, new_value: str, label: str) -> dict[str, Any]:
-    """One atomic write, reported on its own terms. Never raises."""
+def _write_location(path: Path, key: str, new_value: str, label: str,
+                    backup: bool = True) -> dict[str, Any]:
+    """One atomic write, reported on its own terms. Never raises.
+
+    `backup=False` keeps no copy of the file aside: a mind's key being
+    replaced must not survive in a backup (requirement 22)."""
     row: dict[str, Any] = {
         "file": label,
         "path": str(path),
@@ -268,7 +274,7 @@ def _write_location(path: Path, key: str, new_value: str, label: str) -> dict[st
         row["reason"] = reason
         return row
     try:
-        wrote = _write_env_value(path, key, new_value, label=label)
+        wrote = _write_env_value(path, key, new_value, label=label, backup=backup)
     except Unreadable as exc:
         # A non-UTF-8 byte is a ValueError, not an OSError, so a guard written
         # for the latter never saw it — and the caller turns a stray

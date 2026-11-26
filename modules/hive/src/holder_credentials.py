@@ -319,7 +319,7 @@ def _write_stored(location: Location, value: str) -> dict[str, Any]:
     atomically (`mind_key_files.write`); a line is rewritten in its env file."""
     if not location.is_key_file:
         return credentials_data._write_location(
-            location.path, location.env_key, value, location.file)
+            location.path, location.env_key, value, location.file, backup=False)
     row: dict[str, Any] = {"file": location.file, "path": str(location.path),
                            "env_key": location.env_key, "written": False, "reason": None}
     try:
@@ -1235,6 +1235,81 @@ def storage_places(holder: str) -> list[Location]:
     return places or [current]
 
 
+_ANY_LINE = re.compile(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+
+def echo_lines(value: str) -> list[Location]:
+    """Every line in the env files this console writes whose value IS `value`.
+
+    A mind has one key (requirement 22), but the install once kept it in more
+    than one line besides its own: `MIND_PROXY_KEY` (the installer's copy, and
+    the hive's own proxy key where the operator gave one key) and
+    `SERVICE_PROXY_KEY`. A replacement rewrites each of them in the same
+    operation as the key file, so no file holds the old key afterwards. Found
+    by value, not by name, so a copy under a name this code never heard of is
+    caught too. An unreadable file raises `Unreadable`: a copy cannot be ruled
+    out in it."""
+    found: list[Location] = []
+    for label, path in ENV_FILES.items():
+        if label in _OWN_FILE_HOLDERS:
+            continue  # an edge mind's own file is its own place, handled apart
+        if not Path(path).is_file():
+            continue
+        text = credentials_data._read_text(path)
+        names = []
+        for name, raw in _ANY_LINE.findall(text):
+            held = raw.strip().strip("\r")
+            if len(held) >= 2 and held[0] == held[-1] and held[0] in "'\"":
+                held = held[1:-1]
+            if held and secrets.compare_digest(held, value) and name not in names:
+                names.append(name)
+        found += [Location(label, name) for name in names]
+    return found
+
+
+def runtime_copies(value: str) -> list[str]:
+    """The mind files (`runtime.yaml` env, `container/compose.yaml`) that hold
+    `value` literally, by file name. The console does not edit those, so a replacement
+    that finds one refuses before anything changes (requirement 22)."""
+    found = []
+    for path in _mind_runtime_files():
+        try:
+            import yaml
+            env = (yaml.safe_load(path.read_text()) or {}).get("env") or {}
+        except Exception:  # noqa: BLE001 - a file that does not parse holds no key
+            continue
+        if isinstance(env, dict) and any(
+                isinstance(held, str) and held and secrets.compare_digest(held, value)
+                for held in env.values()):
+            found.append(f"{path.parent.name}/runtime.yaml")
+        compose_file = path.parent / "container" / "compose.yaml"
+        try:
+            if compose_file.is_file() and value in compose_file.read_text():
+                found.append(f"{path.parent.name}/container/compose.yaml")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return found
+
+
+def scrub_backups(value: str) -> int:
+    """Remove the console's own pre-write copies of env files that still hold
+    `value`, the key a replacement has just retired (requirement 22: no file
+    keeps the old key). Best effort; returns how many were removed."""
+    removed = 0
+    try:
+        candidates = list(credentials_data.BACKUP_DIR.glob("*.env"))
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            if value in path.read_text():
+                path.unlink()
+                removed += 1
+        except (OSError, UnicodeDecodeError):
+            continue
+    return removed
+
+
 def mind_holds_one_key_line(holder: str) -> bool:
     return stored_key_location(holder) is not None
 
@@ -1364,6 +1439,23 @@ async def replace_mind_key(
     async with _ROTATION_LOCK:
         location = stored_key_location(holder)
         places = storage_places(holder)
+        # Every other line in the install's env files that holds the same key
+        # (requirement 22): rewritten with the key file, so none keeps the old.
+        if location is not None:
+            try:
+                current = _loaded_value(location)
+                if current:
+                    places += [p for p in echo_lines(current) if p not in places]
+                    kept = runtime_copies(current)
+                    if kept:
+                        raise MintRefused(
+                            f"{', '.join(kept)} holds this mind's key literally and this "
+                            "console does not rewrite it; take the key out of it first. "
+                            "Nothing was changed")
+            except Unreadable:
+                raise MintRefused(
+                    "an env file could not be read, so a copy of this mind's key "
+                    "in it cannot be ruled out. Nothing was changed") from None
         # A key file this replacement is about to make is taken away again if
         # the replacement is put back: its absence is what "old" was.
         made_here = [p for p in places if p.is_key_file and not mind_key_files.exists(holder)]
@@ -1469,6 +1561,9 @@ async def replace_mind_key(
                     break
             if failure is None:
                 stored = "written"
+                if old and not secrets.compare_digest(old, value):
+                    with credentials_data._WRITE_LOCK:
+                        scrub_backups(old)
 
         if failure is None:
             try:
