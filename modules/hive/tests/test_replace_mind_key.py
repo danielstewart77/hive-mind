@@ -21,6 +21,7 @@ import pytest
 
 import credentials_data
 import holder_credentials
+import key_journal
 import mind_key_files
 from hive_site import testing
 
@@ -387,6 +388,37 @@ async def test_a_console_stopped_between_the_key_file_and_the_env_lines_brings_t
     assert handled == [{"mind": "ada", "recovered": True}]
     assert _every_file_holding(tmp_path, OLD) == []
     assert f"MIND_PROXY_KEY={NEW}" in hive.env.read_text()
+
+
+async def test_recovery_after_a_crash_also_cleans_the_saved_copies_of_the_old_key_and_the_journal_holds_no_key(hive, tmp_path):
+    hive.env.write_text(f"MIND_PROXY_KEY={OLD}\nSERVICE_PROXY_KEY={OLD}\nOTHER={BOB}\n")
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    saved = backups / "hive_mind-MIND_PROXY_KEY-20261126T000000Z.env"
+    saved.write_text(f"MIND_PROXY_KEY={OLD}\nOTHER={BOB}\n")
+    real = holder_credentials._write_stored
+
+    def stop_after_the_key_file(place, value, backup=True):
+        written = real(place, value, backup)
+        if place.is_key_file:
+            raise KeyboardInterrupt  # the console is gone before the env lines
+        return written
+
+    holder_credentials._write_stored = stop_after_the_key_file
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            await _replace()
+    finally:
+        holder_credentials._write_stored = real
+    assert OLD in saved.read_text()
+    journal = " ".join(p.read_text() for p in key_journal.JOURNAL_DIR.glob("*.json"))
+    assert OLD not in journal and NEW not in journal
+
+    handled = await holder_credentials.recover_replacements()
+
+    assert handled == [{"mind": "ada", "recovered": True}]
+    assert _every_file_holding(tmp_path, OLD) == []
+    assert f"OTHER={BOB}" in saved.read_text()
 
 
 async def test_a_saved_copy_that_cannot_be_cleaned_of_the_old_key_refuses_the_replacement_before_anything_changes(hive, tmp_path):

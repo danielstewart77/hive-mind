@@ -44,6 +44,7 @@ the GitHub-PAT path running in a threadpool.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import secrets
@@ -1292,14 +1293,41 @@ def runtime_copies(value: str) -> list[str]:
     return found
 
 
-def scrub_backups(value: str, *, check_only: bool = False) -> list[str]:
+def fingerprint(value: str) -> str:
+    """What the journal keeps of a retired key so a crash can still scrub its
+    saved copies: a SHA-256 of the key, never the key. Keys are long random
+    values, so the digest is no way back to one."""
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+_TOKEN = re.compile(rb"[A-Za-z0-9._~+/=-]{8,4096}")
+
+
+def _blank_by_fingerprint(raw: bytes, digest: str) -> bytes:
+    """`raw` with every token whose SHA-256 is `digest` replaced; a token is a
+    run of key characters, and one after the first `=` (an env line) counts."""
+    def one(match: re.Match[bytes]) -> bytes:
+        token = match.group()
+        if hashlib.sha256(token).hexdigest() == digest:
+            return b"REPLACED-MIND-KEY"
+        head, eq, tail = token.partition(b"=")
+        if eq and hashlib.sha256(tail).hexdigest() == digest:
+            return head + eq + b"REPLACED-MIND-KEY"
+        return token
+    return _TOKEN.sub(one, raw)
+
+
+def scrub_backups(value: str | None = None, *, check_only: bool = False,
+                  digest: str | None = None) -> list[str]:
     """Blank the retired key `value` in the console's own pre-write copies of
     env files (requirement 22: no file keeps the old key). The copies are kept,
     since they are whole files and hold other credentials' last values; only
     the old key's text in them is replaced, through a private (0600) temporary
     file renamed over the copy, removed again if anything fails. With
     `check_only` nothing is written: it says which copies could not be cleaned.
-    Returns those, by name."""
+    Returns those, by name. Given `digest` (see `fingerprint`) instead of the
+    key itself, copies are found by it: how recovery after a crash, which has
+    only the journal, finishes the job."""
     failed: list[str] = []
     try:
         candidates = list(credentials_data.BACKUP_DIR.iterdir())
@@ -1307,7 +1335,13 @@ def scrub_backups(value: str, *, check_only: bool = False) -> list[str]:
         return failed
     except OSError:
         return ["the backup folder"]
-    needle = value.encode()
+    needle = (value or "").encode()
+
+    def holds(raw: bytes) -> bool:
+        if digest is not None:
+            return _blank_by_fingerprint(raw, digest) != raw
+        return needle in raw
+
     for path in candidates:
         if not path.is_file():
             continue
@@ -1316,7 +1350,7 @@ def scrub_backups(value: str, *, check_only: bool = False) -> list[str]:
         except OSError:
             failed.append(path.name)
             continue
-        if needle not in raw:
+        if not holds(raw):
             continue
         if check_only:
             if not os.access(credentials_data.BACKUP_DIR, os.W_OK):
@@ -1326,7 +1360,8 @@ def scrub_backups(value: str, *, check_only: bool = False) -> list[str]:
         try:
             handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(handle, "wb") as out:
-                out.write(raw.replace(needle, b"REPLACED-MIND-KEY"))
+                out.write(_blank_by_fingerprint(raw, digest) if digest is not None
+                          else raw.replace(needle, b"REPLACED-MIND-KEY"))
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temp, path)
@@ -1563,6 +1598,10 @@ async def replace_mind_key(
             # Names only, never a key: the other lines to bring in step with
             # the stored key if this console stops half-way.
             record["echo"] = [[p.file, p.env_key] for p in places if not p.is_key_file]
+            # A fingerprint of the old key (not the key): if this console stops
+            # before the saved copies are cleaned, recovery finds them by it.
+            if old and not same_as_stored:
+                record["old_fingerprint"] = fingerprint(old)
             key_journal.update(record)
         except OSError as exc:
             raise MintRefused(
@@ -1802,6 +1841,17 @@ async def recover_replacements() -> list[dict[str, Any]]:
                         if not done["written"]:
                             raise MintRefused(
                                 f"{label} did not take the stored key: {done['reason']}")
+            digest = record.get("old_fingerprint")
+            if digest and fingerprint(value) != digest:
+                # The replacement was finished (the stored key is the new
+                # one): the saved copies of the old key are cleaned as an
+                # uninterrupted replacement would have. Not done when the
+                # stored key is still the old one - that one is live.
+                with credentials_data._WRITE_LOCK:
+                    left = scrub_backups(check_only=False, digest=digest)
+                if left:
+                    raise MintRefused(
+                        f"the console's saved copies {', '.join(left)} still hold the old key")
             key_journal.finish(record)
             handled.append({"mind": holder, "recovered": True})
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
