@@ -713,6 +713,54 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
 OWNER_KEY_CHECK_TIMEOUT_S = 5
 
 
+#: A value the gateway said is not the owner's is not asked about again for
+#: this long, and only this many questions go to the gateway in a window: an
+#: unauthenticated caller can present any string, and each one would otherwise
+#: be a request this mind makes to the gateway with its own key.
+OWNER_KEY_REFUSAL_TTL_S = 30.0
+OWNER_KEY_REFUSALS_KEPT = 256
+OWNER_KEY_ASKS_PER_WINDOW = 30
+OWNER_KEY_ASK_WINDOW_S = 60.0
+_refused_owner_keys: dict[str, float] = {}
+_owner_key_asks: list[float] = []
+
+
+def _clock() -> float:
+    import time
+    return time.monotonic()
+
+
+def _may_ask_the_gateway(own: str, presented: str) -> bool | None:
+    """True when the gateway may be asked; False when this value was refused
+    a moment ago (answer no without asking); None when the budget is spent."""
+    import hashlib
+
+    now = _clock()
+    digest = hashlib.sha256(f"{own}\n{presented}".encode()).hexdigest()
+    until = _refused_owner_keys.get(digest)
+    if until is not None:
+        if until > now:
+            return False
+        del _refused_owner_keys[digest]
+    _owner_key_asks[:] = [t for t in _owner_key_asks if now - t < OWNER_KEY_ASK_WINDOW_S]
+    if len(_owner_key_asks) >= OWNER_KEY_ASKS_PER_WINDOW:
+        return None
+    _owner_key_asks.append(now)
+    return True
+
+
+def _remember_refusal(own: str, presented: str) -> None:
+    import hashlib
+
+    now = _clock()
+    for digest in [d for d, t in _refused_owner_keys.items() if t <= now]:
+        del _refused_owner_keys[digest]
+    while len(_refused_owner_keys) >= OWNER_KEY_REFUSALS_KEPT:
+        _refused_owner_keys.pop(next(iter(_refused_owner_keys)))
+    _refused_owner_keys[hashlib.sha256(f"{own}\n{presented}".encode()).hexdigest()] = (
+        now + OWNER_KEY_REFUSAL_TTL_S)
+
+
 async def owner_key_check(presented: str) -> bool | None:
     """Ask the gateway whether `presented` is the key of the user who owns this mind, or of an operator mind of the same owner (requirement 20).
 
@@ -728,6 +776,11 @@ async def owner_key_check(presented: str) -> bool | None:
     own = _own_key()
     if not comms_url or not own:
         return None
+    allowed = _may_ask_the_gateway(own, presented)
+    if allowed is False:
+        return False
+    if allowed is None:
+        return None
     try:
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -742,7 +795,12 @@ async def owner_key_check(presented: str) -> bool | None:
                 answer = await resp.json()
     except Exception:  # noqa: BLE001 - an unanswered question is not a no
         return None
-    return answer.get("owned") is True if isinstance(answer, dict) else None
+    if not isinstance(answer, dict):
+        return None
+    if answer.get("owned") is True:
+        return True
+    _remember_refusal(own, presented)
+    return False
 
 
 async def authorize_models(request, mind_dir: Path) -> JSONResponse | None:

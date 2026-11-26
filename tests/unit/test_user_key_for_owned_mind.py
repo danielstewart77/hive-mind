@@ -119,3 +119,48 @@ def test_the_model_list_guard_admits_the_owners_key_and_refuses_another_users(ga
     assert models(ALPHA_KEY, DANIEL_KEY) is None
     assert models(ALPHA_KEY, SLOAN_KEY) == 401
     assert models(ALPHA_KEY, ALPHA_KEY) is None
+
+
+@pytest.fixture
+def fresh_limiter(monkeypatch):
+    """The refusal memory and the ask budget empty, and a clock the test moves."""
+    runtime_api._refused_owner_keys.clear()
+    runtime_api._owner_key_asks.clear()
+    now = [1000.0]
+    monkeypatch.setattr(runtime_api, "_clock", lambda: now[0])
+    yield now
+    runtime_api._refused_owner_keys.clear()
+    runtime_api._owner_key_asks.clear()
+
+
+def test_a_refused_key_is_not_asked_of_the_gateway_again_until_it_expires(
+        gateway, fresh_limiter, monkeypatch) -> None:
+    asked: list[str] = []
+    real = runtime_api._may_ask_the_gateway
+
+    def counting(own, presented):
+        verdict = real(own, presented)
+        if verdict:
+            asked.append(presented)
+        return verdict
+
+    monkeypatch.setattr(runtime_api, "_may_ask_the_gateway", counting)
+    for _ in range(5):
+        assert _admitted(ALPHA_KEY, SLOAN_KEY) == 401
+    assert asked == [SLOAN_KEY]
+    fresh_limiter[0] += runtime_api.OWNER_KEY_REFUSAL_TTL_S + 1
+    assert _admitted(ALPHA_KEY, SLOAN_KEY) == 401
+    assert asked == [SLOAN_KEY, SLOAN_KEY]
+
+
+def test_a_flood_of_unknown_bearers_stops_reaching_the_gateway_and_the_owner_still_gets_in(
+        gateway, fresh_limiter) -> None:
+    budget = runtime_api.OWNER_KEY_ASKS_PER_WINDOW
+    verdicts = [_admitted(ALPHA_KEY, f"guess-{n}-0123456789") for n in range(budget + 5)]
+    assert verdicts[:budget] == [401] * budget
+    # Over the budget the mind says it cannot ask, never a yes.
+    assert verdicts[budget:] == [503] * 5
+    # Its own key never needed the gateway.
+    assert _admitted(ALPHA_KEY, ALPHA_KEY) is None
+    fresh_limiter[0] += runtime_api.OWNER_KEY_ASK_WINDOW_S + 1
+    assert _admitted(ALPHA_KEY, DANIEL_KEY) is None
