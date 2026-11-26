@@ -42,3 +42,25 @@ def test_each_mind_mounts_only_its_own_key_folder_read_only_and_the_env_file_hol
     assert services[compose.CONSOLE]["environment"]["HIVE_KEY_ROOT"] == "/mind_keys"
     # And the .env: a line an older install kept is dropped once its file exists.
     assert "MIND_KEY_WREN" not in values and values["HOST_KEY_DIR"] == str(home.keys)
+
+
+def test_the_installers_own_copy_never_keeps_the_minds_key_so_a_replacement_leaves_no_old_key_in_state(tmp_path):
+    """Requirement 22: state/secrets.env is out of the console's reach, so it
+    must not hold the mind's key (nor the services' key when it equals it), or
+    a replaced key would survive there. A line an earlier install put there is
+    dropped by the next write; other secrets are kept."""
+    inst = installer_at(tmp_path, answers(pieces=["console"]))
+    home = inst.home
+    key = "the-minds-key-0123456789"
+    home.state.mkdir(parents=True, exist_ok=True)
+    home.secrets.write_text(f"MIND_PROXY_KEY='{key}'\nSERVICE_PROXY_KEY='{key}'\nHIVE_SECRET_KEY='keep-me'\n")
+
+    secrets_store.remember(home, {"MIND_PROXY_KEY": key, "SERVICE_PROXY_KEY": key,
+                                  "HIVE_TOOLS_TOKEN": "tools-token-abcdef"})
+
+    kept = secrets_store.parse_env(home.secrets)
+    assert key not in home.secrets.read_text()
+    assert kept["HIVE_SECRET_KEY"] == "keep-me" and kept["HIVE_TOOLS_TOKEN"] == "tools-token-abcdef"
+    # A services' key of its own (not the mind's) is still kept.
+    secrets_store.remember(home, {"MIND_PROXY_KEY": key, "SERVICE_PROXY_KEY": "services-own-0123456789"})
+    assert secrets_store.parse_env(home.secrets)["SERVICE_PROXY_KEY"] == "services-own-0123456789"
