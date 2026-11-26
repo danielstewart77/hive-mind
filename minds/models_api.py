@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse
 from core import mind_key
 from core.hive_logging import log_event
 from minds.rotation_policy import read_policy
-from minds.runtime_api import authorize_gateway, load_runtime
+from minds.runtime_api import authorize_models, load_runtime
 
 _TIMEOUT = aiohttp.ClientTimeout(total=6)
 
@@ -235,7 +235,7 @@ def install_models_route(
     async def get_models(request: Request, harness: str = "") -> Any:
         # The gateway asks while it switches a conversation's model, with
         # this mind's session credential (see `authorize_gateway`).
-        refusal = authorize_gateway(request, Path(path).parent)
+        refusal = await authorize_models(request, Path(path).parent)
         if refusal is not None:
             return refusal
         try:

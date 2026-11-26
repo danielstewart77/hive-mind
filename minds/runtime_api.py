@@ -739,6 +739,26 @@ async def owner_key_check(presented: str) -> bool | None:
     return answer.get("owned") is True if isinstance(answer, dict) else None
 
 
+async def authorize_models(request, mind_dir: Path) -> JSONResponse | None:
+    """Guard `GET /models`: what `authorize_gateway` admits, and the key of the
+    user who owns this mind, which the console presents when a signed-in owner
+    opens the model picker (requirement 19). Asked of the gateway as in
+    `authorize_admin`; a gateway that cannot be asked is 503."""
+    denied = authorize_gateway(request, mind_dir)
+    if denied is None:
+        return None
+    header = request.headers.get("Authorization", "")
+    presented = header[7:].strip() if header.startswith("Bearer ") else ""
+    if not presented or not _own_key():
+        return denied
+    owned = await owner_key_check(presented)
+    if owned is None:
+        return JSONResponse(
+            {"error": "this mind could not ask the gateway whether that is its owner's key"},
+            status_code=503)
+    return None if owned else denied
+
+
 async def authorize_admin(request: Request) -> JSONResponse | None:
     """Guard a config-write route. None means the caller may proceed.
 

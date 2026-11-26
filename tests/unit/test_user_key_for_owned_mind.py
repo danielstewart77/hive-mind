@@ -105,3 +105,17 @@ def test_a_gateway_that_cannot_be_asked_is_never_taken_for_a_yes_or_a_no(gateway
     monkeypatch.setenv("COMMS_URL", "http://127.0.0.1:9")
     assert _admitted(ALPHA_KEY, DANIEL_KEY) == 503
     assert _admitted(ALPHA_KEY, ALPHA_KEY) is None
+
+
+def test_the_model_list_guard_admits_the_owners_key_and_refuses_another_users(gateway, tmp_path) -> None:
+    def models(mind_key, presented):
+        os.environ["MIND_KEY"] = mind_key
+        try:
+            denied = asyncio.run(runtime_api.authorize_models(_request(presented), tmp_path))
+        finally:
+            del os.environ["MIND_KEY"]
+        return None if denied is None else denied.status_code
+
+    assert models(ALPHA_KEY, DANIEL_KEY) is None
+    assert models(ALPHA_KEY, SLOAN_KEY) == 401
+    assert models(ALPHA_KEY, ALPHA_KEY) is None

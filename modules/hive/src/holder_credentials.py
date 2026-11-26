@@ -1741,7 +1741,10 @@ USER_ROLE = "user"
 
 
 def user_key_variable(username: str) -> str:
-    stem = re.sub(r"[^A-Za-z0-9]", "_", username.strip().lower()).upper()
+    # Injective: every character other than a letter or digit becomes its own
+    # hex code, so `dan.s`, `dan-s` and `dan_s` never share one line.
+    stem = "".join(c if c.isalnum() and c.isascii() else f"_{ord(c):X}_"
+                   for c in username.strip().upper())
     return USER_KEY_PREFIX + stem
 
 
@@ -1801,12 +1804,20 @@ async def user_key(username: str) -> str | None:
         return None
     try:
         location = _user_key_location(name)
+        # Without the lock when the key exists: a settings read must not queue
+        # behind a key move. Only making one is serialised.
+        existing = _loaded_value(location) if location.path.is_file() else None
+        if existing:
+            return existing
         async with _ROTATION_LOCK:
             existing = _loaded_value(location) if location.path.is_file() else None
             if existing:
                 return existing
             return await _issue_user_key(name, location, None)
-    except (MintRefused, MintUncertain, Unreadable, OSError):
+    except (MintRefused, MintUncertain, Unreadable, OSError) as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "no key could be made for user %r: %s", name, type(exc).__name__ + ": " + str(exc)[:200])
         return None
 
 

@@ -84,7 +84,9 @@ def test_a_replaced_or_cut_off_users_key_is_refused_on_the_next_question(client)
 def test_only_a_minds_own_key_may_ask_the_question(client) -> None:
     # No oracle: a person's key, the admin credential and no credential at all
     # cannot test a value against anybody's minds.
-    for caller in (DANIEL_KEY, ADMIN, "never-issued-for-tests", ""):
+    _run(put_credential_row("scheduler", "daniel", user_access.SERVICE,
+                            user_access.digest("scheduler-key-for-tests")))  # secret-guard: allow
+    for caller in (DANIEL_KEY, ADMIN, "never-issued-for-tests", "", "scheduler-key-for-tests"):  # secret-guard: allow
         assert _asked(client, caller, DANIEL_KEY).status_code == 401
 
 
@@ -103,3 +105,14 @@ def test_the_gateway_refuses_a_users_key_under_a_mind_s_name_or_another_user_s(c
     assert other_user.status_code == 400
     assert a_mind.status_code == 400
     assert _asked(client, ALPHA_KEY, DANIEL_KEY).json() == {"owned": True}
+
+
+def test_a_mind_with_no_owner_and_a_mind_that_changed_owner_follow_the_registry(client) -> None:
+    _run(put_mind("33333333-3333-4333-8333-333333333333", "gamma"))
+    _run(put_credential_row("gamma", "daniel", user_access.MIND, user_access.digest("gamma-key-for-tests")))  # secret-guard: allow
+    assert _asked(client, "gamma-key-for-tests", DANIEL_KEY).json() == {"owned": False}  # secret-guard: allow
+    moved = client.put(f"/broker/minds/{ALPHA}/owner", headers={"Authorization": f"Bearer {ADMIN}"},
+                       json={"owner": "sloan"})
+    assert moved.status_code == 200
+    assert _asked(client, ALPHA_KEY, DANIEL_KEY).json() == {"owned": False}
+    assert _asked(client, ALPHA_KEY, SLOAN_KEY).json() == {"owned": True}
