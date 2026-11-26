@@ -149,6 +149,9 @@ def refresh(environ: MutableMapping[str, str] | None = None) -> str:
     path = str(target.get(KEY_FILE) or "").strip()
     if not path:
         return key(target)
+    # One lock block for the whole of it: reading the file and applying what
+    # was read are a single step, so a slower thread cannot apply an older key
+    # over a newer one.
     with _STATE_LOCK:
         state = _STATE.setdefault(path, _FileState())
         _examine(path, state)
@@ -163,10 +166,6 @@ def refresh(environ: MutableMapping[str, str] | None = None) -> str:
                 _log.error("%s and MIND_KEY is not set: this mind has no key", problem)
         elif not problem:
             state.logged = ""
-    with _STATE_LOCK:
-        # The whole update is one step to anyone taking `snapshot`: a spawn
-        # copying the environment never sees the new key under some names and
-        # the old under others.
         if good and key(target) != good:
             target[KEY] = good
             apply_environment(target)

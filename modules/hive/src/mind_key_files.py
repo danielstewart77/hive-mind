@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 
 #: Where the console sees the key root (read-write). The host path behind it is
@@ -133,6 +134,10 @@ def _hand_over(target: Path, owner: tuple[int, int]) -> None:
     try:
         os.chown(target, *owner)
     except OSError as exc:
+        if info.st_uid == owner[0]:
+            # Already the mind's uid: the owner bits are what it reads by, and
+            # a group this console is not in is not worth refusing a key for.
+            return
         raise OSError(
             exc.errno,
             f"the console may not hand {target.name} to the mind's uid "
@@ -145,8 +150,14 @@ def _hand_over(target: Path, owner: tuple[int, int]) -> None:
 _TEMPORARY = re.compile(r"\.key\.[0-9a-f]{12}\.tmp")
 
 
-def stale_temporaries(directory: Path) -> int:
-    """Delete leftover temporary key files in a mind's folder; how many.
+#: A temporary key file younger than this may be another writer's, mid-write.
+STALE_AFTER_SECONDS = 60.0
+
+
+def stale_temporaries(directory: Path, *, now: float | None = None) -> int:
+    """Delete leftover temporary key files in a mind's folder; how many. Only
+    those older than `STALE_AFTER_SECONDS`: a younger one may be a write in
+    progress.
 
     Each holds a key (a replaced one, or the new one before its rename), so a
     killed write must not leave it lying beside the real file."""
@@ -158,6 +169,8 @@ def stale_temporaries(directory: Path) -> int:
     for entry in entries:
         if _TEMPORARY.fullmatch(entry.name) and entry.is_file() and not entry.is_symlink():
             try:
+                if (time.time() if now is None else now) - entry.stat().st_mtime < STALE_AFTER_SECONDS:
+                    continue
                 entry.unlink()
                 removed += 1
             except OSError:
@@ -225,7 +238,7 @@ def remove(name: str) -> bool:
         gone = True
     except FileNotFoundError:
         pass
-    stale_temporaries(directory)
+    stale_temporaries(directory, now=float('inf'))
     try:
         directory.rmdir()
     except (FileNotFoundError, OSError):

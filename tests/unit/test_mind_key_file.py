@@ -240,6 +240,7 @@ def test_a_leftover_temporary_key_is_cleaned_by_the_next_write_and_by_remove(roo
     mind_key_files.write("ada", FIRST)
     stray = root / "ada" / (".key." + "ab" * 6 + ".tmp")
     stray.write_text(SECOND + "\n")
+    os.utime(stray, (1.0, 1.0))
     other = root / "ada" / "notes.txt"
     other.write_text("keep me")
 
@@ -252,3 +253,15 @@ def test_a_leftover_temporary_key_is_cleaned_by_the_next_write_and_by_remove(roo
     assert mind_key_files.remove("ada") is True
     assert not stray.exists()
     assert not (root / "ada").exists()
+
+
+def test_a_young_temporary_key_file_may_be_another_writers_and_is_left(root):
+    mind_key_files.write("ada", FIRST)
+    young = root / "ada" / (".key." + "cd" * 6 + ".tmp")
+    young.write_text(SECOND + "\n")
+
+    mind_key_files.write("ada", SECOND)
+
+    assert young.exists()
+    assert mind_key_files.remove("ada") is True  # an unmade mind loses it too
+    assert not young.exists()
