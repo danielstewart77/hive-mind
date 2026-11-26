@@ -12,6 +12,7 @@ import configuration_data
 import credentials_data
 import holder_credentials
 import key_migration
+import mind_key_files
 import mind_runtime
 from fastapi import HTTPException
 from hive_site import testing
@@ -60,7 +61,9 @@ async def test_a_users_key_is_made_on_first_need_kept_and_accepted_only_for_mind
     key = await holder_credentials.user_key("daniel")
 
     assert key and len(key) >= 32
-    assert credentials_data._read_env_value(two_owners.env, "USER_KEY_DANIEL") == key
+    assert mind_key_files.read_person("daniel") == key
+    # Not in the install's settings file, which a mind may be able to read.
+    assert "USER_KEY_" not in two_owners.env.read_text()
     assert await holder_credentials.user_key("daniel") == key  # kept, not made again
     assert await _asked(OLD, key) is True            # ada is daniel's
     assert await _asked(SLOAN_MIND_KEY, key) is False  # dora is sloan's
@@ -95,7 +98,7 @@ async def test_replacing_a_users_key_refuses_the_old_one_at_the_next_question_an
 
     await holder_credentials.replace_user_key("daniel")
 
-    new = credentials_data._read_env_value(two_owners.env, "USER_KEY_DANIEL")
+    new = mind_key_files.read_person("daniel")
     assert new and new != old
     assert await _asked(OLD, old) is False
     assert await _asked(OLD, new) is True
@@ -140,3 +143,75 @@ async def test_the_person_signed_in_to_a_request_is_what_the_console_presents_th
 
     assert seen == ["daniel"]
     assert mind_runtime._PERSON.get() is None  # not left set after the request
+
+
+async def test_a_key_still_in_the_install_settings_file_moves_to_the_key_folder_and_keeps_working(two_owners):
+    legacy = "daniel-old-line-key-0123456789"
+    line = holder_credentials.user_key_variable("daniel")
+    two_owners.env.write_text(f"UNRELATED=keep\n{line}='{legacy}'\n")
+
+    key = await holder_credentials.user_key("daniel")
+
+    assert key == legacy
+    assert mind_key_files.read_person("daniel") == legacy
+    assert two_owners.env.read_text() == "UNRELATED=keep\n"
+    assert await _asked(OLD, legacy) is True
+
+
+async def test_a_replaced_key_is_never_left_in_the_settings_file_or_a_saved_copy_of_it(two_owners):
+    legacy = "daniel-old-line-key-0123456789"
+    line = holder_credentials.user_key_variable("daniel")
+    two_owners.env.write_text(f"{line}={legacy}\n")
+    credentials_data._backup(two_owners.env.read_text(), "hive_mind", line)
+
+    await holder_credentials.replace_user_key("daniel")
+
+    saved = "".join(p.read_text() for p in credentials_data.BACKUP_DIR.iterdir())
+    assert legacy not in saved
+    assert legacy not in two_owners.env.read_text()
+    assert await _asked(OLD, legacy) is False
+
+
+async def test_the_gateway_is_told_a_persons_key_by_the_database_not_by_its_administrator_credential(two_owners, monkeypatch):
+    # With no gateway administrator credential anywhere, a key is still made
+    # and accepted: the fingerprint is written to the hive database.
+    monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
+
+    key = await holder_credentials.user_key("daniel")
+
+    assert key
+    assert await _asked(OLD, key) is True
+
+
+def test_who_is_an_administrator_is_in_the_hive_database_whichever_sign_in_the_site_uses(console):
+    from hive_site import store
+
+    admin = console.admin()
+    sloan = console.settled_user(admin, "sloan", "sloan-password-1")
+
+    async def admins():
+        return await store.group_usernames("admins")
+
+    assert sloan.get("/api/account/key").status_code == 200
+    assert "sloan" not in testing.run(admins())
+    assert "daniel" in testing.run(admins())
+
+    assert admin.put("/api/admin/groups/admins/members/sloan").status_code in (200, 204)
+    assert sloan.get("/api/account/key").status_code == 200
+    assert "sloan" in testing.run(admins())
+
+    assert admin.delete("/api/admin/groups/admins/members/sloan").status_code in (200, 204)
+    assert sloan.get("/api/account/key").status_code == 200
+    assert "sloan" not in testing.run(admins())
+
+
+def test_an_administrator_replaces_anyones_key_and_anyone_else_only_their_own(console):
+    admin = console.admin()
+    sloan = console.settled_user(admin, "sloan", "sloan-password-1")
+    console.settled_user(admin, "tess", "tess-password-1")
+
+    assert sloan.post("/api/admin/users/tess/key/replace").status_code == 403
+    assert sloan.post("/api/account/key/replace").status_code in (200, 502)
+    refused_for_missing = admin.post("/api/admin/users/nobody/key/replace")
+    assert refused_for_missing.status_code == 404
+    assert admin.post("/api/admin/users/tess/key/replace").status_code in (200, 502)

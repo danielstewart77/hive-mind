@@ -144,6 +144,7 @@ async def lifespan(app: FastAPI):
     await seed_first_user()
     mind_rename.recover_pending()
     recovering = asyncio.create_task(_recover_key_replacements())
+    moving_user_keys = asyncio.create_task(_move_user_keys())
     # The ready-made roles, once per hive (story 10.18.3). A failure is
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
@@ -1491,6 +1492,18 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         },
         **_start_report(name, start),
     }
+
+
+async def _move_user_keys() -> None:
+    """Move every person's key still held in the install's settings file into
+    the key folder (requirement 31). Never fatal."""
+    try:
+        moved = await holder_credentials.move_user_keys()
+        if moved:
+            log_event(log, "user.keys.moved", component="hive-control-plane", count=len(moved))
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "user.keys.move_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
 
 
 async def _recover_key_replacements() -> None:
@@ -4157,15 +4170,36 @@ async def api_key_migration_tools_credential(holder: str, user: dict = Depends(r
     return result
 
 
+@app.get("/api/account/key")
+async def api_my_key_status(user: dict = Depends(require_auth)):
+    """Whether the signed-in person has a key and when it was made. Never the
+    key: nobody is shown it and nobody types it."""
+    return holder_credentials.user_key_status(str(user["username"]))
+
+
 @app.post("/api/account/key/replace")
 async def api_replace_my_key(user: dict = Depends(require_auth)):
     """Cut off the signed-in person's own key and make a new one. The old key
-    is refused by every mind at its next request; nothing is shown."""
+    is refused by the gateway at its next request; nothing is shown."""
     try:
         await holder_credentials.replace_user_key(str(user["username"]))
     except (holder_credentials.MintRefused, holder_credentials.MintUncertain) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     log_event(log, "user.key_replaced", **_actor_fields(user))
+    return {"replaced": True, **holder_credentials.user_key_status(str(user["username"]))}
+
+
+@app.post("/api/admin/users/{username}/key/replace")
+async def api_admin_replace_users_key(username: str, user: dict = Depends(require_auth)):
+    """An administrator replaces anyone's key. The person must exist; the
+    value is shown to nobody, the administrator included."""
+    await _store_call(auth.get_store().get_user, username)
+    try:
+        await holder_credentials.replace_user_key(auth.normalize_username(username))
+    except (holder_credentials.MintRefused, holder_credentials.MintUncertain) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    log_event(log, "user.key_replaced_by_admin", **_actor_fields(user),
+              username=auth.normalize_username(username))
     return {"replaced": True}
 
 

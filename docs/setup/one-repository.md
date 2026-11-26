@@ -339,10 +339,19 @@ Daniel, 2026-11-25: "We should have a key for a user, just as we do for minds.
 So if the user owns the mind, the user's key should be accepted when making
 changes to the mind it owns." Built as feature 834 requirement 19.
 
-- A person has one key, held like a mind's: a credential at the gateway with
-  their username as holder and kind `user`, kept by the console in the shared
-  env file as `USER_KEY_<NAME>`, made at random on their first need and shown to
-  nobody. It opens no route at the gateway.
+- A person has one key. It is a file in the hive site's own key folder (`.people`
+  under the key root, 0600, never mounted into a mind) and a fingerprint row in
+  the hive database's credentials table under their username with kind `user`,
+  written by the hive site itself (the gateway reads the same row on every
+  request; the hive site holds no gateway administrator credential). Made at
+  random on first need, shown and typed nowhere, replaced on the hive site (Your
+  key under Account settings; an administrator can replace anyone's on Users and
+  groups). A key still held as `USER_KEY_<NAME>` in the install's settings file
+  is moved at console start and its line, and the console's saved copies of it,
+  removed. It opens no route at the gateway.
+- With the authentication service as the sign-in, the hive site writes that
+  service's answer about who is in `admins` into the hive database on each
+  request before serving it, so the gateway can read it there.
 - When a signed-in person changes a mind the console already lets them change,
   the console presents their key to that mind. A mind accepts its own key (as
   before) and the key of its owner: it asks the gateway "is this key held by a

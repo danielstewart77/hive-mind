@@ -244,3 +244,91 @@ def remove(name: str) -> bool:
     except (FileNotFoundError, OSError):
         pass
     return gone
+
+
+# ---------------------------------------------------------------------------
+# A person's key (feature 834, requirement 31)
+# ---------------------------------------------------------------------------
+#
+# Kept in the same root and for the same reason as a mind's: outside the
+# checkout, where no mind reads it. But not in any mind's folder and never
+# mounted into one: `.people` starts with a dot, which no mind's folder name
+# can (`_NAME`), so it is never mistaken for a mind and `names()` skips it.
+# Only this console reads or writes it; the files are 0600 and the folder
+# 0700, owned by the console's own user, never handed to a mind's uid.
+
+PEOPLE_FOLDER = ".people"
+
+
+def person_stem(username: str) -> str:
+    """One file name per person, injective: every character other than an
+    ASCII letter or digit becomes its own hex code, so `dan.s`, `dan-s` and
+    `dan_s` never share a file."""
+    name = str(username or "").strip().upper()
+    if not name:
+        raise KeyFileError("a key belongs to a person with a name")
+    return "".join(c if c.isalnum() and c.isascii() else f"_{ord(c):X}_" for c in name)
+
+
+def person_folder(username: str) -> Path:
+    return KEY_ROOT / PEOPLE_FOLDER / person_stem(username)
+
+
+def person_path(username: str) -> Path:
+    return person_folder(username) / FILE_NAME
+
+
+def read_person(username: str) -> str | None:
+    """This person's key, or None when they have none; `KeyFileError` when the
+    file is there and cannot be read (that is not "no key")."""
+    target = person_path(username)
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise KeyFileError(f"{target} could not be read ({type(exc).__name__})") from None
+    return text.strip() or None
+
+
+def person_key_made_at(username: str) -> float | None:
+    """When this person's key file was last written, or None."""
+    try:
+        return person_path(username).stat().st_mtime
+    except (OSError, KeyFileError):
+        return None
+
+
+def write_person(username: str, value: str) -> Path:
+    """Make this the person's key, atomically (temporary file, fsync, rename),
+    readable by this console's user alone."""
+    if not KEY_SHAPE.fullmatch(str(value or "")):
+        raise KeyFileError("that value does not have the shape of a key, so it is not written")
+    if not KEY_ROOT.is_dir():
+        raise KeyFileError(f"{KEY_ROOT} is not there: this console was given no folder for keys")
+    directory = person_folder(username)
+    try:
+        directory.parent.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(directory.parent, 0o700)
+        directory.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+    except OSError as exc:
+        raise KeyFileError(f"{directory} could not be made ({exc.strerror or exc})") from None
+    stale_temporaries(directory)
+    temporary = directory / f".{FILE_NAME}.{secrets.token_hex(6)}.tmp"
+    target = directory / FILE_NAME
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(value + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except OSError as exc:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise KeyFileError(f"{target} could not be written ({exc.strerror or exc})") from None
+    _fsync_directory(directory)
+    return target
