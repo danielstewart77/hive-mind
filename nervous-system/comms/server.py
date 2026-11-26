@@ -1874,17 +1874,6 @@ async def ws_attach(ws: WebSocket, session_id: str):
         log.error("session %s has no model — refusing attach", session_id)
         await ws.close(code=4409, reason="session has no model")
         return
-    # A pane's turns never pass through `send_message`, so the model a DSH
-    # mind's roles allow (story 10.18.5) is applied here, before the pane is
-    # opened on it, as well as on every chat turn.
-    try:
-        allowed_model = await session_mgr.role_model(session)
-    except ValueError as exc:
-        await ws.close(code=4409, reason=str(exc)[:120])
-        return
-    if allowed_model != session_model:
-        await session_mgr._move_to_role_model(session, allowed_model)
-        session_model = allowed_model
 
     # The tile takes the conversation. Nothing else binds a pane-hosted
     # conversation to a surface, so without this the pane carries no

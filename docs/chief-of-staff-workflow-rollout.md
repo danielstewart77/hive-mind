@@ -53,9 +53,10 @@ install that made it.
   (Daniel, 2026-11-23): a big model for the planner, smaller ones below it,
   the same paradigm as home. Consequence: which model a role runs on is a
   fact about the install, not about the role. The shipped role files name
-  no model, so the model is chosen on each install rather than shipped: a
-  mind whose roles name none runs the model it is configured with, and a
-  role that names a model still restricts as before.
+  no model, so the model is chosen on each install rather than shipped.
+  Since 2026-11-26 (feature 893) no role decides a model at all: a mind runs
+  the model it is configured with and a conversation asked for a model gets
+  it, whatever its roles name.
 - **Skills may be tuned in place on an install; publishing is a separate,
   deliberate act** (Daniel, 2026-11-23). The fast loop that made the first
   run work - a mind misbehaves, its skill is fixed, the next turn has the
