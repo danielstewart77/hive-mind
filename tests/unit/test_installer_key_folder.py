@@ -64,3 +64,15 @@ def test_the_installers_own_copy_never_keeps_the_minds_key_so_a_replacement_leav
     # A services' key of its own (not the mind's) is still kept.
     secrets_store.remember(home, {"MIND_PROXY_KEY": key, "SERVICE_PROXY_KEY": "services-own-0123456789"})
     assert secrets_store.parse_env(home.secrets)["SERVICE_PROXY_KEY"] == "services-own-0123456789"
+
+
+def test_resolve_also_drops_a_mind_key_an_earlier_install_left_in_the_installers_copy(tmp_path):
+    inst = installer_at(tmp_path, answers(pieces=["console"]))
+    home = inst.home
+    home.state.mkdir(parents=True, exist_ok=True)
+    home.secrets.write_text("MIND_PROXY_KEY='stale-old-key-0123456789'\nHIVE_SECRET_KEY='keep-me'\n")
+
+    secrets_store.resolve(home, ["HIVE_SECRET_KEY"])
+
+    assert "stale-old-key-0123456789" not in home.secrets.read_text()
+    assert secrets_store.parse_env(home.secrets)["HIVE_SECRET_KEY"] == "keep-me"

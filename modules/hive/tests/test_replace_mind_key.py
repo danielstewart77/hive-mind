@@ -324,3 +324,66 @@ async def test_a_mind_file_that_holds_the_key_literally_stops_a_replacement_befo
     assert mind_key_files.read("ada") == OLD
     assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
     assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
+
+
+async def test_a_backup_holding_the_old_key_keeps_the_other_credentials_it_holds(hive, tmp_path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    saved = backups / "hive_mind-HIVE_TOOLS_TOKEN-20261126T000000Z.env"
+    saved.write_text(f"HIVE_TOOLS_TOKEN=previous-tools-token\nMIND_PROXY_KEY={OLD}\n")
+
+    await _replace()
+
+    assert "previous-tools-token" in saved.read_text()
+    assert OLD not in saved.read_text()
+
+
+async def test_an_env_line_the_console_cannot_rewrite_that_holds_the_old_key_fails_the_replacement_and_puts_the_old_key_back(hive, tmp_path):
+    hive.env.write_text(f"export MIND_PROXY_KEY={OLD}\n")
+
+    with pytest.raises(holder_credentials.MintRefused, match="still holds the old key"):
+        await _replace()
+
+    assert mind_key_files.read("ada") == OLD
+    assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
+    assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
+
+
+async def test_a_runtime_file_env_that_holds_the_key_stops_a_replacement_before_anything_changes(hive, tmp_path, monkeypatch):
+    import configuration_data
+    minds = tmp_path / "minds"
+    (minds / "ada").mkdir(parents=True)
+    (minds / "ada" / "runtime.yaml").write_text(f"env:\n  MIND_PROXY_KEY: {OLD}\n")
+    monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_CONFIG_DIR", minds)
+
+    with pytest.raises(holder_credentials.MintRefused, match="runtime.yaml"):
+        await _replace()
+
+    assert mind_key_files.read("ada") == OLD
+
+
+async def test_a_console_stopped_between_the_key_file_and_the_env_lines_brings_the_env_lines_to_the_stored_key_on_start(hive, tmp_path):
+    hive.env.write_text(f"MIND_PROXY_KEY={OLD}\nSERVICE_PROXY_KEY={OLD}\n")
+    real = holder_credentials._write_stored
+    seen = []
+
+    def stop_after_the_key_file(place, value, backup=True):
+        written = real(place, value, backup)
+        seen.append(place)
+        if place.is_key_file:
+            raise KeyboardInterrupt  # the console is gone before the env lines
+        return written
+
+    holder_credentials._write_stored = stop_after_the_key_file
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            await _replace()
+    finally:
+        holder_credentials._write_stored = real
+    assert mind_key_files.read("ada") == NEW and OLD in hive.env.read_text()
+
+    handled = await holder_credentials.recover_replacements()
+
+    assert handled == [{"mind": "ada", "recovered": True}]
+    assert _every_file_holding(tmp_path, OLD) == []
+    assert f"MIND_PROXY_KEY={NEW}" in hive.env.read_text()

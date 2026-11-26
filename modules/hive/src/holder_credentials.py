@@ -313,13 +313,13 @@ def own_file_label(holder: str) -> str | None:
     return label if label in ENV_FILES and label != "hive_tools" else None
 
 
-def _write_stored(location: Location, value: str) -> dict[str, Any]:
+def _write_stored(location: Location, value: str, backup: bool = True) -> dict[str, Any]:
     """Write one stored value where it is kept, reported like
     `credentials_data._write_location`: never raises. A key file is written
     atomically (`mind_key_files.write`); a line is rewritten in its env file."""
     if not location.is_key_file:
         return credentials_data._write_location(
-            location.path, location.env_key, value, location.file, backup=False)
+            location.path, location.env_key, value, location.file, backup=backup)
     row: dict[str, Any] = {"file": location.file, "path": str(location.path),
                            "env_key": location.env_key, "written": False, "reason": None}
     try:
@@ -1292,22 +1292,37 @@ def runtime_copies(value: str) -> list[str]:
 
 
 def scrub_backups(value: str) -> int:
-    """Remove the console's own pre-write copies of env files that still hold
-    `value`, the key a replacement has just retired (requirement 22: no file
-    keeps the old key). Best effort; returns how many were removed."""
-    removed = 0
+    """Blank the retired key `value` in the console's own pre-write copies of
+    env files (requirement 22: no file keeps the old key). The copies are kept,
+    since they are whole files and hold other credentials' last values; only
+    the old key's text in them is replaced. Returns how many were changed."""
+    changed = 0
     try:
         candidates = list(credentials_data.BACKUP_DIR.glob("*.env"))
     except OSError:
         return 0
     for path in candidates:
         try:
-            if value in path.read_text():
-                path.unlink()
-                removed += 1
+            text = path.read_text()
+            if value in text:
+                path.write_text(text.replace(value, "REPLACED-MIND-KEY"))
+                changed += 1
         except (OSError, UnicodeDecodeError):
             continue
-    return removed
+    return changed
+
+
+def leftover_files(value: str) -> list[str]:
+    """Env files this console writes whose text still holds `value` in any
+    spelling (an `export` line, an inline comment, a longer value)."""
+    found = []
+    for label, path in ENV_FILES.items():
+        try:
+            if Path(path).is_file() and value in credentials_data._read_text(path):
+                found.append(label)
+        except Unreadable:
+            found.append(label)
+    return found
 
 
 def mind_holds_one_key_line(holder: str) -> bool:
@@ -1511,6 +1526,9 @@ async def replace_mind_key(
             # off with Revoke would be live again after a put-back. Remember
             # which services had it cut off, to cut it off again.
             record["revoked"] = [k for k, r in rows.items() if _is_revoked(r)]
+            # Names only, never a key: the other lines to bring in step with
+            # the stored key if this console stops half-way.
+            record["echo"] = [[p.file, p.env_key] for p in places if not p.is_key_file]
             key_journal.update(record)
         except OSError as exc:
             raise MintRefused(
@@ -1549,7 +1567,7 @@ async def replace_mind_key(
             # compose file still reads; each read back.
             for place in places:
                 with credentials_data._WRITE_LOCK:
-                    written = _write_stored(place, value)
+                    written = _write_stored(place, value, backup=False)
                     try:
                         verified = bool(written["written"]) and _loaded_value(place) == value
                     except Unreadable:
@@ -1559,6 +1577,13 @@ async def replace_mind_key(
                         f"{place.path} did not take the new key"
                         + (f" ({written['reason']})" if written.get("reason") else ""))
                     break
+            if failure is None and old and not secrets.compare_digest(old, value):
+                with credentials_data._WRITE_LOCK:
+                    left = leftover_files(old)
+                if left:
+                    failure = MintRefused(
+                        f"{', '.join(left)} still holds the old key in a form this "
+                        "console does not rewrite")
             if failure is None:
                 stored = "written"
                 if old and not secrets.compare_digest(old, value):
@@ -1634,7 +1659,7 @@ async def replace_mind_key(
                     try:
                         if _loaded_value(place) != old:
                             with credentials_data._WRITE_LOCK:
-                                _write_stored(place, old)
+                                _write_stored(place, old, backup=False)
                             file_ok = file_ok and _loaded_value(place) == old
                     except Exception:  # noqa: BLE001
                         file_ok = False
@@ -1732,6 +1757,10 @@ async def recover_replacements() -> list[dict[str, Any]]:
                                    str(record.get("mind_id") or ""), row, value)
                     if key in record.get("revoked", []):
                         await _revoke_row(service, holder)
+                for label, name in record.get("echo", []):
+                    if label in ENV_FILES:
+                        with credentials_data._WRITE_LOCK:
+                            _write_stored(Location(label, name), value, backup=False)
             key_journal.finish(record)
             handled.append({"mind": holder, "recovered": True})
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
