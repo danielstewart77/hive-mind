@@ -123,6 +123,9 @@ TABLE.add(
     # mind being written, so this class admits the machinery and the handler
     # decides which row it may touch.
     "POST /broker/minds",
+    # A mind asking whether a key it was presented is its owner's person key.
+    # The handler admits a mind's own credential alone and answers yes or no.
+    "POST /broker/owner-key-check",
     "POST /sessions/fire-rotation",
     "POST /sessions/record-turn",
     "POST /sessions/{session_id}/harness-state",

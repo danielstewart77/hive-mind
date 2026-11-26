@@ -503,7 +503,7 @@ def install_files_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> No
         Guarded like the skills routes, and for the same reason: this names
         every hook and skill file the mind runs, on a LAN-reachable port.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -521,7 +521,7 @@ def install_files_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> No
         inside a skill is `memory/scripts/recall.sh`, and a path parameter
         would have to be re-joined from segments to say the same thing.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -532,7 +532,7 @@ def install_files_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> No
     @app.put("/files/{tree}/content")
     async def put_file_content(req: Request, tree: str):
         """Replace one existing file's contents. Live for the next turn."""
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:

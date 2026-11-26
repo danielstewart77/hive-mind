@@ -9,6 +9,7 @@ on every boot.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from unittest.mock import patch
@@ -334,14 +335,18 @@ class TestTheConfigSurfaceIsSeparate:
     def test_a_session_token_is_refused_by_the_admin_guard(self, mind_dir):
         token = runtime_api.session_token(mind_dir)
         headers = {"Authorization": f"Bearer {token}"}
-        with patch.dict(os.environ, {"MIND_KEY": "the-mind-key"}):
-            denied = runtime_api.authorize_admin(_request(headers))
+        async def not_the_owners(presented):
+            return False
+
+        with patch.dict(os.environ, {"MIND_KEY": "the-mind-key"}), \
+                patch.object(runtime_api, "owner_key_check", not_the_owners):
+            denied = asyncio.run(runtime_api.authorize_admin(_request(headers)))
         assert denied is not None
         assert denied.status_code == 401
 
     def test_the_admin_guard_still_refuses_when_nothing_is_configured(self):
         with patch.dict(os.environ, {}, clear=True):
-            denied = runtime_api.authorize_admin(_request())
+            denied = asyncio.run(runtime_api.authorize_admin(_request()))
         assert denied is not None
         assert denied.status_code == 503
 
@@ -502,8 +507,12 @@ class TestTheDeployedAppIsGuarded:
         # The admin guard answers 503 until a mind has an admin token at all;
         # the suite names one rather than borrowing the invoking shell's.
         monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "an-admin-token")
-        from minds import mind_server
+        from minds import mind_server, runtime_api
 
+        async def not_the_owners(presented):
+            return False
+
+        monkeypatch.setattr(runtime_api, "owner_key_check", not_the_owners)
         client = TestClient(mind_server.app)
         assert client.get("/runtime").status_code == 401
         # The session credential does not open it, which is what tells the

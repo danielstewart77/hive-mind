@@ -15,30 +15,75 @@ was unreachable would be overwritten the moment it came back.
 
 from __future__ import annotations
 
+import contextvars
+
 import httpx
 from fastapi import HTTPException
 
 _TIMEOUT = 8.0
 
 
+#: The person signed in to the request being served, set around each
+#: authorised request so the many places that reach a mind for them need not
+#: each be handed the user. None outside a request, and on a bearer-only call.
+_PERSON: contextvars.ContextVar[str | None] = contextvars.ContextVar("mind_runtime_person", default=None)
+
+
+class PersonScope:
+    """ASGI middleware (innermost): records who is signed in, for `admin_headers`.
+
+    Added before the authorisation middleware so it runs inside it, where the
+    request's user is already resolved and cached."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        person = None
+        try:
+            import auth
+            from starlette.requests import HTTPConnection
+
+            user = await auth.resolve_user(HTTPConnection(scope))
+            person = str((user or {}).get("username") or "").strip().lower() or None
+        except Exception:  # noqa: BLE001 - no person is not a failure of the request
+            person = None
+        token = _PERSON.set(person)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _PERSON.reset(token)
+
+
 async def admin_headers(target_url: str) -> dict[str, str]:
     """The bearer a Mind accepts on its config-write route, for `target_url`.
 
-    That mind's own key, which it holds and presents to the gateway, and which
-    the console holds for it. Never a hive-wide administrator key: no mind
-    holds or accepts one (feature 834, requirement 17). A mind whose key this
-    console does not hold - one on another machine, its key pasted there - is
-    answered 503 with a sentence saying so, not sent something else.
+    When the person signed in owns the mind at that address, that person's own
+    key (feature 834, requirement 19): the mind asks the gateway whether it is
+    its owner's and accepts it, so a mind on another machine is changed
+    without this console ever holding that mind's key. Otherwise the mind's
+    own key, where this console holds it. Never a hive-wide administrator key:
+    no mind holds or accepts one (requirement 17). A mind this console has
+    neither for is answered 503 with a sentence saying so, not sent something
+    else.
     """
     import configuration_data
 
+    person = _PERSON.get()
+    if person:
+        key = await configuration_data.user_credential_for(target_url, person)
+        if key:
+            return {"Authorization": f"Bearer {key}"}
     own = await configuration_data.own_credential_for(target_url)
     if own:
         return {"Authorization": f"Bearer {own}"}
     raise HTTPException(
         status_code=503,
-        detail="this console does not hold this mind's own key, so its settings "
-        "cannot be read or changed from here",
+        detail="this console has no key to change this mind with: it does not "
+        "hold the mind's own key, and the person signed in is not the mind's owner",
     )
 
 

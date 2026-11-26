@@ -201,7 +201,14 @@ def _route_methods(route: BaseRoute) -> list[str]:
 MIND = "mind"
 SERVICE = "service"
 PERSON = "person"
-ROLES = (MIND, SERVICE, PERSON)
+#: A person's own key, kept by the console and shown to nobody (feature 834,
+#: requirement 19). It names the person as holder and username and opens
+#: nothing at this gateway: `resolve_caller` gives it no standing on any route,
+#: so a copy that leaks from a mind it was presented to cannot read a
+#: conversation. Its one use is the answer to a mind's question "is this key
+#: held by my owner?" (`holds_user_key_of`).
+USER_KEY = "user"
+ROLES = (MIND, SERVICE, PERSON, USER_KEY)
 
 #: Roles that may reach the routes the mind machinery drives.
 MACHINE_ROLES = (MIND, SERVICE)
@@ -268,6 +275,14 @@ async def put_credential(
         )
     if role not in ROLES:
         raise ValueError(f"unknown credential role: {role!r}")
+    if role == USER_KEY:
+        # A person's key is held under the person's own name, so "the key of
+        # the user who owns this mind" is one lookup, and never under the name
+        # of a mind, whose row it would take over.
+        if key != name:
+            raise ValueError("a user's key is held under that user's own name")
+        if await _is_registered_mind(key):
+            raise ValueError(f"{key!r} is a mind, not a user")
     sha = digest(token)
     clash = await broker_ops.holder_of_digest(sha)
     if clash is not None and clash != key:
@@ -472,6 +487,9 @@ async def resolve_caller(token: str) -> Caller:
     found = await credential_for_token(token)
     if not found:
         return Caller()
+    if found.role == USER_KEY:
+        # A person's key for their minds' settings opens no route here.
+        return Caller()
     return Caller(
         username=found.username, holder=found.holder, role=found.role
     )
@@ -503,6 +521,28 @@ async def owner_of_mind(mind_id: str) -> str | None:
     if not row:
         return None
     return normalize_username(row["owner"]) or None
+
+
+async def holds_user_key_of(mind_holder: str, presented: str) -> bool:
+    """Whether `presented` is the key of the person who owns this mind.
+
+    The one question a mind may ask about a key it was handed, and only about
+    its own owner as this registry records it: a yes or a no, never whose key
+    it is or what it opens. A user's key is refused for every mind its user
+    does not own, and no value that is not a user key (a mind's, a service's,
+    a revoked one) is ever a yes. Read per call: replacing a user's key lands
+    on the next request.
+    """
+    owner = await owner_of_mind(mind_holder)
+    if not owner or not presented:
+        return False
+    found = await credential_for_token(presented)
+    return bool(
+        found
+        and found.role == USER_KEY
+        and found.holder == owner
+        and found.username == owner
+    )
 
 
 async def owns_mind(caller: Caller, mind_id: str) -> bool:

@@ -234,6 +234,7 @@ app = FastAPI(
 )
 # Authorization lives in one table (console_access.TABLE), enforced in front
 # of every route and websocket; a route the table does not name is admin-only.
+app.add_middleware(mind_runtime.PersonScope)
 app.add_middleware(mind_rename.EditGate)
 app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
 install_fastapi_logging(app, log, "hive-control-plane")

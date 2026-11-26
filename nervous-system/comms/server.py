@@ -2519,6 +2519,26 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
     return await broker.get_mind_by_id(body.mind_id)
 
 
+class OwnerKeyCheck(BaseModel):
+    key: str
+
+
+@app.post("/broker/owner-key-check")
+async def broker_owner_key_check(request: Request, body: OwnerKeyCheck):
+    """A mind asking whether a key it was presented is its owner's.
+
+    Answered for a mind's own credential only, and only about that mind's own
+    owner as its registry row records it: `{"owned": true|false}` and nothing
+    else. The service holders, a person and the admin credential are refused,
+    so this route cannot be used to test a value against anyone else's minds
+    or to learn whose value it is.
+    """
+    caller = _caller(request)
+    if caller.is_admin or caller.role != user_access.MIND or not caller.holder:
+        raise HTTPException(401, "Invalid token")
+    return {"owned": await user_access.holds_user_key_of(caller.holder, body.key)}
+
+
 async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
     """Refuse a mind asking about another mind's bot.
 

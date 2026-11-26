@@ -494,7 +494,7 @@ async def _startup() -> None:
 
 @app.get("/diagnostics/errors")
 async def diagnostic_errors(request: Request):
-    denied = runtime_api.authorize_admin(request)
+    denied = await runtime_api.authorize_admin(request)
     if denied is not None:
         return denied
     return recent_errors()

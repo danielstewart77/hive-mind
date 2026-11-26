@@ -85,7 +85,7 @@ def install_github_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         know whether this mind has one that works and which account it
         belongs to, so they can see it is the one they meant.
         """
-        refusal = authorize_admin(request)
+        refusal = await authorize_admin(request)
         if refusal is not None:
             return refusal
         if github_token.storage_location()[0] != "keyring":
@@ -127,7 +127,7 @@ def install_github_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         character missing leaves the working token in place rather than
         surfacing later as a push that fails for a mind nobody is watching.
         """
-        refusal = authorize_admin(request)
+        refusal = await authorize_admin(request)
         if refusal is not None:
             return refusal
         if github_token.storage_location()[0] != "keyring":

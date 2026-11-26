@@ -703,15 +703,54 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
     return authorize_session(request, mind_dir)
 
 
-def authorize_admin(request: Request) -> JSONResponse | None:
+#: How long a mind waits on the gateway's answer about its owner's key.
+OWNER_KEY_CHECK_TIMEOUT_S = 5
+
+
+async def owner_key_check(presented: str) -> bool | None:
+    """Ask the gateway whether `presented` is the key of the user who owns this mind.
+
+    The mind's own question about its own owner, authenticated by the mind's
+    own key: the gateway answers yes or no and nothing else (feature 834,
+    requirement 19), so this mind learns nothing about the key it was handed.
+    None when the gateway could not be asked (no address, no answer, a refusal
+    of this mind's own key): the caller must not read that as a no.
+    """
+    import aiohttp
+
+    comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
+    own = _own_key()
+    if not comms_url or not own:
+        return None
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{comms_url}/broker/owner-key-check",
+                json={"key": presented},
+                headers={"Authorization": f"Bearer {own}"},
+                timeout=aiohttp.ClientTimeout(total=OWNER_KEY_CHECK_TIMEOUT_S),
+                allow_redirects=False,
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                answer = await resp.json()
+    except Exception:  # noqa: BLE001 - an unanswered question is not a no
+        return None
+    return answer.get("owned") is True if isinstance(answer, dict) else None
+
+
+async def authorize_admin(request: Request) -> JSONResponse | None:
     """Guard a config-write route. None means the caller may proceed.
 
-    Accepts this mind's own key and nothing else: the one it was issued, which
-    the console holds for it and presents once the person signed in has been
-    allowed by their account. Not the session credential, which every chat
-    turn carries, and no hive-wide administrator key (feature 834,
-    requirement 17). A mind started with no key refuses with 503 rather than
-    opens; a wrong key is 401.
+    Accepts this mind's own key, and the key of the user who owns this mind
+    (feature 834, requirement 19) - a person's key, held like a mind's, which
+    the console presents for a change a signed-in person makes. Whether a
+    presented value is the owner's is asked of the gateway, which answers only
+    this mind's question about its own owner. Not the session credential,
+    which every chat turn carries, and no hive-wide administrator key
+    (requirement 17). A mind started with no key refuses with 503 rather than
+    opens; a wrong key is 401; a gateway that cannot be asked about a key that
+    is not this mind's own is 503, never a guess.
     """
     expected = _own_key()
     if not expected:
@@ -721,9 +760,19 @@ def authorize_admin(request: Request) -> JSONResponse | None:
         )
     header = request.headers.get("Authorization", "")
     presented = header[7:] if header.startswith("Bearer ") else ""
-    if not tokens_match(presented, expected):
+    if tokens_match(presented, expected):
+        return None
+    if not presented.strip():
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return None
+    owned = await owner_key_check(presented)
+    if owned is None:
+        return JSONResponse(
+            {"error": "this mind could not ask the gateway whether that is its owner's key"},
+            status_code=503,
+        )
+    if owned:
+        return None
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
 async def register_with_broker(path: Path, *, mind_name: str, mind_id: str, log) -> str:
@@ -904,7 +953,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         claiming it kept its guard — so every field the allowlist admits, and
         every field anybody adds to it later, was readable from the LAN.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -919,7 +968,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         Sessions already running keep the model they spawned with; the next
         one the gateway creates uses this.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         body = await req.json()
@@ -1028,7 +1077,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         carries a proxy key in its `env` block hands back a payload that key
         is not in.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -1065,7 +1114,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         In effect on the next session or the next turn, depending on the
         setting; nothing already running is disturbed.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         body = await req.json()

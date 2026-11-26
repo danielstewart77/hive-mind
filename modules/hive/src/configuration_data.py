@@ -990,22 +990,13 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
 
 
-async def own_credential_for(url: str) -> str | None:
-    """The one mind's own key that may be sent to `url`, or None.
-
-    How a change the console has already allowed, by the account of the person
-    signed in, reaches a mind: the console presents that mind's own key, the
-    one it holds for it (Daniel, 2026-11-18: "A mind has a key and that is
-    it"), and the mind accepts what it already holds. There is no hive-wide
-    administrator key to fall back on (feature 834, requirement 17).
+async def _mind_at(url: str) -> dict | None:
+    """The one registered mind that answers at `url`, or None.
 
     Only when the address is that one mind's and nobody else's: every registry
     row claiming it is the same mind. An address two minds claim, or one no
-    row claims, gets nothing - a mind can re-register itself anywhere, and
-    another mind's key is not its to draw. A mind whose key this console does
-    not hold (one on another machine, pasted there) gets nothing as well.
-    """
-    import holder_credentials
+    row claims, names nobody - a mind can re-register itself anywhere, and
+    another mind's key is not its to draw."""
     import route_access
 
     try:
@@ -1018,10 +1009,41 @@ async def own_credential_for(url: str) -> str | None:
         if _origin(str(row.get("gateway_url") or "")) == target]
     whose = {(str(row.get("id") or ""), str(row.get("name") or "").strip().lower())
              for row in claimants}
-    if len(whose) != 1:
-        return None
-    ((_, name),) = whose
+    return claimants[0] if len(whose) == 1 else None
+
+
+async def own_credential_for(url: str) -> str | None:
+    """The one mind's own key that may be sent to `url`, or None.
+
+    How a change the console has already allowed, by the account of the person
+    signed in, reaches a mind it is not that person's to open: the console
+    presents that mind's own key, the one it holds for it (Daniel, 2026-11-18:
+    "A mind has a key and that is it"), and the mind accepts what it already
+    holds. There is no hive-wide administrator key to fall back on (feature
+    834, requirement 17). A mind whose key this console does not hold (one on
+    another machine, pasted there) gets nothing here: its owner's changes go
+    by the owner's key (`user_credential_for`).
+    """
+    row = await _mind_at(url)
+    name = str((row or {}).get("name") or "").strip().lower()
     return key_held_for(name) if name else None
+
+
+async def user_credential_for(url: str, person: str) -> str | None:
+    """The key of `person`, when they own the one mind at `url`, or None.
+
+    A person's key goes only to a mind the registry says is theirs (the mind
+    refuses anyone else's by asking the gateway the same question), so an
+    administrator changing another person's mind is not sent their own key
+    where it would be refused, and no person's key is sent to a mind of
+    somebody else's."""
+    import holder_credentials
+
+    row = await _mind_at(url)
+    owner = str((row or {}).get("owner") or "").strip().lower()
+    if not owner or owner != person.strip().lower():
+        return None
+    return await holder_credentials.user_key(owner)
 
 
 def key_held_for(name: str) -> str | None:

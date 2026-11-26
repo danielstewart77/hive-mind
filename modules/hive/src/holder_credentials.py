@@ -1367,6 +1367,14 @@ async def replace_mind_key(
                 key_journal.clear(holder)
             except OSError:
                 pass  # the replacement is complete; a stale record is harmless
+            if location is None:
+                # A mind whose key is not kept here: now registered at every
+                # service, and the console cannot read its file. Remembered, so
+                # the move report can say "registered, key not stored here".
+                try:
+                    key_journal.mark_registered_not_stored(holder)
+                except OSError:
+                    pass
             return {
                 "services": [{"service": s.key, "label": s.label, "status": "replaced"}
                              for s in services],
@@ -1672,6 +1680,7 @@ async def unprovision_mind(name: str) -> list[str]:
     """
     failures: list[str] = []
     holder = name.strip().lower()
+    key_journal.unmark_registered_not_stored(holder)
     for service in SERVICES.values():
         keys = (one_key_variable(holder), variable_name(service, holder))
         try:
@@ -1719,6 +1728,107 @@ async def unprovision_mind(name: str) -> list[str]:
     return failures
 
 
+# ---------------------------------------------------------------------------
+# A person's own key (feature 834, requirement 19)
+# ---------------------------------------------------------------------------
+
+#: A person's key is held like a mind's: a credential at the gateway with the
+#: person's username as holder and kind `user`, and a line in the shared env
+#: file this console keeps for it. Random, never pasted (no proxy is involved
+#: for people), shown to nobody.
+USER_KEY_PREFIX = "USER_KEY_"
+USER_ROLE = "user"
+
+
+def user_key_variable(username: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9]", "_", username.strip().lower()).upper()
+    return USER_KEY_PREFIX + stem
+
+
+def _user_key_location(username: str) -> Location:
+    if MIND_ENV_LABEL not in ENV_FILES:
+        raise MintRefused(f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
+    return Location(MIND_ENV_LABEL, user_key_variable(username))
+
+
+async def _issue_user_key(username: str, location: Location, previous: str | None) -> str:
+    """Register a fresh random key for this person at the gateway and keep it
+    in the file. Under `_ROTATION_LOCK`, taken by the caller. The gateway is
+    told first and put back when the file cannot take it, so the file never
+    holds a value the gateway does not."""
+    gateway = SERVICES["comms"]
+    # A holder of that name that is not a person's key is somebody else's
+    # credential (a mind, a surface bot, a service): never taken over.
+    row = await _holder_row(gateway, username)
+    if row is not None and str(row.get("role") or "") != USER_ROLE:
+        raise MintRefused(
+            f"the gateway already has a holder called {username!r} that is not "
+            "a person's key, so this person's key cannot be made under that name")
+    value = secrets.token_urlsafe(32)
+    _ensure_key(location.path, location.env_key)
+    await _put(gateway, username, username, value, USER_ROLE, None)
+    with credentials_data._WRITE_LOCK:
+        written = credentials_data._write_location(
+            location.path, location.env_key, value, location.file)
+        try:
+            verified = bool(written["written"]) and _loaded_value(location) == value
+        except Unreadable:
+            verified = False
+    if not verified:
+        # Put the gateway back to what the file still holds (or cut it off
+        # when this person had no key before): never a key nothing can read.
+        try:
+            if previous:
+                await _put(gateway, username, username, previous, USER_ROLE, None)
+            else:
+                await _request(gateway, "DELETE", f"/credentials/{username}")
+        except Exception:  # noqa: BLE001 - the refusal below says it
+            pass
+        raise MintRefused(
+            f"{location.path} did not take the new key"
+            + (f" ({written['reason']})" if written.get("reason") else ""))
+    return value
+
+
+async def user_key(username: str) -> str | None:
+    """This person's key, made on their first need and then kept.
+
+    None when it cannot be had (no gateway admin credential, no env file this
+    console can write): the caller falls back to the mind's own key rather
+    than failing the change."""
+    name = username.strip().lower()
+    if not name:
+        return None
+    try:
+        location = _user_key_location(name)
+        async with _ROTATION_LOCK:
+            existing = _loaded_value(location) if location.path.is_file() else None
+            if existing:
+                return existing
+            return await _issue_user_key(name, location, None)
+    except (MintRefused, MintUncertain, Unreadable, OSError):
+        return None
+
+
+async def replace_user_key(username: str) -> dict[str, Any]:
+    """Cut a person's key off and give them a new one. The old one is refused
+    by every mind at its next request (the gateway holds one value per holder);
+    the new one is made now. Small on purpose: no page, no history."""
+    name = username.strip().lower()
+    if not name:
+        raise MintRefused("a key belongs to a person")
+    location = _user_key_location(name)
+    async with _ROTATION_LOCK:
+        try:
+            previous = _loaded_value(location) if location.path.is_file() else None
+        except Unreadable:
+            raise MintRefused(
+                f"{location.path} could not be read, so the old key could not be "
+                "put back if something failed. Nothing was changed") from None
+        await _issue_user_key(name, location, previous)
+    return {"replaced": True, "holder": name}
+
+
 async def check(service: Service, holder: str, role: str = "") -> dict[str, Any]:
     """Present this holder's own value to the service that validates it.
 
@@ -1730,7 +1840,7 @@ async def check(service: Service, holder: str, role: str = "") -> dict[str, Any]
     for a refusal is a new credential, and applying that to a value sitting
     behind an outage destroys a working one.
     """
-    if role == "person":
+    if role in ("person", USER_ROLE):
         # The routes a value can be presented to here are machine-classified,
         # so a person's credential is refused on every one of them — and a row
         # reading "refused" over a perfectly good sign-in is worse than one

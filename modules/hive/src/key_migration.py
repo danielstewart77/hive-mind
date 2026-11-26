@@ -40,6 +40,11 @@ from holder_credentials import MintRefused, ReplacementFailed
 #: What the tools' own routes call the holder of the shared service token.
 SHARED_HOLDER = "skippy"
 
+REGISTERED_NOT_STORED = (
+    "registered, key not stored here: a mind on another machine whose pasted key "
+    "is registered at the gateway, the memory store and the tools; the console "
+    "never holds that key, and its settings are changed with its owner's key")
+
 REPOINT_NOTE = (
     "The report checks that each tools consumer other than a mind has a credential of its "
     "own; it cannot see which one the consumer presents. Point each bot's and the console's "
@@ -74,7 +79,7 @@ def _kind_of(holder: str, role: str, minds: set[str]) -> str:
         return "mind"
     if name == SHARED_HOLDER:
         return "shared tools token"
-    if role == "person":
+    if role in ("person", hc.USER_ROLE):
         return "person"
     if name.endswith("-bot"):
         return "surface bot"
@@ -183,6 +188,11 @@ async def account() -> dict[str, Any]:
                 if not holder or holder == "shared-token-retired":
                     continue  # the tools' own record that the shared token was retired
                 low = holder.lower()
+                if str(row.get("role") or "") == hc.USER_ROLE:
+                    # A person's key is held at the gateway alone, by design.
+                    entry["holders"].append({"holder": holder, "kind": "person", "live": not (
+                        row.get("revoked_at") or row.get("live") is False)})
+                    continue
                 names_by_service[service.key].add(low)
                 live = not (row.get("revoked_at") or row.get("live") is False)
                 row_state[(service.key, low)] = "live" if live else "revoked"
@@ -211,6 +221,7 @@ async def account() -> dict[str, Any]:
     mind_rows: list[dict[str, Any]] = []
     for name in sorted(names):
         problems: list[str] = []
+        note: str | None = None
         found = by_mind.get(name, {}).get("found", [])
         stored = _stored(name)
         try:
@@ -224,8 +235,14 @@ async def account() -> dict[str, Any]:
         if name not in minds:
             state = "unclear"
             problems.append("a holder typed a mind that the mind registry has no row for")
-        elif stored is not None:
+        elif stored is not None or (not local and key_journal.registered_not_stored(name)):
+            # Its one key is kept here, or it is a mind on another machine whose
+            # key was pasted on its page: registered at the three services, the
+            # console never storing it (requirement 19).
             state = "moved"
+            here = stored is not None
+            if not here:
+                note = REGISTERED_NOT_STORED
             for service in services:
                 if service.key == "tools" and not _tools_applies(name):
                     continue
@@ -234,14 +251,17 @@ async def account() -> dict[str, Any]:
                     problems.append(f"cut off at {service.label} (kept cut off by the move)")
                 elif seen != "live":
                     state = "not moved"
-                    problems.append(f"holds its one key here but {service.label} has no credential for it")
+                    problems.append(
+                        f"holds its one key here but {service.label} has no credential for it"
+                        if here else
+                        f"was registered by its pasted key but {service.label} has no live credential for it")
         elif not sources:
             state = "not moved"
             problems.append(
                 "no proxy key found for this mind in any file this console reads"
                 if local else
                 "another machine: its key cannot be read or written from here, "
-                "so it cannot be moved from here")
+                "so it cannot be moved from here; paste its key on its page to register it")
         elif len(distinct) > 1:
             state = "not moved"
             problems.append("its files hold different proxy keys: " + ", ".join(p for p, _ in sources))
@@ -263,6 +283,7 @@ async def account() -> dict[str, Any]:
             "mind": name, "state": state,
             "where_it_reads": (
                 f"{stored.file}:{stored.env_key}" if stored is not None else None),
+            "note": note,
             "proxy_key_found": [
                 {"place": f["place"], "variable": f["variable"], "digest": f["digest"]}
                 for f in found],
@@ -404,7 +425,7 @@ async def _validated_value(name: str) -> str:
             f"{name} has no proxy key in any file this console reads"
             if _is_local(name) else
             f"{name} is on another machine: its key cannot be read or written from "
-            "here, so it cannot be moved from here")
+            "here, so it cannot be moved from here; paste its key on its page to register it")
     values = {v for _, v in sources}
     if len(values) > 1:
         raise MintRefused(
@@ -907,6 +928,8 @@ async def retire() -> dict[str, Any]:
         location = _stored(name)
         value = hc._loaded_value(location) if location else None
         if not value:
+            if location is None and not _is_local(name) and key_journal.registered_not_stored(name):
+                keys_ok.append(f"{name}: registered, key not stored here")
             continue
         answers = {s.key: await hc._accepts(s, value) for s in _services()}
         keys_ok.append(f"{name}: " + ", ".join(f"{k} {'accepts' if v else 'REFUSES' if v is False else 'unknown'}"

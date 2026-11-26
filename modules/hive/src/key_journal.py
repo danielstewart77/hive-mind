@@ -121,3 +121,36 @@ def clear(mind: str) -> None:
                 continue
             if record.get("mind") == mind:
                 path.unlink(missing_ok=True)
+
+
+# A mind whose key is not kept on this console (one on another machine) is
+# registered by pasting its key on its page: the three services take it and
+# this console never stores it. That is the one moment the console can know such
+# a mind was moved, so it keeps a plain record of it (the mind's name, no key,
+# no digest) beside the journal, which is the same volume.
+_REGISTERED_DIR = "registered-not-stored"
+
+
+def _registered_path(mind: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in mind.strip().lower())
+    return JOURNAL_DIR / _REGISTERED_DIR / safe
+
+
+def mark_registered_not_stored(mind: str) -> None:
+    path = _registered_path(mind)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text("registered, key not stored here\n")
+
+
+def registered_not_stored(mind: str) -> bool:
+    try:
+        return _registered_path(mind).is_file()
+    except OSError:
+        return False
+
+
+def unmark_registered_not_stored(mind: str) -> None:
+    try:
+        _registered_path(mind).unlink(missing_ok=True)
+    except OSError:
+        pass
