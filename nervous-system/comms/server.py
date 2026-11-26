@@ -2435,6 +2435,17 @@ async def _refuse_foreign_registration(caller, body) -> None:
         if row["mind_id"] == asked_id or (row["name"] or "").lower() == asked_name
     ]
     for mind_id, name in existing:
+        if str(mind_id or "") != asked_id:
+            # The name is held by a row with another identity. core.minds
+            # keys its name case-sensitively and upserts on `mind_id`, so a
+            # mind posting its own name (or its name in another case) with a
+            # fresh `mind_id` and its own gateway_url would be given a second
+            # row for the name. Whoever holds the name is the only identity
+            # that may register it; the admin renames or removes.
+            raise HTTPException(
+                403,
+                f"the name {name!r} is already held by another mind identity",
+            )
         keys = {str(mind_id or ""), user_access.normalize_username(name)}
         if caller.holder not in keys:
             # An operator mind may re-register a mind of its own owner

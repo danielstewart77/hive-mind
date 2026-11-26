@@ -202,3 +202,15 @@ def test_a_changed_query_userinfo_or_ipv6_host_is_a_move(world) -> None:
                 "http://evil.invalid\\@alpha.old:8420"):
         assert _register(world.client, KEYS["alpha"], A, "alpha", url).status_code == 403, url
     assert _address(world.client, "alpha") == OLD
+
+
+def test_a_mind_cannot_take_a_second_row_under_its_own_name(world) -> None:
+    fresh = "66666666-6666-4666-8666-666666666666"
+    for spelling in ("alpha", "Alpha", "ALPHA"):
+        refused = _register(world.client, KEYS["alpha"], fresh, spelling, NEW)
+        assert refused.status_code == 403, spelling
+    rows = world.client.get(
+        "/broker/minds", headers={"Authorization": f"Bearer {ADMIN}"}).json()
+    assert [r["name"] for r in rows].count("alpha") == 1
+    assert len(rows) == 5
+    assert _address(world.client, "alpha") == OLD
