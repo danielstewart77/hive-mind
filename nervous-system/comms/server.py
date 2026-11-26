@@ -2297,7 +2297,8 @@ async def _mind_exists(mind_id: str) -> bool:
 async def mind_grants(mind_id: str, request: Request):
     """What this mind's roles let it use, read now (feature 10.18).
 
-    `managed` False means roles decide nothing about the mind. For a managed
+    `managed` False means roles decide nothing about the mind. No model is
+    in the answer: a role decides none (feature 893). For a managed
     mind every list is the union of the roles it holds at this moment, so a
     role changed on the console is a changed answer on the next call. The
     path takes the mind's id or its name; a mind's own credential reaches

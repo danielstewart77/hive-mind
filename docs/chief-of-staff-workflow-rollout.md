@@ -56,7 +56,8 @@ install that made it.
   no model, so the model is chosen on each install rather than shipped.
   Since 2026-11-26 (feature 893) no role decides a model at all: a mind runs
   the model it is configured with and a conversation asked for a model gets
-  it, whatever its roles name.
+  it, whatever its roles hold. A role carries a suggested tier in place
+  of a model, shown where a mind's model is chosen.
 - **Skills may be tuned in place on an install; publishing is a separate,
   deliberate act** (Daniel, 2026-11-23). The fast loop that made the first
   run work - a mind misbehaves, its skill is fixed, the next turn has the
