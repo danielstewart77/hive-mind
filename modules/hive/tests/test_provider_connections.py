@@ -61,7 +61,8 @@ def test_scaffold_routes_inference_to_selected_connection_without_embedding_key(
     compose = yaml.safe_load((tmp_path / "minds/new-mind/container/compose.yaml").read_text())
     env = dict(item.split("=", 1) for item in compose["services"]["new-mind"]["environment"])
     assert env["OPENAI_BASE_URL"] == "https://direct.invalid/v1"
-    assert env["OPENAI_API_KEY"] == "${MIND_KEY_NEW_MIND}"
+    # The key is in the mind's key file; no key is named in its compose.
+    assert "OPENAI_API_KEY" not in env and env["MIND_KEY_FILE"] == "/run/mind-key/key"
     assert "INFERENCE_PROXY_URL" not in env
     runtime = yaml.safe_load((tmp_path / "minds/new-mind/runtime.yaml").read_text())
     assert runtime["provider_connection"]["id"] == "direct"
@@ -74,7 +75,8 @@ def test_new_mind_creation_stores_its_token_and_selected_connection(creation):
     assert saved.status_code == 200
     response = client.post("/api/minds", json={"name": "direct-new", "harness": "dsh", "provider_id": saved.json()["id"], "provider_token": "mind-owned-token", "default_model": "direct-model"})
     assert response.status_code == 200, response.text
-    assert credentials_data._read_env_value(env, "MIND_KEY_DIRECT_NEW") == "mind-owned-token"
+    import mind_key_files
+    assert mind_key_files.read("direct-new") == "mind-owned-token"
     assert not state["proxy_requests"]
     runtime = yaml.safe_load((minds / "direct-new/runtime.yaml").read_text())
     assert runtime["provider_connection"]["base_url"] == "http://direct.invalid/v1"
@@ -85,8 +87,8 @@ def test_new_mind_creation_stores_its_token_and_selected_connection(creation):
     assert result.returncode == 0, result.stderr
     actual = json.loads(result.stdout)["services"]["direct-new"]["environment"]
     assert actual["OPENAI_BASE_URL"] == "http://direct.invalid/v1"
-    assert actual["DSH_API_KEY"] == "mind-owned-token"
-    assert actual["HIVE_PROVIDER_TOKEN"] == "mind-owned-token"
+    assert "mind-owned-token" not in result.stdout
+    assert actual["MIND_KEY_FILE"] == "/run/mind-key/key"
     assert "INFERENCE_PROXY_URL" not in actual
 
 
