@@ -86,7 +86,7 @@ def _given(monkeypatch, *, hooks, skills):
     """The mind is given a role on the console: this is what the gateway
     then answers when the mind asks what its roles grant."""
     grants = {"managed": True, "roles": ["general"], "hooks": hooks,
-              "skills": skills, "models": [], "tools": []}
+              "skills": skills, "tools": []}
     monkeypatch.setattr(role_guard, "fetch", lambda *a, **k: json.loads(json.dumps(grants)))
 
 
@@ -494,7 +494,7 @@ def _provide(harness: str, mind: dict, skills: list[str]) -> dict:
     return role_files.provision(
         harness, mind[harness],
         {"managed": True, "roles": ["general"], "hooks": [], "skills": skills,
-         "models": [], "tools": []})
+         "tools": []})
 
 
 @pytest.mark.parametrize("harness", HARNESSES)

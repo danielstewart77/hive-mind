@@ -1,7 +1,7 @@
 """The files a role names, put on the mind that holds it (story 10.18.15).
 
-A role grants four things. A model and the built-in tools are names the
-gateway checks; hooks and skills are files, and a mind granted one it has no
+A role grants three things. The built-in tools are names the role guard
+checks; hooks and skills are files, and a mind granted one it has no
 file for used to skip it without a word. `provision` closes that: every
 adapter calls it with the grants it has just fetched for a spawn, before the
 harness is handed its hooks, so a mind given a role on the console has that

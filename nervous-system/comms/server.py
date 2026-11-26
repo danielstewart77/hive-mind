@@ -1920,17 +1920,6 @@ async def ws_attach(ws: WebSocket, session_id: str):
         log.error("session %s has no model — refusing attach", session_id)
         await ws.close(code=4409, reason="session has no model")
         return
-    # A pane's turns never pass through `send_message`, so the model a DSH
-    # mind's roles allow (story 10.18.5) is applied here, before the pane is
-    # opened on it, as well as on every chat turn.
-    try:
-        allowed_model = await session_mgr.role_model(session)
-    except ValueError as exc:
-        await ws.close(code=4409, reason=str(exc)[:120])
-        return
-    if allowed_model != session_model:
-        await session_mgr._move_to_role_model(session, allowed_model)
-        session_model = allowed_model
 
     # The tile takes the conversation. Nothing else binds a pane-hosted
     # conversation to a surface, so without this the pane carries no
@@ -2354,7 +2343,8 @@ async def _mind_exists(mind_id: str) -> bool:
 async def mind_grants(mind_id: str, request: Request):
     """What this mind's roles let it use, read now (feature 10.18).
 
-    `managed` False means roles decide nothing about the mind. For a managed
+    `managed` False means roles decide nothing about the mind. No model is
+    in the answer: a role decides none (feature 893). For a managed
     mind every list is the union of the roles it holds at this moment, so a
     role changed on the console is a changed answer on the next call. The
     path takes the mind's id or its name; a mind's own credential reaches

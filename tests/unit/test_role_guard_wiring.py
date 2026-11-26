@@ -27,7 +27,7 @@ from minds.harness import role_guard
 
 def _managed(*tools):
     return {"managed": True, "roles": ["general", "writer"], "skills": [], "hooks": [],
-            "models": [], "tools": list(tools)}
+            "tools": list(tools)}
 
 
 def _says(monkeypatch, grants):
