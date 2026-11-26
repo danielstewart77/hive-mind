@@ -289,6 +289,32 @@ hold, a mind at a time.
   (a tool script, say) must keep that key under another name, for example
   `OUTSIDE_OPENAI_API_KEY`, and the script must read that name. A mind not yet
   moved is untouched. Move such a mind only after renaming.
+- **A replaced key is not revoked everywhere at once. Say so plainly to
+  whoever replaces one.** The old key survives, and still works where it is
+  accepted, in four places until each is dealt with: (1) in a container that has
+  not been recreated since it was created with the key in its environment (an
+  older mind that has not had its key folder mounted yet keeps the creation-time
+  value for as long as it runs; one recreate gives it the folder and ends that);
+  (2) in any process already running that read it (a mind process reads the file
+  at the next request, but a hive service that took the key from its environment,
+  such as the services that share the mind's key as `SERVICE_PROXY_KEY`, keeps it
+  in memory until it is restarted once); (3) at the inference proxy itself, which
+  the console never calls: the old key bills there until whoever runs the proxy
+  revokes it; (4) anywhere outside this install that somebody copied it. The
+  replacement refuses the old key at the gateway, the memory store and the tools
+  the moment it lands; it cannot reach the other four.
+- **A refused request while a key is being replaced.** Between the services
+  taking the new key and the mind's file being written, a request the mind makes
+  with the old key can be refused once; a mind that cannot ask the gateway
+  whether a presented key is its owner's answers 503 for that request and is
+  asked again on the next. A caller presenting unknown keys to a mind is limited:
+  a value the gateway said no to is answered no for thirty seconds without asking
+  again, and the mind asks the gateway at most thirty such questions a minute,
+  answering 503 beyond that (its own key and a key already accepted never wait on
+  the gateway).
+- **A name belongs to one mind identity.** A mind registering under a name that
+  another identity (`mind_id`) already holds is refused, in any capitalisation;
+  only the admin renames or removes a row.
 - **The console runs as one process.** The lock that serialises key
   replacement, cut-off, move and retirement, and the key check and write inside
   mind creation (`_ROTATION_LOCK`)
