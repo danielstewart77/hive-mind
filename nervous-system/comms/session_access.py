@@ -25,6 +25,7 @@ from __future__ import annotations
 from comms.user_access import (
     ADMIN,
     MACHINE,
+    CHANGE,
     OWNER,
     PUBLIC,
     SCOPED,
@@ -207,3 +208,12 @@ TABLE.add(
 )
 
 TABLE.add(Rule(ADMIN), "GET /diagnostics/errors")
+
+# --- A change to one mind, asked with a person's key or a mind's key -------
+# Neither the admin credential nor any service holder reaches these; the
+# handler decides whether this caller may change the mind named in the path.
+TABLE.add(
+    Rule(CHANGE),
+    *(f"{method} /broker/minds/{{mind_id}}/forward/{{tail:path}}"
+      for method in ("GET", "PUT", "PATCH", "POST", "DELETE")),
+)

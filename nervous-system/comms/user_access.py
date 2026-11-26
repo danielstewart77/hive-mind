@@ -114,8 +114,14 @@ SCOPED = "scoped"
 OWNER = "owner"
 #: The admin token only.
 ADMIN = "admin"
+#: A change to one mind, asked with a person's key or a mind's key and nothing
+#: else (feature 834, requirement 24). The gate resolves the caller with a
+#: person's key admitted and refuses the admin credential, a service holder
+#: and anything unrecognised; the handler decides whether this caller may
+#: change that mind.
+CHANGE = "change"
 
-_KINDS = frozenset({PUBLIC, MACHINE, SCOPED, OWNER, ADMIN})
+_KINDS = frozenset({PUBLIC, MACHINE, SCOPED, OWNER, ADMIN, CHANGE})
 
 WEBSOCKET = "WS"
 
@@ -460,8 +466,11 @@ def bearer_of(scope: Scope) -> str:
     return ""
 
 
-async def resolve_caller(token: str) -> Caller:
+async def resolve_caller(token: str, *, allow_person_key: bool = False) -> Caller:
     """Turn a presented bearer into a caller.
+
+    `allow_person_key` is for the one route class that takes a person's key
+    (`CHANGE`); everywhere else a person's key resolves to nobody.
 
     The admin credential is checked first, because the console and the
     operator must keep a way into a wedged conversation whatever else is
@@ -491,6 +500,8 @@ async def resolve_caller(token: str) -> Caller:
     if not found:
         return Caller()
     if found.role == USER_KEY:
+        if allow_person_key:
+            return Caller(username=found.username, holder=found.holder, role=USER_KEY)
         # A person's key for their minds' settings opens no route here.
         return Caller()
     return Caller(
@@ -588,6 +599,54 @@ async def operator_may_change(operator_holder: str, target: str) -> bool:
     mine = await owner_of_mind(operator_holder)
     theirs = await owner_of_mind(target)
     return bool(mine and theirs and mine == theirs)
+
+
+ADMINS_GROUP = "admins"
+
+
+async def person_is_administrator(username: str) -> bool:
+    """Whether this person is in the admins group, read from the hive database
+    on this call (feature 834, requirement 32). A person with no row, a
+    disabled one, or a database that cannot be read is not an administrator."""
+    name = normalize_username(username)
+    if not name:
+        return False
+    try:
+        for row in await core.list_users():
+            if normalize_username(row["username"]) == name:
+                if row["disabled_at"] is not None:
+                    return False
+                return ADMINS_GROUP in await core.groups_of(row["id"])
+    except _STORE_DOWN:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable group is no administrator (fail closed)
+        log.warning("admins group could not be read; treated as not an administrator",
+                    exc_info=True)
+    return False
+
+
+async def caller_may_change(caller: Caller, target: dict) -> bool:
+    """Whether this caller may change this mind (requirement 24).
+
+    A person who is an administrator: any mind. Any other person: a mind they
+    own (an ownerless mind follows the conversation rule and answers to the
+    primary user). An operator mind: a mind owned by the same person as
+    itself. An ordinary mind: itself only. Everything read on this call.
+    """
+    holder = normalize_holder(caller.holder)
+    if caller.role == USER_KEY:
+        if await person_is_administrator(caller.username):
+            return True
+        owner = normalize_username(target.get("owner"))
+        if owner:
+            return owner == caller.username
+        return caller.username == primary_user()
+    if caller.role == MIND:
+        names = {normalize_holder(target.get("mind_id")), normalize_holder(target.get("name"))}
+        if holder in names:
+            return True
+        return await operator_may_change(holder, str(target.get("mind_id") or ""))
+    return False
 
 
 async def key_opens_settings_of(mind_holder: str, presented: str) -> bool:
@@ -818,6 +877,19 @@ class UserAccess:
                 )
                 return
             if not caller.is_admin:
+                await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
+                return
+        elif rule.kind == CHANGE:
+            # A person's key or a mind's key, and nothing else. The admin
+            # credential and every service holder are refused here: no
+            # credential of the hive's own may stand for anyone.
+            try:
+                caller = await resolve_caller(bearer_of(scope), allow_person_key=True)
+            except _STORE_DOWN:
+                await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
+                return
+            if (caller.is_admin or caller.is_service or caller.unscoped
+                    or caller.role not in (MIND, USER_KEY) or not caller.holder):
                 await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
                 return
         elif rule.kind == MACHINE:

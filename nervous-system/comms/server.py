@@ -2603,6 +2603,115 @@ async def broker_owner_key_check(request: Request, body: OwnerKeyCheck):
     return {"owned": await user_access.key_opens_settings_of(caller.holder, body.key)}
 
 
+#: What a person or a mind may ask of another mind through the gateway: the
+#: console's reads and changes of a mind's settings, files, skills, symbols,
+#: chat and GitHub tokens, model list and errors. A fixed list of method and
+#: path shapes. Never a conversation, a session or a terminal route: the
+#: credential forwarded with also opens those (requirement 24).
+_FORWARDED = (
+    ("GET", r"runtime"), ("PATCH", r"runtime"),
+    ("GET", r"runtime/settings"), ("PATCH", r"runtime/settings"),
+    ("GET", r"models"),
+    ("GET", r"health"), ("GET", r"diagnostics/errors"),
+    ("GET", r"surface-token"), ("PUT", r"surface-token"),
+    ("GET", r"github-token"), ("PUT", r"github-token"),
+    ("GET", r"files/[A-Za-z0-9_.-]+"),
+    ("GET", r"files/[A-Za-z0-9_.-]+/content"), ("PUT", r"files/[A-Za-z0-9_.-]+/content"),
+    ("GET", r"skills"),
+    ("GET", r"skills/[A-Za-z0-9_.-]+/diff"),
+    ("POST", r"skills/[A-Za-z0-9_.-]+/install"),
+    ("POST", r"skills/[A-Za-z0-9_.-]+/write-back"),
+    ("POST", r"skills/[A-Za-z0-9_.-]+/resolve"),
+    ("DELETE", r"skills/[A-Za-z0-9_.-]+"),
+    ("GET", r"symbols"), ("GET", r"symbols/roots"),
+)
+_FORWARD_METHODS = ("GET", "PUT", "PATCH", "POST", "DELETE")
+#: The longest a mind is waited for: its own slowest save (a token save checks
+#: Telegram or GitHub first, the console waits its base timeout plus twelve
+#: seconds) with room to spare.
+_FORWARD_TIMEOUT_SECONDS = 45
+
+
+def _forwardable(method: str, tail: str) -> str | None:
+    """The normalised path for a forwardable route, or None. No dot segment,
+    no empty segment, no escape character survives: what is matched is what is
+    sent."""
+    parts = tail.split("/")
+    if any(p in ("", ".", "..") or "\\" in p or "%" in p or "\x00" in p for p in parts):
+        return None
+    clean = "/".join(parts)
+    for allowed_method, shape in _FORWARDED:
+        if allowed_method == method and re.fullmatch(shape, clean):
+            return clean
+    return None
+
+
+@app.api_route("/broker/minds/{mind_id}/forward/{tail:path}", methods=list(_FORWARD_METHODS))
+async def broker_forward_to_mind(request: Request, mind_id: str, tail: str):
+    """A change to one mind, or a reading of it, made through the gateway.
+
+    Asked with a person's key or a mind's key and nothing else (the gate
+    refuses every other value). The gateway works out whose key it is and
+    whether they may change this mind: a person who is an administrator any
+    mind (read from the hive database on this request), any other person the
+    mind they own, an operator mind a mind of its own owner, an ordinary mind
+    itself. Only then is the request delivered to the mind's registered
+    address with the mind's own gateway credential; the asker's key is never
+    forwarded. Nothing of the request or the answer is logged or kept.
+    """
+    caller = _caller(request)
+    row = await core.get_mind_by_id_or_name(mind_id)
+    if row is None or not await user_access.caller_may_change(caller, dict(row)):
+        if row is None and caller.role == user_access.USER_KEY \
+                and await user_access.person_is_administrator(caller.username):
+            raise HTTPException(404, "No such mind")
+        raise HTTPException(403, "this key may not change that mind")
+    path = _forwardable(request.method, tail)
+    if path is None:
+        raise HTTPException(404, "that is not something a mind can be asked through the gateway")
+    base = str(row["gateway_url"] or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(502, "that mind has no registered address, it could not be reached")
+    try:
+        auth = await session_mgr.mind_auth_headers(row["mind_id"])
+    except sessions.MindCallFailed as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if not auth:
+        raise HTTPException(
+            409, "this gateway holds no credential for that mind; it has to register again")
+    from urllib.parse import quote
+    url = base + "/" + "/".join(quote(p, safe="") for p in path.split("/"))
+    headers = dict(auth)
+    content_type = request.headers.get("content-type")
+    if content_type:
+        headers["Content-Type"] = content_type
+    body = await request.body()
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=_FORWARD_TIMEOUT_SECONDS)
+        ) as http:
+            async with http.request(
+                request.method, url, params=list(request.query_params.multi_items()),
+                data=body or None, headers=headers, allow_redirects=False,
+            ) as answer:
+                payload = await answer.read()
+                status = answer.status
+                answer_type = answer.headers.get("Content-Type", "application/json")
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            504, "the mind did not answer in time; it is not known whether the change was applied, reload to see",
+        ) from None
+    except aiohttp.ClientError:
+        raise HTTPException(502, "that mind could not be reached") from None
+    if status == 401:
+        raise HTTPException(
+            502, "the credential this gateway holds for that mind is out of date; it refreshes when the mind next registers")
+    if 300 <= status < 400:
+        raise HTTPException(502, "that mind answered with a redirect, which is not followed")
+    from fastapi import Response
+    return Response(content=payload, status_code=status, media_type=answer_type.split(";")[0])
+
+
 async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
     """Refuse a mind asking about another mind's bot.
 
