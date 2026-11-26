@@ -72,6 +72,7 @@ from minds.pty_attach import PaneAdapter, install_pty_attach
 # values are retired). What the mind's own bot presents on /proactive is read
 # first, because applying the key overwrites the gateway name it used to share.
 _LEGACY_GATEWAY_VALUE = os.environ.get("COMMS_BEARER_TOKEN", "")
+mind_key.refresh()
 mind_key.apply_environment()
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")

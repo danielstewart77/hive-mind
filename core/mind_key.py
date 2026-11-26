@@ -5,12 +5,28 @@ memory-store credential and its tools credential. The services each hold it as
 that mind (the console registers what the person pasted); nothing here invents,
 stores or sends it.
 
-Two spellings, one rule:
+Where the key comes from, in order:
 
-* inside the mind's container the compose file names `MIND_KEY`;
-* in a file shared by several minds (the install's `.env`) it is
-  `MIND_KEY_<NAME>`, the name upper-cased with hyphens as underscores, the same
-  rule the per-service variables used.
+* a FILE: `MIND_KEY_FILE` names a file inside a folder that is bind-mounted
+  read-only into this mind alone, one folder per mind, kept outside the
+  checkout. The console replaces the file atomically (temp file, fsync,
+  rename), so a reader sees the old key or the new one, never half of one.
+  `refresh` reads it with a modification-time cache, per request and per
+  spawn, so a replaced key takes effect on the next request with no restart
+  and no recreate;
+* otherwise `MIND_KEY` in the environment (the transition: a mind started
+  before it had a key folder, or whose file is not there yet).
+
+Rules for the file: a missing file at the first read falls back to
+`MIND_KEY`. After a good key has been read, a file that is unreadable,
+garbled (not the shape of a key) or empty is ignored: the last good key stays
+in use and the fault is logged once, never the key. A file that is read again
+and is good wins over the environment.
+
+In a file shared by several minds (the console's own env files) the old
+spelling was `MIND_KEY_<NAME>`, the name upper-cased with hyphens as
+underscores; `shared_variable` still names it, for the legacy lines the
+retirement step removes.
 
 The readers inside a mind were written against the per-service names
 (`COMMS_BEARER_TOKEN`, `LUCENT_BEARER_TOKEN`, `HIVE_TOOLS_TOKEN` and the
@@ -26,14 +42,30 @@ Standard library only, so a hook or a skill script may copy `resolve`.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import secrets
+import threading
 from collections.abc import Mapping, MutableMapping
+from dataclasses import dataclass
 
 #: What a mind's compose file names, inside the container.
 KEY = "MIND_KEY"
 #: What the mind's compose file reads the key from, in a shared file.
 SHARED_PREFIX = "MIND_KEY_"
+#: Names the file the key is read from, inside the container.
+KEY_FILE = "MIND_KEY_FILE"
+#: A mind on a direct or custom provider names its endpoint here, and its
+#: harness reads the key as this provider token.
+PROVIDER_ENDPOINT = "HIVE_PROVIDER_URL"
+PROVIDER_TOKEN = "HIVE_PROVIDER_TOKEN"
+
+#: The shape of a key: what the console accepts when one is pasted. Anything
+#: else in the file (a half-written value, a stray line, a prompt) is not used.
+KEY_SHAPE = re.compile(r"[A-Za-z0-9._~+/=-]{8,4096}")
+
+_log = logging.getLogger("hive-mind.mind_key")
 
 #: The names readers inside a mind look for, by what they are for. The first
 #: of each is the one a service-specific reader reads; the harness binaries
@@ -55,6 +87,86 @@ def shared_variable(mind: str) -> str:
     if not stem:
         raise ValueError("a mind's key variable needs the mind's name")
     return SHARED_PREFIX + stem
+
+
+@dataclass
+class _FileState:
+    #: What the file looked like when it was last examined.
+    stamp: tuple | None = None
+    #: The last good key read from it; "" until one has been.
+    good: str = ""
+    #: The fault last logged for it, so a fault is logged once, not per request.
+    logged: str = ""
+    #: The fault found at `stamp`, if any, so an unchanged bad file is not re-read.
+    problem: str = ""
+
+
+_STATE: dict[str, _FileState] = {}
+_STATE_LOCK = threading.Lock()
+
+
+def _examine(path: str, state: _FileState) -> None:
+    """Look at the file again only when it has changed (its stamp), and record
+    what is in it. Never raises and never logs a key."""
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        state.stamp, state.problem = None, "the key file is not there"
+        return
+    except OSError as exc:
+        state.stamp, state.problem = None, f"the key file cannot be read ({exc.strerror or exc})"
+        return
+    stamp = (info.st_mtime_ns, info.st_size, info.st_ino)
+    if stamp == state.stamp:
+        return
+    try:
+        with open(path, encoding="utf-8") as stream:
+            text = stream.read(8192)
+    except (OSError, UnicodeDecodeError) as exc:
+        state.stamp, state.problem = None, f"the key file cannot be read ({type(exc).__name__})"
+        return
+    value = text.strip()
+    state.stamp = stamp
+    if not value:
+        state.problem = "the key file is empty"
+    elif not KEY_SHAPE.fullmatch(value):
+        state.problem = "the key file does not hold a key (wrong shape)"
+    else:
+        state.good, state.problem = value, ""
+
+
+def refresh(environ: MutableMapping[str, str] | None = None) -> str:
+    """Bring this mind's key up to date from its key file, and return it.
+
+    With no `MIND_KEY_FILE` this changes nothing. With one, a good key in the
+    file is set as `MIND_KEY` and re-applied to every per-service name when it
+    differs from what the environment holds, so the next request, spawn or
+    registration presents the new key. The rules for a missing, empty or
+    garbled file are in the module's description.
+    Cost when nothing changed: one `stat`.
+    """
+    target = os.environ if environ is None else environ
+    path = str(target.get(KEY_FILE) or "").strip()
+    if not path:
+        return key(target)
+    with _STATE_LOCK:
+        state = _STATE.setdefault(path, _FileState())
+        _examine(path, state)
+        problem, good = state.problem, state.good
+        if problem and state.logged != problem:
+            state.logged = problem
+            if good:
+                _log.error("%s: keeping the last good key", problem)
+            elif key(target):
+                _log.warning("%s: using MIND_KEY from the environment", problem)
+            else:
+                _log.error("%s and MIND_KEY is not set: this mind has no key", problem)
+        elif not problem:
+            state.logged = ""
+    if good and key(target) != good:
+        target[KEY] = good
+        apply_environment(target)
+    return key(target)
 
 
 def key(environ: Mapping[str, str] | None = None) -> str:
@@ -87,9 +199,19 @@ def apply_environment(environ: MutableMapping[str, str] | None = None) -> list[s
     one = key(target)
     if not one:
         return []
-    for name in GENERIC_NAMES:
+    names = list(GENERIC_NAMES)
+    if str(target.get(PROVIDER_ENDPOINT) or "").strip():
+        # A mind on a direct or custom provider: the key is the provider token
+        # its harness is told to read (the compose names the endpoint only),
+        # and, on an Anthropic-format provider that is not the hive's proxy,
+        # the Anthropic key name too.
+        names.append(PROVIDER_TOKEN)
+        if (str(target.get("HIVE_PROVIDER_API") or "") == "anthropic"
+                and str(target.get("HIVE_PROVIDER_KIND") or "") != "proxy"):
+            names.append("ANTHROPIC_API_KEY")
+    for name in names:
         target[name] = one
-    return list(GENERIC_NAMES)
+    return names
 
 
 def runtime_env(declared: Mapping[str, object] | None,

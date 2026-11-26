@@ -32,6 +32,7 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from core import mind_key
 from core.hive_logging import log_event
 from minds import runtime_settings
 
@@ -682,7 +683,12 @@ async def refuse_session_websocket(websocket, denial: JSONResponse) -> None:
 
 def _own_key() -> str:
     """This mind's one key, the only credential it holds or accepts for the
-    console. "" when it was started with none."""
+    console. "" when it was started with none.
+
+    Read from the key file first (`core.mind_key.refresh`: one stat, the file
+    read only when it changed), so a key the console replaced is the one this
+    request is judged against and the one registration presents."""
+    mind_key.refresh()
     return (os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN", "")).strip()
 
 

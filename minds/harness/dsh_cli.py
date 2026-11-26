@@ -1132,6 +1132,10 @@ async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
     and compared against a resident process's own environment to decide whether
     that process still speaks for this conversation.
     """
+    # The key file first: a key replaced since the last turn is the one this
+    # turn's process is given, and a resident process whose composed
+    # environment differs from this one is respawned on it.
+    mind_key.refresh()
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     window = await _turn_window(

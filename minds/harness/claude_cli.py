@@ -274,6 +274,7 @@ async def _spawn_proc(
     if resume_sid:
         cmd.extend(claude_conversation_flags(resume_sid, PROJECT_DIR))
 
+    mind_key.refresh()
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     # The gateway's own row id for this conversation. A mind's `/end-session`
