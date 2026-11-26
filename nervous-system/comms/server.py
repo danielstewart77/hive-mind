@@ -2479,12 +2479,20 @@ def _canonical_address(url: object) -> str:
         port = parts.port
     except ValueError:
         return text.rstrip("/")
-    if not parts.scheme or not host:
+    if not parts.scheme or not host or "\\" in text:
         return text.rstrip("/")
     scheme = parts.scheme.lower()
-    if port and port != {"http": 80, "https": 443}.get(scheme):
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and port != {"http": 80, "https": 443}.get(scheme):
         host = f"{host}:{port}"
-    return f"{scheme}://{host}{parts.path.rstrip('/')}"
+    # Userinfo, query and fragment are part of the address: changing any of
+    # them is a move, so they stay in the compared form.
+    userinfo = parts.netloc.rpartition("@")[0]
+    prefix = f"{userinfo}@" if "@" in parts.netloc else ""
+    query = f"?{parts.query}" if parts.query else ""
+    fragment = f"#{parts.fragment}" if parts.fragment else ""
+    return f"{scheme}://{prefix}{host}{parts.path.rstrip('/')}{query}{fragment}"
 
 
 async def _refuse_address_change(caller, body) -> None:

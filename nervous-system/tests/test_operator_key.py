@@ -195,3 +195,10 @@ def test_the_same_address_spelled_differently_is_not_a_move(world) -> None:
         assert _register(world.client, KEYS["alpha"], A, "alpha", url).status_code == 200
     assert _register(world.client, KEYS["alpha"], A, "alpha",
                      "http://alpha.old:8421").status_code == 403
+
+
+def test_a_changed_query_userinfo_or_ipv6_host_is_a_move(world) -> None:
+    for url in (OLD + "?x=1", "http://u@alpha.old:8420", "http://[::1]:8420",
+                "http://evil.invalid\\@alpha.old:8420"):
+        assert _register(world.client, KEYS["alpha"], A, "alpha", url).status_code == 403, url
+    assert _address(world.client, "alpha") == OLD
