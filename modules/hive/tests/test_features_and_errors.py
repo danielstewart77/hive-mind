@@ -76,8 +76,11 @@ def test_a_mind_the_credential_guard_refuses_is_listed_as_withheld_and_never_ask
         **kwargs, transport=httpx.MockTransport(transport)))
     components = {c['name']: c for c in client.get('/api/hive-errors').json()['components']}
     assert components['Kidbox']['status'] == 'withheld'
-    assert components['Atlas']['status'] == 'withheld'
-    assert 'kidbox' not in asked and 'atlas' not in asked
+    # Atlas is the signed-in person's own: it is asked, with that person's own
+    # key, which is made here with no gateway administrator credential.
+    assert components['Atlas']['status'] == 'ok'
+    assert 'kidbox' not in asked
+    assert asked['atlas'].startswith('Bearer ') and asked['atlas'] != 'Bearer stand-in-admin'
 
 
 async def test_terminal_start_exception_reaches_component_error_report():

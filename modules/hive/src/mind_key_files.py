@@ -264,10 +264,12 @@ def person_stem(username: str) -> str:
     """One file name per person, injective: every character other than an
     ASCII letter or digit becomes its own hex code, so `dan.s`, `dan-s` and
     `dan_s` never share a file."""
-    name = str(username or "").strip().upper()
+    name = str(username or "").strip()
     if not name:
         raise KeyFileError("a key belongs to a person with a name")
-    return "".join(c if c.isalnum() and c.isascii() else f"_{ord(c):X}_" for c in name)
+    # Upper-cased only where ASCII: `str.upper` maps two different non-ASCII
+    # letters to one (ß and ss), and two people must never share a file.
+    return "".join(c.upper() if c.isalnum() and c.isascii() else f"_{ord(c):X}_" for c in name)
 
 
 def person_folder(username: str) -> Path:

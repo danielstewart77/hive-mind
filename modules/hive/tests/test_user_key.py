@@ -215,3 +215,29 @@ def test_an_administrator_replaces_anyones_key_and_anyone_else_only_their_own(co
     refused_for_missing = admin.post("/api/admin/users/nobody/key/replace")
     assert refused_for_missing.status_code == 404
     assert admin.post("/api/admin/users/tess/key/replace").status_code in (200, 502)
+
+
+async def test_a_crash_between_the_database_and_the_key_file_is_mended_by_the_next_ask(two_owners):
+    key = await holder_credentials.user_key("daniel")
+    # The database took a new key and the console died before the file did.
+    await holder_credentials._record_user_key("daniel", "some-other-value-0123456789")
+    assert await _asked(OLD, key) is False
+
+    assert await holder_credentials.user_key("daniel") == key
+
+    assert await _asked(OLD, key) is True
+
+
+async def test_a_legacy_line_left_behind_beside_an_existing_key_file_is_removed_by_the_next_ask(two_owners):
+    key = await holder_credentials.user_key("daniel")
+    line = holder_credentials.user_key_variable("daniel")
+    two_owners.env.write_text(f"UNRELATED=keep\n{line}=left-behind-0123456789\n")
+
+    assert await holder_credentials.user_key("daniel") == key
+
+    assert two_owners.env.read_text() == "UNRELATED=keep\n"
+
+
+def test_two_people_whose_names_differ_only_in_letters_that_upper_case_alike_never_share_a_key_file():
+    assert mind_key_files.person_stem("strasse") != mind_key_files.person_stem("straße")
+    assert mind_key_files.person_stem("dan.s") != mind_key_files.person_stem("dan-s")

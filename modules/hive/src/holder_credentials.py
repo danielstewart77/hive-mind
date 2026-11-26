@@ -2085,7 +2085,7 @@ USER_ROLE = "user"
 def user_key_variable(username: str) -> str:
     """The name the key had as a line in the install's settings file, before
     it moved to the key folder. Kept to find and remove such a line."""
-    return USER_KEY_PREFIX + mind_key_files.person_stem(username)
+    return USER_KEY_PREFIX + mind_key_files.person_stem(username.strip().lower())
 
 
 def _legacy_location(username: str) -> Location | None:
@@ -2122,6 +2122,16 @@ async def _record_user_key(username: str, value: str) -> None:
     except Exception as exc:  # noqa: BLE001 - one sentence, never the value
         raise MintRefused(
             f"the hive database did not take {username!r}'s key ({type(exc).__name__})") from None
+
+
+async def _recorded(username: str, value: str) -> bool:
+    """Whether the gateway's row for this person is live and holds `value`."""
+    from hive_data import broker_ops, core
+
+    row = await core.get_credential(username)
+    return (row is not None and str(row.get("role") or "") == USER_ROLE
+            and not row.get("revoked_at")
+            and await broker_ops.holder_of_digest(_digest(value)) == username)
 
 
 async def _unrecord_user_key(username: str) -> None:
@@ -2207,17 +2217,25 @@ async def user_key(username: str) -> str | None:
     if not name:
         return None
     try:
-        # Without the lock when the key exists: a settings read must not queue
-        # behind a key move. Only making one is serialised.
+        # Without the lock when the key exists and the database agrees: a
+        # settings read must not queue behind a key move. Only making or
+        # mending one is serialised.
         existing = _stored_user_key(name)
-        if existing:
+        if existing and await _recorded(name, existing) and _legacy_value(name) is None:
             return existing
         async with _ROTATION_LOCK:
             existing = _stored_user_key(name)
-            if existing:
-                return existing
             old = _legacy_value(name)
-            value = await _issue_user_key(name, None, old)
+            if existing:
+                # A crash between the database write and the file write, or
+                # between the file and the old line's removal, leaves this
+                # half done: finish it here, from the file, which is the key.
+                if not await _recorded(name, existing):
+                    await _record_user_key(name, existing)
+                if old:
+                    _remove_legacy_line(name, old)
+                return existing
+            value = await _issue_user_key(name, old, old)
             if old:
                 _remove_legacy_line(name, old)
             return value
@@ -2245,7 +2263,14 @@ async def replace_user_key(username: str) -> dict[str, Any]:
                 "put back if something failed. Nothing was changed") from None
         await _issue_user_key(name, previous or legacy)
         if legacy:
-            _remove_legacy_line(name, legacy)
+            try:
+                _remove_legacy_line(name, legacy)
+            except (Unreadable, OSError) as exc:
+                # The replacement took; the old value is refused. The line is
+                # taken out the next time this person's key is asked for.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "the old line of %r's key could not be removed: %s", name, type(exc).__name__)
     return {"replaced": True, "holder": name}
 
 
