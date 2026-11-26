@@ -108,7 +108,8 @@ def _mind_keys_in_a_folder_the_test_owns(tmp_path, monkeypatch):
     root = tmp_path / "mind-keys"
     root.mkdir()
     monkeypatch.setattr(mind_key_files, "KEY_ROOT", root)
-    monkeypatch.delenv("HIVE_MIND_UID", raising=False)
+    monkeypatch.setenv("HIVE_MIND_UID", str(os.getuid()))
+    monkeypatch.setenv("HIVE_MIND_GID", str(os.getgid()))
     return root
 
 

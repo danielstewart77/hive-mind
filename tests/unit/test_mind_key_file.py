@@ -146,7 +146,8 @@ _spec.loader.exec_module(mind_key_files)
 @pytest.fixture
 def root(tmp_path, monkeypatch):
     monkeypatch.setattr(mind_key_files, "KEY_ROOT", tmp_path)
-    monkeypatch.delenv("HIVE_MIND_UID", raising=False)
+    monkeypatch.setenv("HIVE_MIND_UID", str(os.getuid()))
+    monkeypatch.setenv("HIVE_MIND_GID", str(os.getgid()))
     return tmp_path
 
 
@@ -215,3 +216,39 @@ def test_what_the_console_writes_a_mind_accepts_and_the_two_shapes_agree(root, c
     mind_key_files.write("ada", SECOND)  # the console replaces it; no restart
 
     assert runtime_api._own_key() == SECOND
+
+
+def test_a_console_that_may_not_hand_the_key_to_the_mind_refuses_rather_than_loosen_it(
+        root, monkeypatch):
+    monkeypatch.setenv("HIVE_MIND_UID", "4242")
+    monkeypatch.setenv("HIVE_MIND_GID", "4242")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(mind_key_files.os, "chown", refuse)
+    with pytest.raises(mind_key_files.KeyFileError, match="HIVE_MIND_UID"):
+        mind_key_files.write("ada", FIRST)
+
+    # Nothing readable by others was left behind.
+    assert not (root / "ada" / "key").exists()
+    for entry in root.rglob("*"):
+        assert entry.stat().st_mode & 0o004 == 0, entry
+
+
+def test_a_leftover_temporary_key_is_cleaned_by_the_next_write_and_by_remove(root):
+    mind_key_files.write("ada", FIRST)
+    stray = root / "ada" / (".key." + "ab" * 6 + ".tmp")
+    stray.write_text(SECOND + "\n")
+    other = root / "ada" / "notes.txt"
+    other.write_text("keep me")
+
+    mind_key_files.write("ada", SECOND)
+    assert not stray.exists()
+    assert other.exists()
+
+    stray.write_text(FIRST + "\n")
+    other.unlink()
+    assert mind_key_files.remove("ada") is True
+    assert not stray.exists()
+    assert not (root / "ada").exists()

@@ -119,15 +119,61 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _hand_over(target: Path, owner: tuple[int, int]) -> None:
+    """Make the mind's uid and gid the owner, or fail.
+
+    Failing closed: a console that may not chown (it is not root and the mind
+    runs as someone else) would otherwise have to leave the key readable by
+    others on the host (0644) for the mind to read it. A key is never loosened
+    to make a write succeed; the person fixes HIVE_MIND_UID or the console's
+    user, and the old key stays in place meanwhile."""
+    info = os.stat(target)
+    if (info.st_uid, info.st_gid) == owner:
+        return
+    try:
+        os.chown(target, *owner)
+    except OSError as exc:
+        raise OSError(
+            exc.errno,
+            f"the console may not hand {target.name} to the mind's uid "
+            f"{owner[0]}:{owner[1]} ({exc.strerror}); set HIVE_MIND_UID and "
+            "HIVE_MIND_GID to the console's own user or run it with that right",
+        ) from None
+
+
+#: A temporary key file the writer leaves only if it was killed mid-write.
+_TEMPORARY = re.compile(r"\.key\.[0-9a-f]{12}\.tmp")
+
+
+def stale_temporaries(directory: Path) -> int:
+    """Delete leftover temporary key files in a mind's folder; how many.
+
+    Each holds a key (a replaced one, or the new one before its rename), so a
+    killed write must not leave it lying beside the real file."""
+    removed = 0
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if _TEMPORARY.fullmatch(entry.name) and entry.is_file() and not entry.is_symlink():
+            try:
+                entry.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def write(name: str, value: str) -> Path:
     """Make this the mind's key, atomically. Returns the file's path.
 
     The value must have the shape of a key: a half-written or garbled value is
     refused here, never written for a mind to find. The folder is the mind's
     to read and nobody else's: owned by the mind's uid with mode 0750 and the
-    file 0640 where this console may chown, otherwise 0755 and 0644 (the folder
-    is mounted into that one mind only; the host user the console runs as has
-    to be able to hand the mind its key)."""
+    file 0640 (the folder is mounted into that one mind only; the host user the console runs as has
+    to be able to hand the mind its key). Where this console may not chown to
+    the mind's uid the write is refused, never loosened to 0755 and 0644."""
     stem = _checked(name)
     if not KEY_SHAPE.fullmatch(str(value or "")):
         raise KeyFileError("that value does not have the shape of a key, so it is not written")
@@ -135,17 +181,13 @@ def write(name: str, value: str) -> Path:
         raise KeyFileError(f"{KEY_ROOT} is not there: this console was given no folder for mind keys")
     directory = KEY_ROOT / stem
     owner = _owner()
-    chowned = True
+    if owner is None:
+        raise KeyFileError("HIVE_MIND_UID or HIVE_MIND_GID is not a number, so the key is not written")
+    stale_temporaries(directory)
     try:
         directory.mkdir(mode=0o750, exist_ok=True)
-        if owner:
-            try:
-                os.chown(directory, *owner)
-            except (PermissionError, OSError):
-                chowned = False
-        else:
-            chowned = False
-        os.chmod(directory, 0o750 if chowned else 0o755)
+        _hand_over(directory, owner)
+        os.chmod(directory, 0o750)
     except OSError as exc:
         raise KeyFileError(f"{directory} could not be made ({exc.strerror or exc})") from None
     temporary = directory / f".{FILE_NAME}.{secrets.token_hex(6)}.tmp"
@@ -156,9 +198,8 @@ def write(name: str, value: str) -> Path:
             stream.write(value + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-        if owner and chowned:
-            os.chown(temporary, *owner)
-        os.chmod(temporary, 0o640 if chowned else 0o644)
+        _hand_over(temporary, owner)
+        os.chmod(temporary, 0o640)
         os.replace(temporary, target)
     except OSError as exc:
         try:
@@ -171,7 +212,8 @@ def write(name: str, value: str) -> Path:
 
 
 def remove(name: str) -> bool:
-    """Take this mind's key file and its folder away. True when one was there.
+    """Take this mind's key file, any leftover temporary key file, and its
+    folder away. True when a key file was there.
 
     Used when a mind is unmade: a key left behind in a folder nothing mounts is
     still a key on the host. A folder holding anything else is left."""
@@ -183,6 +225,7 @@ def remove(name: str) -> bool:
         gone = True
     except FileNotFoundError:
         pass
+    stale_temporaries(directory)
     try:
         directory.rmdir()
     except (FileNotFoundError, OSError):
