@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import credentials_data
 import holder_credentials
+import mind_key_files
 from hive_site import testing
 
 
@@ -329,7 +330,7 @@ def test_a_new_mind_with_no_pasted_key_is_refused_and_nothing_is_sent(hive, serv
         _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=None))
 
     assert service["sent"] == []
-    assert not _value(hive["shared"], "MIND_KEY_QUOKKA")
+    assert not mind_key_files.exists("quokka")
 
 
 def test_one_service_refusing_still_reports_the_credential_that_landed(hive, service):
@@ -346,12 +347,16 @@ def test_one_service_refusing_still_reports_the_credential_that_landed(hive, ser
     assert "memory store" in failed
 
 
-def test_a_new_minds_variables_all_hold_the_pasted_key_in_the_shared_file(hive, service):
+def test_a_new_minds_key_is_in_its_own_key_file_and_the_shared_env_file_holds_no_mind_key(hive, service):
+    before = hive["shared"].read_text()
+
     _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
 
-    assert _value(hive["shared"], "MIND_KEY_QUOKKA") == PASTED
-    for old in ("COMMS_TOKEN_QUOKKA", "LUCENT_TOKEN_QUOKKA", "PROXY_TOKEN_QUOKKA"):
-        assert _value(hive["shared"], old) is None
+    assert mind_key_files.read("quokka") == PASTED
+    # Nothing of the new mind's key, or of any key variable for it, went into
+    # the install's .env: it is byte for byte what it was.
+    assert hive["shared"].read_text() == before
+    assert PASTED not in hive["shared"].read_text()
     assert _value(hive["shared"], "COMMS_TOKEN_ADA") == "ada-old"
 
 
@@ -390,7 +395,7 @@ def test_two_creations_pasting_the_same_key_cannot_both_get_it(hive, service):
 
     refused = [r for r in results if isinstance(r, holder_credentials.KeyHeldByAnother)]
     assert len(refused) == 1
-    holders = [n for n in ("QUOKKA", "WOMBAT") if _value(hive["shared"], f"MIND_KEY_{n}") == PASTED]
+    holders = [n for n in ("quokka", "wombat") if mind_key_files.read(n) == PASTED]
     assert len(holders) == 1
 
 
@@ -400,15 +405,16 @@ def test_a_blank_or_tiny_key_is_refused_with_the_paste_the_minds_key_sentence(hi
             _run(holder_credentials.accept_mind_provider_token(bad, for_mind="quokka"))
 
 
-def test_adding_a_variable_never_lands_on_the_last_line(hive, service):
+def test_adding_a_variable_never_lands_on_the_last_line(hive):
     """A `.env` whose final line has no newline would otherwise take the new
-    key onto the end of it, destroying whichever variable was last."""
+    key onto the end of it, destroying whichever variable was last. Still how
+    a person's key line (requirement 19) is added to the shared file."""
     hive["shared"].write_text("COMMS_TOKEN_ADA=ada-old\nLAST_ONE=matters")  # secret-guard: allow — invented fixture
 
-    _run(holder_credentials.provision_mind("quokka", "uuid-1234", "daniel", proxy_key=PASTED))
+    holder_credentials._ensure_key(hive["shared"], "USER_KEY_DAN")
 
     assert _value(hive["shared"], "LAST_ONE") == "matters"
-    assert _value(hive["shared"], "MIND_KEY_QUOKKA")
+    assert _value(hive["shared"], "USER_KEY_DAN") == ""
 
 
 # --- what a rotation must not be confused with ---------------------------

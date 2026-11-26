@@ -688,7 +688,7 @@ window.addEventListener("DOMContentLoaded", function () {
         const move = event.target.closest("[data-migration-move]"), undo = event.target.closest("[data-migration-undo]"), retire = event.target.closest("#migration-retire");
         const base = "/api/settings/key-migration/";
         let url, question;
-        if (move) { url = base + encodeURIComponent(move.dataset.migrationMove) + "/move"; question = "Move " + move.dataset.migrationMove + " onto the proxy key it already holds? Its old per-service values stop being accepted now, and it must be recreated to read the new one."; }
+        if (move) { url = base + encodeURIComponent(move.dataset.migrationMove) + "/move"; question = "Move " + move.dataset.migrationMove + " onto the proxy key it already holds? Its old per-service values stop being accepted now, and it must be recreated once, to mount its key folder; after that a replaced key needs no recreate."; }
         else if (undo) { url = base + encodeURIComponent(undo.dataset.migrationUndo) + "/undo"; question = "Put " + undo.dataset.migrationUndo + " back on its old values?"; }
         else if (retire) { url = base + "retire"; question = "Retire the old per-service keys and the shared tools token? This cannot be undone and ends going back a release for every moved mind."; }
         else return;

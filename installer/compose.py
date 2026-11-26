@@ -133,8 +133,18 @@ SERVICE_PROXY_CLIENT = "hive-services"
 
 
 def mind_key_var(mind: str) -> str:
-    """Where `.env` keeps a mind's one key (the console's rule: core/mind_key)."""
+    """The line an install made before key files kept a mind's one key under in
+    `.env`. Read once to seed the key file and then dropped from `.env`: a mind
+    on its one key has its key in its own key file and nowhere in `.env`."""
     return "MIND_KEY_" + mind.upper().replace("-", "_")
+
+
+#: Where a mind's key folder appears inside the mind, and the file in it
+#: (the same as the console's mind_key_files; hive-mind's core/mind_key reads it).
+KEY_MOUNT = "/run/mind-key"
+KEY_FILE = "key"
+#: Where the console sees the key root, read-write.
+CONSOLE_KEY_ROOT = "/mind_keys"
 
 
 def proactive_var(mind: str) -> str:
@@ -316,14 +326,11 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     else:
         values.setdefault(SERVICE_PROXY_KEY, values["MIND_PROXY_KEY"])
     mind = answers.get("mind_name")
-    if mind and values["MIND_PROXY_KEY"] and on_one_key(home, answers):
-        # The mind's one key is the key the proxy issued it (or the operator
-        # typed): the compose file reads it under its own name.
-        # Kept when already set: a replaced key lives on this line and a
-        # rerun must not put the old one back.
-        values[mind_key_var(mind)] = current.get(mind_key_var(mind)) or values["MIND_PROXY_KEY"]
-    elif mind and on_one_key(home, answers):
-        values.setdefault(mind_key_var(mind), "")
+    if mind and on_one_key(home, answers):
+        # The mind's one key is in its key file, never in `.env`: a line an
+        # earlier install made is dropped once the file has been made from it.
+        if (home.mind_keys(mind) / KEY_FILE).is_file():
+            values.pop(mind_key_var(mind), None)
         values.setdefault(proactive_var(mind), "")
     values.setdefault(EMBEDDING_MODEL_VAR, "")
     values.setdefault(CLASSIFIER_MODEL_VAR, "")
@@ -332,6 +339,9 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     # where the install is on this host, and where its dsh tree is.
     values["HOST_PROJECT_DIR"] = str(home.root)
     values["HOST_DSH_DIR"] = str(home.dsh)
+    # Where each mind's key folder is on this host, for the compose file of a
+    # mind the console makes: outside the checkout, one folder per mind.
+    values["HOST_KEY_DIR"] = str(home.keys)
     values["TERMINAL_LABELS_TOKEN"] = values["COMMS_RENAME_TOKEN"]
     return values
 
@@ -492,6 +502,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "INFERENCE_PROXY_KEY": env_ref(SERVICE_PROXY_KEY),
                "OLLAMA_BASE_URL": proxy_url(answers), "OLLAMA_URL": proxy_url(answers),
                "HOST_UID": str(host.uid), "HOST_GID": str(host.gid),
+               "HIVE_KEY_ROOT": CONSOLE_KEY_ROOT,
+               "HIVE_MIND_UID": str(host.uid), "HIVE_MIND_GID": str(host.gid),
                # Where the hive's compose project is, for the console's
                # restart and mount controls; unset it names Daniel's checkout.
                "HIVE_MIND_PROJECT_PATH": str(home.root),
@@ -528,6 +540,10 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                           # The same folder, writable: where Add a Mind
                           # writes a new mind and the list that includes it.
                           bind(home.minds, site.MINDS_WRITE_MOUNT),
+                          # Every mind's key folder, writable here and only
+                          # here: the console puts a pasted or replaced key in
+                          # its mind's folder, atomically.
+                          bind(home.keys, CONSOLE_KEY_ROOT),
                           bind(repo("hive-tools"), "/hive_tools_repo", "ro"),
                           bind(home.env_file, site.ENV_FILE_MOUNT, kind=files)]
 
@@ -581,7 +597,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                           bind(home.root, str(home.root))]
 
     one_key = on_one_key(home, answers)
-    mind_value = env_ref(mind_key_var(mind)) if one_key else env_ref("MIND_PROXY_KEY")
+    mind_value = env_ref("MIND_PROXY_KEY")
     mind_dir = home.mind(mind)
     app_mind = f"{APP}/minds/{mind}"
     mountpoints.append(repo("hive-mind") / "minds" / mind)
@@ -591,10 +607,10 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "CODEX_HOME": f"{app_mind}/.codex", "KEY_RING": f"{app_mind}/data/keyring",
         "PYTHONNOUSERSITE": "1", "PYTHONPATH": f"{APP}/vendor",
         "COMMS_URL": COMMS_URL, "HIVEMIND_BROKER_URL": COMMS_URL,
-        "COMMS_BEARER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("COMMS", mind)),
-        "HIVEMIND_BROKER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("COMMS", mind)),
+        "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", mind)),
+        "HIVEMIND_BROKER_TOKEN": env_ref(token_var("COMMS", mind)),
         "LUCENT_URL": LUCENT_URL, "LUCENT_URL_SELF": LUCENT_URL,
-        "LUCENT_BEARER_TOKEN": env_ref(mind_key_var(mind) if one_key else token_var("LUCENT", mind)),
+        "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", mind)),
         "SPECS_DIR": f"{APP}/specs/data-classes",
         "AUTO_REMEMBER_LOG_DIR": f"{app_mind}/data/auto-remember",
         # The capture hook classifies through the proxy with the mind's key.
@@ -603,19 +619,28 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                                key_ref=mind_value),
     }
     if one_key:
-        # One value, named once for what reads it by its own name and once
-        # (`MIND_KEY`) for what reads the one key (core/mind_key.py).
-        mind_env["MIND_KEY"] = mind_value
+        # One value, in a file: the mind reads it at each request and sets
+        # every name its harnesses and hooks read from it (core/mind_key.py),
+        # so no key is named in this file and `.env` holds none.
+        for name in ("COMMS_BEARER_TOKEN", "HIVEMIND_BROKER_TOKEN", "LUCENT_BEARER_TOKEN",
+                     "DSH_API_KEY", "MIND_PROXY_KEY"):
+            mind_env.pop(name, None)
+        mind_env["MIND_KEY_FILE"] = f"{KEY_MOUNT}/{KEY_FILE}"
         mind_env["MIND_PROACTIVE_TOKEN"] = env_ref(proactive_var(mind))
     if "tools" in pieces:
-        mind_env.update({"HIVE_TOOLS_URL": tools.URL,
-                         "HIVE_TOOLS_TOKEN": mind_value if one_key else env_ref("HIVE_TOOLS_TOKEN")})
+        mind_env.update({"HIVE_TOOLS_URL": tools.URL})
+        if not one_key:
+            mind_env["HIVE_TOOLS_TOKEN"] = env_ref("HIVE_TOOLS_TOKEN")
     svc = base(mind, image="hive/mind:local", needs=(COMMS, LUCENT), build=mind_build, env=mind_env)
     svc["container_name"] = f"hive-mind-{mind}"
     svc["working_dir"] = APP
     svc["volumes"] = [bind(repo("hive-mind"), APP, "ro"),
                       bind(mind_dir, app_mind),
                       bind(home.dsh, dsh.MOUNT, "ro")]
+    if one_key:
+        # This mind's key folder, and no other mind's, read-only: replacing the
+        # key is a file write by the console and needs no recreate.
+        svc["volumes"].append(bind(home.mind_keys(mind), KEY_MOUNT, "ro"))
     svc["tmpfs"] = ["/tmp:exec,mode=1777", NO_MODULES, NO_MODULE_HISTORY]
     svc["security_opt"] = ["no-new-privileges:true"]
     svc["command"] = ["/opt/venv/bin/python3", "-m", "minds.mind_server"]

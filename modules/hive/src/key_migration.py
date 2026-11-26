@@ -359,40 +359,71 @@ def _compose_path(name: str) -> Path | None:
 
 
 _ENV_HEAD = re.compile(r"(?m)^(?P<indent>[ \t]+)environment:[ \t]*\n(?P<first>[ \t]+)- ")
+_VOLUMES_HEAD = re.compile(r"(?m)^(?P<indent>[ \t]+)volumes:[ \t]*\n(?P<first>[ \t]+)- ")
 
 
-def _compose_line(name: str) -> str:
-    return f"MIND_KEY=${{{hc.one_key_variable(name)}}}"
+def _key_file_lines(name: str) -> tuple[str, str]:
+    """The two lines a container mind's compose needs to read its key from its
+    file: the setting that names it, and the read-only mount of its folder."""
+    import configuration_data
+    return configuration_data.key_file_setting(), configuration_data.key_folder_mount(name)
+
+
+def _has_line(text: str, line: str) -> bool:
+    return re.search(r"(?m)^[ \t]+-[ \t]+['\"]?" + re.escape(line) + r"['\"]?[ \t]*$", text) is not None
+
+
+def compose_has_key_mount(name: str) -> bool:
+    """Whether this mind's own compose file already mounts its key folder."""
+    path = _compose_path(name)
+    if path is None:
+        return False
+    try:
+        text = credentials_data._read_text(path)
+    except Unreadable:
+        return False
+    setting, mount = _key_file_lines(name)
+    return _has_line(text, setting) and _has_line(text, mount)
 
 
 def compose_one_key(name: str, *, add: bool) -> str:
-    """Add (or remove) the one line that makes a container mind read its key
-    as MIND_KEY. Text-level, so nothing else in the file is touched; a file the
-    console cannot find, write, or whose layout is not one `environment:` list
-    is left alone and the answer says so."""
+    """Add (or remove) the two lines that make a container mind read its key
+    from its own key file: `MIND_KEY_FILE` in its environment and a read-only
+    mount of its key folder. Text-level, so nothing else in the file is
+    touched; a file the console cannot find or write, or whose layout is not
+    exactly one `environment:` list and one `volumes:` list, is left alone and
+    the answer says so. Adding the mount is what needs the mind recreated, once;
+    replacing its key afterwards needs nothing."""
     path = _compose_path(name)
+    setting, mount = _key_file_lines(name)
     if path is None:
-        return "not found: add the line MIND_KEY=${%s} to the mind's compose environment by hand" % hc.one_key_variable(name)
+        return f"not found: add the lines {setting} and {mount} to the mind's compose by hand"
     try:
         text = credentials_data._read_text(path)
     except Unreadable:
         return "not readable"
-    line = _compose_line(name)
-    present = re.search(r"(?m)^[ \t]+-[ \t]+['\"]?" + re.escape(line) + r"['\"]?[ \t]*$", text) is not None
     if add:
-        if present or re.search(r"(?m)^[ \t]+-[ \t]+MIND_KEY=", text):
+        if _has_line(text, setting) and _has_line(text, mount):
             return "already present"
-        heads = list(_ENV_HEAD.finditer(text))
-        if len(heads) != 1:
-            return "left alone: the file does not have exactly one environment list; add the line by hand"
-        match = heads[0]
-        insert = f"{match.group('first')}- {line}\n"
-        cut = match.start("first")
-        updated = text[:cut] + insert + text[cut:]
+        envs, vols = list(_ENV_HEAD.finditer(text)), list(_VOLUMES_HEAD.finditer(text))
+        if len(envs) != 1 or len(vols) != 1:
+            return ("left alone: the file does not have exactly one environment list and one "
+                    f"volumes list; add the lines {setting} and {mount} by hand")
+        updated = text
+        # The later one first, so the earlier offset still holds.
+        edits = sorted(
+            [(envs[0], setting, _has_line(text, setting)), (vols[0], mount, _has_line(text, mount))],
+            key=lambda e: e[0].start("first"), reverse=True)
+        for match, line, present in edits:
+            if not present:
+                cut = match.start("first")
+                updated = updated[:cut] + f"{match.group('first')}- {line}\n" + updated[cut:]
     else:
-        if not present:
+        if not (_has_line(text, setting) or _has_line(text, mount)):
             return "already absent"
-        updated = re.sub(r"(?m)^[ \t]+-[ \t]+['\"]?" + re.escape(line) + r"['\"]?[ \t]*\n", "", text, count=1)
+        updated = text
+        for line in (setting, mount):
+            updated = re.sub(r"(?m)^[ \t]+-[ \t]+['\"]?" + re.escape(line) + r"['\"]?[ \t]*\n", "", updated, count=1)
     try:
         with credentials_data._WRITE_LOCK:
             credentials_data._write_file_in_place(path, updated, "compose", name, text)
@@ -404,6 +435,15 @@ def compose_one_key(name: str, *, add: bool) -> str:
 # ---------------------------------------------------------------------------
 # Move and undo
 # ---------------------------------------------------------------------------
+
+def _remove_stored(location: hc.Location) -> None:
+    """Take a mind's one key away from where it is kept: its key file, or a
+    line in an env file."""
+    if location.is_key_file:
+        hc.mind_key_files.remove(location.env_key)
+        return
+    _line_remove(location.path, location.env_key)
+
 
 def _line_remove(path: Path, variable: str) -> None:
     with credentials_data._WRITE_LOCK:
@@ -455,14 +495,16 @@ async def move_mind(name: str) -> dict[str, Any]:
         raise MintRefused(f"{name} is not a mind this hive knows")
     if _stored(holder) is not None:
         raise MintRefused(f"{holder} already holds one key; nothing to move")
-    path = hc.ENV_FILES.get(hc.MIND_ENV_LABEL)
     own_label = hc.own_file_label(holder)
     if own_label:
         target = hc.Location(own_label, hc.ONE_KEY_PLAIN)
-    elif path is not None and path.is_file():
-        target = hc.Location(hc.MIND_ENV_LABEL, hc.one_key_variable(holder))
+    elif hc.mind_key_files.configured():
+        # The mind's own key file (requirement 21): nothing goes into the
+        # install's .env.
+        target = hc.key_file_location(holder)
     else:
-        raise MintRefused("This Hive is not configured to store mind keys here; nothing was changed")
+        raise MintRefused("This Hive is not configured to store mind keys here "
+                          "(no HIVE_KEY_ROOT folder); nothing was changed")
     services = [s for s in _services() if s.key != "tools" or _tools_applies(holder)]
     owner = str(row.get("owner") or "")
     mind_id = str(row.get("mind_id") or "")
@@ -508,11 +550,8 @@ async def move_mind(name: str) -> dict[str, Any]:
         cancelled = False
         wrote_line = False
         try:
-            if target.file == hc.MIND_ENV_LABEL:
-                hc._ensure_key(target.path, target.env_key)
             with credentials_data._WRITE_LOCK:
-                written = credentials_data._write_location(
-                    target.path, target.env_key, value, target.file)
+                written = hc._write_stored(target, value)
                 try:
                     verified = bool(written["written"]) and hc._loaded_value(target) == value
                 except Unreadable:
@@ -559,7 +598,7 @@ async def move_mind(name: str) -> dict[str, Any]:
                             f"{service.label} could not be cut off again after the move ({hc._failure_sentence(exc)})")
                         break
         if failure is None:
-            compose = compose_one_key(holder, add=True) if not own_label else "not needed: an edge mind reads its own file"
+            compose = compose_one_key(holder, add=True) if not own_label else "not needed: an edge mind reads its own key file"
             try:
                 key_journal.finish(record)
                 key_journal.clear(holder)
@@ -575,9 +614,14 @@ async def move_mind(name: str) -> dict[str, Any]:
                 "compose": compose,
                 "restart_target": target.restart_target,
                 "next_step": (
-                    "Recreate this mind now so it reads its one key; until then its old values are "
-                    "refused. The old per-service values stay in their file until retirement, and "
-                    "'undo' registers them again."),
+                    "Recreate this mind once so it mounts its key folder and reads its key from it; "
+                    "until then its old values are refused. Replacing its key afterwards needs no "
+                    "recreate. The old per-service values stay in their file until retirement, and "
+                    "'undo' registers them again."
+                    if not own_label else
+                    "Put the key where this mind reads it (its MIND_KEY_FILE) and restart it once; "
+                    "until then its old values are refused. The old per-service values stay in "
+                    "their file until retirement, and 'undo' registers them again."),
             }
 
         # Put back, in reverse order, whatever may have taken the new key.
@@ -602,7 +646,7 @@ async def move_mind(name: str) -> dict[str, Any]:
             ok = True
             if wrote_line:
                 try:
-                    _line_remove(target.path, target.env_key)
+                    _remove_stored(target)
                     ok = hc._loaded_value(target) is None
                 except Exception:  # noqa: BLE001
                     ok = False
@@ -642,7 +686,7 @@ async def move_mind(name: str) -> dict[str, Any]:
             raise MintRefused(f"{reason}. Every service is back on its old value; nothing moved.")
         sentence = hc._states_sentence(services, state)
         if not line_ok:
-            sentence += f"; the line {target.env_key} in {target.path} could not be taken out again"
+            sentence += f"; the key kept at {target.path} could not be taken out again"
         try:
             key_journal.update(record, status="needs_attention", detail=sentence)
         except OSError:
@@ -711,7 +755,9 @@ async def undo_move(name: str) -> dict[str, Any]:
             raise ReplacementFailed(
                 "; ".join(failures) + ". The services that answered are back on their old values "
                 "and the one-key registration is still in place; press undo again to finish.")
-        _line_remove(stored.path, stored.env_key)
+        _remove_stored(stored)
+        for leftover in hc.legacy_key_lines(holder):
+            _line_remove(leftover.path, leftover.env_key)
         compose = compose_one_key(holder, add=False) if not hc.own_file_label(holder) else "not needed"
         key_journal.clear(holder)
     return {
@@ -719,7 +765,8 @@ async def undo_move(name: str) -> dict[str, Any]:
         "services": [{"service": s.key, "status": "back on its old value" if s.key != "tools"
                       else "one-key registration removed"} for s in services],
         "compose": compose,
-        "next_step": "Recreate this mind so it reads its old values again.",
+        "next_step": "Recreate this mind so it reads its old values again (it was reading a key file "
+                     "that is gone now).",
     }
 
 
@@ -916,6 +963,21 @@ async def retire() -> dict[str, Any]:
                     continue
                 _line_remove(location.path, location.env_key)
                 removed.append(f"{location.file}:{location.env_key}")
+        # A mind's key lives in its key file; the `MIND_KEY_<NAME>` line an
+        # older install kept in the shared .env is a second source and goes
+        # (the file wins either way). A mind whose own compose does not mount
+        # its key folder yet still reads it from there, so its line stays and
+        # is named, and goes on the retirement that follows its recreate.
+        for name in sorted(registry):
+            current = _stored(name)
+            if current is None or not current.is_key_file:
+                continue
+            for leftover in hc.legacy_key_lines(name):
+                if compose_text is None or not compose_has_key_mount(name):
+                    kept.append(f"{leftover.file}:{leftover.env_key}")
+                    continue
+                _line_remove(leftover.path, leftover.env_key)
+                removed.append(f"{leftover.file}:{leftover.env_key}")
     still: list[str] = []
     for service, name, value in old_values:
         if await hc._accepts(service, value) is True:

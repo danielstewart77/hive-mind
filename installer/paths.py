@@ -104,6 +104,17 @@ class Home:
         return self.root / "data"
 
     @property
+    def keys(self) -> Path:
+        """One folder per mind, each holding that mind's key file. Outside the
+        hive-mind checkout (which every mind mounts), so no mind can read
+        another's; the console writes here, a mind sees only its own folder,
+        read-only (feature 834, requirement 21)."""
+        return self.root / "keys"
+
+    def mind_keys(self, name: str) -> Path:
+        return self.keys / name
+
+    @property
     def compose_file(self) -> Path:
         return self.root / "docker-compose.yml"
 
@@ -116,7 +127,7 @@ class Home:
         self.root.mkdir(parents=True, exist_ok=True)
         self.state.mkdir(exist_ok=True)
         os.chmod(self.state, 0o700)
-        for folder in (self.repos, self.dsh, self.minds, self.data):
+        for folder in (self.repos, self.dsh, self.minds, self.data, self.keys):
             folder.mkdir(exist_ok=True)
 
 
@@ -136,6 +147,19 @@ def write_private(path: Path, text: str) -> None:
     finally:
         os.close(fd)
     os.replace(tmp, path)
+
+
+def write_key_file(folder: Path, text: str) -> Path:
+    """A mind's key file, atomically: a temp file in the same folder, fsynced,
+    renamed over the old one, so a reader sees the old key or the new one and
+    never half of one. The folder is the mind's alone (0700, the installing
+    user is the mind's user); the console, which writes the file later, makes
+    it the mind's by uid."""
+    folder.mkdir(parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    target = folder / "key"
+    write_private(target, text.strip() + "\n")
+    return target
 
 
 def write_private_in_place(path: Path, text: str) -> None:

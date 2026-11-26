@@ -12,6 +12,7 @@ import pytest
 
 import credentials_data
 import holder_credentials
+import mind_key_files
 from hive_site import testing
 
 from .test_replace_mind_key import ADA_ID, BOB, OLD, hive  # noqa: F401 - fixture
@@ -29,7 +30,7 @@ async def test_a_cut_off_mind_is_refused_by_all_three_services_on_its_next_reque
         assert code in (401, 403), service
     assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
     # The stored line stays: the page still says where the mind reads.
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert mind_key_files.read("ada") == OLD
 
 
 async def test_cutting_off_a_mind_already_cut_off_succeeds_again(hive):

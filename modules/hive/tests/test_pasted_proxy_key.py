@@ -16,6 +16,7 @@ import configuration_data
 import credentials_data
 import hive_logging
 import holder_credentials
+import mind_key_files
 
 KEY = "test-only-pasted-proxy-key-0123456789"
 
@@ -107,7 +108,9 @@ def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     response = client.post("/api/minds", json=body(KEY, harness, provider))
     assert response.status_code == 200, response.text
     assert KEY not in response.text and KEY not in caplog.text
-    assert env.read_text().split("MIND_KEY_PASTED_KEY_FIXTURE=", 1)[1].splitlines()[0] == KEY
+    # The key is in the mind's own key file and nowhere in the install's .env.
+    assert mind_key_files.read("pasted-key-fixture") == KEY
+    assert KEY not in env.read_text() and "MIND_KEY" not in env.read_text()
     assert state["proxy_requests"][0].headers["authorization"] == f"Bearer {KEY}"
     parsed = subprocess.run(
         ["docker", "compose", "--env-file", str(env), "-f", str(stack), "config", "--format", "json"],
@@ -115,14 +118,11 @@ def test_pasted_key_reaches_the_created_mind_without_issuing_another_key(
     )
     assert parsed.returncode == 0, parsed.stderr
     runtime_env = json.loads(parsed.stdout)["services"]["pasted-key-fixture"]["environment"]
-    assert runtime_env["OPENAI_API_KEY"] == KEY
-    assert runtime_env["ANTHROPIC_AUTH_TOKEN"] == KEY
     assert runtime_env["INFERENCE_PROXY_URL"] == "http://proxy.invalid:8899"
-    assert runtime_env["DSH_API_KEY"] == KEY
-    # One key: the gateway, the memory store and the tools values are it too.
-    for name in ("MIND_KEY", "COMMS_BEARER_TOKEN", "HIVEMIND_BROKER_TOKEN",
-                 "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN"):
-        assert runtime_env[name] == KEY, name
+    # One key, in a file: no key is named in the container's environment, the
+    # mind is told where its file is, and sets every name from it at start.
+    assert runtime_env["MIND_KEY_FILE"] == "/run/mind-key/key"
+    assert KEY not in parsed.stdout
     if harness == "dsh":
         import yaml
 

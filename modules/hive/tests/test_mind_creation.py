@@ -19,6 +19,7 @@ import auth
 import configuration_data
 import credentials_data
 import holder_credentials
+import mind_key_files
 import main as main_mod
 import mind_creation
 import accounts
@@ -345,20 +346,22 @@ def test_the_form_offers_only_pairs_the_api_accepts(client):
 def test_every_harness_logs_in_to_the_proxy_with_the_key_minted_for_this_mind(
     client, harness, provider, model
 ):
-    """Story 2.1.9: the key the mind is given at creation is how it talks to
-    the proxy, whatever its harness - read from the variable the mint writes,
-    and not stamped over by its runtime env at spawn."""
-    import holder_credentials
-
+    """Story 2.1.9, requirement 21: the key the mind is given at creation is
+    how it talks to the proxy, whatever its harness - read from its own key
+    file, which the mind applies to the harness's names at start, and not
+    stamped over by its runtime env at spawn. No key is named in its compose."""
     assert _create(client, harness=harness, provider=provider).status_code == 200
 
-    own = holder_credentials.one_key_variable("atlas")
     compose = yaml.safe_load(
         (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text())
     environment = dict(
         item.split("=", 1) for item in compose["services"]["atlas"]["environment"])
-    for login in ("ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY"):
-        assert environment[login] == "${" + own + "}"
+    assert environment["MIND_KEY_FILE"] == "/run/mind-key/key"
+    for login in ("ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY", "MIND_KEY",
+                  "COMMS_BEARER_TOKEN", "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN", "MIND_PROXY_KEY"):
+        assert login not in environment, login
+    assert "MIND_KEY_ATLAS" not in (client.minds_dir / "atlas" / "container" / "compose.yaml").read_text()
+    assert mind_key_files.read("atlas") == PASTED_KEY
     assert environment["ANTHROPIC_BASE_URL"] == os.environ["INFERENCE_PROXY_URL"]
     runtime_env = yaml.safe_load(
         (client.minds_dir / "atlas" / "runtime.yaml").read_text()).get("env") or {}
@@ -391,6 +394,8 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
         f"{host}/session_token:{own}/session_token:ro",
         # The install's generated skills, read-only: the one folder of the
         # checkout a role's skill may come from.
+        # Its own key folder and no other mind's, read-only, outside the checkout.
+        "${HOST_KEY_DIR:?set HOST_KEY_DIR in .env}/atlas:/run/mind-key:ro",
         "${HOST_PROJECT_DIR:-.}/install/workflow-skills:/usr/src/app/install/workflow-skills:ro",
     ]
     assert (client.minds_dir / "atlas" / home).is_dir()
@@ -446,8 +451,7 @@ def test_a_mind_made_from_the_console_is_not_locked_and_its_settings_card_reache
     )["services"]["atlas"]
     environment = dict(item.split("=", 1) for item in service["environment"])
     assert "COMMS_ADMIN_BEARER_TOKEN" not in environment
-    issued = credentials_data._read_env_value(
-        client.env_file, holder_credentials.one_key_variable("atlas"))
+    issued = mind_key_files.read("atlas")
     assert issued and issued != os.environ["COMMS_ADMIN_BEARER_TOKEN"]
 
     registry = [
@@ -807,8 +811,8 @@ def test_on_a_hive_laid_out_as_the_installer_lays_it_out_a_new_mind_gets_its_key
     response = _create(client, harness="dsh", provider="anthropic")
 
     assert response.status_code == 200, response.text
-    assert credentials_data._read_env_value(
-        client.env_file, holder_credentials.one_key_variable("atlas"))
+    assert mind_key_files.read("atlas") == PASTED_KEY
+    assert holder_credentials.one_key_variable("atlas") not in client.env_file.read_text()
     assert yaml.safe_load(stack.read_text()) == {
         "include": [{"path": "atlas/container/compose.yaml"}]}
     registered = [r["json"] for r in client.services.received

@@ -55,6 +55,7 @@ import httpx
 
 import credentials_data
 import key_journal
+import mind_key_files
 from credentials_data import ENV_FILES, Unreadable
 
 #: How long to wait on a service's own credential route. Longer than the
@@ -218,12 +219,19 @@ TOOLS_RESERVED_HOLDERS = frozenset({"hitl-approver", "internal", "skippy"})
 #: process reads one file, and whoever reads that file is who is still
 #: holding the old value.
 RESTART_BY_FILE: dict[str, str] = {
-    "hive_mind": "the containerised minds (docker compose up -d)",
+    # Only the per-service lines a mind made before the one key still has. A
+    # mind on its one key reads a key file at each request and needs none.
+    "hive_mind": "the containerised minds still on per-service values (docker compose up -d)",
     "nervous_system": "hive-comms",
     "skippy": "skippy.service",
     "mordecai": "mordecai.service",
     "hive_tools": "the hive-tools container",
 }
+
+
+#: The label of a mind's own key file (not an env file): `env_key` then holds
+#: the mind's name. Never in `ENV_FILES`; see `mind_key_files`.
+KEY_FILE_LABEL = "key_file"
 
 
 @dataclass(frozen=True)
@@ -234,12 +242,27 @@ class Location:
     env_key: str
 
     @property
+    def is_key_file(self) -> bool:
+        return self.file == KEY_FILE_LABEL
+
+    @property
     def path(self) -> Path:
+        if self.is_key_file:
+            return mind_key_files.path(self.env_key)
         return ENV_FILES[self.file]
 
     @property
     def restart_target(self) -> str | None:
         return RESTART_BY_FILE.get(self.file)
+
+    @property
+    def is_one_key(self) -> bool:
+        """This place holds a mind's one key (its file, or a line for it)."""
+        return self.is_key_file or is_one_key_variable(self.env_key)
+
+
+def key_file_location(holder: str) -> Location:
+    return Location(KEY_FILE_LABEL, holder.strip().lower())
 
 
 def variable_name(service: Service, holder: str) -> str:
@@ -259,6 +282,10 @@ def variable_name(service: Service, holder: str) -> str:
 #: its key is moved; both are looked for, the one key first.
 ONE_KEY_PREFIX = "MIND_KEY_"
 
+
+NO_KEY_ROOT_MESSAGE = (
+    "this console was given no folder to keep mind keys in (HIVE_KEY_ROOT), "
+    "so a new mind's key has nowhere to go")
 
 ONE_KEY_REFUSAL = (
     "This mind holds one key for every service, so it cannot be replaced "
@@ -286,6 +313,24 @@ def own_file_label(holder: str) -> str | None:
     return label if label in ENV_FILES and label != "hive_tools" else None
 
 
+def _write_stored(location: Location, value: str) -> dict[str, Any]:
+    """Write one stored value where it is kept, reported like
+    `credentials_data._write_location`: never raises. A key file is written
+    atomically (`mind_key_files.write`); a line is rewritten in its env file."""
+    if not location.is_key_file:
+        return credentials_data._write_location(
+            location.path, location.env_key, value, location.file)
+    row: dict[str, Any] = {"file": location.file, "path": str(location.path),
+                           "env_key": location.env_key, "written": False, "reason": None}
+    try:
+        mind_key_files.write(location.env_key, value)
+    except mind_key_files.KeyFileError as exc:
+        row["reason"] = str(exc)
+        return row
+    row["written"] = True
+    return row
+
+
 def _loaded_value(location: Location) -> str | None:
     """The value the holder's own process loads, not the file's spelling of it.
 
@@ -294,6 +339,11 @@ def _loaded_value(location: Location) -> str | None:
     the holder a value it will never present, under a message saying its
     previous one was reinstated.
     """
+    if location.is_key_file:
+        try:
+            return mind_key_files.read(location.env_key)
+        except mind_key_files.KeyFileError as exc:
+            raise Unreadable(str(exc)) from None
     raw = credentials_data._read_env_value(location.path, location.env_key)
     if raw is None:
         return None
@@ -328,6 +378,10 @@ def locate(service: Service, holder: str, *, old_only: bool = False) -> Location
     one = one_key_variable(holder)
     held: list[Location] = []
     own_label = own_file_label(holder)
+    if not old_only and mind_key_files.exists(holder):
+        # Its key file is the key; any line left in an env file is a leftover
+        # the retirement removes, and never wins.
+        return key_file_location(holder)
     if (not old_only and own_label
             and credentials_data._read_env_value(ENV_FILES[own_label], ONE_KEY_PLAIN) is not None):
         held.append(Location(own_label, ONE_KEY_PLAIN))
@@ -510,7 +564,7 @@ async def mint(
     if location is None:
         location = locate(service, holder)
     await _require_managed_proxy(service, holder)
-    if value is None and location is not None and is_one_key_variable(location.env_key):
+    if value is None and location is not None and location.is_one_key:
         # One line is every service's value for this mind. A fresh value
         # written to it and sent to one service leaves the others holding a
         # key nothing now matches. Replacing a mind's key is done from the
@@ -537,9 +591,7 @@ async def mint(
         await _put(service, holder, username, new_value, role, mind_id)
 
         with credentials_data._WRITE_LOCK:
-            written = credentials_data._write_location(
-                location.path, location.env_key, new_value, location.file
-            )
+            written = _write_stored(location, new_value)
             verified = False
             if written["written"]:
                 try:
@@ -705,7 +757,7 @@ async def holder_rows(service: Service) -> list[dict[str, Any]]:
             reason = f"a file that may hold this holder's value could not be read: {exc}"
         except Ambiguous as exc:
             reason = str(exc)
-        if location is not None and is_one_key_variable(location.env_key):
+        if location is not None and location.is_one_key:
             reason = ONE_KEY_REFUSAL
         rows.append(
             {
@@ -855,6 +907,13 @@ def key_places() -> list[tuple[str, str, str]]:
             existing = _loaded_value(Location(label, variable))
             if existing:
                 found.append((f"{label}:{variable}", variable, existing))
+    for name in mind_key_files.names():
+        try:
+            existing = mind_key_files.read(name)
+        except mind_key_files.KeyFileError:
+            raise Unreadable(f"{mind_key_files.path(name)}") from None
+        if existing:
+            found.append((f"{KEY_FILE_LABEL}:{name}", "MIND_KEY", existing))
     for path in _mind_runtime_files():
         try:
             import yaml
@@ -884,11 +943,11 @@ def proxy_key_places(value: str, *, own: str | None = None) -> list[str]:
     found: list[str] = []
     for place, variable, existing in key_places():
         head = place.partition(":")[0]
-        if head in ENV_FILES:
+        if head in ENV_FILES or head == KEY_FILE_LABEL:
             # This mind's own places: its named variables, a variable that
-            # names it (`ADA_PROXY_KEY`), and the whole of a file it has to
-            # itself (an edge mind's own `.env`).
-            if (variable in mine or head == own_file
+            # names it (`ADA_PROXY_KEY`), its own key file, and the whole of a
+            # file it has to itself (an edge mind's own `.env`).
+            if (variable in mine or (head != KEY_FILE_LABEL and head == own_file)
                     or (own_name and holder_from_place(place) == own_name)):
                 continue
         elif own_name and head == own_name:
@@ -907,7 +966,7 @@ def mind_proxy_key_sources(name: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for place, variable, value in key_places():
         head = place.partition(":")[0]
-        if head in ENV_FILES:
+        if head in ENV_FILES or head == KEY_FILE_LABEL:
             if holder_from_place(place) == holder:
                 found.append((place, value))
         elif head == holder:
@@ -923,9 +982,9 @@ async def provision_mind(
     The person pasted the key; the hive invents nothing. The gateway, the
     memory store and the tools are each made to accept exactly that value as
     this mind, and
-    it is written once, to the one variable the mind's generated compose file
-    reads (`MIND_KEY_<NAME>`). The proxy is sent nothing: the key is already
-    its client's.
+    it is written once, to the mind's own key file (`mind_key_files`), which
+    its generated compose file mounts. Nothing is written to the install's
+    `.env`. The proxy is sent nothing: the key is already its client's.
 
     Role and provenance are stated, never inferred. A mind is minted before it
     has a broker row, and comms types a holder it cannot find as a `person`;
@@ -952,11 +1011,10 @@ async def provision_mind(
     # key, made together under the rotation lock, first and before any service
     # is told: the second creation finds the first's line and is refused here
     # with nothing of its own written.
-    if MIND_ENV_LABEL not in ENV_FILES:
-        raise MintRefused(f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
+    if not mind_key_files.configured():
+        raise MintRefused(NO_KEY_ROOT_MESSAGE)
     async with _ROTATION_LOCK:
         _refuse_if_another_holds(proxy_key, name)
-        _ensure_key(ENV_FILES[MIND_ENV_LABEL], one_key_variable(name))
         minted.append(_store_mind_proxy_key_locked(name, owner, proxy_key, creating=True))
     for service in SERVICES.values():
         if service.key == "proxy":
@@ -964,11 +1022,6 @@ async def provision_mind(
         if service.key == "tools" and not service.configured():
             continue
         try:
-            key = one_key_variable(name)
-            if MIND_ENV_LABEL not in ENV_FILES:
-                raise MintRefused(
-                    f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
-            _ensure_key(ENV_FILES[MIND_ENV_LABEL], key)
             minted.append(
                 await mint(
                     service,
@@ -976,7 +1029,7 @@ async def provision_mind(
                     owner,
                     role="mind",
                     mind_id=mind_id,
-                    location=Location(MIND_ENV_LABEL, key),
+                    location=key_file_location(name),
                     value=proxy_key,
                 )
             )
@@ -1060,22 +1113,29 @@ async def store_mind_proxy_key(name: str, owner: str, value: str, *, creating: b
 
 def _store_mind_proxy_key_locked(name: str, owner: str, value: str, *, creating: bool = False) -> dict[str, Any]:
     """`store_mind_proxy_key` for a caller already holding `_ROTATION_LOCK`."""
+    if creating:
+        # A new mind's key goes to its own key file, never into the shared
+        # `.env`. Written atomically, and read back.
+        place = key_file_location(name)
+        written = _write_stored(place, value)
+        if not written["written"] or _loaded_value(place) != value:
+            raise MintRefused("The pasted proxy key could not be saved; creation cannot use it")
+        return {"service": "proxy", "holder": name, "username": owner, "role": "mind",
+                "file": place.file, "path": str(place.path), "env_key": place.env_key,
+                "restart_target": None}
     path = ENV_FILES[MIND_ENV_LABEL]
-    if (credentials_data._read_env_value(path, one_key_variable(name)) is not None
-            and not creating):
-        # Writing only the line would leave the gateway, memory store and
-        # tools on the old value: the mind would go dark on its next start.
+    if stored_key_location(name) is not None:
+        # Writing only the key would leave the gateway, memory store and
+        # tools on the old value: the mind would go dark on its next request.
         raise MintRefused(ONE_KEY_REFUSAL)
-    # A mind that holds its one key keeps it on that line; one made before
-    # still has its own proxy line, and the key goes there until it is moved.
-    key = one_key_variable(name)
-    if credentials_data._read_env_value(path, key) is None and name_has_old_proxy_line(path, name):
-        key = variable_name(SERVICES["proxy"], name)
+    # A mind made before the one key has its own proxy line, and the key goes
+    # there until the mind is moved.
+    key = variable_name(SERVICES["proxy"], name)
     with credentials_data._WRITE_LOCK:
         _ensure_key(path, key)
         written = credentials_data._write_location(path, key, value, MIND_ENV_LABEL)
         if not written["written"] or _loaded_value(Location(MIND_ENV_LABEL, key)) != value:
-            raise MintRefused("The pasted proxy key could not be saved; creation cannot use it")
+            raise MintRefused("The pasted proxy key could not be saved")
     return {"service": "proxy", "holder": name, "username": owner, "role": "mind",
             "file": MIND_ENV_LABEL, "path": str(path), "env_key": key,
             "restart_target": RESTART_BY_FILE.get(MIND_ENV_LABEL, RESTART_BY_FILE["hive_mind"])}
@@ -1117,6 +1177,10 @@ def stored_key_location(holder: str) -> Location | None:
     one = one_key_variable(holder)
     found = []
     own_label = own_file_label(holder)
+    if mind_key_files.exists(holder):
+        # The key file is the key. An older line for it in an env file is a
+        # leftover (`legacy_key_lines`), never a second answer.
+        return key_file_location(holder)
     for label in ENV_FILES:
         try:
             if credentials_data._read_env_value(ENV_FILES[label], one) is not None:
@@ -1133,6 +1197,42 @@ def stored_key_location(holder: str) -> Location | None:
             f"{', '.join(l.file for l in found)} each hold {one}, so which one "
             "this mind reads cannot be told. Nothing was changed")
     return found[0] if found else None
+
+
+def legacy_key_lines(holder: str) -> list[Location]:
+    """The `MIND_KEY_<NAME>` lines this mind still has in env files: where its
+    key lived before key files. They are removed when the mind is moved to a
+    file and retired; until then a compose written before the mount reads
+    them."""
+    one = one_key_variable(holder)
+    found = []
+    for label in ENV_FILES:
+        try:
+            if credentials_data._read_env_value(ENV_FILES[label], one) is not None:
+                found.append(Location(label, one))
+        except Unreadable:
+            continue
+    return found
+
+
+def storage_places(holder: str) -> list[Location]:
+    """Every place this console writes this mind's key, the key file first.
+
+    A mind whose key is kept here gets its key file (when this console was
+    given a key root); a line it still has in an env file is kept in step until
+    the retirement removes it, so a container made from an older compose file
+    reads the right key. An edge mind's own env file is its own place, as
+    before. A mind whose key is not kept here has no place."""
+    current = stored_key_location(holder)
+    if current is None:
+        return []
+    if current.file == own_file_label(holder):
+        return [current]
+    places: list[Location] = []
+    if mind_key_files.configured():
+        places.append(key_file_location(holder))
+    places += [place for place in legacy_key_lines(holder) if place not in places]
+    return places or [current]
 
 
 def mind_holds_one_key_line(holder: str) -> bool:
@@ -1203,6 +1303,8 @@ def holder_from_place(place: str) -> str | None:
     """The mind a `label:VARIABLE` or `mind:VARIABLE` place from
     `proxy_key_places` belongs to, so a refusal can name it."""
     head, _, variable = place.partition(":")
+    if head == KEY_FILE_LABEL:
+        return variable or None
     if head not in ENV_FILES:
         return head or None
     if head in _OWN_FILE_HOLDERS:
@@ -1261,6 +1363,10 @@ async def replace_mind_key(
     services = _one_key_services()
     async with _ROTATION_LOCK:
         location = stored_key_location(holder)
+        places = storage_places(holder)
+        # A key file this replacement is about to make is taken away again if
+        # the replacement is put back: its absence is what "old" was.
+        made_here = [p for p in places if p.is_key_file and not mind_key_files.exists(holder)]
         old: str | None = None
         if location is not None:
             try:
@@ -1347,19 +1453,22 @@ async def replace_mind_key(
 
         stored = "not_writable"
         if failure is None and location is not None:
-            with credentials_data._WRITE_LOCK:
-                written = credentials_data._write_location(
-                    location.path, location.env_key, value, location.file)
-                try:
-                    verified = bool(written["written"]) and _loaded_value(location) == value
-                except Unreadable:
-                    verified = False
-            if verified:
+            # The key file first (what a mind reads), then any line an older
+            # compose file still reads; each read back.
+            for place in places:
+                with credentials_data._WRITE_LOCK:
+                    written = _write_stored(place, value)
+                    try:
+                        verified = bool(written["written"]) and _loaded_value(place) == value
+                    except Unreadable:
+                        verified = False
+                if not verified:
+                    failure = MintRefused(
+                        f"{place.path} did not take the new key"
+                        + (f" ({written['reason']})" if written.get("reason") else ""))
+                    break
+            if failure is None:
                 stored = "written"
-            else:
-                failure = MintRefused(
-                    f"{location.path} did not take the new key"
-                    + (f" ({written['reason']})" if written.get("reason") else ""))
 
         if failure is None:
             try:
@@ -1380,6 +1489,7 @@ async def replace_mind_key(
                              for s in services],
                 "stored": stored,
                 "restart_target": location.restart_target if location else None,
+                "key_file": bool(location and location.is_key_file),
                 "proxy_note": PROXY_NOTE,
             }
 
@@ -1419,14 +1529,20 @@ async def replace_mind_key(
                     pass
             file_ok = True
             if location is not None and old is not None:
-                try:
-                    if _loaded_value(location) != old:
-                        with credentials_data._WRITE_LOCK:
-                            credentials_data._write_location(
-                                location.path, location.env_key, old, location.file)
-                        file_ok = _loaded_value(location) == old
-                except Exception:  # noqa: BLE001
-                    file_ok = False
+                for place in places:
+                    if place in made_here:
+                        try:
+                            mind_key_files.remove(holder)
+                        except Exception:  # noqa: BLE001
+                            file_ok = False
+                        continue
+                    try:
+                        if _loaded_value(place) != old:
+                            with credentials_data._WRITE_LOCK:
+                                _write_stored(place, old)
+                            file_ok = file_ok and _loaded_value(place) == old
+                    except Exception:  # noqa: BLE001
+                        file_ok = False
             return file_ok
 
         # A cancelled request still puts the services back: the put-back runs
@@ -1725,6 +1841,12 @@ async def unprovision_mind(name: str) -> list[str]:
                         path, "".join(kept), MIND_ENV_LABEL, keys[0], text)
         except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
             failures.append(f"the line {keys[0]} is still in {path} ({exc})")
+    try:
+        # Its key file and folder go with it: a key left in a folder nothing
+        # mounts is still a key on this host.
+        mind_key_files.remove(holder)
+    except Exception as exc:  # noqa: BLE001 - reported, like every other leftover
+        failures.append(f"the key file of {holder} is still in {mind_key_files.KEY_ROOT} ({exc})")
     return failures
 
 

@@ -4053,18 +4053,24 @@ async def api_mind_proxy_key_update(
     except holder_credentials.MintRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     stored = replaced["stored"] == "written"
+    in_file = bool(replaced.get("key_file"))
     return {
         "saved": True,
-        "restart_required": stored,
+        # A mind reading its key file takes the new key at its next request;
+        # only a mind still on a line in the install's .env must be recreated.
+        "restart_required": stored and not in_file,
         "services": replaced["services"],
         "stored": replaced["stored"],
         "restart_target": replaced["restart_target"],
         "proxy_note": replaced["proxy_note"],
         "next_step": (
-            "Recreate this mind so it reads its new key; until then its "
+            "The mind reads its new key from its key file at its next request; "
+            "nothing is restarted." if stored and in_file else
+            "Recreate this mind so it reads its new key (it still reads a line in "
+            "the install's .env, which the move to a key file ends); until then its "
             "requests are refused." if stored else
-            "Put the new key on the machine this mind runs on, where it reads "
-            "its key, and restart it; until then its requests are refused."),
+            "Put the new key in the file this mind reads its key from, on the machine "
+            "it runs on (its MIND_KEY_FILE); it takes it at its next request."),
     }
 
 

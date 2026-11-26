@@ -99,6 +99,19 @@ def _mind_creation_records_in_a_folder_the_test_owns(tmp_path, monkeypatch):
     monkeypatch.setattr(mind_rename, 'RENAME_DIR', tmp_path / 'mind-renames')
 
 
+@pytest.fixture(autouse=True)
+def _mind_keys_in_a_folder_the_test_owns(tmp_path, monkeypatch):
+    """A mind's key is a file under a key root (`mind_key_files`), which
+    defaults to the console's live `/mind_keys`: every test gets its own."""
+    import mind_key_files
+
+    root = tmp_path / "mind-keys"
+    root.mkdir()
+    monkeypatch.setattr(mind_key_files, "KEY_ROOT", root)
+    monkeypatch.delenv("HIVE_MIND_UID", raising=False)
+    return root
+
+
 RELEASE_CONTEXT = "https://github.com/danielstewart77/hive-mind.git#" + "c" * 40
 
 

@@ -95,7 +95,7 @@ def _refused_key(response: httpx.Response) -> None:
         raise HTTPException(
             status_code=502,
             detail="this mind refused its own key as the console presented it; "
-            "the key it holds may have been replaced (paste it again, or recreate the mind)",
+            "the key it holds may have been replaced (paste it again; a mind reading its key file takes it at its next request)",
         )
 
 

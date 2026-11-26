@@ -21,6 +21,7 @@ import pytest
 
 import credentials_data
 import holder_credentials
+import mind_key_files
 from hive_site import testing
 
 NERVOUS = Path(__file__).resolve().parents[3] / "nervous-system"
@@ -122,7 +123,11 @@ def hive(tmp_path, monkeypatch, builtin_console):
     from hive_data import core
 
     shared = tmp_path / "hive_mind.env"
-    shared.write_text(f"MIND_KEY_ADA={OLD}\nMIND_KEY_BOB={BOB}\nUNRELATED=keep\n")
+    # Each mind's key is its own file in a folder of its own (requirement 21);
+    # the shared .env holds no mind key.
+    shared.write_text("UNRELATED=keep\n")
+    mind_key_files.write("ada", OLD)
+    mind_key_files.write("bob", BOB)
     files = {"hive_mind": shared}
     monkeypatch.setattr(credentials_data, "ENV_FILES", files)
     monkeypatch.setattr(holder_credentials, "ENV_FILES", files)
@@ -185,8 +190,8 @@ async def test_a_replaced_key_is_refused_by_all_three_services_on_the_next_reque
         assert code in (401, 403), service
     assert await hive.status(NEW) == {"comms": 200, "lucent": 200, "tools": 404}
     assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == NEW
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_BOB") == BOB
+    assert mind_key_files.read("ada") == NEW
+    assert mind_key_files.read("bob") == BOB
 
 
 async def test_a_replacement_the_tools_cannot_take_puts_the_old_key_back_on_the_others(hive):
@@ -198,7 +203,7 @@ async def test_a_replacement_the_tools_cannot_take_puts_the_old_key_back_on_the_
     assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
     answers = await hive.status(OLD)
     assert answers["comms"] == 200 and answers["lucent"] == 200
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert mind_key_files.read("ada") == OLD
     assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
     assert holder_credentials.key_journal.unfinished() == []
 
@@ -209,7 +214,7 @@ async def test_pasting_a_key_another_mind_holds_changes_nothing_and_both_minds_k
 
     assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
     assert await hive.status(BOB) == {"comms": 200, "lucent": 200, "tools": 404}
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert mind_key_files.read("ada") == OLD
 
 
 async def test_a_cut_off_mind_stays_cut_off_when_a_replacement_fails_and_is_put_back(hive):
@@ -235,7 +240,7 @@ async def test_a_key_a_service_already_accepts_is_refused_before_anything_change
         await _replace()
 
     assert await hive.status(OLD) == {"comms": 200, "lucent": 200, "tools": 404}
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert mind_key_files.read("ada") == OLD
     assert holder_credentials.key_journal.unfinished() == []
 
 
@@ -248,13 +253,13 @@ async def test_a_request_cancelled_part_way_still_puts_the_old_key_back(hive):
     assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
     answers = await hive.status(OLD)
     assert answers["comms"] == 200 and answers["lucent"] == 200
-    assert credentials_data._read_env_value(hive.env, "MIND_KEY_ADA") == OLD
+    assert mind_key_files.read("ada") == OLD
 
 
 async def test_a_cut_off_mind_whose_old_key_is_unknown_is_not_left_live_on_the_new_key(hive):
     for name in ("comms", "lucent"):
         await holder_credentials.revoke(holder_credentials.SERVICES[name], "ada")
-    hive.env.write_text(f"MIND_KEY_BOB={BOB}\n")  # ada's key is not stored here
+    mind_key_files.remove("ada")  # ada's key is not stored here
     hive.tools.fail = True
 
     with pytest.raises(holder_credentials.ReplacementFailed):

@@ -351,27 +351,25 @@ def internal_mind_exists(name: str) -> bool:
 OWNER_RE = re.compile(r"[a-z0-9][a-z0-9._@-]{0,63}")
 
 
-#: The per-service names its harnesses, hooks and skills read, each set from the
-#: one key. The same list as `GENERIC_NAMES` less the inference ones in
-#: hive-mind's core/mind_key.py, which sets the full list again at the mind's
-#: start; this module cannot import that one (it is the mind's, not the
-#: console's), so the two are kept equal by hand.
-_SERVICE_NAMES_FROM_ONE_KEY = (
-    "COMMS_BEARER_TOKEN", "HIVEMIND_BROKER_TOKEN", "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN",
-)
+#: Where a mind's key folder is mounted, and the file in it (requirement 21).
+#: The mind reads the key from there at each request (hive-mind's
+#: core/mind_key.py); the compose file carries no key at all. Asked of the
+#: module that writes the file, so the two cannot drift.
+def key_folder_mount(name: str) -> str:
+    """The volume line that gives this mind, and no other, its key folder
+    (read-only). `HOST_KEY_DIR` is a folder outside the checkout, one
+    subfolder per mind; it is required, so a compose file made without it is
+    refused rather than mounting a folder docker would create as root."""
+    import mind_key_files
+
+    return f"${{HOST_KEY_DIR:?set HOST_KEY_DIR in .env}}/{name}:{mind_key_files.MOUNT}:ro"
 
 
-def _key_variable(name: str) -> str:
-    """The variable a shared env file holds this mind's one key under.
+def key_file_setting() -> str:
+    """The environment line that names the key file inside the mind."""
+    import mind_key_files
 
-    Asked of the module that writes it (`holder_credentials`), for the reason
-    every per-mind variable was: a name may carry hyphens and a `.env` key may
-    not, so two copies of the rule is a compose file reading a variable the
-    creation never wrote.
-    """
-    import holder_credentials
-
-    return holder_credentials.one_key_variable(name)
+    return f"MIND_KEY_FILE={mind_key_files.MOUNT}/{mind_key_files.FILE_NAME}"
 
 
 #: The rotation threshold a newly created Mind starts with: the percentage of
@@ -512,16 +510,15 @@ def scaffold_internal_mind(
                     # Its own keyring, in its own folder: the hive's shared
                     # one holds other minds' secrets.
                     f"KEY_RING={own}/data/keyring",
-                    # The mind's one key, the value its owner pasted. The
-                    # gateway, the memory store, the tools and the proxy each
-                    # accept it as this mind, so every service value below is
-                    # the same one, and no mind-specific variable but this
-                    # one is named. MIND_KEY is what the mind reads (the
-                    # left-hand names below are what its harnesses, hooks
-                    # and skills read, and do not change).
-                    f"MIND_KEY=${{{_key_variable(name)}}}",
-                    *[f"{variable}=${{{_key_variable(name)}}}"
-                      for variable in _SERVICE_NAMES_FROM_ONE_KEY],
+                    # The mind's one key, the value its owner pasted, is a
+                    # FILE in a folder of its own that only this mind has
+                    # mounted (below). The mind reads it at each request, so a
+                    # replaced key needs no recreate, and the key is in no
+                    # environment and no .env. The gateway, the memory store,
+                    # the tools and the proxy each accept it as this mind; the
+                    # mind sets every name its harnesses, hooks and skills
+                    # read from it (core/mind_key.py).
+                    key_file_setting(),
                     "LUCENT_URL=http://hive-lucent:8424",
                     "LUCENT_URL_SELF=http://hive-lucent:8424",
                     "HIVE_TOOLS_URL=http://hive-tools:9421",
@@ -536,12 +533,9 @@ def scaffold_internal_mind(
                     # host login, and never another mind's key.
                     f"INFERENCE_PROXY_URL={proxy}",
                     f"ANTHROPIC_BASE_URL={proxy}",
-                    f"ANTHROPIC_AUTH_TOKEN=${{{_key_variable(name)}}}",
                     "ANTHROPIC_API_KEY=",
                     f"OPENAI_BASE_URL={proxy}/v1",
-                    f"OPENAI_API_KEY=${{{_key_variable(name)}}}",
                     f"DSH_PROXY_BASE_URL={proxy}/v1",
-                    f"DSH_API_KEY=${{{_key_variable(name)}}}",
                     "GATEWAY_URL=http://server:8420",
                     "SPECS_DIR=/usr/src/app/specs/data-classes",
                     f"AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/{name}/data/auto-remember",
@@ -561,6 +555,9 @@ def scaffold_internal_mind(
                     f"{host}:{own}:rw",
                     f"{host}/container:{own}/container:ro",
                     f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
+                    # Its key folder, and no other mind's: outside the checkout,
+                    # read-only here, written only by the console.
+                    key_folder_mount(name),
                     # The install's generated skills, which a role may name.
                     workflow_skills_volume(),
                 ],
@@ -587,8 +584,12 @@ def scaffold_internal_mind(
                            "DSH_PROXY_BASE_URL", "DSH_API_KEY"}
         service["environment"] = [item for item in service["environment"]
                                   if item.split("=", 1)[0] not in inference_names]
+        # A direct or custom provider: its endpoint and format are named; the
+        # key itself is the mind's key file, applied to the provider names at
+        # the mind's start (core/mind_key.py), so none is written here.
         service["environment"] += [f"{k}={v}" for k, v in inference_environment(
-            connection, f"${{{_key_variable(name)}}}", harness).items()]
+            connection, "", harness).items() if not k.endswith(("_KEY", "_TOKEN"))
+            or k == "ANTHROPIC_API_KEY"]
     if is_dsh:
         service = compose["services"][name]
         service["environment"] += [
@@ -598,7 +599,6 @@ def scaffold_internal_mind(
             # code is root's.
             f"DSH_SPAWN_DIR={own}/data",
             # What its capture hook classifies with, as its own proxy client.
-            *([f"MIND_PROXY_KEY=${{{_key_variable(name)}}}"] if not connection else []),
             "HIVE_CLASSIFIER_MODEL=${HIVE_CLASSIFIER_MODEL:-}",
         ]
         # The harness itself, read-only: a mind must not rewrite the tree it

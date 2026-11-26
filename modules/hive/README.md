@@ -73,8 +73,12 @@ and shows a warning when it matches an existing local proxy credential.
 It uses that key for the new Mind without changing other Minds' keys.
 
 An existing local Mind's detail page also accepts a pasted proxy key. Saving
-checks and stores the key without returning it; restart the Mind afterward
-to load the new value into its container.
+checks and stores the key without returning it. A Mind reads its key from a
+file (`/run/mind-key/key`) in a folder only that Mind has mounted, read-only,
+outside the checkout (`HIVE_KEY_ROOT` in the console, `HOST_KEY_DIR` in a new
+Mind's compose); the console writes it atomically, and the Mind takes the new
+key at its next request with no restart. A Mind made before key files is
+recreated once to add the mount.
 
 Build the DSH tree through the Hive installer before creating a DSH Mind.
 Its generated container mounts that tree read-only at `/opt/dsh` from

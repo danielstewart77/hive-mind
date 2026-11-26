@@ -19,7 +19,7 @@ from pathlib import Path
 
 from installer import collisions, compose, hive_api, plan, probe, secrets_store
 from installer.adapters import dsh, migrate, proxy as proxy_adapter, site, tools
-from installer.paths import REPO_BASE, write_private, write_private_in_place
+from installer.paths import REPO_BASE, write_key_file, write_private, write_private_in_place
 from installer.runner import NeedInput, Step
 from installer.shell import NETWORK, Shell, StepFailed, http_in_network
 
@@ -508,10 +508,17 @@ def proxy_setup(ctx: Ctx):
         raise StepFailed(f"the proxy already has a key for {a['mind_name']!r} that this install "
                          f"did not record; revoke it on {_proxy_admin(ctx)} and run again")
     if compose.on_one_key(ctx.home, a):
-        # The mind's one key is that key, read under the name its compose
-        # file names; every service then accepts it as this mind.
-        var = compose.mind_key_var(a["mind_name"])
-        ctx.set_env(**{var: ctx.env().get(var) or ctx.env()["MIND_PROXY_KEY"]})
+        # The mind's one key is that key, kept in the mind's own key file (a
+        # folder only this mind mounts), never in `.env`; every service then
+        # accepts it as this mind. A line an earlier install kept in `.env` is
+        # what the file is made from, once, and is dropped from `.env` by the
+        # next config step. A file already there is a replaced key: kept.
+        name = a["mind_name"]
+        target = ctx.home.mind_keys(name) / compose.KEY_FILE
+        if not target.is_file():
+            var = compose.mind_key_var(name)
+            write_key_file(ctx.home.mind_keys(name),
+                           ctx.env().get(var) or ctx.env()["MIND_PROXY_KEY"])
     # The hive's own services present a proxy key of their own, so none of
     # them holds a value that opens the gateway or the tools as the mind.
     services_key = proxy_adapter.mint_key(ctx.sh, ctx.compose, kind="app",
@@ -927,6 +934,19 @@ def dsh_hooks(ctx: Ctx):
     return "hooks written"
 
 
+def _mind_key_from_file(ctx: Ctx, name: str) -> str:
+    """The mind's one key, from its own key file (where the proxy step put it)."""
+    path = ctx.home.mind_keys(name) / compose.KEY_FILE
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        value = ""
+    if not value:
+        raise StepFailed(f"the key file of {name!r} ({path}) is not there or is empty; run the "
+                         "proxy step again")
+    return value
+
+
 # ---- 20. register -----------------------------------------------------------
 def register_mind(ctx: Ctx):
     a, env = ctx.answers, ctx.env()
@@ -944,12 +964,13 @@ def register_mind(ctx: Ctx):
     # made before the one key still run on until its key is moved.
     one = compose.on_one_key(ctx.home, a)
     for store, api in (("comms", ctx.comms()), ("lucent", ctx.lucent())):
-        value = env[compose.mind_key_var(name)] if one else env[compose.token_var(store.upper(), name)]
+        value = (_mind_key_from_file(ctx, name) if one
+                 else env[compose.token_var(store.upper(), name)])
         hive_api.mint(api, {name: value}, admin,
                       role=hive_api.MIND, mind_id=mind_id,
                       on_minted=lambda h, s=store: _record_minted(ctx, s, [h]))
     if one and "tools" in plan.installed(a):
-        _register_mind_with_tools(ctx, name, env[compose.mind_key_var(name)])
+        _register_mind_with_tools(ctx, name, _mind_key_from_file(ctx, name))
     return f"{name} on dsh, owned by {admin}, model {a['model']}"
 
 

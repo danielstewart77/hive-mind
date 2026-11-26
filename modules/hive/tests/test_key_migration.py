@@ -16,6 +16,7 @@ import configuration_data
 import credentials_data
 import holder_credentials
 import key_migration
+import mind_key_files
 from hive_site import testing
 
 from .test_replace_mind_key import (  # noqa: F401 - fixtures and constants
@@ -136,7 +137,7 @@ async def _carol_already_on_one_key(hive):
     from comms import user_access
     from lucent_api import holder_access
     key = "carol-one-key-0123456789"
-    hive.env.write_text(hive.env.read_text() + f"MIND_KEY_CAROL={key}\n")
+    mind_key_files.write("carol", key)
     await user_access.put_credential("carol", "daniel", key, role="mind")
     await holder_access.put_credential("carol", "daniel", key, role="mind", mind_id=CAROL_ID)
     hive.tools.values["carol"] = key
@@ -165,9 +166,11 @@ async def test_moving_a_mind_registers_the_proxy_key_it_holds_on_all_three_servi
     assert answers["comms"] == 200
     assert (await _answers(old_hive, BOB_LUCENT))["lucent"] == 200
     # The old lines are kept in their file until retirement; the one line is new.
-    assert credentials_data._read_env_value(old_hive.env, "MIND_KEY_ADA") == ADA_PROXY
+    # The one key is the mind's own key file, never a line in the shared .env.
+    assert mind_key_files.read("ada") == ADA_PROXY
+    assert credentials_data._read_env_value(old_hive.env, "MIND_KEY_ADA") is None
     assert credentials_data._read_env_value(old_hive.env, "COMMS_TOKEN_ADA") == ADA_COMMS
-    assert credentials_data._read_env_value(old_hive.env, "MIND_KEY_BOB") is None
+    assert not mind_key_files.exists("bob")
 
 
 async def test_undoing_a_move_puts_the_mind_back_on_its_old_values_and_removes_the_one_key_registration(old_hive):
@@ -182,6 +185,7 @@ async def test_undoing_a_move_puts_the_mind_back_on_its_old_values_and_removes_t
     assert proxy_key["comms"] in (401, 403) and proxy_key["lucent"] in (401, 403)
     assert proxy_key["tools"] == 401  # the tools registration is gone
     assert credentials_data._read_env_value(old_hive.env, "MIND_KEY_ADA") is None
+    assert not mind_key_files.exists("ada")
     assert (await _answers(old_hive, BOB_COMMS))["comms"] == 200
 
 
