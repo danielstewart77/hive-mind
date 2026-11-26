@@ -4054,6 +4054,9 @@ async def api_mind_proxy_key_update(
         raise HTTPException(status_code=400, detail=str(exc)) from None
     stored = replaced["stored"] == "written"
     in_file = bool(replaced.get("key_file"))
+    copies = replaced.get("copies_still_holding_old_key", [])
+    left_over = (f"The console's saved copies {', '.join(copies)} still hold the old key "
+                 "and could not be cleaned; remove them by hand. " if copies else "")
     return {
         "saved": True,
         # A mind reading its key file takes the new key at its next request;
@@ -4063,7 +4066,8 @@ async def api_mind_proxy_key_update(
         "stored": replaced["stored"],
         "restart_target": replaced["restart_target"],
         "proxy_note": replaced["proxy_note"],
-        "next_step": (
+        "copies_still_holding_old_key": copies,
+        "next_step": left_over + (
             "The mind reads its new key from its key file at its next request; "
             "nothing is restarted." if stored and in_file else
             "Recreate this mind so it reads its new key (it still reads a line in "

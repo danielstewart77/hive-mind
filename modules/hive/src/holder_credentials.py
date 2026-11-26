@@ -318,8 +318,9 @@ def _write_stored(location: Location, value: str, backup: bool = True) -> dict[s
     `credentials_data._write_location`: never raises. A key file is written
     atomically (`mind_key_files.write`); a line is rewritten in its env file."""
     if not location.is_key_file:
+        extra = {} if backup else {"backup": False}
         return credentials_data._write_location(
-            location.path, location.env_key, value, location.file, backup=backup)
+            location.path, location.env_key, value, location.file, **extra)
     row: dict[str, Any] = {"file": location.file, "path": str(location.path),
                            "env_key": location.env_key, "written": False, "reason": None}
     try:
