@@ -70,7 +70,7 @@ def gateway(monkeypatch):
 
 def _managed(**grants):
     return {"managed": True, "roles": ["general", "writer"], "skills": [], "hooks": [],
-            "models": [], "tools": [], **grants}
+            "tools": [], **grants}
 
 
 def _env(gateway, tmp_path, grants_file=None):

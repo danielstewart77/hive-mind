@@ -1,7 +1,7 @@
 """A role never decides which model a conversation runs on (feature 893).
 
 A mind runs on the model it is set to and a conversation asked for a model
-gets that one, whatever the mind's roles name. The roles are real rows in the
+gets that one, whatever tier the mind's roles suggest. The roles are real rows in the
 scratch database, written through the same `hive_data.roles` the console
 writes them with, and the mind is one under role management, which is the
 only kind the old rule ever moved.
@@ -33,8 +33,9 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _role(model: str | None) -> int:
-    made = await roles.create_role(f"Role {uuid.uuid4().hex[:8]}", model=model)
+async def _role(suggested_tier: str | None = "high") -> int:
+    made = await roles.create_role(f"Role {uuid.uuid4().hex[:8]}", tools=["files"],
+                                   suggested_tier=suggested_tier)
     return made["row"]["id"]
 
 
@@ -66,7 +67,7 @@ def test_a_mind_set_to_a_model_no_role_of_its_names_opens_its_conversations_on_i
     async def scenario():
         mgr = await make_manager()
         mind = await _mind(default="gemma4:26b")
-        await roles.set_mind_roles(mind, [await _role("claude-sonnet-5-5")])
+        await roles.set_mind_roles(mind, [await _role()])
         spawns: list = []
         with _spawns_captured(spawns):
             created = await mgr.create_session(
@@ -83,7 +84,7 @@ def test_a_conversation_asked_for_a_model_no_role_names_opens_on_that_model(comm
     async def scenario():
         mgr = await make_manager()
         mind = await _mind(default="claude-haiku-5-5")
-        await roles.set_mind_roles(mind, [await _role("claude-sonnet-5-5")])
+        await roles.set_mind_roles(mind, [await _role()])
         spawns: list = []
         with _spawns_captured(spawns):
             created = await mgr.create_session(
@@ -101,7 +102,7 @@ def test_a_turn_runs_on_its_conversations_model_when_no_role_names_it(comms_db):
     async def scenario():
         mgr = await make_manager()
         mind = await _mind()
-        await roles.set_mind_roles(mind, [await _role("claude-opus-5-5")])
+        await roles.set_mind_roles(mind, [await _role()])
         await seed_session("s7", mind_id=mind, harness="dsh", model="gpt-6.1-terra",
                            surface_id="125")
         with patch.object(mgr, "mind_model_row", new=AsyncMock(return_value=None)), \
@@ -124,7 +125,7 @@ def test_a_conversation_is_switched_to_a_model_no_role_names(comms_db):
     async def scenario():
         mgr = await make_manager()
         mind = await _mind()
-        await roles.set_mind_roles(mind, [await _role("claude-opus-5-5")])
+        await roles.set_mind_roles(mind, [await _role()])
         await seed_session("s4", mind_id=mind, harness="dsh", model="claude-opus-5-5")
         with patch.object(mgr, "mind_models", new=AsyncMock(return_value=[
                 {"name": "claude-opus-5-5"}, {"name": "gpt-6.1-terra"}])), \
@@ -148,7 +149,7 @@ def test_a_minds_own_credential_reads_its_own_grants_and_no_other_minds(comms_db
         import hive_data
         await hive_data.connect()
         mine, other = await _mind(), await _mind()
-        await roles.set_mind_roles(mine, [await _role("claude-opus-5-5")])
+        await roles.set_mind_roles(mine, [await _role()])
         await user_access.put_credential(mine, "daniel", "mind-secret", role="mind")
         await hive_data.close(drain_timeout=5.0)
         return mine, other
@@ -162,5 +163,5 @@ def test_a_minds_own_credential_reads_its_own_grants_and_no_other_minds(comms_db
         foreign = client.get(f"/minds/{other}/grants")
 
     assert own.status_code == 200
-    assert own.json()["managed"] is True and own.json()["models"] == ["claude-opus-5-5"]
+    assert own.json()["managed"] is True and own.json()["tools"] == ["files"]
     assert foreign.status_code == 404

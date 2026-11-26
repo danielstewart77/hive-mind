@@ -116,12 +116,12 @@ def test_an_unset_token_makes_no_request_and_says_what_is_missing(
 def test_a_role_is_created_with_the_grants_the_command_line_names(
         console, capsys):
     code, _ = _run(capsys, "create", "Reviewer", "--slug", "rev",
-                   "--model", "a-model", "--skills", "read, write",
+                   "--suggested-tier", "medium", "--skills", "read, write",
                    "--tools", "shell,files", "--hooks", "guard")
 
     assert code == 0
     assert _writes(console) == [("POST", "/api/roles", {
-        "name": "Reviewer", "slug": "rev", "model": "a-model",
+        "name": "Reviewer", "slug": "rev", "suggested_tier": "medium",
         "skills": ["read", "write"], "tools": ["shell", "files"],
         "hooks": ["guard"]})]
 
@@ -143,13 +143,13 @@ def test_an_update_sends_only_the_fields_it_was_given_to_the_role_by_slug(
         "PUT", "/api/roles/7", {"name": "Dev", "skills": ["code", "plan"]})]
 
 
-def test_an_update_can_clear_a_roles_model_and_an_empty_list_clears_a_list(
+def test_an_update_can_clear_a_roles_suggested_tier_and_an_empty_list_clears_a_list(
         console, capsys):
-    code, _ = _run(capsys, "update", "7", "--clear-model", "--hooks", "")
+    code, _ = _run(capsys, "update", "7", "--clear-suggested-tier", "--hooks", "")
 
     assert code == 0
     assert _writes(console) == [(
-        "PUT", "/api/roles/7", {"model": None, "hooks": []})]
+        "PUT", "/api/roles/7", {"suggested_tier": None, "hooks": []})]
 
 
 def test_an_update_that_changes_nothing_sends_nothing(console, capsys):

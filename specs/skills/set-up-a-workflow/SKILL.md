@@ -17,8 +17,8 @@ a credential and never put one on a command line. When unsure of a command's
 shape, run it with `--help` and use the shape it shows exactly.
 
     roles list | show ROLE | catalog
-    roles create NAME [--slug S] [--model M] [--skills a,b] [--tools ..] [--hooks ..]
-    roles update ROLE [--name N] [--model M | --clear-model] [--skills a,b]
+    roles create NAME [--slug S] [--suggested-tier T] [--skills a,b] [--tools ..] [--hooks ..]
+    roles update ROLE [--name N] [--suggested-tier T | --clear-suggested-tier] [--skills a,b]
     roles add-skill ROLE SKILL | remove-skill ROLE SKILL
     roles keep ROLE | promote ROLE | take SLUG
 
@@ -42,14 +42,18 @@ Read the top document, then every stage document beside it.
 Run `roles list`. Create each role the documents name that is missing, with
 `roles create`, including the three lens roles the review document calls
 for, one each for the requirements, tests and edges lenses: a stage cannot be
-given a model, a skill or a holder before its role exists. You create roles; the
+given a skill or a holder before its role exists. You create roles; the
 owner gives minds their roles.
 
 ## 3. Ask, and record
 
-Ask the owner which of this install's models serves each tier: extra high,
-high, medium, low. Set it on each role with `roles update ROLE --model M`,
-using the tier the top document gives that role. Then ask everything the
+Set each role's suggested tier with `roles update ROLE --suggested-tier T`
+(`low`, `medium`, `high` or `extra-high`), using the tier the top document
+gives that role. A role names no model and decides none: the tier is shown
+to the owner above the model box of a mind holding the role, and the owner
+sets each mind's model on the mind. Ask the owner which of this install's
+models serves each tier, extra high, high, medium and low, and record it
+with the other answers. Then ask everything the
 documents say to ask: the deployment document above all, and each role's
 needs as the top document lists them. Record the answers in the install's own
 file, `install/workflow-skills/.install/chief-of-staff.md`, in the four

@@ -4,9 +4,9 @@ routes.
 
     roles.py list
     roles.py show ROLE
-    roles.py create NAME [--slug S] [--model M] [--skills a,b]
+    roles.py create NAME [--slug S] [--suggested-tier T] [--skills a,b]
                          [--tools shell,files] [--hooks x,y]
-    roles.py update ROLE [--name N] [--model M | --clear-model]
+    roles.py update ROLE [--name N] [--suggested-tier T | --clear-suggested-tier]
                          [--skills a,b] [--tools ..] [--hooks ..]
     roles.py add-skill ROLE SKILL
     roles.py remove-skill ROLE SKILL
@@ -46,6 +46,10 @@ import os
 import sys
 from typing import Any
 from urllib import error, parse, request
+
+#: The model tiers a role may suggest. The console holds the rule; these are
+#: the same four names, so a mistyped one is refused before any call is made.
+TIERS = ("low", "medium", "high", "extra-high")
 
 _TIMEOUT = 30.0
 
@@ -194,8 +198,8 @@ def do_create(args) -> dict[str, Any]:
     body: dict[str, Any] = {"name": args.name}
     if args.slug is not None:
         body["slug"] = args.slug
-    if args.model is not None:
-        body["model"] = args.model
+    if args.suggested_tier is not None:
+        body["suggested_tier"] = args.suggested_tier
     return _call("POST", "/api/roles", _grants(args, into=body))
 
 
@@ -203,14 +207,14 @@ def do_update(args) -> dict[str, Any]:
     changes: dict[str, Any] = {}
     if args.name is not None:
         changes["name"] = args.name
-    if args.clear_model:
-        changes["model"] = None
-    elif args.model is not None:
-        changes["model"] = args.model
+    if args.clear_suggested_tier:
+        changes["suggested_tier"] = None
+    elif args.suggested_tier is not None:
+        changes["suggested_tier"] = args.suggested_tier
     _grants(args, into=changes)
     if not changes:
-        raise Refused("nothing to update: give --name, --model, "
-                      "--clear-model, --skills, --tools or --hooks")
+        raise Refused("nothing to update: give --name, --suggested-tier, "
+                      "--clear-suggested-tier, --skills, --tools or --hooks")
     rid = _held(args.role)
     return _call("PUT", f"/api/roles/{rid}", changes)
 
@@ -263,19 +267,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("list", do_list, "every role on this hive and in the repo")
     add("show", do_show, "one role", "role")
-    add("catalog", do_catalog, "the models, skills and hooks a role can be given")
+    add("catalog", do_catalog, "the skills and hooks a role can be given")
 
     create = add("create", do_create, "make a role", "name")
     create.add_argument("--slug", help="its key; defaults to the name's")
-    create.add_argument("--model")
+    create.add_argument("--suggested-tier", dest="suggested_tier", choices=TIERS,
+                        help="the model tier this role suggests; advice, never a rule")
     grants(create)
 
     update = add("update", do_update, "change a role's fields", "role")
     update.add_argument("--name")
-    model = update.add_mutually_exclusive_group()
-    model.add_argument("--model")
-    model.add_argument("--clear-model", dest="clear_model", action="store_true",
-                       help="the role names no model")
+    tier = update.add_mutually_exclusive_group()
+    tier.add_argument("--suggested-tier", dest="suggested_tier", choices=TIERS,
+                      help="the model tier this role suggests; advice, never a rule")
+    tier.add_argument("--clear-suggested-tier", dest="clear_suggested_tier",
+                      action="store_true", help="the role suggests no tier")
     grants(update)
 
     add("add-skill", do_add_skill, "give a role one skill", "role", "skill")
