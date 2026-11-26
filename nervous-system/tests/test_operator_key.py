@@ -214,3 +214,20 @@ def test_a_mind_cannot_take_a_second_row_under_its_own_name(world) -> None:
     assert [r["name"] for r in rows].count("alpha") == 1
     assert len(rows) == 5
     assert _address(world.client, "alpha") == OLD
+
+
+def test_an_unreadable_roles_table_makes_an_operator_an_ordinary_mind(world, monkeypatch) -> None:
+    """The role is read at every request; when the read fails the gateway
+    refuses the operator's reach (403, not 500) rather than guess yes. The
+    store is the boundary that fails here; `is_operator_mind` itself runs."""
+    world.make_operator()
+    assert _register(world.client, KEYS["ops"], A, "alpha", NEW).status_code == 200
+
+    async def unreadable(*args, **kwargs):
+        raise RuntimeError("the roles tables cannot be read")
+
+    monkeypatch.setattr(roles, "roles_of", unreadable)
+    refused = _register(world.client, KEYS["ops"], A, "alpha", OLD)
+    assert refused.status_code == 403
+    assert _address(world.client, "alpha") == NEW
+    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": False}

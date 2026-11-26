@@ -381,22 +381,29 @@ def test_pasting_a_key_another_mind_holds_in_the_env_file_is_refused_whatever_va
         _run(holder_credentials.accept_mind_provider_token(PASTED, for_mind="quokka"))
 
 
-def test_two_creations_pasting_the_same_key_cannot_both_get_it(hive, service):
+@pytest.mark.parametrize("first", ["quokka", "wombat"])
+def test_two_creations_pasting_the_same_key_cannot_both_get_it(hive, service, first):
     """Both pass the page's early read before either writes. The refusal that
     stands is the one made under the rotation lock, so exactly one mind ends
-    holding the key and the other writes nothing."""
+    holding the key and the other writes nothing. Run with each mind first in
+    the gather, so which one wins is never what the test depends on: the one
+    that goes first holds it and the other is the refused one."""
+    minds = {"quokka": ("quokka", "uuid-1"), "wombat": ("wombat", "uuid-2")}
+    order = [first] + [n for n in minds if n != first]
+
     async def both():
         return await asyncio.gather(
-            holder_credentials.provision_mind("quokka", "uuid-1", "daniel", proxy_key=PASTED),
-            holder_credentials.provision_mind("wombat", "uuid-2", "daniel", proxy_key=PASTED),
+            *[holder_credentials.provision_mind(
+                minds[n][0], minds[n][1], "daniel", proxy_key=PASTED) for n in order],
             return_exceptions=True)
 
-    results = _run(both())
+    results = dict(zip(order, _run(both())))
 
-    refused = [r for r in results if isinstance(r, holder_credentials.KeyHeldByAnother)]
-    assert len(refused) == 1
-    holders = [n for n in ("quokka", "wombat") if mind_key_files.read(n) == PASTED]
-    assert len(holders) == 1
+    loser = order[1]
+    assert not isinstance(results[first], BaseException), results[first]
+    assert isinstance(results[loser], holder_credentials.KeyHeldByAnother)
+    assert mind_key_files.read(first) == PASTED
+    assert mind_key_files.read(loser) is None
 
 
 def test_a_blank_or_tiny_key_is_refused_with_the_paste_the_minds_key_sentence(hive):
