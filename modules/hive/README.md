@@ -158,7 +158,12 @@ writes the file, not just the registry row: the console's
 
 That is one code path for every Mind — a container in this stack, a
 bare-metal Mind on this host, and a Mind on another machine, which no bind
-mount can reach. A Mind that is down cannot be configured, which is the
+mount can reach. The console presents the signed-in
+owner's own key (made by the console, kept like a mind's, shown to nobody); the
+Mind accepts that key, or its own, and asks the gateway whether a key that is
+not its own is its owner's. So a Mind on another machine is changed without the
+console holding that Mind's key; a Mind that cannot reach the gateway answers
+503. A Mind that is down cannot be configured, which is the
 honest answer rather than a limitation: a registry row written while its
 Mind was unreachable would be overwritten the moment it came back.
 

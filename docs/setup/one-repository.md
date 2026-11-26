@@ -236,8 +236,8 @@ hold, a mind at a time.
    shell set the same and `HIVE_SITE_URL`.
 2. `python3 tools/stateless/key_migration/key_migration.py report`. It lists every
    holder on the gateway, memory store and tools and every mind with a state.
-   Names plainly any mind on another machine, any mind sharing a key and any
-   holder it cannot place. It shows digests only, never a value.
+   Names plainly any mind on another machine not yet registered (paste its key
+   on its page), any mind sharing a key and any holder it cannot place. It shows digests only, never a value.
 3. `... move <mind>` for the pilot mind, then recreate it, then check it works
    and an untouched control mind still does. Then the rest.
 4. `... tools-credential hive-site` and one per surface bot. Each is written
@@ -285,16 +285,38 @@ package and the chat surfaces install alone at a named tag, so a mind on another
 machine needs only them:
 `pip install "hive-data @ git+https://github.com/danielstewart77/hive-mind.git@hive-data-vX.Y.Z#subdirectory=modules/hive-data"`.
 
-## Open: a mind on another machine and the console (Daniel's answer awaited)
+## A mind on another machine, and a person's own key
 
-A settings change on a mind that runs on a different machine from the console
-needs that mind's own key, and the console never holds it (it is not readable
-from there). Two answers are possible and neither is built: the console stores a
-pasted key for every mind (a new secret store in the console), or minds on other
-machines keep an administrator path of their own. Until Daniel answers, such a
-mind shows as "another machine ... cannot be moved from here" in the report,
-and `retire` stays blocked while any mind is in that state. This page does not
-decide it.
+Daniel, 2026-11-25: "We should have a key for a user, just as we do for minds.
+So if the user owns the mind, the user's key should be accepted when making
+changes to the mind it owns." Built as feature 834 requirement 19.
+
+- A person has one key, held like a mind's: a credential at the gateway with
+  their username as holder and kind `user`, kept by the console in the shared
+  env file as `USER_KEY_<NAME>`, made at random on their first need and shown to
+  nobody. It opens no route at the gateway.
+- When a signed-in person changes a mind the console already lets them change,
+  the console presents their key to that mind. A mind accepts its own key (as
+  before) and the key of its owner: it asks the gateway "is this key held by a
+  user who owns me?" (`POST /broker/owner-key-check`, authenticated by the
+  mind's own key, answered yes or no, owner as on the mind's registry row).
+  A user's key is refused by every mind that user does not own, on this host or
+  another machine, in-repo or edge. There is no administrator key.
+- So a change to a mind on another machine works without the console ever
+  holding that mind's key. It does need that machine to be able to reach the
+  gateway (a mind that cannot ask answers 503, never open), and the mind to
+  run this release. A person whose key is replaced
+  (`POST /api/account/key/replace`, the signed-in person's own) has the old
+  key refused by every mind at its next request.
+- Retirement: a mind on another machine counts as moved when its pasted key
+  (pasting it on the mind's page registers it at the gateway, the memory store
+  and the tools; the console never stores it) is registered at all three. The
+  report says plainly "registered, key not stored here". Until it is pasted,
+  such a mind is "not moved" and `retire` stays blocked. The old per-service
+  values of such a mind stay refused after `retire`, as for any mind.
+- Limit: the console remembers "registered, key not stored here" in a small
+  record beside the key journal (`/data/key-journal`, a volume), holding the
+  mind's name and no key.
 
 ## Things this does not do
 

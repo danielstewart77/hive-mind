@@ -570,6 +570,10 @@ TABLE.add(
 
 
 TABLE.add(Rule(USER), "GET /api/settings/features", "PUT /api/settings/features")
+# A person replaces their own key, the one this console presents to the minds
+# they own (feature 834, requirement 19). Only their own: the name is the
+# signed-in user's, never taken from the request.
+TABLE.add(Rule(USER), "POST /api/account/key/replace")
 TABLE.add(Rule(ADMIN), "GET /hive-errors", "GET /api/hive-errors")
 TABLE.add(Rule(ADMIN), "GET /api/settings/providers", "POST /api/settings/providers",
           "PUT /api/settings/providers/{provider_id}", "DELETE /api/settings/providers/{provider_id}",

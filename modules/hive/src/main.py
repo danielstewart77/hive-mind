@@ -4147,6 +4147,18 @@ async def api_key_migration_tools_credential(holder: str, user: dict = Depends(r
     return result
 
 
+@app.post("/api/account/key/replace")
+async def api_replace_my_key(user: dict = Depends(require_auth)):
+    """Cut off the signed-in person's own key and make a new one. The old key
+    is refused by every mind at its next request; nothing is shown."""
+    try:
+        await holder_credentials.replace_user_key(str(user["username"]))
+    except (holder_credentials.MintRefused, holder_credentials.MintUncertain) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    log_event(log, "user.key_replaced", **_actor_fields(user))
+    return {"replaced": True}
+
+
 @app.post("/api/settings/key-migration/{name}/move")
 async def api_key_migration_move(name: str, user: dict = Depends(require_admin_or_route_bearer)):
     """Move one existing mind onto the proxy key it already holds."""
