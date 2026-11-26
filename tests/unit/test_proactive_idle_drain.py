@@ -15,7 +15,9 @@ import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from minds.proactive import extract_assistant_texts, idle_drain, make_proactive_router
+from minds.proactive import (
+    extract_assistant_texts, idle_drain, make_handoff_router, make_proactive_router,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -260,3 +262,20 @@ async def test_a_mind_specific_telegram_surface_still_buffers():
     )
     await _drain_briefly(session, buffer)
     assert buffer == [{"chat_id": 8776938611, "text": "still mine"}]
+
+
+def test_what_the_gateway_hands_a_mind_is_what_its_surface_next_collects():
+    """A wake turn's words reach Telegram through the queue the bot drains."""
+    buffer: list[dict] = []
+    app = FastAPI()
+    app.include_router(make_handoff_router(buffer))
+    app.include_router(make_proactive_router(buffer, None))
+    client = TestClient(app)
+
+    handed = client.post("/sessions/s-1/proactive",
+                         json={"chat_id": "5550001", "text": "The planner asks."})
+
+    assert handed.status_code == 200
+    assert client.get("/proactive").json() == [
+        {"chat_id": 5550001, "text": "The planner asks."}]
+

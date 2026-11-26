@@ -248,6 +248,20 @@ def _is_wake_text(content: str | None) -> bool:
     return str(content or "").startswith("[wake]")
 
 
+def _telegram_chat(row: dict | None) -> int | None:
+    """The Telegram chat a conversation is on, or None when it is on none.
+
+    The surface decides, never the shape of the id: a Discord channel id is
+    an integer too, and one handed to a Telegram bot is retried for hours.
+    """
+    if str((row or {}).get("surface") or "").split(":", 1)[0] != "telegram":
+        return None
+    try:
+        return int(row.get("surface_id"))
+    except (TypeError, ValueError):
+        return None
+
+
 _FINISH_CAPABILITY = re.compile(r"finish capability: [0-9a-f]{64}")
 _CAPABILITY_WITHHELD = "finish capability: (withheld from the record)"
 
@@ -1024,10 +1038,12 @@ class SessionManager:
             ids = [w["id"] for w in claimed]
             try:
                 text = await self._wake_text(claimed)
+                woken_at = time.time()
                 async for _ in self.send_message(
                     sender_id, text, _wake_ids=ids,
                 ):
                     pass
+                await self._hand_wake_answer_to_surface(row, woken_at)
             except SenderBusy:
                 pass
             except Exception:
@@ -1036,6 +1052,53 @@ class SessionManager:
                 await watches.release_claims(ids)
         except Exception:
             log.exception("could not deliver wakes to %s", sender_id)
+
+    async def _hand_wake_answer_to_surface(self, row: dict, woken_at: float) -> None:
+        """Give what a woken mind said to the surface its conversation is on.
+
+        Nobody reads a wake turn's stream: the gateway sent it. So the mind's
+        closing words reached its person only if the mind remembered to send
+        them itself, by a command its skill told it to run. On 2026-11-24 a
+        chief of staff's new conversation took eight wake turns and sent none
+        of them, a planner's question among them, and the day before the ones
+        it did send had no voice. The words are handed to the mind's own
+        surface here instead, on the queue its bot already drains for every
+        other turn a mind takes unprompted, so they are posted and spoken by
+        the same code as those.
+
+        Only a conversation on Telegram has such a queue. Best effort: the
+        answer is in the record whatever happens here, so a failure is
+        logged and the wake is still delivered.
+        """
+        try:
+            chat_id = _telegram_chat(row)
+            if chat_id is None:
+                return
+            said = await core.latest_turn(row["id"], role="assistant")
+            text = str((said or {}).get("content") or "").strip()
+            if not text or float(said.get("created_at") or 0) < woken_at:
+                # Nothing said in this turn; an older answer is not this one.
+                return
+            mind_url = (self._procs.get(row["id"]) or {}).get("_mind_url")
+            if not mind_url:
+                return
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    f"{mind_url}/sessions/{row['id']}/proactive",
+                    json={"chat_id": chat_id, "text": text},
+                    headers=await self._mind_auth_headers_for_session(
+                        row["id"], row.get("mind_id")),
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    status = resp.status
+            log_event(log, "wake.answer.handed_to_surface",
+                      level=logging.INFO if status == 200 else logging.WARNING,
+                      session_id=row["id"], mind_id=row.get("mind_id"),
+                      status_code=status, content_chars=len(text))
+        except Exception:
+            log.exception("could not hand the wake answer of %s to its surface",
+                          row.get("id"))
 
     async def _wake_sweep_loop(self) -> None:
         while True:

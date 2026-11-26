@@ -657,6 +657,69 @@ async def test_the_model_and_endpoint_come_from_the_minds_own_configuration(
     assert spawn.env["DSH_PROXY_BASE_URL"] == "http://proxy:8899/v1"
 
 
+async def test_the_effort_a_conversation_names_is_what_its_dsh_process_is_told(
+    dsh, monkeypatch
+) -> None:
+    """Daniel, 2026-11-24: a dsh sub-agent spent 550,000 hidden reasoning
+    tokens in seventy-five minutes. The conversation's effort was accepted
+    by this adapter and dropped, so the model was never told how hard to
+    think."""
+    _session(dsh)["effort"] = "medium"
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_REASONING_EFFORT"] == "medium"
+
+
+async def test_a_conversation_naming_no_effort_tells_its_dsh_process_none(
+    dsh, monkeypatch
+) -> None:
+    """Not even one left in the mind server's own environment: the model
+    keeps its default, as on the other harnesses."""
+    monkeypatch.setenv("DSH_REASONING_EFFORT", "max")
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert "DSH_REASONING_EFFORT" not in spawn.env
+
+
+async def test_a_conversation_naming_no_effort_runs_at_the_minds_own_default(
+    dsh, monkeypatch
+) -> None:
+    """Daniel, 2026-11-24: the coder's build conversations run at medium.
+    Whoever opens a conversation for a mind sets no level on it."""
+    monkeypatch.setitem(dsh.RUNTIME, "default_effort", "medium")
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_REASONING_EFFORT"] == "medium"
+
+
+async def test_the_effort_a_conversation_names_wins_over_the_minds_default(
+    dsh, monkeypatch
+) -> None:
+    monkeypatch.setitem(dsh.RUNTIME, "default_effort", "medium")
+    _session(dsh)["effort"] = "high"
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_REASONING_EFFORT"] == "high"
+
+
+async def test_an_effort_word_dsh_does_not_know_is_not_handed_to_it(
+    dsh, monkeypatch
+) -> None:
+    """The profile refuses an unknown level, and a process that cannot read
+    its profile does not start: the conversation would be dead."""
+    _session(dsh)["effort"] = "turbo"
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert "DSH_REASONING_EFFORT" not in spawn.env
+
+
 async def test_a_standalone_turn_is_sized_by_the_window_the_proxy_lists_for_its_model(
     dsh, monkeypatch
 ) -> None:
@@ -2097,6 +2160,11 @@ def test_the_terminals_pane_carries_the_same_session_id(dsh) -> None:
     the browser terminal is the one most likely to."""
     env = dsh._pane_env("qwen35-131k", "", "", "", None, "row-1")
     assert env["HIVE_SESSION_ID"] == "row-1"
+
+
+def test_the_terminals_pane_is_told_the_conversations_effort(dsh) -> None:
+    env = dsh._pane_env("qwen35-131k", "", "", "", None, "row-1", "low")
+    assert env["DSH_REASONING_EFFORT"] == "low"
 
 
 # ── role guard wiring (feature 10.18) ─────────────────────────────────────

@@ -59,7 +59,9 @@ from minds import (
     transcript,
 )
 from minds.harness import dsh_hooks, hook_commands, rotation_hooks
-from minds.proactive import BUFFER as proactive_buffer, make_proactive_router
+from minds.proactive import (
+    BUFFER as proactive_buffer, make_handoff_router, make_proactive_router,
+)
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
 # The mind's one key (core/mind_key.py): when this container was started with
@@ -123,6 +125,7 @@ install_fastapi_logging(app, log, f"mind:{NAME}")
 # idle drain, and dsh's resident process reporting a background child that
 # settled after the turn that dispatched it had closed. The codex adapter
 # spawns per turn with no idle stream and leaves it empty.
+app.include_router(make_handoff_router(proactive_buffer))
 app.include_router(make_proactive_router(
     proactive_buffer,
     mind_key.proactive_token(os.environ, _LEGACY_GATEWAY_VALUE),

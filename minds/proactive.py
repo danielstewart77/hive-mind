@@ -195,3 +195,32 @@ def make_proactive_router(buffer: list[dict], token: str | None) -> APIRouter:
         return items
 
     return router
+
+
+def make_handoff_router(buffer: list[dict]) -> APIRouter:
+    """Return a router exposing ``POST /sessions/{sid}/proactive``.
+
+    The gateway calls it with what a mind said in a turn nobody was reading:
+    a turn the gateway itself started, to wake the mind because a session it
+    briefed stopped. The text joins the buffer ``GET /proactive`` drains, so
+    the mind's surface posts and speaks it like any other unprompted turn.
+    Under ``/sessions`` so that the mind's session guard covers it: the
+    caller is the gateway, with the credential it sends every turn with.
+    """
+    router = APIRouter()
+
+    @router.post("/sessions/{sid}/proactive")
+    async def hand_off(sid: str, body: dict):  # noqa: ANN202
+        text = body.get("text")
+        try:
+            chat_id = int(body.get("chat_id"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "chat_id must be a number"}, status_code=422)
+        if not isinstance(text, str) or not text.strip():
+            return JSONResponse({"error": "text must not be empty"}, status_code=422)
+        buffer.append({"chat_id": chat_id, "text": text})
+        log_event(log, "proactive.buffered", mind_name=NAME, session_id=sid,
+                  client_ref=chat_id, content_chars=len(text), source="gateway")
+        return {"queued": True}
+
+    return router
