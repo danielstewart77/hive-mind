@@ -387,3 +387,23 @@ async def test_a_console_stopped_between_the_key_file_and_the_env_lines_brings_t
     assert handled == [{"mind": "ada", "recovered": True}]
     assert _every_file_holding(tmp_path, OLD) == []
     assert f"MIND_PROXY_KEY={NEW}" in hive.env.read_text()
+
+
+async def test_a_saved_copy_that_cannot_be_cleaned_of_the_old_key_fails_the_replacement_loudly_and_puts_the_old_key_back(hive, tmp_path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / "hive_mind-X-1.env").write_bytes(b"\xff\xfe" + OLD.encode())  # not text: still a copy of the key
+    stuck = backups / "stuck.env"
+    stuck.mkdir()  # a directory in the way is skipped, a file that cannot be replaced is not
+    (backups / "locked.env").write_text(f"MIND_PROXY_KEY={OLD}\n")
+    import os
+    os.chmod(backups, 0o500)
+    try:
+        if os.access(backups, os.W_OK):
+            pytest.skip("this user can write a read-only folder")
+        with pytest.raises(holder_credentials.MintRefused, match="could not be cleaned"):
+            await _replace()
+    finally:
+        os.chmod(backups, 0o700)
+    assert mind_key_files.read("ada") == OLD
+    assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}

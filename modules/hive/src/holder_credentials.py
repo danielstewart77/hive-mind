@@ -1291,25 +1291,32 @@ def runtime_copies(value: str) -> list[str]:
     return found
 
 
-def scrub_backups(value: str) -> int:
+def scrub_backups(value: str) -> list[str]:
     """Blank the retired key `value` in the console's own pre-write copies of
     env files (requirement 22: no file keeps the old key). The copies are kept,
     since they are whole files and hold other credentials' last values; only
-    the old key's text in them is replaced. Returns how many were changed."""
-    changed = 0
+    the old key's text in them is replaced, by a temporary file renamed over
+    the copy. Returns the copies that could not be cleaned, by name."""
+    failed: list[str] = []
     try:
-        candidates = list(credentials_data.BACKUP_DIR.glob("*.env"))
+        candidates = list(credentials_data.BACKUP_DIR.iterdir())
+    except FileNotFoundError:
+        return failed
     except OSError:
-        return 0
+        return ["the backup folder"]
     for path in candidates:
-        try:
-            text = path.read_text()
-            if value in text:
-                path.write_text(text.replace(value, "REPLACED-MIND-KEY"))
-                changed += 1
-        except (OSError, UnicodeDecodeError):
+        if not path.is_file():
             continue
-    return changed
+        try:
+            raw = path.read_bytes()
+            if value.encode() not in raw:
+                continue
+            temp = path.with_name(path.name + ".tmp")
+            temp.write_bytes(raw.replace(value.encode(), b"REPLACED-MIND-KEY"))
+            os.replace(temp, path)
+        except OSError:
+            failed.append(path.name)
+    return failed
 
 
 def leftover_files(value: str) -> list[str]:
@@ -1580,15 +1587,18 @@ async def replace_mind_key(
             if failure is None and old and not secrets.compare_digest(old, value):
                 with credentials_data._WRITE_LOCK:
                     left = leftover_files(old)
+                with credentials_data._WRITE_LOCK:
+                    unscrubbed = scrub_backups(old)
                 if left:
                     failure = MintRefused(
                         f"{', '.join(left)} still holds the old key in a form this "
                         "console does not rewrite")
+                elif unscrubbed:
+                    failure = MintRefused(
+                        f"the console's saved copies {', '.join(unscrubbed)} still hold the "
+                        "old key and could not be cleaned")
             if failure is None:
                 stored = "written"
-                if old and not secrets.compare_digest(old, value):
-                    with credentials_data._WRITE_LOCK:
-                        scrub_backups(old)
 
         if failure is None:
             try:
@@ -1760,7 +1770,10 @@ async def recover_replacements() -> list[dict[str, Any]]:
                 for label, name in record.get("echo", []):
                     if label in ENV_FILES:
                         with credentials_data._WRITE_LOCK:
-                            _write_stored(Location(label, name), value, backup=False)
+                            done = _write_stored(Location(label, name), value, backup=False)
+                        if not done["written"]:
+                            raise MintRefused(
+                                f"{label} did not take the stored key: {done['reason']}")
             key_journal.finish(record)
             handled.append({"mind": holder, "recovered": True})
         except Exception as exc:  # noqa: BLE001 - recorded, never fatal to the console
