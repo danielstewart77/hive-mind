@@ -2084,8 +2084,11 @@ USER_ROLE = "user"
 
 def user_key_variable(username: str) -> str:
     """The name the key had as a line in the install's settings file, before
-    it moved to the key folder. Kept to find and remove such a line."""
-    return USER_KEY_PREFIX + mind_key_files.person_stem(username.strip().lower())
+    it moved to the key folder. Kept to find and remove such a line, so it
+    keeps the rule it was written under (the whole name upper-cased)."""
+    stem = "".join(c if c.isalnum() and c.isascii() else f"_{ord(c):X}_"
+                   for c in username.strip().upper())
+    return USER_KEY_PREFIX + stem
 
 
 def _legacy_location(username: str) -> Location | None:
@@ -2124,13 +2127,16 @@ async def _record_user_key(username: str, value: str) -> None:
             f"the hive database did not take {username!r}'s key ({type(exc).__name__})") from None
 
 
-async def _recorded(username: str, value: str) -> bool:
-    """Whether the gateway's row for this person is live and holds `value`."""
+async def _recorded(username: str, value: str) -> bool | None:
+    """Whether the gateway's row for this person is live and holds `value`;
+    None when the row was cut off on purpose (revoked), which is never undone
+    here."""
     from hive_data import broker_ops, core
 
     row = await core.get_credential(username)
+    if row is not None and str(row.get("role") or "") == USER_ROLE and row.get("revoked_at"):
+        return None
     return (row is not None and str(row.get("role") or "") == USER_ROLE
-            and not row.get("revoked_at")
             and await broker_ops.holder_of_digest(_digest(value)) == username)
 
 
@@ -2206,6 +2212,29 @@ def _legacy_value(username: str) -> str | None:
     return _loaded_value(location) or None
 
 
+def _legacy_line_absent(username: str) -> bool:
+    try:
+        return _legacy_value(username) is None
+    except Unreadable:
+        return True  # a file this console cannot read is not a reason to refuse the key
+
+
+def _legacy_value_or_none(username: str) -> str | None:
+    try:
+        return _legacy_value(username)
+    except Unreadable:
+        return None
+
+
+def _remove_legacy_line_quietly(username: str, value: str) -> None:
+    try:
+        _remove_legacy_line(username, value)
+    except (Unreadable, OSError) as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "the old line of %r's key could not be removed: %s", username, type(exc).__name__)
+
+
 async def user_key(username: str) -> str | None:
     """This person's key, made on their first need and then kept.
 
@@ -2221,25 +2250,32 @@ async def user_key(username: str) -> str | None:
         # settings read must not queue behind a key move. Only making or
         # mending one is serialised.
         existing = _stored_user_key(name)
-        if existing and await _recorded(name, existing) and _legacy_value(name) is None:
-            return existing
+        if existing:
+            state = await _recorded(name, existing)
+            if state is None:
+                return None  # cut off on purpose: replace_user_key makes a new one
+            if state and _legacy_line_absent(name):
+                return existing
         async with _ROTATION_LOCK:
             existing = _stored_user_key(name)
-            old = _legacy_value(name)
+            old = _legacy_value_or_none(name)
             if existing:
                 # A crash between the database write and the file write, or
                 # between the file and the old line's removal, leaves this
                 # half done: finish it here, from the file, which is the key.
-                if not await _recorded(name, existing):
+                state = await _recorded(name, existing)
+                if state is None:
+                    return None
+                if not state:
                     await _record_user_key(name, existing)
                 if old:
-                    _remove_legacy_line(name, old)
+                    _remove_legacy_line_quietly(name, old)
                 return existing
             value = await _issue_user_key(name, old, old)
             if old:
-                _remove_legacy_line(name, old)
+                _remove_legacy_line_quietly(name, old)
             return value
-    except (MintRefused, MintUncertain, Unreadable, OSError) as exc:
+    except Exception as exc:  # noqa: BLE001 - a database that cannot answer is no key, never a 500
         import logging
         logging.getLogger(__name__).warning(
             "no key could be made for user %r: %s", name, type(exc).__name__ + ": " + str(exc)[:200])

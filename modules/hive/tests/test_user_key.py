@@ -211,10 +211,14 @@ def test_an_administrator_replaces_anyones_key_and_anyone_else_only_their_own(co
     console.settled_user(admin, "tess", "tess-password-1")
 
     assert sloan.post("/api/admin/users/tess/key/replace").status_code == 403
-    assert sloan.post("/api/account/key/replace").status_code in (200, 502)
+    own = sloan.post("/api/account/key/replace")
+    assert own.status_code == 200 and own.json()["replaced"] is True
+    assert mind_key_files.read_person("sloan")
     refused_for_missing = admin.post("/api/admin/users/nobody/key/replace")
     assert refused_for_missing.status_code == 404
-    assert admin.post("/api/admin/users/tess/key/replace").status_code in (200, 502)
+    before = mind_key_files.read_person("tess")
+    assert admin.post("/api/admin/users/tess/key/replace").status_code == 200
+    assert mind_key_files.read_person("tess") not in (None, before)
 
 
 async def test_a_crash_between_the_database_and_the_key_file_is_mended_by_the_next_ask(two_owners):
@@ -241,3 +245,14 @@ async def test_a_legacy_line_left_behind_beside_an_existing_key_file_is_removed_
 def test_two_people_whose_names_differ_only_in_letters_that_upper_case_alike_never_share_a_key_file():
     assert mind_key_files.person_stem("strasse") != mind_key_files.person_stem("straße")
     assert mind_key_files.person_stem("dan.s") != mind_key_files.person_stem("dan-s")
+
+
+async def test_a_key_an_administrator_cut_off_is_not_brought_back_by_the_next_ask(two_owners):
+    key = await holder_credentials.user_key("daniel")
+    await holder_credentials._unrecord_user_key("daniel")
+
+    assert await holder_credentials.user_key("daniel") is None
+    assert await _asked(OLD, key) is False
+
+    await holder_credentials.replace_user_key("daniel")
+    assert await holder_credentials.user_key("daniel") != key
