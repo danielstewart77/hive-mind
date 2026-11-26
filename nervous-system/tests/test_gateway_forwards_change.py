@@ -40,6 +40,7 @@ SESSION_TOKEN = "alpha-gateway-credential-for-tests"  # secret-guard: allow
 
 class _Mind(BaseHTTPRequestHandler):
     seen: list = []
+    status = 200
 
     def _answer(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -47,7 +48,7 @@ class _Mind(BaseHTTPRequestHandler):
         type(self).seen.append({"method": self.command, "path": self.path,
                                 "auth": self.headers.get("Authorization"), "body": body})
         payload = json.dumps({"applied": True}).encode()
-        self.send_response(200)
+        self.send_response(type(self).status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -180,3 +181,54 @@ def test_a_mind_that_cannot_be_reached_is_said_so_plainly(world, mind_server) ->
     answer = _change(world, KEYS["daniel"])
     assert answer.status_code == 502
     assert "could not be reached" in answer.json()["detail"]
+
+
+def test_a_disabled_person_changes_nothing_and_a_mind_with_an_odd_address_is_not_called(world) -> None:
+    asyncio.run(execute("UPDATE core.users SET disabled_at = 1 WHERE username = 'daniel'"))
+    assert _change(world, KEYS["daniel"]).status_code == 403
+    asyncio.run(execute("UPDATE core.users SET disabled_at = NULL WHERE username = 'daniel'"))
+    for odd in ("http://127.0.0.1:9/latest/#", "http://127.0.0.1:9/?x=", "file:///etc/passwd",
+                "http://u:p@127.0.0.1:9"):
+        asyncio.run(execute("UPDATE core.minds SET gateway_url = $1 WHERE name = 'alpha'", odd))
+        assert _change(world, KEYS["daniel"]).status_code == 502
+    assert world.seen == []
+
+
+def test_the_minds_answer_status_and_body_come_back_and_what_was_sent_arrives_whole(world) -> None:
+    answer = _change(world, KEYS["daniel"], tail="files/skills/content", method="PUT",
+                     body={"text": "hello"})
+    assert answer.status_code == 200 and answer.json() == {"applied": True}
+    assert world.seen[0]["method"] == "PUT"
+    assert world.seen[0]["path"] == "/files/skills/content"
+    assert json.loads(world.seen[0]["body"]) == {"text": "hello"}
+
+
+def test_a_mind_that_refuses_the_gateways_credential_is_reported_as_out_of_date(world) -> None:
+    _Mind.status = 401
+    try:
+        answer = _change(world, KEYS["daniel"])
+    finally:
+        _Mind.status = 200
+    assert answer.status_code == 502
+    assert "refreshes when the mind next registers" in answer.json()["detail"]
+
+
+def test_a_mind_the_gateway_holds_no_credential_for_is_told_to_register_again(world) -> None:
+    asyncio.run(execute("UPDATE core.minds SET session_token = NULL WHERE name = 'alpha'"))
+    answer = _change(world, KEYS["daniel"])
+    assert answer.status_code == 409
+    assert "register again" in answer.json()["detail"]
+    assert world.seen == []
+
+
+def test_a_mind_with_no_owner_answers_to_the_primary_user_only(world, monkeypatch) -> None:
+    monkeypatch.setenv("COMMS_PRIMARY_USER", "sloan")
+    asyncio.run(execute("UPDATE core.minds SET owner = NULL WHERE name = 'alpha'"))
+    assert _change(world, KEYS["daniel"]).status_code == 403
+    assert _change(world, KEYS["sloan"]).status_code == 200
+
+
+def test_a_traversal_that_would_land_on_an_allowed_route_is_still_refused(world) -> None:
+    for tail in ("runtime/%2e%2e/runtime", "runtime/", "runtime//settings"):
+        assert _change(world, KEYS["daniel"], tail=tail, method="GET").status_code == 404
+    assert world.seen == []

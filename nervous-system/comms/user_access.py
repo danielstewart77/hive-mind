@@ -604,6 +604,16 @@ async def operator_may_change(operator_holder: str, target: str) -> bool:
 ADMINS_GROUP = "admins"
 
 
+async def _live_user_row(username: str):
+    name = normalize_username(username)
+    if not name:
+        return None
+    for row in await core.list_users():
+        if normalize_username(row["username"]) == name:
+            return row
+    return None
+
+
 async def person_is_administrator(username: str) -> bool:
     """Whether this person is in the admins group, read from the hive database
     on this call (feature 834, requirement 32). A person with no row, a
@@ -635,6 +645,12 @@ async def caller_may_change(caller: Caller, target: dict) -> bool:
     """
     holder = normalize_holder(caller.holder)
     if caller.role == USER_KEY:
+        # A person whose account is disabled changes nothing, whatever their
+        # key still says; a person with no account row (a hive that records
+        # people elsewhere) is judged on ownership alone.
+        row = await _live_user_row(caller.username)
+        if row is not None and row["disabled_at"] is not None:
+            return False
         if await person_is_administrator(caller.username):
             return True
         owner = normalize_username(target.get("owner"))

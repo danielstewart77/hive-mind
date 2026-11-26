@@ -2646,6 +2646,26 @@ def _forwardable(method: str, tail: str) -> str | None:
     return None
 
 
+def _forward_base(registered: object) -> str | None:
+    """The scheme, host and port of a mind's registered address, rebuilt from
+    its parts. A registered address carrying a path, query, fragment or
+    credentials is refused, so the fixed list of routes is the only thing that
+    decides the path (nothing in the address can swallow it)."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(str(registered or "").strip())
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not host:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username or parts.password:
+        return None
+    shown = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{shown}" + (f":{port}" if port else "")
+
+
 @app.api_route("/broker/minds/{mind_id}/forward/{tail:path}", methods=list(_FORWARD_METHODS))
 async def broker_forward_to_mind(request: Request, mind_id: str, tail: str):
     """A change to one mind, or a reading of it, made through the gateway.
@@ -2660,18 +2680,24 @@ async def broker_forward_to_mind(request: Request, mind_id: str, tail: str):
     forwarded. Nothing of the request or the answer is logged or kept.
     """
     caller = _caller(request)
-    row = await core.get_mind_by_id_or_name(mind_id)
-    if row is None or not await user_access.caller_may_change(caller, dict(row)):
-        if row is None and caller.role == user_access.USER_KEY \
-                and await user_access.person_is_administrator(caller.username):
+    try:
+        row = await core.get_mind_by_id_or_name(mind_id)
+        allowed = row is not None and await user_access.caller_may_change(caller, dict(row))
+        unknown_to_admin = (
+            row is None and caller.role == user_access.USER_KEY
+            and await user_access.person_is_administrator(caller.username))
+    except user_access._STORE_DOWN:
+        return JSONResponse({"detail": "the hive database is not answering"}, status_code=503)
+    if not allowed:
+        if unknown_to_admin:
             raise HTTPException(404, "No such mind")
         raise HTTPException(403, "this key may not change that mind")
     path = _forwardable(request.method, tail)
     if path is None:
         raise HTTPException(404, "that is not something a mind can be asked through the gateway")
-    base = str(row["gateway_url"] or "").strip().rstrip("/")
-    if not base:
-        raise HTTPException(502, "that mind has no registered address, it could not be reached")
+    base = _forward_base(row["gateway_url"])
+    if base is None:
+        raise HTTPException(502, "that mind has no usable registered address, it could not be reached")
     try:
         auth = await session_mgr.mind_auth_headers(row["mind_id"])
     except sessions.MindCallFailed as exc:
