@@ -188,3 +188,10 @@ def test_a_mind_registering_for_the_first_time_is_accepted(world) -> None:
     client.portal.call(_credential)
     assert _register(client, "fresh-mind-key-for-tests",  # secret-guard: allow
                      fresh, "fresh", NEW).status_code == 200
+
+
+def test_the_same_address_spelled_differently_is_not_a_move(world) -> None:
+    for url in ("HTTP://Alpha.Old:8420", "http://alpha.old:8420/"):
+        assert _register(world.client, KEYS["alpha"], A, "alpha", url).status_code == 200
+    assert _register(world.client, KEYS["alpha"], A, "alpha",
+                     "http://alpha.old:8421").status_code == 403

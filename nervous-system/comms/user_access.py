@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -86,6 +87,8 @@ import hive_data
 from hive_data import broker_ops, core
 from starlette.routing import BaseRoute
 from starlette.types import Receive, Scope, Send
+
+log = logging.getLogger("hive-mind.user_access")
 
 # The store not answering, as opposed to answering no.
 _STORE_DOWN = (
@@ -561,10 +564,16 @@ async def is_operator_mind(holder: str) -> bool:
     """
     from hive_data import roles
 
-    row = await core.get_mind_by_id_or_name(str(holder or "").strip())
-    if not row:
+    try:
+        row = await core.get_mind_by_id_or_name(str(holder or "").strip())
+        if not row:
+            return False
+        return any(r["slug"] == OPERATOR_ROLE
+                   for r in await roles.roles_of(row["mind_id"]))
+    except Exception:  # noqa: BLE001 - an unreadable role is no operator (fail closed)
+        log.warning("operator role could not be read; treated as not an operator",
+                    exc_info=True)
         return False
-    return any(r["slug"] == OPERATOR_ROLE for r in await roles.roles_of(row["mind_id"]))
 
 
 async def operator_may_change(operator_holder: str, target: str) -> bool:

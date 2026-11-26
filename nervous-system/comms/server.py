@@ -2467,6 +2467,26 @@ async def _refuse_foreign_registration(caller, body) -> None:
         )
 
 
+def _canonical_address(url: object) -> str:
+    """An address compared as the same place: scheme and host lowered, the
+    scheme's default port and a trailing slash dropped."""
+    from urllib.parse import urlsplit
+
+    text = str(url or "").strip()
+    try:
+        parts = urlsplit(text)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return text.rstrip("/")
+    if not parts.scheme or not host:
+        return text.rstrip("/")
+    scheme = parts.scheme.lower()
+    if port and port != {"http": 80, "https": 443}.get(scheme):
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}{parts.path.rstrip('/')}"
+
+
 async def _refuse_address_change(caller, body) -> None:
     """An ordinary mind's own key may not move its own address (requirement 20).
 
@@ -2477,11 +2497,11 @@ async def _refuse_address_change(caller, body) -> None:
     about), the owner's key (admin route on the console) and an operator mind
     - read from the roles tables now - may change it.
     """
-    row = await core.get_mind_by_id_or_name(str(body.mind_id or "").strip())
+    row = await core.get_mind(str(body.mind_id or "").strip())
     if not row:
         return
-    old = str(row["gateway_url"] or "").strip().rstrip("/")
-    new = str(body.gateway_url or "").strip().rstrip("/")
+    old = _canonical_address(row["gateway_url"])
+    new = _canonical_address(body.gateway_url)
     if old == new or not old:
         return
     if await user_access.operator_may_change(caller.holder, row["mind_id"]):

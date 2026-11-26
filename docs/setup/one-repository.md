@@ -341,6 +341,7 @@ settings.
   address. A first registration, the same address again (boot registration) and
   a session-token refresh keep working. The admin and an operator mind of the
   same owner may change an address; an operator mind may not rename a mind.
+- Addresses compare as the same place when only case, the scheme's default port or a trailing slash differs. The role is global: whoever can grant the `operator` role to a mind gives it this reach over every mind of that mind's owner, and an operator mind may also move its own address. A role that cannot be read counts as not an operator.
 - When a mind legitimately moves to a new address: the operator changes it
   with the admin credential (the console's mind page, or `POST /broker/minds`
   with the admin token) or from an operator mind of the same owner, before or
