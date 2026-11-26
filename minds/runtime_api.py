@@ -708,7 +708,7 @@ OWNER_KEY_CHECK_TIMEOUT_S = 5
 
 
 async def owner_key_check(presented: str) -> bool | None:
-    """Ask the gateway whether `presented` is the key of the user who owns this mind.
+    """Ask the gateway whether `presented` is the key of the user who owns this mind, or of an operator mind of the same owner (requirement 20).
 
     The mind's own question about its own owner, authenticated by the mind's
     own key: the gateway answers yes or no and nothing else (feature 834,

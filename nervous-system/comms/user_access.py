@@ -524,7 +524,9 @@ async def owner_of_mind(mind_id: str) -> str | None:
 
 
 async def holds_user_key_of(mind_holder: str, presented: str) -> bool:
-    """Whether `presented` is the key of the person who owns this mind.
+    """Whether `presented` is the key of the person who owns this mind. (The route
+    asks the wider `key_opens_settings_of`, which adds a same-owner operator
+    mind's key.)
 
     The one question a mind may ask about a key it was handed, and only about
     its own owner as this registry records it: a yes or a no, never whose key

@@ -28,6 +28,8 @@ KEYS = {
     "beta": "beta-mind-key-for-tests",  # secret-guard: allow
     "ops": "ops-mind-key-for-tests",  # secret-guard: allow
     "other": "other-mind-key-for-tests",  # secret-guard: allow
+    "orphan": "orphan-mind-key-for-tests",  # secret-guard: allow
+    "ops-person": "ops-person-key-for-tests",  # secret-guard: allow
 }
 OLD = "http://alpha.old:8420"
 NEW = "http://attacker.invalid:8420"
@@ -38,6 +40,13 @@ async def _seed() -> None:
     await put_mind(B, "beta", owner="daniel", gateway_url="http://beta.old:8420")
     await put_mind(OP, "ops", owner="daniel")
     await put_mind(FOREIGN, "other", owner="sloan", gateway_url="http://other.old:8420")
+    await put_mind("55555555-5555-4555-8555-555555555555", "orphan", owner=None,
+                   gateway_url="http://orphan.old:8420/")
+    await put_credential_row("orphan", "", user_access.MIND,
+                             user_access.digest(KEYS["orphan"]))
+    # a person's key under the operator mind's own name: not a mind's key
+    await put_credential_row("ops-person", "ops", user_access.USER_KEY,
+                             user_access.digest(KEYS["ops-person"]))
     for holder, owner in (("alpha", "daniel"), ("beta", "daniel"),
                           ("ops", "daniel"), ("other", "sloan")):
         await put_credential_row(
@@ -146,3 +155,36 @@ def test_a_cut_off_operator_key_is_refused(world) -> None:
     assert world.client.delete(
         "/credentials/ops", headers={"Authorization": f"Bearer {ADMIN}"}).status_code == 200
     assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": False}
+
+
+def test_an_operator_does_not_open_an_ownerless_mind_and_a_non_mind_key_is_no_operator(world) -> None:
+    world.make_operator()
+    assert _asked(world.client, KEYS["orphan"], KEYS["ops"]) == {"owned": False}
+    assert _register(world.client, KEYS["ops"], "55555555-5555-4555-8555-555555555555",
+                     "orphan", NEW).status_code == 403
+    # a user-kind credential is never read as the operator mind's key
+    assert _asked(world.client, KEYS["alpha"], KEYS["ops-person"]) == {"owned": False}
+
+
+def test_an_operator_registers_a_same_owner_mind_at_its_address_but_cannot_rename_it(world) -> None:
+    world.make_operator()
+    assert _register(world.client, KEYS["ops"], B, "beta", "http://beta.old:8420").status_code == 200
+    assert _register(world.client, KEYS["ops"], B, "gamma", "http://beta.old:8420").status_code == 403
+
+
+def test_a_stored_address_with_a_trailing_slash_is_refreshed_without_it(world) -> None:
+    assert _register(world.client, KEYS["alpha"], A, "alpha", OLD + "/").status_code == 200
+    assert _register(world.client, KEYS["alpha"], A, "alpha", OLD).status_code == 200
+
+
+def test_a_mind_registering_for_the_first_time_is_accepted(world) -> None:
+    fresh = "66666666-6666-4666-8666-666666666666"
+    client = world.client
+
+    async def _credential():
+        await put_credential_row("fresh", "daniel", user_access.MIND,
+                                 user_access.digest("fresh-mind-key-for-tests"))  # secret-guard: allow
+
+    client.portal.call(_credential)
+    assert _register(client, "fresh-mind-key-for-tests",  # secret-guard: allow
+                     fresh, "fresh", NEW).status_code == 200
