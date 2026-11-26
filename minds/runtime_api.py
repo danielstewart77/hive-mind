@@ -751,11 +751,9 @@ async def authorize_models(request, mind_dir: Path) -> JSONResponse | None:
     presented = header[7:].strip() if header.startswith("Bearer ") else ""
     if not presented or not _own_key():
         return denied
+    # A read the gateway polls: a gateway that cannot be asked leaves the
+    # refusal it had, never a different status.
     owned = await owner_key_check(presented)
-    if owned is None:
-        return JSONResponse(
-            {"error": "this mind could not ask the gateway whether that is its owner's key"},
-            status_code=503)
     return None if owned else denied
 
 
