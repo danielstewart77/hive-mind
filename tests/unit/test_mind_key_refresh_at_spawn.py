@@ -123,7 +123,7 @@ def test_a_mind_server_starting_reads_the_key_file_over_the_environment(tmp_path
     environment = {k: v for k, v in os.environ.items()
                    if k not in mind_key.GENERIC_NAMES}
     environment.update(MIND_KEY=OLD, MIND_KEY_FILE=str(path),
-                       PYTHONPATH=os.pathsep.join([str(ROOT), *sys.path]))
+                       PYTHONPATH=os.pathsep.join([str(ROOT), *[p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]]))
     program = ("import os, json, minds.mind_server;"
                "print(json.dumps({n: os.environ.get(n) for n in "
                "('MIND_KEY', 'COMMS_BEARER_TOKEN', 'LUCENT_BEARER_TOKEN')}))")
