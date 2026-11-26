@@ -29,12 +29,19 @@ def _place(path, text: str) -> None:
 
 
 @pytest.fixture
-def folder(tmp_path, monkeypatch):
-    for name in ("MIND_KEY", "COMMS_BEARER_TOKEN", "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN",
-                 "OPENAI_API_KEY", "DSH_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MIND_PROXY_KEY"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("MIND_KEY_FILE", str(tmp_path / "key"))
-    return tmp_path / "key"
+def folder(tmp_path):
+    """A key file path, with the process environment put back afterwards:
+    `refresh` sets the key and every name derived from it in `os.environ`, which
+    monkeypatch does not restore for a name that was absent."""
+    from unittest import mock
+
+    with mock.patch.dict(os.environ):
+        for name in ("MIND_KEY", "COMMS_BEARER_TOKEN", "HIVEMIND_BROKER_TOKEN",
+                     "LUCENT_BEARER_TOKEN", "HIVE_TOOLS_TOKEN", "OPENAI_API_KEY",
+                     "DSH_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MIND_PROXY_KEY"):
+            os.environ.pop(name, None)
+        os.environ["MIND_KEY_FILE"] = str(tmp_path / "key")
+        yield tmp_path / "key"
 
 
 def test_a_replaced_key_is_the_mind_s_key_on_its_next_request_with_no_restart(folder):
@@ -51,9 +58,8 @@ def test_a_replaced_key_is_the_mind_s_key_on_its_next_request_with_no_restart(fo
         assert os.environ[name] == SECOND, name
 
 
-def test_a_mind_whose_file_is_not_there_at_start_runs_on_the_key_in_its_environment(
-        folder, monkeypatch):
-    monkeypatch.setenv("MIND_KEY", ENV_KEY)
+def test_a_mind_whose_file_is_not_there_at_start_runs_on_the_key_in_its_environment(folder):
+    os.environ["MIND_KEY"] = ENV_KEY
 
     assert runtime_api._own_key() == ENV_KEY
 
@@ -138,6 +144,14 @@ def root(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture
+def clean_environment():
+    from unittest import mock
+
+    with mock.patch.dict(os.environ):
+        yield
+
+
 def test_a_reader_of_the_key_file_never_sees_half_a_key_while_the_console_replaces_it(root):
     a, b = "A" * 200 + "-first", "B" * 200 + "-second"
     mind_key_files.write("ada", a)
@@ -185,10 +199,10 @@ def test_a_value_that_is_not_the_shape_of_a_key_is_never_written(root, bad):
     assert mind_key_files.read("ada") == FIRST
 
 
-def test_what_the_console_writes_a_mind_accepts_and_the_two_shapes_agree(root, monkeypatch):
+def test_what_the_console_writes_a_mind_accepts_and_the_two_shapes_agree(root, clean_environment):
     assert mind_key_files.KEY_SHAPE.pattern == mind_key.KEY_SHAPE.pattern
-    monkeypatch.setenv("MIND_KEY_FILE", str(mind_key_files.write("ada", FIRST)))
-    monkeypatch.delenv("MIND_KEY", raising=False)
+    os.environ["MIND_KEY_FILE"] = str(mind_key_files.write("ada", FIRST))
+    os.environ.pop("MIND_KEY", None)
 
     assert runtime_api._own_key() == FIRST
 
