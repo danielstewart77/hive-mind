@@ -1291,12 +1291,14 @@ def runtime_copies(value: str) -> list[str]:
     return found
 
 
-def scrub_backups(value: str) -> list[str]:
+def scrub_backups(value: str, *, check_only: bool = False) -> list[str]:
     """Blank the retired key `value` in the console's own pre-write copies of
     env files (requirement 22: no file keeps the old key). The copies are kept,
     since they are whole files and hold other credentials' last values; only
-    the old key's text in them is replaced, by a temporary file renamed over
-    the copy. Returns the copies that could not be cleaned, by name."""
+    the old key's text in them is replaced, through a private (0600) temporary
+    file renamed over the copy, removed again if anything fails. With
+    `check_only` nothing is written: it says which copies could not be cleaned.
+    Returns those, by name."""
     failed: list[str] = []
     try:
         candidates = list(credentials_data.BACKUP_DIR.iterdir())
@@ -1304,18 +1306,35 @@ def scrub_backups(value: str) -> list[str]:
         return failed
     except OSError:
         return ["the backup folder"]
+    needle = value.encode()
     for path in candidates:
         if not path.is_file():
             continue
         try:
             raw = path.read_bytes()
-            if value.encode() not in raw:
-                continue
-            temp = path.with_name(path.name + ".tmp")
-            temp.write_bytes(raw.replace(value.encode(), b"REPLACED-MIND-KEY"))
+        except OSError:
+            failed.append(path.name)
+            continue
+        if needle not in raw:
+            continue
+        if check_only:
+            if not os.access(credentials_data.BACKUP_DIR, os.W_OK):
+                failed.append(path.name)
+            continue
+        temp = path.with_name(path.name + ".tmp")
+        try:
+            handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(handle, "wb") as out:
+                out.write(raw.replace(needle, b"REPLACED-MIND-KEY"))
+                out.flush()
+                os.fsync(out.fileno())
             os.replace(temp, path)
         except OSError:
             failed.append(path.name)
+            try:
+                temp.unlink()
+            except OSError:
+                pass
     return failed
 
 
@@ -1458,6 +1477,7 @@ async def replace_mind_key(
     holder = name.strip().lower()
     value = supplied
     services = _one_key_services()
+    unscrubbed: list[str] = []
     async with _ROTATION_LOCK:
         location = stored_key_location(holder)
         places = storage_places(holder)
@@ -1499,6 +1519,12 @@ async def replace_mind_key(
             except MintRefused as exc:
                 raise MintRefused(f"{exc}. Nothing was changed.") from None
         same_as_stored = old is not None and secrets.compare_digest(old, value)
+        if old and not same_as_stored:
+            stuck = scrub_backups(old, check_only=True)
+            if stuck:
+                raise MintRefused(
+                    f"the console's saved copies {', '.join(stuck)} hold the old key and "
+                    "cannot be cleaned. Nothing was changed")
         accepted: dict[str, bool] = {}
         if not same_as_stored:
             for service in services:
@@ -1587,18 +1613,17 @@ async def replace_mind_key(
             if failure is None and old and not secrets.compare_digest(old, value):
                 with credentials_data._WRITE_LOCK:
                     left = leftover_files(old)
-                with credentials_data._WRITE_LOCK:
-                    unscrubbed = scrub_backups(old)
                 if left:
                     failure = MintRefused(
                         f"{', '.join(left)} still holds the old key in a form this "
                         "console does not rewrite")
-                elif unscrubbed:
-                    failure = MintRefused(
-                        f"the console's saved copies {', '.join(unscrubbed)} still hold the "
-                        "old key and could not be cleaned")
             if failure is None:
                 stored = "written"
+                if old and not secrets.compare_digest(old, value):
+                    # Only now that everything verified: the saved copies are
+                    # what a failed replacement would have been recovered from.
+                    with credentials_data._WRITE_LOCK:
+                        unscrubbed = scrub_backups(old)
 
         if failure is None:
             try:
@@ -1620,6 +1645,8 @@ async def replace_mind_key(
                 "stored": stored,
                 "restart_target": location.restart_target if location else None,
                 "key_file": bool(location and location.is_key_file),
+                # Saved copies that still hold the old key (should be none).
+                "copies_still_holding_old_key": unscrubbed,
                 "proxy_note": PROXY_NOTE,
             }
 

@@ -389,7 +389,7 @@ async def test_a_console_stopped_between_the_key_file_and_the_env_lines_brings_t
     assert f"MIND_PROXY_KEY={NEW}" in hive.env.read_text()
 
 
-async def test_a_saved_copy_that_cannot_be_cleaned_of_the_old_key_fails_the_replacement_loudly_and_puts_the_old_key_back(hive, tmp_path):
+async def test_a_saved_copy_that_cannot_be_cleaned_of_the_old_key_refuses_the_replacement_before_anything_changes(hive, tmp_path):
     backups = tmp_path / "backups"
     backups.mkdir()
     (backups / "hive_mind-X-1.env").write_bytes(b"\xff\xfe" + OLD.encode())  # not text: still a copy of the key
@@ -401,9 +401,24 @@ async def test_a_saved_copy_that_cannot_be_cleaned_of_the_old_key_fails_the_repl
     try:
         if os.access(backups, os.W_OK):
             pytest.skip("this user can write a read-only folder")
-        with pytest.raises(holder_credentials.MintRefused, match="could not be cleaned"):
+        with pytest.raises(holder_credentials.MintRefused, match="cannot be cleaned"):
             await _replace()
     finally:
         os.chmod(backups, 0o700)
     assert mind_key_files.read("ada") == OLD
     assert await hive.status(NEW) == {"comms": 401, "lucent": 401, "tools": 401}
+
+
+async def test_a_cleaned_saved_copy_stays_private_and_no_temporary_file_is_left(hive, tmp_path):
+    import os, stat
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    saved = backups / "hive_mind-X-1.env"
+    saved.write_text(f"MIND_PROXY_KEY={OLD}\nOTHER=keep\n")
+    os.chmod(saved, 0o600)
+
+    result = await _replace()
+
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+    assert sorted(p.name for p in backups.iterdir()) == [saved.name]
+    assert result["copies_still_holding_old_key"] == []
