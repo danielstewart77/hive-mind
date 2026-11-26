@@ -133,3 +133,42 @@ def test_a_mind_server_starting_reads_the_key_file_over_the_environment(tmp_path
     seen = json.loads(done.stdout.strip().splitlines()[-1])
     assert seen == {"MIND_KEY": NEW, "COMMS_BEARER_TOKEN": NEW,
                     "LUCENT_BEARER_TOKEN": NEW}
+
+
+def test_a_spawn_never_copies_an_environment_half_way_through_a_key_replacement(tmp_path) -> None:
+    """While one thread brings the environment to the new key, another taking
+    the copy a child is given must see the old key everywhere or the new one
+    everywhere, never a mixture."""
+    import threading
+
+    path = tmp_path / "key"
+    _place(path, OLD + "\n")
+    taken: list[dict] = []
+
+    class Environment(dict):
+        armed = False
+
+        def __setitem__(self, name, value):
+            super().__setitem__(name, value)
+            if self.armed and name == "COMMS_BEARER_TOKEN":
+                # Mid-update: the first names are new, the rest still old. A
+                # spawn that arrives now copies the environment.
+                self.armed = False
+                copier = threading.Thread(
+                    target=lambda: taken.append(mind_key.snapshot(self)))
+                copier.start()
+                copier.join(timeout=0.3)
+                self.copier = copier
+
+    environment = Environment(MIND_KEY_FILE=str(path))
+    mind_key.refresh(environment)
+    assert environment["MIND_KEY"] == OLD
+    _place(path, NEW + "\n")
+    environment.armed = True
+
+    mind_key.refresh(environment)
+    environment.copier.join(timeout=5)
+
+    assert len(taken) == 1
+    held = {taken[0][name] for name in mind_key.GENERIC_NAMES}
+    assert len(held) == 1, "a copy taken mid-replacement mixed the old and the new key"

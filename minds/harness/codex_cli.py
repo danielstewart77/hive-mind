@@ -729,7 +729,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     log.info("%s session %s: spawning codex turn (thread=%s)", NAME, sid, thread_id or "new")
 
     mind_key.refresh()
-    env = os.environ.copy()
+    env = mind_key.snapshot()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     env["CODEX_HOME"] = str(CODEX_HOME)
     # The gateway's own row id for this conversation. A mind's `/end-session`

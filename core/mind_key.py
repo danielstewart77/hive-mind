@@ -102,7 +102,7 @@ class _FileState:
 
 
 _STATE: dict[str, _FileState] = {}
-_STATE_LOCK = threading.Lock()
+_STATE_LOCK = threading.RLock()
 
 
 def _examine(path: str, state: _FileState) -> None:
@@ -163,10 +163,22 @@ def refresh(environ: MutableMapping[str, str] | None = None) -> str:
                 _log.error("%s and MIND_KEY is not set: this mind has no key", problem)
         elif not problem:
             state.logged = ""
-    if good and key(target) != good:
-        target[KEY] = good
-        apply_environment(target)
-    return key(target)
+    with _STATE_LOCK:
+        # The whole update is one step to anyone taking `snapshot`: a spawn
+        # copying the environment never sees the new key under some names and
+        # the old under others.
+        if good and key(target) != good:
+            target[KEY] = good
+            apply_environment(target)
+        return key(target)
+
+
+def snapshot(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """A copy of the environment taken between two `refresh` updates, never in
+    the middle of one: what a spawn hands its child."""
+    source = os.environ if environ is None else environ
+    with _STATE_LOCK:
+        return dict(source)
 
 
 def key(environ: Mapping[str, str] | None = None) -> str:

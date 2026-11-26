@@ -1136,7 +1136,7 @@ async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
     # turn's process is given, and a resident process whose composed
     # environment differs from this one is respawned on it.
     mind_key.refresh()
-    env = os.environ.copy()
+    env = mind_key.snapshot()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     window = await _turn_window(
         state["model"],

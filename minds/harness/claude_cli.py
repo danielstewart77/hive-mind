@@ -275,7 +275,7 @@ async def _spawn_proc(
         cmd.extend(claude_conversation_flags(resume_sid, PROJECT_DIR))
 
     mind_key.refresh()
-    env = os.environ.copy()
+    env = mind_key.snapshot()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     # The gateway's own row id for this conversation. A mind's `/end-session`
     # skill deletes that row, and until this was set no harness exported
