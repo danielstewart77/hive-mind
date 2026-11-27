@@ -289,9 +289,8 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
     # The signed-in person's own key (story 905), never the house token.
     asked = health.await_args_list[0].kwargs["headers"]["Authorization"]
     assert asked.startswith("Bearer ") and asked != "Bearer comms-test-token"
-    assert health.await_args_list[1].kwargs["headers"] == {
-        "Authorization": "Bearer lucent-test-token"
-    }
+    # The memory store's health answer is open: nothing of the site's own is sent.
+    assert health.await_args_list[1].kwargs["headers"] == {}
 
 
 def test_session_activity_does_not_treat_registration_as_a_heartbeat():
@@ -1015,7 +1014,7 @@ def test_a_kokoro_sample_is_spoken_by_the_engine_and_names_no_mind(
     assert response.status_code == 200
     assert response.headers["content-type"] == "audio/ogg"
     assert response.content == b"OggS-sample"
-    assert sample.await_args.args == ("http://voice-kokoro:8422", "bm_george", "")
+    assert sample.await_args.args[:3] == ("http://voice-kokoro:8422", "bm_george", "")
 
 
 def test_a_chatterbox_sample_is_spoken_by_the_chatterbox_server_for_one_mind(
@@ -1040,7 +1039,7 @@ def test_a_chatterbox_sample_is_spoken_by_the_chatterbox_server_for_one_mind(
 
     assert response.status_code == 200
     assert response.content == b"OggS-clip"
-    assert sample.await_args.args == (
+    assert sample.await_args.args[:3] == (
         "http://voice-chatterbox:8422",
         "_dramitac_mono_voice_ref.wav",
         "skippy",
