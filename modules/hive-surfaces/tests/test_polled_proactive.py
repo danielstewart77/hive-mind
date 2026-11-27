@@ -115,17 +115,14 @@ class TestWhatPollingPutsOnTheQueue:
 
 
 class TestWhichCredentialThePollPresents:
-    async def test_the_poll_presents_the_minds_own_credential(self) -> None:
-        """The backend being polled is the mind, so the mind's token is what it checks.
-
-        The gateway token the surfaces carry everywhere else was the same
-        string until every holder in the hive got its own; presenting it here
-        after that is a refusal on every poll.
-        """
+    async def test_the_poll_presents_the_minds_own_key(self, monkeypatch) -> None:
+        """The backend being polled is the mind, and the bot serves that one
+        mind: it presents the mind's own key, the same one it gives the gateway."""
+        monkeypatch.delenv("MIND_KEY_FILE", raising=False)
+        monkeypatch.setenv("MIND_KEY", "the-minds-own")
         configure(SurfaceConfig(
             proactive_poll_url="http://mind.example:8420",
             proactive_poll_interval_s=0.01,
-            proactive_poll_token="the-minds-own",
         ))
         seen = {}
 
@@ -136,13 +133,14 @@ class TestWhichCredentialThePollPresents:
             return _Response(200, [{"chat_id": 1, "text": "x"}])
 
         session.get = _get
-        with patch.object(tb, "COMMS_BEARER_TOKEN", "the-gateways"):
-            await _run_source_until(session)
+        await _run_source_until(session)
 
         assert seen.get("Authorization") == "Bearer the-minds-own"
 
-    async def test_a_poll_with_no_credential_configured_asks_without_one(self) -> None:
-        """A backend that checks nothing is what the unset case is for."""
+    async def test_a_poll_with_no_key_asks_without_one(self, monkeypatch) -> None:
+        """A mind with no key at all has a backend that checks nothing."""
+        monkeypatch.delenv("MIND_KEY_FILE", raising=False)
+        monkeypatch.delenv("MIND_KEY", raising=False)
         configure(SurfaceConfig(
             proactive_poll_url="http://mind.example:8420",
             proactive_poll_interval_s=0.01,
@@ -156,8 +154,7 @@ class TestWhichCredentialThePollPresents:
             return _Response(200, [{"chat_id": 1, "text": "x"}])
 
         session.get = _get
-        with patch.object(tb, "COMMS_BEARER_TOKEN", "the-gateways"):
-            await _run_source_until(session)
+        await _run_source_until(session)
 
         assert seen["headers"] == {}
 

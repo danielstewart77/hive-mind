@@ -726,7 +726,7 @@ async def test_the_rename_client_puts_to_the_named_session_with_its_credential()
 
     client = GatewayClient(
         _Http(), "http://gw.test", "telegram", mind_id="m",
-        bearer_token="service", rename_token="rename-only",
+        bearer_token="service",
     )
 
     status = await client.rename_session("33333333-cccc", {"name": "Health"})
@@ -735,7 +735,7 @@ async def test_the_rename_client_puts_to_the_named_session_with_its_credential()
     url, body, headers = calls[0]
     assert url == "http://gw.test/sessions/33333333-cccc/name"
     assert body == {"name": "Health"}
-    assert headers["X-Rename-Token"] == "rename-only"
+    assert "X-Rename-Token" not in headers
     assert headers["Authorization"] == "Bearer service"
 
 

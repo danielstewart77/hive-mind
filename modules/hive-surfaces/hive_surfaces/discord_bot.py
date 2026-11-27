@@ -17,6 +17,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from hive_surfaces import own_key
 from hive_surfaces import (
     effort_picker, harness_picker, model_picker, surface_claim, token_store, voice_routing,
 )
@@ -35,7 +36,6 @@ log = configure_logging("hive-mind-discord")
 # ---------------------------------------------------------------------------
 DISCORD_MSG_LIMIT = 2000
 COMMS_URL = os.environ.get("COMMS_URL", "http://127.0.0.1:8426")
-COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN")
 VOICE_COMMS_URL = os.environ.get("VOICE_COMMS_URL", "http://localhost:8422")
 # A host running both engines names each one's server; a host running one
 # names neither and `VOICE_COMMS_URL` answers for whichever engine its minds
@@ -195,7 +195,7 @@ def should_handle_message(
 #: while this process runs.
 _voice_servers = voice_routing.VoiceServerResolver(
     COMMS_URL,
-    COMMS_BEARER_TOKEN or "",
+    own_key.current,
     {
         voice_routing.CHATTERBOX: VOICE_SERVER_URL_CHATTERBOX,
         voice_routing.KOKORO: VOICE_SERVER_URL_KOKORO,
@@ -607,7 +607,6 @@ class HiveMindBot(discord.Client):
             http, COMMS_URL, f"discord:{mind_id}",
             surface_prompt=None,
             mind_id=mind_id,
-            bearer_token=COMMS_BEARER_TOKEN or None,  # secret-guard: allow
         )
         await self.tree.sync()
         log.info("Slash commands synced")

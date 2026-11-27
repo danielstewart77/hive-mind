@@ -263,27 +263,23 @@ def runtime_env(declared: Mapping[str, object] | None,
 
 
 def proactive_token(environ: Mapping[str, str] | None = None, started_with: str = "") -> str | None:
-    """What the mind's own bot must present to collect proactive messages.
+    """What the mind's own bot must present to collect proactive messages: the
+    mind's own key, the same one the bot presents to the gateway. A bot holds
+    no credential of its own.
 
-    The bot's credential is its own (`MIND_PROACTIVE_TOKEN`), never the mind's
-    key: a bot given the key would be a holder of the mind's inference key.
-
-    Without one, a mind started the old way (no `MIND_KEY`) keeps what it
-    always compared against: the gateway value it was started with
-    (`started_with`, read before the key was applied), so a bot not yet given
-    its own credential keeps working through the transition. A mind on the one
-    key never takes that old gateway value: once the old keys retire it would
-    be a retired credential still collecting the mind's messages. Such a mind
-    with no `MIND_PROACTIVE_TOKEN` answers nobody (a value nothing can present)
-    rather than the open route a mind with no credential at all has.
+    Read at each request (`refresh`), so a replaced key is the one asked for
+    on the next poll. A mind started the old way (no key, no key file) keeps
+    what it always compared against: the gateway value it was started with
+    (`started_with`), until that mind moves to its key.
     """
     source = os.environ if environ is None else environ
-    own = str(source.get("MIND_PROACTIVE_TOKEN") or "").strip()
-    if own and own != key(source):
-        return own
-    if key(source) or str(source.get(KEY_FILE) or "").strip():
-        # On the one key, or told where its key file is (which may not be
-        # readable yet): never the old gateway value.
+    refresh(source)
+    one = key(source)
+    if one:
+        return one
+    if str(source.get(KEY_FILE) or "").strip():
+        # Told where its key file is but nothing readable yet: a value nothing
+        # can present, rather than the open route a mind with no credential has.
         return secrets.token_urlsafe(32)
     return started_with.strip() or None
 

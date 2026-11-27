@@ -129,7 +129,7 @@ install_fastapi_logging(app, log, f"mind:{NAME}")
 app.include_router(make_handoff_router(proactive_buffer))
 app.include_router(make_proactive_router(
     proactive_buffer,
-    mind_key.proactive_token(os.environ, _LEGACY_GATEWAY_VALUE),
+    lambda: mind_key.proactive_token(os.environ, _LEGACY_GATEWAY_VALUE),
 ))
 
 

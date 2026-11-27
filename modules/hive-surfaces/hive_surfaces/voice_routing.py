@@ -92,7 +92,7 @@ class VoiceServerResolver:
     def __init__(
         self,
         comms_url: str,
-        token: str,
+        token,
         urls: dict[str, str],
         *,
         fallback_url: str = "",
@@ -102,6 +102,7 @@ class VoiceServerResolver:
         clock=time.monotonic,
     ) -> None:
         self._url = comms_url or ""
+        # The mind's own key, as a value or a callable read at each request.
         self._token = token or ""
         self._urls = {
             engine: (urls or {}).get(engine, "").strip().rstrip("/")
@@ -125,7 +126,9 @@ class VoiceServerResolver:
         if self._fetched_at is not None and now - self._fetched_at < self._ttl:
             return self._index
         try:
-            rows = self._fetch(self._url, self._token, self._timeout)
+            rows = self._fetch(
+                self._url, self._token() if callable(self._token) else self._token,
+                self._timeout)
         except Exception as exc:
             log.warning("mind engine listing unreadable: %s", exc)
             # Keep whatever was last known and try again after the TTL rather

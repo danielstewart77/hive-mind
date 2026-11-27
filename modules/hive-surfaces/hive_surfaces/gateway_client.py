@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator
 
 import aiohttp
 
+from hive_surfaces import own_key
 from hive_surfaces.hive_logging import log_event, log_if_slow
 
 log = logging.getLogger("hive-mind.gateway-client")
@@ -114,23 +115,21 @@ class GatewayClient:
         *,
         mind_id: str,
         bearer_token: str | None = None,
-        rename_token: str | None = None,
     ):
         self.http = http
         self.server_url = server_url
         self.surface = surface
         self.surface_prompt = surface_prompt
         self.mind_id = mind_id
+        # An explicit value (a test, a caller with its own) wins; otherwise
+        # the mind's own key, read afresh on every request.
         self._bearer_token = bearer_token
-        # The one small credential that may change a conversation's name. Held
-        # separately from the service bearer on purpose: a copy of this one
-        # escaping into a log or a screenshot is worth exactly one renamed
-        # conversation, where the service token opens every route on the hive.
-        self._rename_token = rename_token
 
     @property
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._bearer_token}"} if self._bearer_token else {}
+        if self._bearer_token:
+            return {"Authorization": f"Bearer {self._bearer_token}"}
+        return own_key.bearer()
 
     async def find_active_session(
         self, user_id: int, client_ref: int | str
@@ -268,7 +267,7 @@ class GatewayClient:
         things and the operator has to be told which one happened: 409 is a
         conversation that has already rotated away — the button or the rename
         prompt carried an id captured when it was drawn and neither expires —
-        and 503 is a gateway with no rename credential configured. Folding
+        and 401 is a key the gateway does not recognise. Folding
         those into "it did not work" sends the operator looking at the wrong
         thing.
 
@@ -276,8 +275,6 @@ class GatewayClient:
         colour picked at the tile survives without being read back first.
         """
         headers = {**self._auth_headers}
-        if self._rename_token:
-            headers["X-Rename-Token"] = self._rename_token
         try:
             async with self.http.put(
                 f"{self.server_url}/sessions/{session_id}/name",

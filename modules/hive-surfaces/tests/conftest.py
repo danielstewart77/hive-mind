@@ -10,8 +10,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # refill `COMMS_URL` and the suite would start issuing live requests at a
 # running hive-comms. A value already present is one nothing else overwrites.
 os.environ["COMMS_URL"] = "http://127.0.0.1:9"
-os.environ["COMMS_ADMIN_BEARER_TOKEN"] = "test-token-never-valid"
-os.environ["COMMS_BEARER_TOKEN"] = "test-token-never-valid"
 
 
 import pytest

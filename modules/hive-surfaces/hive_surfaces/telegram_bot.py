@@ -36,6 +36,7 @@ from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, picker_sp
 from hive_surfaces.gateway_client import (
     GatewayClient, TURN_INTERRUPTED, TurnOutcome, turn_marker,
 )
+from hive_surfaces import own_key
 from hive_surfaces import (
     effort_picker, harness_picker, hitl, model_picker, rename_prompt, session_picker,
     surface_claim, voice_routing,
@@ -51,12 +52,6 @@ log = configure_logging("hive-mind-telegram")
 TELEGRAM_MSG_LIMIT = 4096
 # Gateway/sessions/broker → hive-comms (containerised, NS-owned).
 COMMS_URL = os.environ.get("COMMS_URL", "http://127.0.0.1:8426")
-COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN", "")
-# The one credential that may change a conversation's name, held apart from the
-# service bearer. It is the same secret the browser terminal used to check when
-# it owned the name store, kept small on purpose: a copy escaping into a log or
-# a screenshot is worth exactly one renamed conversation.
-TERMINAL_LABELS_TOKEN = os.environ.get("TERMINAL_LABELS_TOKEN", "")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
 # A host running both engines names each one's server; a host running one
 # names neither and `VOICE_SERVER_URL` answers for whichever engine its minds
@@ -169,7 +164,7 @@ async def _claim_or_refuse(update: Update) -> bool:
 #: while this process runs.
 _voice_servers = voice_routing.VoiceServerResolver(
     COMMS_URL,
-    COMMS_BEARER_TOKEN or "",
+    own_key.current,
     {
         voice_routing.CHATTERBOX: VOICE_SERVER_URL_CHATTERBOX,
         voice_routing.KOKORO: VOICE_SERVER_URL_KOKORO,
@@ -1261,16 +1256,14 @@ async def _apply_rename(session_id: str, name: str) -> str:
             "That conversation has already rotated away \u2014 nothing renamed. "
             "Send /sessions and tap the live one."
         )
-    if status == 503:
-        return "Renaming isn't wired up on this hive \u2014 nothing changed."
-    if status == 401:
-        # Named as a credential, not as a network fault. This mind may hold no
-        # rename token at all, which is the state a fresh mind is installed in,
-        # and "couldn't reach the gateway" sends the operator to restart a
-        # container that is answering perfectly.
+    if status in (401, 403, 404):
+        # Named as a key refusal, not as a network fault: "couldn't reach the
+        # gateway" would send the operator to restart a container that is
+        # answering perfectly.
         return (
-            "The gateway refused my rename credential \u2014 nothing changed. "
-            "This mind needs TERMINAL_LABELS_TOKEN set to the hive's rename token."
+            "The gateway refused my key for that conversation \u2014 nothing "
+            "changed. It is not one of my owner's conversations, or my key was "
+            "replaced and I have not read the new one yet."
         )
     return "Couldn't reach the gateway \u2014 name unchanged."
 
@@ -2181,8 +2174,6 @@ async def _on_startup(app) -> None:
         http, COMMS_URL, surface_name,
         surface_prompt=TELEGRAM_SURFACE_PROMPT,
         mind_id=mind_id,
-        bearer_token=COMMS_BEARER_TOKEN or None,  # secret-guard: allow
-        rename_token=TERMINAL_LABELS_TOKEN or None,  # secret-guard: allow
     )
     log.info(
         "Hive Mind Telegram bot started (gateway=%s, voice=%s)",
@@ -2515,8 +2506,6 @@ async def _proactive_poll_source() -> None:
     healthy.
     """
     url = f"{config.proactive_poll_url.rstrip('/')}/proactive"
-    poll_token = config.proactive_poll_token
-    headers = {"Authorization": f"Bearer {poll_token}"} if poll_token else {}
     interval = config.proactive_poll_interval_s
     log_event(
         log, "surface.proactive.poll.started", surface="telegram",
@@ -2529,7 +2518,7 @@ async def _proactive_poll_source() -> None:
         try:
             await asyncio.sleep(interval)
             async with http.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
+                url, headers=own_key.bearer(), timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
                     log_event(
