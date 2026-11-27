@@ -461,6 +461,12 @@ class Stranded(Exception):
         self.restored = restored
 
 
+async def _asking_person_key(person: str) -> str | None:
+    """The key of the person asking, for a call to the gateway. A seam: the
+    key store is the boundary a test replaces."""
+    return await user_key(person)
+
+
 async def _request(
     service: Service,
     method: str,
@@ -468,7 +474,27 @@ async def _request(
     body: dict[str, Any] | None = None,
     timeout: float = MINT_TIMEOUT_S,
 ) -> httpx.Response:
-    admin = service.admin_token()
+    if service.key == "comms":
+        # The gateway is asked with the key of the person who asked (feature
+        # 834, story 905); this site holds no key of its own that stands for
+        # anyone. The one use left is work with no person behind it: the
+        # operator's key-migration command, run from a shell, which carries
+        # the administrator credential it was given (named on the feature row
+        # as work with no person; removed with the credential itself).
+        import mind_runtime
+
+        person = mind_runtime._PERSON.get()
+        if person:
+            admin = await _asking_person_key(person)
+            if not admin:
+                raise MintRefused(
+                    "your own key could not be found, so "
+                    f"{service.label} was not asked"
+                )
+        else:
+            admin = service.admin_token()
+    else:
+        admin = service.admin_token()
     if not admin:
         raise MintRefused(
             f"this console holds no {service.admin_env}, so it cannot mint "

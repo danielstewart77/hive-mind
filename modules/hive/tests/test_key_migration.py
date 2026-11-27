@@ -85,6 +85,13 @@ def old_hive(tmp_path, monkeypatch, builtin_console):
     monkeypatch.setenv("LUCENT_API_URL", "http://lucent.test")
     monkeypatch.setenv("HIVE_TOOLS_URL", "http://tools.test")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN["comms"])
+
+    # The gateway stand-in knows one administrator's value; the site presents
+    # the signed-in person's key (story 905), so that person's key is it.
+    async def _administrators_key(_person):
+        return ADMIN["comms"]
+
+    monkeypatch.setattr(holder_credentials, "_asking_person_key", _administrators_key)
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN["lucent"])
     monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", ADMIN["tools"])
     monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.invalid:8899")

@@ -233,7 +233,17 @@ class _Checked:
     monotonic_at: float  # for the age, which a clock change must not move
 
 
-_checks: dict[tuple[str, str], _Checked] = {}
+_checks: dict[tuple[str, str, str], _Checked] = {}
+
+
+def _asker() -> str:
+    """Whose reading this is. A check of a mind is asked through the gateway
+    with the signed-in person's own key (story 905), so what one person was
+    told is not another's: a person who may not ask would otherwise write
+    "unconfigured" over the answer an administrator got."""
+    import mind_runtime
+
+    return mind_runtime._PERSON.get() or ""
 
 
 def remember(
@@ -259,12 +269,12 @@ def remember(
         taken_at=time.time(),
         monotonic_at=time.monotonic(),
     )
-    _checks[(credential, holder)] = entry
+    _checks[(_asker(), credential, holder)] = entry
     return entry
 
 
 def recall(credential: str, holder: str) -> _Checked | None:
-    return _checks.get((credential, holder))
+    return _checks.get((_asker(), credential, holder))
 
 
 def forget_all() -> None:
@@ -734,7 +744,7 @@ def prune(known: set[tuple[str, str]]) -> None:
     and a credential dropped from the declaration would keep its entries for
     as long as the process lives.
     """
-    for key in [k for k in _checks if k not in known]:
+    for key in [k for k in _checks if k[1:] not in known]:
         del _checks[key]
 
 

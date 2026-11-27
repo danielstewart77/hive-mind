@@ -286,9 +286,9 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
     assert body["minds"][0]["last_activity"] == 456
     assert body["minds"][0]["activity_status"] == "active"
     assert body["sessions"][0]["mind_name"] == "ada"
-    assert health.await_args_list[0].kwargs["headers"] == {
-        "Authorization": "Bearer comms-test-token"
-    }
+    # The signed-in person's own key (story 905), never the house token.
+    asked = health.await_args_list[0].kwargs["headers"]["Authorization"]
+    assert asked.startswith("Bearer ") and asked != "Bearer comms-test-token"
     assert health.await_args_list[1].kwargs["headers"] == {
         "Authorization": "Bearer lucent-test-token"
     }
@@ -1355,7 +1355,7 @@ def test_an_edge_mind_bootstrap_installs_for_the_owner_named_or_the_admin(tmp_pa
     assert unknown.status_code == 400
 
 
-def test_edge_mind_verify_registers_with_the_admin_token_and_the_owner(
+def test_edge_mind_verify_registers_with_the_signed_in_persons_key_and_the_owner(
     tmp_path, monkeypatch, fake_comms
 ):
     client = _authed_client(tmp_path, monkeypatch)
@@ -1391,5 +1391,8 @@ def test_edge_mind_verify_registers_with_the_admin_token_and_the_owner(
 
     assert response.status_code == 200, response.text
     (sent,) = [r for r in fake_comms.received if r["path"] == "/broker/minds"]
-    assert sent["authorization"] == "Bearer admin-token"
+    # The registering administrator's own key (story 905), not the gateway's
+    # administrator credential.
+    assert sent["authorization"].startswith("Bearer ")
+    assert sent["authorization"] != "Bearer admin-token"
     assert json.loads(sent["body"])["owner"] == "sloan"

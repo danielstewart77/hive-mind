@@ -240,7 +240,9 @@ def test_canvas_submit_dispatches_broker_message(tmp_path, monkeypatch):
     assert sent["json"]["metadata"]["request_type"] == "canvas_review"
     assert "render.svg" in sent["json"]["content"]
     assert "look at the capture flow" in sent["json"]["content"]
-    assert sent["headers"]["Authorization"] == "Bearer house-token"
+    # The signed-in person's own key, never the house token (story 905).
+    assert sent["headers"]["Authorization"].startswith("Bearer ")
+    assert sent["headers"]["Authorization"] != "Bearer house-token"
 
 
 def test_a_second_users_canvas_submit_reaches_their_own_mind_and_names_them(tmp_path, monkeypatch):

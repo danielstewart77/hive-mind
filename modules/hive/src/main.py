@@ -372,13 +372,6 @@ def _lucent_bearer_token() -> str:
     return os.getenv("LUCENT_BEARER_TOKEN", "")
 
 
-def _gateway_headers() -> dict:
-    token = os.getenv("COMMS_BEARER_TOKEN", "")
-    if token:
-        return {"Authorization": f"Bearer {token}"}
-    return {}
-
-
 def _asset_versions() -> dict[str, int]:
     static_dir = BASE_DIR / "static"
     return {
@@ -422,43 +415,57 @@ def _login_redirect_for(request: Request) -> RedirectResponse:
     return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
 
 
-def _gateway_json_sync(
-    path: str, params: dict | None = None, admin: bool = False
-) -> dict | list:
+async def _person_headers_or_none() -> dict:
+    """The person's key for a status display that never gates a route: no key
+    shows the gateway as asked without one, which it refuses, in words."""
+    try:
+        return await _person_headers()
+    except HTTPException:
+        return {}
+
+
+async def _person_headers() -> dict:
+    """The signed-in person's own key, as the gateway's bearer.
+
+    Everything this site asks of the gateway is asked because a person asked,
+    so it carries that person's key and nothing else (feature 834, story 905).
+    Refused with a sentence, never 401 (the layout would sign the person out):
+    nobody signed in, or their key cannot be had. There is no fallback to a
+    credential of this site's own, because it holds none.
+    """
+    import holder_credentials
+
+    person = mind_runtime._PERSON.get()
+    if not person:
+        raise HTTPException(
+            status_code=403,
+            detail="nobody is signed in, so nothing is asked of the gateway",
+        )
+    key = await holder_credentials.user_key(person)
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="your own key could not be found on this site, so the gateway was not asked",
+        )
+    return {"Authorization": f"Bearer {key}"}
+
+
+def _gateway_json_sync(path: str, params: dict | None, headers: dict) -> dict | list:
     query = f"?{urllib.parse.urlencode(params)}" if params else ""
     url = f"{_gateway_base_url().rstrip('/')}{path}{query}"
-    auth = _admin_headers() if admin else _gateway_headers()
-    headers = {"Accept": "application/json", **auth}
-    request = urllib.request.Request(url, headers=headers)
+    request = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-async def _gateway_json(
-    path: str, params: dict | None = None, admin: bool = False
-) -> dict | list:
+async def _gateway_json(path: str, params: dict | None = None) -> dict | list:
+    headers = await _person_headers()
     try:
-        return await asyncio.to_thread(_gateway_json_sync, path, params, admin)
+        return await asyncio.to_thread(_gateway_json_sync, path, params, headers)
     except urllib.error.HTTPError as exc:
         raise HTTPException(status_code=exc.code, detail=f"Gateway request failed: {path}") from exc
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
-
-
-def _admin_headers() -> dict:
-    """The gateway's admin bearer, required by every consequential route.
-
-    Registering a Mind, changing its row, and writing its runtime.yaml are
-    all admin operations — the service token comms hands out for reads is
-    rejected on all of them.
-    """
-    token = os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")
-    if not token:
-        raise HTTPException(
-            status_code=503,
-            detail="COMMS_ADMIN_BEARER_TOKEN is not configured for this console",
-        )
-    return {"Authorization": f"Bearer {token}"}
 
 
 async def _gateway_request(
@@ -467,19 +474,20 @@ async def _gateway_request(
     *,
     params: dict | None = None,
     json_body: dict | None = None,
-    admin: bool = False,
 ) -> dict | list:
+    headers = await _person_headers()
     url = f"{_gateway_base_url().rstrip('/')}{path}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.request(
-            method,
-            url,
-            params=params,
-            json=json_body,
-            headers=_admin_headers() if admin else _gateway_headers(),
+            method, url, params=params, json=json_body, headers=headers,
         )
     if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+        # Never the gateway's 401: this site's own layout would sign the
+        # person out over it. It means their key is not accepted.
+        status = 502 if response.status_code == 401 else response.status_code
+        detail = ("the gateway did not accept your key; replace it on Your key"
+                  if response.status_code == 401 else response.text)
+        raise HTTPException(status_code=status, detail=detail)
     if not response.content:
         return {}
     data = response.json()
@@ -1623,7 +1631,7 @@ async def _deregister_mind(name: str, mind_id: str) -> None:
     if not _registered_mind(rows, mind_id):
         return
     try:
-        await _gateway_request("DELETE", f"/broker/minds/{name}", admin=True)
+        await _gateway_request("DELETE", f"/broker/minds/{name}")
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
@@ -1739,7 +1747,7 @@ async def _register_scaffolded_mind(normalized: str, body: dict, user: dict) -> 
         registration["session_token"] = holder_credentials.gateway_credential(one_key)
     # POST /broker/minds is an admin route on comms; the service token gets 401.
     broker_result = await _gateway_request(
-        "POST", "/broker/minds", json_body=registration, admin=True
+        "POST", "/broker/minds", json_body=registration
     )
     log_event(
         log, "mind.registered", **_actor_fields(user), mind_name=normalized,
@@ -1944,9 +1952,35 @@ async def _fetch_hosts() -> dict:
     return {**dashboard_data.watchable_hosts(merged), "reports": settled}
 
 
-_host_snapshot = dashboard_data.SharedSnapshot(
-    _fetch_hosts, ttl=dashboard_data.HOST_TTL_SECONDS
-)
+class _PerPersonSnapshot:
+    """The hosts reading, one per signed-in person.
+
+    The hosts are asked of every mind through the gateway with the asking
+    person's own key (story 905), so what a person who may not reach a mind
+    reads is not what an administrator reads: one shared reading would show
+    each the other's answers for the cache window. Each person's reading is
+    still single-flight and held for the same time."""
+
+    def __init__(self, fetch, *, ttl):
+        self._fetch = fetch
+        self._ttl = ttl
+        self._clock = time.time
+        self._by_person: dict[str, dashboard_data.SharedSnapshot] = {}
+
+    async def get(self) -> dict:
+        person = mind_runtime._PERSON.get() or ""
+        found = self._by_person.get(person)
+        if found is None:
+            found = dashboard_data.SharedSnapshot(self._fetch, ttl=self._ttl, clock=self._clock)
+            self._by_person[person] = found
+        found._fetch, found._ttl, found._clock = self._fetch, self._ttl, self._clock
+        return await found.get()
+
+    def invalidate(self) -> None:
+        self._by_person.clear()
+
+
+_host_snapshot = _PerPersonSnapshot(_fetch_hosts, ttl=dashboard_data.HOST_TTL_SECONDS)
 _provider_snapshot = dashboard_data.SharedSnapshot(
     _fetch_provider_limits, ttl=dashboard_data.PROVIDER_TTL_SECONDS
 )
@@ -1960,7 +1994,7 @@ async def _live_sessions() -> dict:
     # Admin-guarded on the gateway: the body carries assistant prose from
     # every conversation in the hive, which the service token every surface
     # bot holds must not open.
-    payload = await _gateway_json("/sessions/live", admin=True)
+    payload = await _gateway_json("/sessions/live")
     if not isinstance(payload, dict) or "sessions" not in payload:
         # A gateway too old to know this route answers 200 with the body of
         # GET /sessions/{id} for the id "live". Folding that into an empty
@@ -2041,8 +2075,7 @@ async def api_dashboard_text(
     del user
     return await _gateway_json(
         "/sessions/live/text",
-        {"session_id": session_id, "since": since},
-        admin=True,
+        {"session_id": session_id, "since": since}
     )
 
 
@@ -2060,9 +2093,9 @@ async def api_overview(user: dict = Depends(require_auth)):
     comms_health, lucent_health = await asyncio.gather(
         _service_health(
             f"{_gateway_base_url().rstrip('/')}/health",
-            headers=_gateway_headers(),
+            headers=await _person_headers_or_none(),
             service_name="Hive Comms",
-            repair_action="Verify COMMS_BEARER_TOKEN and the Hive Comms endpoint, then retry.",
+            repair_action="Check the Hive Comms endpoint and your own key, then retry.",
         ),
         _service_health(
             f"{_lucent_base_url().rstrip('/')}/health",
@@ -2558,7 +2591,7 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
     if owner:
         registration["owner"] = owner
     broker_result = await _gateway_request(
-        "POST", "/broker/minds", json_body=registration, admin=True
+        "POST", "/broker/minds", json_body=registration
     )
     await set_edge_mind_metadata(
         name,
@@ -3263,15 +3296,13 @@ async def canvas_submit(request: Request):
         f"{who} finished a drawing pass on the hive whiteboard and wants you "
         f"to look. The board currently has {element_count} element(s). Fetch "
         f"the snapshot with `curl -H \"Authorization: Bearer $CANVAS_PUSH_TOKEN\" "
-        f"{snapshot}` — the bearer you draw with (CANVAS_PUSH_TOKEN, or "
-        "COMMS_BEARER_TOKEN where that is unset); without it the console "
+        f"{snapshot}` — the bearer you draw with (CANVAS_PUSH_TOKEN); without it the console "
         "refuses. Rasterize it and respond on Telegram with what you see."
     )
     if note:
         content += f" {who}'s note: {note}"
 
-    headers = _gateway_headers()
-    headers["Content-Type"] = "application/json"
+    headers = {**await _person_headers(), "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             payload = {
@@ -3518,7 +3549,7 @@ async def _bot_claim(mind_uuid: str, surface: str) -> dict:
     try:
         body = await _gateway_request(
             "GET", f"/broker/minds/{mind_uuid}/surface-claim",
-            params={"surface": surface}, admin=True,
+            params={"surface": surface}
         )
     except HTTPException as exc:
         if exc.status_code == 404:
@@ -3640,7 +3671,7 @@ async def api_mind_bot_claim_phrase(
     mind_uuid = await _mind_uuid(name)
     body = await _gateway_request(
         "POST", f"/broker/minds/{mind_uuid}/surface-claim/phrase",
-        params={"surface": surface}, admin=True,
+        params={"surface": surface}
     )
     if not isinstance(body, dict) or not body.get("phrase"):
         raise HTTPException(status_code=502, detail="The gateway minted no phrase")
@@ -3661,7 +3692,7 @@ async def api_mind_bot_claim_clear(
     mind_uuid = await _mind_uuid(name)
     await _gateway_request(
         "DELETE", f"/broker/minds/{mind_uuid}/surface-claim",
-        params={"surface": surface}, admin=True,
+        params={"surface": surface}
     )
     log_event(log, "mind.bot_claim.cleared", mind=name, surface=surface)
     return {"ok": True, "surface": surface}
@@ -4008,8 +4039,7 @@ async def api_mind_voice_update(
     await _gateway_request(
         "PUT",
         f"/broker/minds/{urllib.parse.quote(name)}",
-        json_body=row,
-        admin=True,
+        json_body=row
     )
     return {
         "saved": True,
@@ -4260,8 +4290,7 @@ async def api_mind_configuration_update(
         await _gateway_request(
             "PUT",
             f"/broker/minds/{urllib.parse.quote(name)}",
-            json_body={"model": default_model},
-            admin=True,
+            json_body={"model": default_model}
         )
     except HTTPException:
         previous_model = str(previous_configuration.get("default_model") or "")
@@ -4368,8 +4397,7 @@ async def api_mind_surface_token_set(
         try:
             await _gateway_request(
                 "POST", f"/broker/minds/{await _mind_uuid(name)}/surface-claim/bot",
-                params={"surface": surface}, json_body={"bot_ref": bot_ref},
-                admin=True,
+                params={"surface": surface}, json_body={"bot_ref": bot_ref}
             )
         except HTTPException as exc:
             # A gateway that predates bot claims, or one that is down. The
@@ -5194,7 +5222,7 @@ async def api_settings_hive_comms_session_delete(
 ):
     url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.delete(url, headers=_gateway_headers())
+        resp = await client.delete(url, headers=await _person_headers())
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
         result = resp.json() if resp.content else {"ok": True}
@@ -6493,8 +6521,7 @@ async def api_mind_owner_set(name: str, request: Request, user: dict = Depends(r
     result = await _gateway_request(
         "PUT",
         f"/broker/minds/{urllib.parse.quote(mind_id, safe='')}/owner",
-        json_body={"owner": owner},
-        admin=True,
+        json_body={"owner": owner}
     )
     log_event(
         log, "mind.owner.changed", **_actor_fields(user), mind_name=mind.get("name"),
@@ -6673,15 +6700,20 @@ async def api_hive_errors(user: dict = Depends(require_auth)):
     del user
     targets = []
     withheld = []
-    for name, url, token in [
-        ("Hive Comms", _gateway_base_url(), os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")),
-        ("Lucent", _lucent_base_url(), os.getenv("LUCENT_ADMIN_BEARER_TOKEN", "")),
+    # The gateway is asked with the signed-in administrator's own key (story
+    # 905). The memory store keeps its own administrator credential: flagged
+    # on the feature row as the memory store's own story.
+    gateway_headers = await _person_headers_or_none()
+    for name, url, headers in [
+        ("Hive Comms", _gateway_base_url(), gateway_headers),
+        ("Lucent", _lucent_base_url(),
+         {"Authorization": f"Bearer {os.getenv('LUCENT_ADMIN_BEARER_TOKEN', '')}"}),
     ]:
-        targets.append({"name": name, "url": url, "headers": {"Authorization": f"Bearer {token}"}})
+        targets.append({"name": name, "url": url, "headers": headers})
     # A failed registry read must stay visible rather than reporting zero minds.
     try:
         async with httpx.AsyncClient(timeout=4.0) as client:
-            response = await client.get(_gateway_base_url().rstrip('/') + '/broker/minds', headers=_gateway_headers())
+            response = await client.get(_gateway_base_url().rstrip('/') + '/broker/minds', headers=await _person_headers())
             response.raise_for_status()
             minds = response.json()
         if not isinstance(minds, list):

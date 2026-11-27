@@ -425,23 +425,33 @@ def test_a_gateway_answering_the_route_is_passed_through(monkeypatch):
     assert asyncio.run(main_mod._live_sessions()) == {"sessions": [{"id": "a"}]}
 
 
-def test_the_dashboard_reads_the_gateway_as_admin(monkeypatch):
+def test_the_dashboard_reads_the_gateway_with_the_signed_in_persons_key(monkeypatch):
     """Both live routes carry assistant prose from every conversation in the
-    hive, so the console must present the admin bearer and not the service
-    token every surface bot also holds."""
+    hive, so they are asked with the signed-in person's own key (story 905):
+    the gateway decides what that person may read, and this site holds no
+    credential of its own to read it with."""
     seen: list[dict] = []
 
-    def fake_sync(path, params=None, admin=False):
-        seen.append({"path": path, "admin": admin})
+    def fake_sync(path, params, headers):
+        seen.append({"path": path, "auth": headers.get("Authorization")})
         return {"sessions": []} if path == "/sessions/live" else {"blocks": []}
 
-    monkeypatch.setattr(main_mod, "_gateway_json_sync", fake_sync)
+    async def key(person):
+        return f"{person}-key-for-tests"
 
-    asyncio.run(main_mod._live_sessions())
-    asyncio.run(main_mod.api_dashboard_text(session_id="s1", since=0, user={}))
+    import holder_credentials
+
+    monkeypatch.setattr(main_mod, "_gateway_json_sync", fake_sync)
+    monkeypatch.setattr(holder_credentials, "user_key", key)
+    token = main_mod.mind_runtime._PERSON.set("daniel")
+    try:
+        asyncio.run(main_mod._live_sessions())
+        asyncio.run(main_mod.api_dashboard_text(session_id="s1", since=0, user={}))
+    finally:
+        main_mod.mind_runtime._PERSON.reset(token)
 
     assert [call["path"] for call in seen] == ["/sessions/live", "/sessions/live/text"]
-    assert all(call["admin"] for call in seen)
+    assert all(call["auth"] == "Bearer daniel-key-for-tests" for call in seen)
 
 
 def test_a_column_reaches_the_page_headed_by_its_mind_name(

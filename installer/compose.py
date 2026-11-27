@@ -554,7 +554,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         env = {"TERMINAL_HOST": "0.0.0.0", "HIVE_DATABASE_URL": dsn,
                "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"), "GATEWAY_API_URL": COMMS_URL,
                "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", TERMINAL)),
-               "COMMS_ADMIN_BEARER_TOKEN": env_ref("COMMS_ADMIN_BEARER_TOKEN"),
                "TERMINAL_LABELS_TOKEN": env_ref("TERMINAL_LABELS_TOKEN"), **site_links}
         if voice:
             env["VOICE_API_URL"] = voice

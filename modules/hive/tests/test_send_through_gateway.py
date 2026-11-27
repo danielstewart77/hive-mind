@@ -92,6 +92,7 @@ def test_a_person_who_is_neither_owner_nor_administrator_is_refused_before_anyth
 
 
 def test_with_nobody_signed_in_nothing_is_sent(world):
+    mind_runtime._PERSON.set(None)
     with pytest.raises(HTTPException) as refused:
         _send(world)
     assert refused.value.status_code == 403

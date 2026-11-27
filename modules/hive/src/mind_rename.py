@@ -107,13 +107,21 @@ async def _tools(operation, method, suffix=''):
     return await _request(method, url, main._hive_tools_headers(), params={'path': operation['project_path']}, timeout=180)
 
 
+async def _requester_headers(username):
+    """The gateway's bearer for a rename: the key of the person who asked for
+    it, who is on the operation record. This site holds no key of its own
+    (feature 834, story 905). No key to be had: the step waits as recoverable."""
+    key = await holder_credentials.user_key(str(username or ''))
+    if not key:
+        raise ValueError('The key of the person who asked for this rename could not be found')
+    return {'Authorization': 'Bearer ' + key}
+
+
 async def _broker(operation, action):
     service = holder_credentials.SERVICES['comms']
-    token = service.admin_token()
-    if not token:
-        raise ValueError('The gateway’s credential management connection is not configured')
+    headers = await _requester_headers(operation.get('requester'))
     return await _request('POST', f'{service.url().rstrip("/")}/broker/minds/{operation["mind_id"]}/rename/{action}',
-                          {'Authorization': 'Bearer ' + token}, {'operation_id': operation['operation_id']})
+                          headers, {'operation_id': operation['operation_id']})
 
 
 async def _runtime(operation, name):
@@ -179,7 +187,7 @@ async def request_rename(mind_id, new, user):
         # Refuse unsupported gateway versions before touching any live state.
         service = holder_credentials.SERVICES['comms']
         capabilities = await _request('GET', service.url().rstrip('/') + '/broker/minds/rename/capabilities',
-                                      {'Authorization': 'Bearer ' + service.admin_token()})
+                                      await _requester_headers(user['username']))
         if capabilities.get('version') != 1:
             raise ValueError('The gateway needs rename support before this Mind can be renamed')
         import main

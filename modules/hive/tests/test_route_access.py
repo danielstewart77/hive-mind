@@ -206,7 +206,7 @@ def test_a_route_added_with_no_authorization_code_is_refused_to_a_non_admin(peop
             main.app.router.routes.remove(route)
 
 
-def test_only_an_admin_moves_a_mind_to_another_owner_and_comms_hears_it_with_the_admin_token(
+def test_only_an_admin_moves_a_mind_to_another_owner_and_comms_hears_it_with_that_administrators_own_key(
     people, fake_comms, monkeypatch
 ):
     admin, sloan = people
@@ -221,7 +221,7 @@ def test_only_an_admin_moves_a_mind_to_another_owner_and_comms_hears_it_with_the
     assert admin.put("/api/minds/zack/owner", json={"owner": "nobody-here"}).status_code == 400
     (sent,) = fake_comms.received
     assert (sent["method"], sent["path"]) == ("PUT", "/broker/minds/m-zack/owner")
-    assert sent["authorization"] == "Bearer admin-token"
+    assert sent["authorization"].startswith("Bearer ") and sent["authorization"] != "Bearer admin-token"
     assert json.loads(sent["body"]) == {"owner": "sloan"}
 
 

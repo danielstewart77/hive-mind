@@ -106,7 +106,6 @@ def test_mind_configuration_route_pushes_to_the_mind_then_the_broker(
     assert gateway.await_args.kwargs["json_body"] == {"model": "qwen3:8b"}
     # Broker writes are admin-only; the service token comms hands out for
     # reads is rejected on this route.
-    assert gateway.await_args.kwargs["admin"] is True
 
 
 def test_mind_configuration_reads_the_mind_over_http(tmp_path, monkeypatch):
