@@ -35,7 +35,7 @@ from hive_data import memory as hd_memory
 
 from lucent_api import holder_access as ha
 from lucent_api import lucent_memory
-from lucent_api.tests.conftest import unique
+from lucent_api.tests.conftest import put_credential, unique
 
 ADMIN_TOKEN = "lucent-admin-credential"  # secret-guard: allow
 
@@ -112,15 +112,14 @@ async def hive(store, registered_types, monkeypatch):
     holders = {k: unique(k) for k in ("skippy", "mordecai", "arnold", "comms")}
     tokens = {k: unique(f"{k}-token") for k in holders}
 
-    await ha.put_credential(holders["skippy"], mine, tokens["skippy"],
+    await put_credential(holders["skippy"], mine, tokens["skippy"],
                             role=ha.MIND)
-    await ha.put_credential(holders["mordecai"], mine, tokens["mordecai"],
+    await put_credential(holders["mordecai"], mine, tokens["mordecai"],
                             role=ha.MIND)
-    await ha.put_credential(holders["arnold"], theirs, tokens["arnold"],
+    await put_credential(holders["arnold"], theirs, tokens["arnold"],
                             role=ha.MIND)
-    await ha.put_credential(holders["comms"], mine, tokens["comms"],
+    await put_credential(holders["comms"], mine, tokens["comms"],
                             role=ha.SERVICE)
-    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     monkeypatch.setattr(lucent_memory, "_embed", _fake_embed)
 
     from lucent_api.server import create_app
@@ -141,13 +140,22 @@ async def hive(store, registered_types, monkeypatch):
 # ---- the credential store -------------------------------------------------
 
 
+async def _cut_off(holder: str) -> None:
+    """Cut a key off in the one record, as the hive site does."""
+    import time
+
+    from hive_data import broker_ops
+
+    assert (await broker_ops.revoke_live_credential(holder, time.time()))["rows"] == 1
+
+
 @pytest.mark.asyncio
 async def test_two_holders_of_one_person_each_get_their_own_value(store):
     owner = unique("daniel")
     first, second = unique("skippy"), unique("bob")
     first_value, second_value = unique("first-value"), unique("second-value")
-    await ha.put_credential(first, owner, first_value)
-    await ha.put_credential(second, owner, second_value)
+    await put_credential(first, owner, first_value)
+    await put_credential(second, owner, second_value)
 
     assert (await ha.credential_for_token(first_value)).holder == first
     assert (await ha.credential_for_token(second_value)).holder == second
@@ -158,10 +166,10 @@ async def test_revoking_one_holder_leaves_another_of_the_same_person(store):
     owner = unique("daniel")
     first, second = unique("skippy"), unique("bob")
     first_value, second_value = unique("first-value"), unique("second-value")
-    await ha.put_credential(first, owner, first_value)
-    await ha.put_credential(second, owner, second_value)
+    await put_credential(first, owner, first_value)
+    await put_credential(second, owner, second_value)
 
-    assert await ha.revoke_credential(first) is True
+    await _cut_off(first)
 
     assert await ha.credential_for_token(first_value) is None
     assert (await ha.credential_for_token(second_value)).holder == second
@@ -171,42 +179,27 @@ async def test_revoking_one_holder_leaves_another_of_the_same_person(store):
 async def test_a_revoked_value_stops_resolving_on_the_very_next_call(store):
     holder = unique("skippy")
     value = unique("value")
-    await ha.put_credential(holder, unique("daniel"), value)
+    await put_credential(holder, unique("daniel"), value)
     assert await ha.credential_for_token(value) is not None
 
-    await ha.revoke_credential(holder)
+    await _cut_off(holder)
 
     # Same pool, same process, nothing restarted.
     assert await ha.credential_for_token(value) is None
 
 
-@pytest.mark.asyncio
-async def test_a_value_another_holder_already_holds_is_refused(store):
-    holder = unique("skippy")
-    value = unique("value")
-    await ha.put_credential(holder, unique("daniel"), value)
-
-    with pytest.raises(ValueError) as caught:
-        await ha.put_credential(unique("arnold"), unique("sloan"), value)
-
-    assert holder in str(caught.value)
-    assert (await ha.credential_for_token(value)).holder == holder
 
 
-@pytest.mark.asyncio
-async def test_the_shared_sentinel_is_not_a_holder(store):
-    with pytest.raises(ValueError):
-        await ha.put_credential(ha.SHARED, unique("daniel"), unique("value"))
 
 
 @pytest.mark.asyncio
 async def test_a_credential_is_stored_as_a_digest(store, inspector):
     holder = unique("skippy")
     value = unique("value")
-    await ha.put_credential(holder, unique("daniel"), value)
+    await put_credential(holder, unique("daniel"), value)
 
     row = await inspector.fetchrow(
-        'SELECT * FROM memory.credentials WHERE "holder" = $1', holder)
+        'SELECT * FROM core.credentials WHERE "holder" = $1', holder)
 
     assert row["token_sha"] == ha.digest(value)
     assert value not in json.dumps({k: str(v) for k, v in dict(row).items()})
@@ -303,12 +296,6 @@ async def test_no_credential_at_all_is_refused(hive):
     assert caught.value.status_code == 401
 
 
-@pytest.mark.asyncio
-async def test_the_admin_value_reaches_every_mind(hive):
-    caller = await ha.require_holder(authorization=f"Bearer {hive.admin}")
-
-    assert caller.is_admin is True
-    assert caller.minds_for_read(None) is None
 
 
 @pytest_asyncio.fixture
@@ -320,14 +307,14 @@ async def no_live_credentials(store, inspector):
     to revoke what is there and restore it afterwards.
     """
     parked = [r["holder"] for r in await inspector.fetch(
-        'UPDATE memory.credentials SET "revoked_at" = 1 '
+        'UPDATE core.credentials SET "revoked_at" = 1 '
         'WHERE "revoked_at" IS NULL RETURNING "holder"')]
     try:
         yield
     finally:
         if parked:
             await inspector.execute(
-                'UPDATE memory.credentials SET "revoked_at" = NULL '
+                'UPDATE core.credentials SET "revoked_at" = NULL '
                 'WHERE "holder" = ANY($1::text[])', parked)
 
 
@@ -621,67 +608,16 @@ async def _mint(hive: Hive, token: str, holder: str, value: str,
               "role": "service", **body})
 
 
-@pytest.mark.asyncio
-async def test_a_minds_own_credential_cannot_mint_one(hive):
-    value = unique("a-value")
-
-    answer = await _mint(hive, hive.skippy_token, unique("intruder"), value)
-
-    assert answer.status_code == 401, answer.text
-    assert await ha.credential_for_token(value) is None
 
 
-@pytest.mark.asyncio
-async def test_the_admin_credential_mints_one(hive):
-    holder = unique("newcomer")
-    value = unique("a-value")
-
-    answer = await _mint(hive, hive.admin, holder, value)
-
-    assert answer.status_code == 200, answer.text
-    assert (await ha.credential_for_token(value)).holder == holder
 
 
-@pytest.mark.asyncio
-async def test_a_minds_own_credential_cannot_revoke_one(hive):
-    answer = await hive.client.delete(
-        f"/credentials/{hive.skippy}", headers=hive.h(hive.skippy_token))
-
-    assert answer.status_code == 401, answer.text
-    assert await ha.credential_for_token(hive.skippy_token) is not None
 
 
-@pytest.mark.asyncio
-async def test_a_minds_own_credential_cannot_list_holders(hive):
-    answer = await hive.client.get(
-        "/credentials", headers=hive.h(hive.skippy_token))
-
-    assert answer.status_code == 401, answer.text
 
 
-@pytest.mark.asyncio
-async def test_the_listing_never_carries_a_value(hive):
-    """An operator does not need it; they need to know whether the holder
-    has one that works."""
-    answer = await hive.client.get("/credentials", headers=hive.h(hive.admin))
-
-    assert answer.status_code == 200, answer.text
-    body = answer.text
-    assert hive.skippy in body, "the holder under test is not even listed"
-    assert hive.skippy_token not in body
-    assert ha.digest(hive.skippy_token) not in body
-    assert "token_sha" not in body
 
 
-@pytest.mark.asyncio
-async def test_a_credential_naming_no_role_is_refused(hive):
-    """Defaulting it silently narrows comms to one mind, and the symptom is
-    minds answering with no identity while every surface stays green."""
-    answer = await hive.client.put(
-        f"/credentials/{unique('comms')}", headers=hive.h(hive.admin),
-        json={"username": unique("daniel"), "token": unique("another-value")})
-
-    assert answer.status_code == 422, answer.text
 
 
 # ---- the provenance alias -------------------------------------------------
@@ -697,7 +633,7 @@ async def aliased(store) -> tuple[str, str, ha.Caller]:
     holder = unique("skippy")
     provenance = unique("14cb-uuid")
     value = unique("value")
-    await ha.put_credential(holder, unique("daniel"), value,
+    await put_credential(holder, unique("daniel"), value,
                             mind_id=provenance)
     caller = await ha.credential_for_token(value)
     assert caller is not None

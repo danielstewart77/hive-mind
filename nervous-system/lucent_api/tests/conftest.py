@@ -135,3 +135,47 @@ async def a_mind(store):
         harness="claude", registered_at=1_800_000_000.0,
         last_seen=1_800_000_000.0)
     return mind_id
+
+
+# ---- the one record of keys ------------------------------------------------
+#
+# The memory store registers no keys. What a test needs is a key recorded in
+# `core.credentials` the way the hive site records it, so these write that row.
+
+async def put_credential(holder: str, username: str, token: str,
+                         role: str = "mind", mind_id: str | None = None) -> None:
+    """Record `token` as `holder`'s key in the one record. A `mind_id` also
+    registers the mind under that identity, which is where the store reads a
+    mind's provenance from."""
+    import time
+
+    from hive_data import access, core
+
+    await core.upsert_credential(
+        holder=holder, username=username, role=role,
+        token_sha=access.digest(token), created_at=time.time(), revoked_at=None)
+    if mind_id:
+        await core.upsert_mind(
+            mind_id=mind_id, name=holder, gateway_url="http://127.0.0.1:8426",
+            model="claude-opus-5", harness="claude",
+            registered_at=1_800_000_000.0, last_seen=1_800_000_000.0,
+            owner=username)
+
+
+async def an_administrator(token: str | None = None, *, admin: bool = True,
+                           username: str | None = None) -> tuple[str, str]:
+    """A person with an account, in the admins group when `admin`, holding
+    their own key. Returns (username, key)."""
+    import time
+
+    from hive_data import access, core
+
+    name = username or unique("person")
+    key = token or unique("person-key")
+    user = await core.create_user(
+        username=name, password_hash="x", created_at=int(time.time()))
+    if admin:
+        await core.create_group(name=access.ADMINS_GROUP, created_at=int(time.time()))
+        await core.add_group_member(group_name=access.ADMINS_GROUP, user_id=user["row"]["id"])
+    await put_credential(name, name, key, role=access.USER_KEY)
+    return name, key

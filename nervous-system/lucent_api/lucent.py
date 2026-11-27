@@ -109,22 +109,24 @@ async def store_is_live() -> bool:
 
 
 async def owners_by_writer() -> dict[str, str]:
-    """Each mind's owner, as lucent's own credential table records it.
+    """Each mind's owner, as the one record of keys (`core.credentials`)
+    names it: the user a live mind key answers for, under the mind's name and
+    its uuid."""
+    from hive_data import core
 
-    Lucent's credentials carry the user their holder answers for, which is
-    the only owner fact this process holds. Comms' `minds.owner` is the same
-    fact recorded by another service, and reaching into it behind comms'
-    back would make two readers of one truth.
-    """
     owners: dict[str, str] = {}
-    for row in await graph.credentials_all():
-        if row.get("revoked_at") is not None:
+    for row in await core.list_live_credentials():
+        if str(row.get("role") or "") != "mind":
             continue
         user = str(row.get("username") or "").strip().lower()
         if not user:
             continue
-        for key in (str(row.get("mind_id") or "").strip(),
-                    str(row.get("holder") or "").strip().lower()):
+        holder = str(row.get("holder") or "").strip().lower()
+        keys = [holder]
+        known = await core.get_mind_by_id_or_name(holder)
+        if known is not None:
+            keys.append(str(known["mind_id"] or "").strip())
+        for key in keys:
             if key:
                 owners[key] = user
     return owners

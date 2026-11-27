@@ -635,8 +635,8 @@ class SchemaEdgeBody(BaseModel):
 async def add_schema_type(body: SchemaTypeBody) -> dict:
     """Insert a new node type into the allow-list.
 
-    Bearer-gated by ``LUCENT_ADMIN_BEARER_TOKEN``. Only hive-tools (which
-    fronts the request-new-type HITL flow) holds this token.
+    Gated on an administrator's own person key. Hive-tools forwards the key of
+    the mind that asked, which is refused here: a mind is not an administrator.
     """
     import time
 
