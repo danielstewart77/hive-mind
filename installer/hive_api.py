@@ -1,12 +1,19 @@
-"""Talking to comms and lucent: holder credentials and the mind's registration.
+"""Writing holder credentials and the mind's registration into the hive database.
 
-Both stores' `PUT /credentials/{holder}` is mint-or-replace. Replacing is how
-an install against an existing hive would cut a running service off without a
-word, so the installer never puts over a holder that already has a row: a
-holder it finds is kept when the value this install holds is the one the
-store accepts, and refused otherwise. A holder is minted with an explicit role
-— `service` for a service, `mind` for the mind — because an omitted role
-defaults to `person`, which may not reach the routes the machinery drives.
+The installer holds no administrator credential of any service. What it has to
+record — each service's own credential, the mind's registration, the mind's
+one key in the tools — it writes as rows in the hive database through
+`hive_data`, the way the gateway records a credential itself, and not by
+asking a service that would have to trust an administrator value for it.
+
+The write runs inside the hive network in the console image (which carries
+`hive_data`), the same way the first admin is seeded; the database address and
+the values ride in on stdin, never in a command line.
+
+A holder that already has a row is never replaced: it is kept when the value
+this install holds is the one the row recognises, and refused otherwise.
+A holder is written with an explicit role — `service` for a service, `mind`
+for the mind — because a role left out means `person`.
 """
 
 from __future__ import annotations
@@ -20,88 +27,175 @@ from installer.shell import StepFailed
 SERVICE = "service"
 MIND = "mind"
 
-#: A route each store answers to a machine holder and not to a stranger: what
-#: "the token written to that service is accepted" is checked against.
-ACCEPTS = {"comms": "/broker/minds", "lucent": "/graph/schema"}
+#: Run by `Shell.in_network`, which defines `PAYLOAD` and imports json.
+SCRIPT = r'''
+import asyncio, hashlib, hmac, os, time
+os.environ["HIVE_DATABASE_URL"] = PAYLOAD["dsn"]
 
+LABEL = b"hive-mind: what the gateway shows this mind, v1"
 
-class Api:
-    def __init__(self, kind: str, base_url: str, admin_token: str, timeout: float = 15):
-        self.kind = kind
-        self.base = base_url.rstrip("/")
-        self.admin = admin_token
-        self.timeout = timeout
+def digest(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def request(self, method: str, path: str, body: dict | None = None,
-                token: str | None = None) -> tuple[int, object]:
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(
-            self.base + path, data=data, method=method,
-            headers={"Authorization": f"Bearer {token or self.admin}",
-                     **({"Content-Type": "application/json"} if data else {})})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        try:
-            with opener.open(req, timeout=self.timeout) as resp:
-                raw = resp.read()
-                status = resp.status
-        except urllib.error.HTTPError as exc:
-            raw, status = exc.read(), exc.code
-        except OSError as exc:
-            raise StepFailed(f"{self.kind} at {self.base} cannot be reached: {exc}") from exc
-        try:
-            return status, json.loads(raw or b"null")
-        except ValueError:
-            return status, raw.decode("utf-8", "replace")
+def gateway_credential(key):
+    return hmac.new(str(key).strip().encode("utf-8"), LABEL, hashlib.sha256).hexdigest()
 
-    def credentials(self) -> dict[str, dict]:
-        status, rows = self.request("GET", "/credentials")
-        if status != 200 or not isinstance(rows, list):
-            raise StepFailed(f"{self.kind} would not list its credentials ({status})")
-        return {r["holder"]: r for r in rows}
+def held_by(holder):
+    return (f"that value is already held by {holder!r}; "
+            "a credential belongs to one holder")
 
-    def accepts(self, token: str) -> bool:
-        status, _ = self.request("GET", ACCEPTS[self.kind], token=token)
-        return status not in (401, 403)
-
-
-def mint(api: Api, holders: dict[str, str], username: str, role: str = SERVICE,
-         mind_id: str | None = None, on_minted=None) -> dict[str, str]:
-    """Give every holder its credential unless it has one; never replace.
-
-    `holders` maps holder -> the value this install holds for it. Returns
-    holder -> "minted" | "kept". `on_minted(holder)` is called the moment a
-    holder's PUT succeeds, so a run that fails at the next holder has
-    already recorded this one as its own.
-    """
-    existing = api.credentials()
-    out: dict[str, str] = {}
-    for holder, token in holders.items():
+async def mint(hive_data, p):
+    from hive_data import broker_ops, core, graph
+    done, error = {}, None
+    comms = p["store"] == "comms"
+    for holder, token in p["holders"].items():
         key = holder.strip().lower()
-        if key in existing:
-            if existing[key].get("live") and api.accepts(token):
-                out[key] = "kept"
+        sha = digest(token)
+        existing = None
+        if comms:
+            existing = await core.get_credential(key)
+        else:
+            existing = next((r for r in await graph.credentials_all() if r["holder"] == key), None)
+        if existing is not None:
+            if existing["revoked_at"] is None and hmac.compare_digest(
+                    str(existing["token_sha"]).encode(), sha.encode()):
+                done[key] = "kept"
                 continue
-            raise StepFailed(
-                f"{api.kind} already has a holder named {key!r} with a credential this "
-                "install does not hold; it was not replaced. Choose another name or "
-                "revoke it on the console first.")
-        body: dict = {"username": username, "token": token, "role": role}
-        if mind_id and api.kind == "lucent":
-            body["mind_id"] = mind_id
-        status, answer = api.request("PUT", f"/credentials/{key}", body)
-        if status != 200:
-            raise StepFailed(f"{api.kind} refused to mint {key!r}: {answer}")
-        out[key] = "minted"
-        if on_minted is not None:
-            on_minted(key)
+            error = (f"{p['store']} already has a holder named {key!r} with a credential this "
+                     "install does not hold; it was not replaced. Choose another name or "
+                     "revoke it on the console first.")
+            break
+        if comms:
+            clash = await broker_ops.holder_of_digest(sha)
+        else:
+            clash = await graph.credential_holder_of_digest(token_sha=sha, other_than=key)
+        if clash is not None and clash != key:
+            error = held_by(clash)
+            break
+        now = time.time()
+        try:
+            if comms:
+                async with hive_data.transaction() as unit:
+                    await core.upsert_credential(holder=key, username=p["username"],
+                                                 role=p["role"], token_sha=sha,
+                                                 created_at=now, revoked_at=None, unit=unit)
+                    if p["role"] == "mind":
+                        known = await core.get_mind_by_id_or_name(key, unit=unit)
+                        if known is not None:
+                            await broker_ops.update_mind(
+                                known["mind_id"], unit=unit,
+                                session_token=gateway_credential(token))
+            else:
+                await graph.credential_put(holder=key, username=p["username"], role=p["role"],
+                                           token_sha=sha, mind_id=p.get("mind_id"),
+                                           created_at=now)
+        except hive_data.Conflict:
+            error = held_by(clash or "another holder")
+            break
+        done[key] = "minted"
+    return {"done": done, "error": error}
+
+async def register_mind(hive_data, p):
+    from hive_data import broker_ops, core
+    now = time.time()
+    async with hive_data.transaction() as unit:
+        existing = await core.get_mind(p["mind_id"], unit=unit)
+        if existing:
+            fields = {"name": p["name"], "gateway_url": p["gateway_url"], "model": p["model"],
+                      "harness": p["harness"], "last_seen": now}
+            if not existing["owner"]:
+                fields["owner"] = p["owner"]
+            await broker_ops.update_mind(p["mind_id"], unit=unit, **fields)
+        else:
+            await core.upsert_mind(mind_id=p["mind_id"], name=p["name"],
+                                   gateway_url=p["gateway_url"], model=p["model"],
+                                   harness=p["harness"], registered_at=now, last_seen=now,
+                                   owner=p["owner"], unit=unit)
+    return {"registered": True}
+
+async def tools_key(hive_data, p):
+    from hive_data import tools
+    name = p["holder"].strip().lower()
+    if name in ("hitl-approver", "internal", "skippy", "shared-token-retired"):
+        return {"error": f"{name!r} is not a holder the tools take a mind's key for"}
+    if len(p["token"]) < 8 or any(c.isspace() for c in p["token"]):
+        return {"error": "a credential is at least 8 characters with no spaces in it"}
+    try:
+        await tools.register_token(name, digest(p["token"]), int(time.time()))
+    except hive_data.Conflict as exc:
+        return {"error": str(exc)}
+    return {"registered": True}
+
+async def main():
+    import hive_data
+    await hive_data.connect()
+    try:
+        op = PAYLOAD["op"]
+        return await {"mint": mint, "mind": register_mind, "tools": tools_key}[op](
+            hive_data, PAYLOAD["args"])
+    finally:
+        await hive_data.close()
+
+try:
+    print(json.dumps(asyncio.run(main())))
+except Exception as exc:
+    print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+'''
+
+
+def apply(sh, dsn: str, op: str, image: str, **args) -> dict:
+    """Run one operation of `SCRIPT` against the hive database and return its answer."""
+    out = sh.in_network(SCRIPT, {"dsn": dsn, "op": op, "args": args}, timeout=120,
+                        image=image, redact=(dsn, *(
+                            str(v) for v in (args.get("holders") or {}).values()),
+                            str(args.get("token") or "")))
     return out
 
 
-def register_mind(comms: Api, *, mind_id: str, name: str, gateway_url: str, model: str,
-                  owner: str, harness: str = "dsh") -> dict:
-    body = {"mind_id": mind_id, "name": name, "gateway_url": gateway_url, "model": model,
-            "harness": harness, "owner": owner}
-    status, answer = comms.request("POST", "/broker/minds", body)
-    if status != 200:
-        raise StepFailed(f"comms refused to register {name!r} ({status}): {answer}")
-    return answer if isinstance(answer, dict) else {}
+def mint(sh, dsn: str, image: str, store: str, holders: dict[str, str], username: str,
+         role: str = SERVICE, mind_id: str | None = None, on_minted=None) -> dict[str, str]:
+    """Give every holder its credential unless it has one; never replace.
+
+    `holders` maps holder -> the value this install holds for it. Returns
+    holder -> "minted" | "kept". `on_minted(holder)` is called for every
+    holder that was written, even when a later holder stops the run, so a run
+    that fails at the next holder has already recorded this one as its own.
+    """
+    out = apply(sh, dsn, "mint", image, store=store, holders=holders, username=username,
+                role=role, mind_id=mind_id)
+    done = out.get("done") or {}
+    if on_minted is not None:
+        for holder, state in done.items():
+            if state == "minted":
+                on_minted(holder)
+    if out.get("error"):
+        raise StepFailed(f"{store}: {out['error']}")
+    return done
+
+
+def register_mind(sh, dsn: str, image: str, *, mind_id: str, name: str, gateway_url: str,
+                  model: str, owner: str, harness: str = "dsh") -> None:
+    out = apply(sh, dsn, "mind", image, mind_id=mind_id, name=name, gateway_url=gateway_url,
+                model=model, harness=harness, owner=owner)
+    if out.get("error") or not out.get("registered"):
+        raise StepFailed(f"the mind {name!r} could not be registered: {out.get('error')}")
+
+
+def register_tools_key(sh, dsn: str, image: str, holder: str, token: str) -> None:
+    """The mind's one key as the holder's working credential in the tools."""
+    out = apply(sh, dsn, "tools", image, holder=holder, token=token)
+    if out.get("error") or not out.get("registered"):
+        raise StepFailed(f"the tools could not take {holder!r}'s key: {out.get('error')}")
+
+
+def answers(base_url: str, path: str = "/health", timeout: float = 15) -> int:
+    """The status a service gives a request that carries no credential: it is
+    serving when it answers at all (200, or 401/403 for a route that wants one)."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(base_url.rstrip("/") + path, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except OSError:
+        return 0

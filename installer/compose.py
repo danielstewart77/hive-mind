@@ -87,7 +87,6 @@ NO_MODULE_HISTORY = f"{APP}/.git/{MODULES}:ro"
 
 #: Secrets the installer always makes.
 BASE_SECRETS = (
-    "COMMS_ADMIN_BEARER_TOKEN", "LUCENT_ADMIN_BEARER_TOKEN", "LUCENT_SOUL_BEARER_TOKEN",
     # The terminal's label token *is* comms' rename token: one value, two names.
     "COMMS_RENAME_TOKEN", "SMS_INBOUND_HMAC_SECRET",
     "HIVE_SECRET_KEY", "HIVE_SITE_ADMIN_TOKEN",
@@ -433,7 +432,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "context": ns, "dockerfile": "comms/Dockerfile",
         "additional_contexts": {"hive_data": hive_data}}, env={
         "COMMS_PORT": "8424", "COMMS_PROJECT_DIR": "/app", "HIVE_DATABASE_URL": dsn,
-        "COMMS_ADMIN_BEARER_TOKEN": env_ref("COMMS_ADMIN_BEARER_TOKEN"),
         "COMMS_RENAME_TOKEN": env_ref("COMMS_RENAME_TOKEN"),
         "SMS_INBOUND_HMAC_SECRET": env_ref("SMS_INBOUND_HMAC_SECRET"),
         "LUCENT_URL": LUCENT_URL, "LUCENT_URL_HIVE": LUCENT_URL,
@@ -451,8 +449,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "INFERENCE_PROXY_KEY": env_ref(SERVICE_PROXY_KEY),
         "LUCENT_EMBEDDING_MODEL": env_ref(EMBEDDING_MODEL_VAR),
         "LUCENT_CLASSIFIER_MODEL": env_ref(CLASSIFIER_MODEL_VAR),
-        "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN"),
-        "LUCENT_SOUL_BEARER_TOKEN": env_ref("LUCENT_SOUL_BEARER_TOKEN"),
         "LUCENT_PRIMARY_USER": env_ref("HIVE_SEED_USERNAME"),
         "PRUNE_LOG_PATH": "/data/prune.log", "PRUNE_TIMEZONE": host.tz,
     }
@@ -489,15 +485,12 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "HIVE_SITE_ADMIN_TOKEN": env_ref("HIVE_SITE_ADMIN_TOKEN"),
                "COMMS_URL": COMMS_URL, "GATEWAY_API_URL": COMMS_URL,
                "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", CONSOLE)),
-               "COMMS_ADMIN_BEARER_TOKEN": env_ref("COMMS_ADMIN_BEARER_TOKEN"),
                "LUCENT_API_URL": LUCENT_URL,
                "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", CONSOLE)),
-               "LUCENT_SOUL_BEARER_TOKEN": env_ref("LUCENT_SOUL_BEARER_TOKEN"),
                # What issues a new mind its memory-store credential: Add a
                # Mind mints one per service, and without this the memory
                # store's is refused and the mind is not made. The gateway's
                # is above; the proxy's is read from the .env it has mounted.
-               "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN"),
                # The console's model address is the proxy too, with the one
                # key: OLLAMA_BASE_URL / OLLAMA_URL are where it points a mind
                # it scaffolds for local models.
@@ -528,10 +521,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         if voice:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
-            env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN"),
-                        # The console registers a mind's pasted key with the
-                        # tools at creation. Only the console holds this.
-                        "TOOLS_ADMIN_BEARER_TOKEN": env_ref("TOOLS_ADMIN_BEARER_TOKEN")})
+            env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
         # The Hive Tools card reports what is really there: the module, read
         # only, where the console looks for a checkout.
         env["HIVE_TOOLS_DIR"] = str(repo("hive-tools"))
@@ -589,8 +579,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                                 model_ref=env_ref(CLASSIFIER_MODEL_VAR)),
             "COMMS_URL": COMMS_URL,
             "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", tools.SERVICE)),
-            "LUCENT_URL": LUCENT_URL,
-            "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN")})
+            "LUCENT_URL": LUCENT_URL})
         # The console restarts a mind through the tools service, which runs
         # `docker compose` against this install: the socket, and the install
         # folder at the same path it has on the host so the file's paths hold.
