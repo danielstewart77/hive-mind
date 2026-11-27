@@ -84,11 +84,20 @@ def _unwrap(response: httpx.Response) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+async def _ask(client, method: str, path: str, **kwargs):
+    """One call to the memory store; one that cannot be made is a plain 502."""
+    try:
+        return await getattr(client, method.lower())(f"{_base_url()}{path}", **kwargs)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502,
+                            detail=f"the memory store did not answer: {type(exc).__name__}") from exc
+
+
 async def fetch_soul(mind_name: str) -> dict:
     """The Mind's soul as it stands in the graph, with its change count."""
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        response = await client.get(
-            f"{_base_url()}/graph/soul",
+        response = await _ask(
+            client, "GET", "/graph/soul",
             params={"name": node_name(mind_name)},
             headers=await soul_headers(),
         )
@@ -98,8 +107,8 @@ async def fetch_soul(mind_name: str) -> dict:
 async def fetch_history(mind_name: str, limit: int = 25) -> list[dict]:
     """Recorded changes, newest first — who changed what, and why."""
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        response = await client.get(
-            f"{_base_url()}/graph/soul/history",
+        response = await _ask(
+            client, "GET", "/graph/soul/history",
             params={"name": node_name(mind_name), "limit": limit},
             headers=await soul_headers(),
         )
