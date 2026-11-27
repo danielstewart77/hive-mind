@@ -26,8 +26,8 @@ failed; exit 2, the same shape, for a malformed command line.
 **Through the console's own routes.** A role decides what every mind holding
 it may use, and the console is the one place that checks a tool name, keeps
 a slug unique and refuses to delete the general role. The console is
-`HIVE_SITE_URL` and the credential is `ROLES_PUSH_TOKEN`, the operator's own:
-it admits what the Roles page admits and nothing else on the console. It is
+`HIVE_SITE_URL` and the credential is this mind's own key (`MIND_KEY`), which the console
+recognises as the operator's from the roles it holds: it admits what the Roles page admits and nothing else on the console. It is
 never printed, not even in an error.
 
 `update --skills a,b` replaces the whole list, so two callers replacing at
@@ -79,11 +79,10 @@ def _console() -> str:
 
 
 def _token() -> str:
-    token = (os.getenv("ROLES_PUSH_TOKEN") or "").strip()
+    token = (os.getenv("MIND_KEY") or "").strip()
     if not token:
-        raise Refused("ROLES_PUSH_TOKEN is unset: it is the operator's "
-                      "credential for roles, and without it the console "
-                      "answers every call with 401.")
+        raise Refused("MIND_KEY is unset: it is this mind's own key, and "
+                      "without it the console answers every call with 401.")
     return token
 
 

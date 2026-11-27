@@ -430,6 +430,7 @@ async def submit_page(
     items: dict[str, dict[str, Any]],
     action: str = "feedback",
     revision: int | None = None,
+    submitted_by: str = "",
 ) -> dict[str, Any]:
     """Write Daniel's edits and questions, and queue a notice for the Mind.
 
@@ -488,12 +489,13 @@ async def submit_page(
 
     return await _write_page(
         design_id, page, merged, accepted=accepted, stale=stale,
-        expected_revision=record["revision"], notice=(action, page),
+        expected_revision=record["revision"], notice=(action, page, submitted_by),
     )
 
 
 async def accept_page(
-    design_id: str, page: str, *, revision: int | None = None
+    design_id: str, page: str, *, revision: int | None = None,
+    submitted_by: str = "",
 ) -> dict[str, Any]:
     """Record that Daniel has accepted a page as it stands.
 
@@ -523,7 +525,7 @@ async def accept_page(
     return await _write_page(
         design_id, page, record[page], accepted=accepted,
         stale=record["stale"],
-        expected_revision=record["revision"], notice=("accept", page),
+        expected_revision=record["revision"], notice=("accept", page, submitted_by),
     )
 
 
@@ -553,7 +555,7 @@ async def _write_page(
     accepted: dict[str, Any],
     stale: dict[str, Any],
     expected_revision: int,
-    notice: tuple[str, str] | None = None,
+    notice: tuple[str, str, str] | None = None,
 ) -> dict[str, Any]:
     """Write one page, but only if the record is still where it was read.
 
@@ -581,8 +583,12 @@ async def _write_page(
                 f" this write was made against {expected_revision}"
             )
         if notice is not None:
-            kind, notice_page = notice
-            await store.queue_notice(design_id, kind, notice_page, now)
+            kind, notice_page, by = notice
+            # Who submitted travels with the notice (its `body`), because the
+            # delivery goes out with that person's own key and no other.
+            await store.queue_notice(
+                design_id, kind, notice_page, now,
+                body=json.dumps({"submitted_by": str(by or "").strip().lower()}))
     return await get_design_session(design_id)
 
 

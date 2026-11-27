@@ -77,94 +77,54 @@ def design_push_token() -> str:
     return os.getenv("DESIGN_PUSH_TOKEN", "")
 
 
-def cutover_check_token() -> str:
-    """The credential the one-database check reads the console with.
+#: The board roles, given on the roles page. A mind writes to the board with
+#: its own key, and what it may do is the role it holds in the hive database:
+#: the planner reads, creates and updates; the push role does all of that and
+#: deletes. Possession of a token is no longer the role.
+BOARD_PLANNER_ROLE = "board-planner"
+BOARD_PUSH_ROLE = "board-push"
+OPERATOR_ROLE = "operator"
 
-    Deliberately its own, with no fallback to the house tokens. The read it
-    admits — the whole board, and every row of the memory store — is the
-    reason it has to be a value this install issued for this purpose rather
-    than one every mind in the hive already holds.
 
-    It exists because the check cannot be made any other way. The board and
-    the memory pages answer to a signed-in admin session, so a check running
-    outside a browser has no credential to present, and an unchecked console
-    is reported as unchecked — which is not a pass. And a read-only
-    comparison could not answer the question anyway: the loader made the two
-    stores agree, so a console still reading its SQLite file answers
-    correctly. The check marks a row in Postgres and requires it back, which
-    is why it needs a way in at all.
+async def mind_holding(presented: str, slugs: tuple[str, ...]) -> str | None:
+    """The name of the mind whose own key this is, when it holds one of the
+    roles named, or None.
 
-    Unset means these routes admit no bearer and only a session reaches
-    them, which is where every install that is not mid-cutover sits.
+    The key is recognised from the one record of keys in the hive database
+    (`core.credentials`, the record the gateway, the memory store and the
+    tools read), on this request and never remembered. Only a mind's key
+    counts: a person's key presented here is nobody's, and a replaced or
+    cut-off key is not live in the record. The role is read from the roles
+    tables on this request too, so a role taken away stops working on the
+    mind's next call.
     """
-    return os.getenv("HIVE_SITE_ADMIN_TOKEN", "")
+    import hashlib
+
+    from hive_data import core, roles
+
+    value = str(presented or "").strip()
+    if not value:
+        return None
+    try:
+        row = await core.credential_for_token(
+            hashlib.sha256(value.encode("utf-8")).hexdigest())
+        if row is None or str(row["role"] or "") != "mind":
+            return None
+        mind = await core.get_mind_by_id_or_name(str(row["holder"]))
+        if not mind:
+            return None
+        held = {r["slug"] for r in await roles.roles_of(mind["mind_id"])}
+    except Exception:  # noqa: BLE001 - a key or role that cannot be read admits nobody
+        return None
+    if not held & set(slugs):
+        return None
+    return str(mind["name"])
 
 
-def board_token() -> str:
-    """The credential a Mind reads and writes the Kanban board with.
-
-    The backlog is where the hive's work is decided, and until now the only
-    way in was a signed-in admin browser. A mind whose whole job is the
-    backlog — the chief of staff — therefore had no door at all, and the
-    alternatives it reaches for when it has none are worse than this token:
-    raw SQL against `work_items`, which skips the ordering, the hierarchy
-    numbering and the write lock the board module holds, or `docker exec`
-    into this container, which is host access granted to get at a table.
-
-    Deliberately its own, with no fallback to the house tokens, for the
-    reason `design_push_token` gives: every Mind in the hive already holds
-    `COMMS_BEARER_TOKEN` and `COMMS_ADMIN_BEARER_TOKEN`, so either as a
-    fallback would hand the backlog to every mind on it, a kid's Windows box
-    included. Not `HIVE_SITE_ADMIN_TOKEN` either: that one also opens the
-    whole memory store, which is far more than the board.
-
-    Unset means the board routes admit no bearer and only a session reaches
-    them, which is where an install with no mind on the backlog sits.
-    """
-    return os.getenv("BOARD_PUSH_TOKEN", "")
-
-
-def board_planner_token() -> str:
-    """The credential a Mind plans the backlog with: the board, less the delete.
-
-    Two minds work the board and they are not trusted with the same thing.
-    The chief of staff holds `BOARD_PUSH_TOKEN` and may delete; a mind whose
-    job is planning — writing epics, features and stories — reads, creates
-    and updates and never needs the one operation that destroys a row and
-    everything under it (Daniel, 2026-11-20). One shared value could not say
-    that, so this is a second value naming every board route but the delete.
-
-    It has to be issued as a value of its own. The guard matches on the
-    value, so an install that sets this to the same string as
-    `BOARD_PUSH_TOKEN` has issued one credential under two names, and its
-    holder deletes.
-
-    Unset means no bearer is admitted through it, which is where an install
-    with no planning mind sits.
-    """
-    return os.getenv("BOARD_PLANNER_TOKEN", "")
-
-
-def roles_token() -> str:
-    """The credential the operator edits roles with.
-
-    A role decides what every mind holding it may use, so the credential that
-    changes one is the operator's and nobody else's. The operator is a mind
-    made in the console, and until now its only way into the Roles page was a
-    signed-in admin browser, which a mind does not have.
-
-    Deliberately its own, with no fallback to the house tokens, for the
-    reason `design_push_token` gives: every Mind in the hive already holds
-    `COMMS_BEARER_TOKEN` and `COMMS_ADMIN_BEARER_TOKEN`, so either as a
-    fallback would let any mind rewrite the grants of every mind, its own
-    included. Not `BOARD_PUSH_TOKEN` either: whoever works the backlog is not
-    thereby trusted with what every mind may use.
-
-    It admits every route a person uses on the Roles page and nothing else on
-    the console. Unset means those routes admit no bearer and only a session
-    reaches them, which is where an install with no operator sits.
-    """
-    return os.getenv("ROLES_PUSH_TOKEN", "")
+def _holding(*slugs: str):
+    async def recognise(presented: str) -> str | None:
+        return await mind_holding(presented, slugs)
+    return recognise
 
 
 def key_migration_token() -> str:
@@ -182,7 +142,6 @@ def key_migration_token() -> str:
 CANVAS = "canvas"
 KEY_MIGRATION = "key_migration"
 DESIGN = "design"
-CUTOVER = "cutover"
 BOARD = "board"
 BOARD_PLANNER = "board_planner"
 ROLES = "roles"
@@ -204,21 +163,15 @@ TABLE = RouteTable(
             design_push_token, unset_status=503,
             unset_message="DESIGN_PUSH_TOKEN is not configured",
         ),
-        CUTOVER: BearerToken(
-            cutover_check_token, unset_status=401,
-            unset_message="Authentication required",
-        ),
+        # A mind's own key, recognised from the one record, plus its role.
         BOARD: BearerToken(
-            board_token, unset_status=401,
-            unset_message="Authentication required",
+            lambda: "", recognise=_holding(BOARD_PUSH_ROLE),
         ),
         BOARD_PLANNER: BearerToken(
-            board_planner_token, unset_status=401,
-            unset_message="Authentication required",
+            lambda: "", recognise=_holding(BOARD_PLANNER_ROLE, BOARD_PUSH_ROLE),
         ),
         ROLES: BearerToken(
-            roles_token, unset_status=401,
-            unset_message="Authentication required",
+            lambda: "", recognise=_holding(OPERATOR_ROLE),
         ),
         KEY_MIGRATION: BearerToken(
             key_migration_token, unset_status=401,
@@ -364,7 +317,7 @@ TABLE.add(
 # and an unchecked app is reported as unchecked rather than counted as
 # working.
 TABLE.add(
-    Rule(ADMIN, bearer=CUTOVER),
+    Rule(ADMIN),
     "GET /api/memory/tables",
     "GET /api/memory/rows",
 )
@@ -382,7 +335,7 @@ TABLE.add(
 # refuse a row with anything under it, which the board tool sends unless
 # the caller asked for the cascade.
 TABLE.add(
-    Rule(ADMIN, bearer=(CUTOVER, BOARD, BOARD_PLANNER)),
+    Rule(ADMIN, bearer=(BOARD, BOARD_PLANNER)),
     "GET /api/kanban/data",
 )
 TABLE.add(

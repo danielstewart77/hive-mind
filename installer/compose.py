@@ -89,7 +89,7 @@ NO_MODULE_HISTORY = f"{APP}/.git/{MODULES}:ro"
 BASE_SECRETS = (
     # The terminal's label token *is* comms' rename token: one value, two names.
     "COMMS_RENAME_TOKEN", "SMS_INBOUND_HMAC_SECRET",
-    "HIVE_SECRET_KEY", "HIVE_SITE_ADMIN_TOKEN",
+    "HIVE_SECRET_KEY",
 )
 
 #: Comms holders minted for a service, by the piece that runs them. Role
@@ -482,7 +482,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     if "console" in pieces:
         env = {"HIVE_HOST": "0.0.0.0", "HIVE_PORT": str(CONSOLE_PORT), "HIVE_LOG_FORMAT": "json",
                "HIVE_DATABASE_URL": dsn, "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"),
-               "HIVE_SITE_ADMIN_TOKEN": env_ref("HIVE_SITE_ADMIN_TOKEN"),
                "COMMS_URL": COMMS_URL, "GATEWAY_API_URL": COMMS_URL,
                "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", CONSOLE)),
                "LUCENT_API_URL": LUCENT_URL,
@@ -544,7 +543,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         env = {"TERMINAL_HOST": "0.0.0.0", "HIVE_DATABASE_URL": dsn,
                "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"), "GATEWAY_API_URL": COMMS_URL,
                "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", TERMINAL)),
-               "TERMINAL_LABELS_TOKEN": env_ref("TERMINAL_LABELS_TOKEN"), **site_links}
+               "TERMINAL_LABELS_TOKEN": env_ref("TERMINAL_LABELS_TOKEN"),
+               "HIVE_KEY_ROOT": CONSOLE_KEY_ROOT, **site_links}
         if voice:
             env["VOICE_API_URL"] = voice
         svc = base(TERMINAL, image="hive/terminal:local", waits_on_db=True, needs=(COMMS,), build={
@@ -552,6 +552,9 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             "additional_contexts": {"hive_site": str(repo("hive") / "hive_site"),
                                     "hive_data": hive_data}}, env=env)
         svc["ports"] = [f"0.0.0.0:{TERMINAL_PORT}:{TERMINAL_PORT}"]
+        # The signed-in person's key is read from the key folder, read-only:
+        # the terminal site presents that person's key and holds none of its own.
+        svc["volumes"] = [bind(home.keys, CONSOLE_KEY_ROOT, "ro")]
 
     mind_build = {"context": str(repo("hive-mind")),
                   "additional_contexts": {"hive_surfaces": str(repo("hive-surfaces"))},

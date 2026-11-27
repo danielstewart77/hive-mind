@@ -65,7 +65,7 @@ def console(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("HIVE_SITE_URL",
                        f"http://127.0.0.1:{server.server_address[1]}")
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", _TOKEN)
+    monkeypatch.setenv("MIND_KEY", _TOKEN)
     yield server
     server.shutdown()
     server.server_close()
@@ -92,24 +92,24 @@ def test_every_request_carries_the_operators_bearer_and_the_token_is_never_print
 
 def test_a_refused_credential_is_reported_as_such_without_printing_the_token(
         console, capsys, monkeypatch):
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "a-wrong-one")
+    monkeypatch.setenv("MIND_KEY", "a-wrong-one")
 
     code, answer = _run(capsys, "list")
 
     assert code == 1
     assert answer["kind"] == "Refused"
-    assert "refused the operator's roles credential" in answer["error"]
+    assert "refused" in answer["error"]
     assert "a-wrong-one" not in json.dumps(answer)
 
 
 def test_an_unset_token_makes_no_request_and_says_what_is_missing(
         console, capsys, monkeypatch):
-    monkeypatch.delenv("ROLES_PUSH_TOKEN")
+    monkeypatch.delenv("MIND_KEY")
 
     code, answer = _run(capsys, "list")
 
     assert code == 1
-    assert "ROLES_PUSH_TOKEN" in answer["error"]
+    assert "MIND_KEY" in answer["error"]
     assert console.seen == []
 
 

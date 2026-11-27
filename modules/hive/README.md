@@ -27,9 +27,8 @@ operations. The store is async, which is why the console is async all the way
 down to `require_auth`.
 
 The memory pages read the `memory` schema of the same database.
-`HIVE_SITE_ADMIN_TOKEN` is the bearer the one-database check reads the board
-and the memory pages with; unset, those routes admit no bearer and only a
-signed-in admin session reaches them.
+The board and the memory pages answer to a signed-in session; the board also
+answers to a mind's own key (below).
 
 The suite runs on a scratch Postgres: set `HIVE_DATA_TEST_ADMIN_DSN` to a
 server it may create and drop a database on (see `hive_site/testing.py`).
@@ -275,40 +274,18 @@ design routes refuse with 503 rather than opening. Daniel's own browser
 login is accepted on the same routes, reads included — a design session
 carries source text pulled off his disks.
 
-`BOARD_PUSH_TOKEN` is the credential a Mind reads and writes the Kanban
-board with. It exists because the backlog is where the hive's work is
-decided and the only way in was a signed-in admin browser, so a mind whose
-job *is* the backlog had no door — and what it reaches for without one is
-raw SQL against `work_items`, which skips the ordering, the numbering and
-the write lock `kanban_data` holds above that table. It has no fallback to
-the house tokens, for the reason `DESIGN_PUSH_TOKEN` gives, and it is not
-`HIVE_SITE_ADMIN_TOKEN`, which also opens the memory store. It admits the
-whole board, `DELETE /api/kanban/{kind}/{record_id}` included: the chief of
-staff has full create, read, update and delete.
-
-`BOARD_PLANNER_TOKEN` is the board credential without the delete, for a
-mind that plans the backlog and is not the chief of staff. It reaches every
-board route `BOARD_PUSH_TOKEN` reaches except the delete, which answers it
-with 401. Issue it as its own value: the guard matches on the value, so one
-equal to `BOARD_PUSH_TOKEN` is that token and deletes. The mind's board tool reads
-`BOARD_PUSH_TOKEN` from its own environment, so the mind's compose file
-hands it this value under that name.
-
-`ROLES_PUSH_TOKEN` is the operator's credential for roles. A role decides
-what every mind holding it may use, so the operator, a mind made in the
-console, needs a way in that is not a signed-in browser. It admits the
-routes a person uses on the Roles page: reading the roles and the catalog,
-creating, changing and deleting a role, adding or removing one skill
-(`POST /api/roles/{role_id}/skills`, `DELETE /api/roles/{role_id}/skills/{skill}`,
-each atomic under a lock on the role so two adds at once both land), and
-the keep, promote and take-from-repo choices. Nothing on the Roles page is
-narrower for it than for a signed-in admin, and it reaches nothing else on
-the console. It has no fallback to the house tokens or to
-`BOARD_PUSH_TOKEN`, for the reason `DESIGN_PUSH_TOKEN` gives; unset, the
-routes admit no bearer. The value is the same in the console's `.env` and in
-the stack `.env`, which is what hands it, with `HIVE_SITE_URL`, to the
-operator mind; that mind's roles tool reads both from its own environment.
-A mind holding the operator role is given `ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}` in its compose file (`src/operator_attachment.py`), so the value must be set, the same, in the stack `.env` that compose substitutes for minds as well as in the console's.
+A mind reads and writes the Kanban board, and changes roles, with its own key
+(`MIND_KEY`, the one key it uses for everything). The console finds whose key
+it is in the one record of keys in the hive database and checks the role the
+mind holds, read on every request: `board-planner` reads, creates and updates
+(every board route but the delete), `board-push` does all of that and deletes
+(`DELETE /api/kanban/{kind}/{record_id}`), and `operator` reaches the routes a
+person uses on the Roles page. A mind with none of these is refused, a person's
+key presented by a mind is refused, and a key cut off or replaced stops working
+on the next request. There is no board, roles or site administrator token: none
+is read anywhere. The compose fragment of a mind holding the operator role gets
+the skills folder writable and `HIVE_SITE_URL`, nothing else
+(`src/operator_attachment.py`).
 
 ## Test
 

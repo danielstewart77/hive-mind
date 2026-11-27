@@ -28,10 +28,11 @@ above it. A statement against the table skips every one of them: a story
 inserted by hand has no position anybody agrees on, and the backlog numbers
 the operator reads (`2.17.6`) are computed from an order it is not in.
 
-The console is `HIVE_SITE_URL` and the credential is `BOARD_PUSH_TOKEN` —
-issued for the board specifically. It admits the operations above and
-nothing else on the console: not the memory store, not another Mind's
-settings.
+The console is `HIVE_SITE_URL` and the credential is this mind's own key
+(`MIND_KEY`), the one it uses for everything. The console finds whose key it
+is in the one record of keys and checks the board role the mind holds
+(`board-planner` reads, creates and updates; `board-push` also deletes). It
+admits the operations above and nothing else on the console.
 
 `move --under` gives a row a new parent and touches nothing else: a story
 goes to another feature, a feature to another epic, and whatever is under
@@ -92,20 +93,20 @@ def _console() -> str:
 
 
 def _token() -> str:
-    token = (os.getenv("BOARD_PUSH_TOKEN") or "").strip()
+    token = (os.getenv("MIND_KEY") or "").strip()
     if not token:
-        raise Refused("BOARD_PUSH_TOKEN is unset: it is this mind's "
-                      "credential for the board, and without it the "
-                      "console answers every call with 401.")
+        raise Refused("MIND_KEY is unset: it is this mind's own key, the one "
+                      "it uses for everything, and without it the console "
+                      "answers every call with 401.")
     return token
 
 
 def _call(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-    """One board route, with this mind's bearer.
+    """One board route, with this mind's own key.
 
     Every refusal the console makes is reported as what it was. A 401 is a
     credential this install did not issue or did not match, and a 403 is a
-    route the board token does not reach — telling them apart is the whole
+    route this mind's board role does not reach — telling them apart is the whole
     difference between "rotate the token" and "that is not yours to do".
     """
     payload = json.dumps(body).encode() if body is not None else None
@@ -124,7 +125,7 @@ def _call(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
             ) from exc
         if exc.code == 403:
             raise Refused(
-                f"the board token does not reach {method} {path}: {detail}"
+                f"this mind's board role does not reach {method} {path}: {detail}"
             ) from exc
         raise Refused(f"{method} {path}: {exc.code} {detail}") from exc
     except error.URLError as exc:

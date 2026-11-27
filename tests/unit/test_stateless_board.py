@@ -92,7 +92,7 @@ def console(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("HIVE_SITE_URL",
                        f"http://127.0.0.1:{server.server_address[1]}")
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    monkeypatch.setenv("MIND_KEY", "a-board-token")
     yield server
     server.shutdown()
     server.server_close()

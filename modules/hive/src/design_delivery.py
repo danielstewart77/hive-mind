@@ -44,11 +44,31 @@ def gateway_base_url() -> str:
     return os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424"
 
 
-def _service_headers() -> dict[str, str]:
-    token = os.getenv("COMMS_BEARER_TOKEN", "")
-    if not token:
-        raise RuntimeError("COMMS_BEARER_TOKEN is not configured")
-    return {"Authorization": f"Bearer {token}"}
+class NoSubmitterKey(RuntimeError):
+    """The notice names nobody who submitted it, or that person's key cannot be
+    had. Nothing is sent: this site holds no key of its own to send instead."""
+
+
+def submitter_of(notice: dict[str, Any]) -> str:
+    """The person who submitted (or accepted) this page, as the notice kept it."""
+    try:
+        return str(json.loads(notice.get("body") or "{}").get("submitted_by") or "").strip().lower()
+    except (ValueError, AttributeError):
+        return ""
+
+
+async def _submitter_headers(notice: dict[str, Any]) -> dict[str, str]:
+    """The key of the person who submitted, as the gateway's bearer: the
+    notice goes to the mind as that person's own turn (requirement 39)."""
+    import holder_credentials
+
+    person = submitter_of(notice)
+    if not person:
+        raise NoSubmitterKey("this notice records no person who submitted it")
+    key = await holder_credentials.user_key(person)
+    if not key:
+        raise NoSubmitterKey(f"{person}'s own key could not be found on this site")
+    return {"Authorization": f"Bearer {key}"}
 
 
 def person_label(username: str) -> str:
@@ -177,7 +197,7 @@ def _post_sync(path: str, body: dict, *, headers: dict, stream: bool) -> None:
             response.read()
 
 
-async def adopt_conversation(design_id: str, conversation_id: str) -> None:
+async def adopt_conversation(design_id: str, conversation_id: str, headers: dict[str, str]) -> None:
     """Move the conversation onto this surface, ending whatever held it."""
     await asyncio.to_thread(
         _post_sync,
@@ -188,17 +208,17 @@ async def adopt_conversation(design_id: str, conversation_id: str) -> None:
             "surface": SURFACE,
             "surface_id": design_id,
         },
-        headers=_service_headers(),
+        headers=headers,
         stream=False,
     )
 
 
-async def send_turn(conversation_id: str, content: str) -> None:
+async def send_turn(conversation_id: str, content: str, headers: dict[str, str]) -> None:
     await asyncio.to_thread(
         _post_sync,
         f"/sessions/{urllib.parse.quote(conversation_id)}/message",
         {"content": content},
-        headers=_service_headers(),
+        headers=headers,
         stream=True,
     )
 
@@ -230,8 +250,9 @@ async def deliver_notice(notice_id: int) -> bool:
             else await route_access.owner_of_session(conversation_id)
         ) or ""
         content = compose_message(record, notice["page"], notice["kind"], person)
-        await adopt_conversation(record["id"], conversation_id)
-        await send_turn(conversation_id, content)
+        headers = await _submitter_headers(notice)
+        await adopt_conversation(record["id"], conversation_id, headers)
+        await send_turn(conversation_id, content, headers)
     except Exception:  # noqa: BLE001 — a failed send is never a lost submission
         log.exception("design notice %s could not be delivered", notice_id)
         await design_data.release_notice(notice_id)
