@@ -643,10 +643,10 @@ async def check_mind(credential: str, holder: str, gateway_url: str) -> _Checked
         async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
             response = await mind_runtime.send(client, "GET", f"{base}{spec.route}")
     except HTTPException as exc:
-        if exc.status_code in (502, 504) and "could not be reached" in str(exc.detail):
+        if exc.status_code == 504 or (exc.status_code == 502 and "could not be reached" in str(exc.detail)):
             return remember(
                 credential, holder, status=UNREACHABLE,
-                detail=f"the mind could not be reached: {exc.detail}",
+                detail=f"no answer: {exc.detail}",
             )
         # The request was not sent, or the gateway refused it: that is this
         # console's or the person's standing, not the mind's state.

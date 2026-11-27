@@ -1895,7 +1895,7 @@ async def _probe_mind_host(mind: dict) -> dict:
             response = await mind_runtime.send(client, "GET", f"{gateway}/host")
     except HTTPException as exc:
         said = str(exc.detail)
-        if exc.status_code in (502, 504) and "could not be reached" in said:
+        if exc.status_code == 504 or (exc.status_code == 502 and "could not be reached" in said):
             status_word = "unreachable"
         elif "the mind refused" in said:
             status_word = "refused"
