@@ -255,3 +255,24 @@ def test_a_persons_key_lists_and_changes_only_their_own_minds_and_an_administrat
     assert _as(world, KEYS["daniel"], "PUT", "/broker/minds/alpha/owner", json={"owner": "sloan"}).status_code == 401
     assert _as(world, KEYS["daniel"], "GET", "/sessions/live/text?session_id=x").status_code == 401
     assert _as(world, KEYS["root"], "GET", "/sessions/live/text?session_id=x").status_code == 200
+
+
+def _scope(world, key, mind, method="POST"):
+    return world.client.request(
+        method, "/secrets/scopes", headers={"Authorization": f"Bearer {key}"},
+        json={"mind_name": mind, "secret_keys": ["SOME_SECRET"]})
+
+
+def test_secret_scopes_are_granted_by_the_minds_owner_or_an_administrator_and_by_no_mind(world) -> None:
+    """The secret scope routes take a person's own key: the owner of the mind
+    or an administrator. A mind's key (even the mind's own), another person
+    and a service are refused."""
+    assert _scope(world, KEYS["daniel"], "alpha").status_code == 200
+    assert _scope(world, KEYS["root"], "other").status_code == 200
+    assert _scope(world, KEYS["daniel"], "alpha", method="DELETE").status_code == 200
+    for refused in (_scope(world, KEYS["sloan"], "alpha"),
+                    _scope(world, KEYS["alpha"], "alpha"),
+                    _scope(world, KEYS["ops"], "beta"),
+                    _scope(world, KEYS["bot"], "alpha"),
+                    _scope(world, KEYS["daniel"], "other")):
+        assert refused.status_code in (401, 404)

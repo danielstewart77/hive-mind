@@ -59,7 +59,6 @@ def _seed_live_session(session_id: str = "sess-1") -> str:
 @pytest.fixture
 def client(monkeypatch, broker_db):
     admin_person_key(ADMIN)
-    monkeypatch.setenv("COMMS_RENAME_TOKEN", "rename-only")
 
     from comms import server as server_module
 
@@ -69,68 +68,23 @@ def client(monkeypatch, broker_db):
         yield test_client
 
 
-def test_a_minds_own_credential_alone_cannot_rename_a_conversation(
-    client, monkeypatch
-) -> None:
-    """R8: the credential a mind actually runs on gains nothing here.
-
-    This used to be stated about the one shared value every bot and every
-    kid's box held; that value is no longer a credential at all, so the test
-    presents what replaced it. Breaks the moment the route is guarded only by
-    the global bearer gate, which is what moving the write onto comms does by
-    default.
-    """
+def test_an_unknown_key_cannot_rename_a_conversation(client) -> None:
+    """A rename is asked with the key of whoever asks; a key the one record
+    does not hold renames nothing."""
     response = client.put(
         "/sessions/sess-1/name",
-        headers={"Authorization": "Bearer a-minds-own-credential"},  # secret-guard: allow
+        headers={"Authorization": "Bearer a-key-nobody-holds"},  # secret-guard: allow
         json={"name": "Health"},
     )
     assert response.status_code == 401
 
 
-def test_the_rename_token_renames_the_conversation(client) -> None:
-    """R8: and the small credential does open the one thing it is for."""
+def test_an_administrators_own_key_renames_the_conversation(client) -> None:
     response = client.put(
-        "/sessions/sess-1/name",
-        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
-        json={"name": "Health"},
+        "/sessions/sess-1/name", headers=REACHES_EVERYTHING, json={"name": "Health"},
     )
     assert response.status_code == 200
     assert response.json()["name"] == "Health"
-
-
-def test_the_rename_token_opens_nothing_else(client) -> None:
-    """R8: rename-only means it is not a way past the service gate.
-
-    Breaks if the rename credential is ever added to `require_bearer`.
-    """
-    response = client.get("/sessions", headers={"Authorization": "Bearer rename-only"})
-    assert response.status_code == 401
-
-
-def test_renaming_refuses_when_no_rename_credential_is_configured() -> None:
-    """R8: unset refuses, where the service gate deliberately bypassed.
-
-    The retired service gate bypassed when its token was unset, so a fresh
-    container could boot before its secrets were wired. The same shape here
-    would mean a deployment missing one variable lets anything on the LAN
-    rename any mind's conversations.
-
-    Driven against the dependency rather than through a request, because the
-    one caller that reaches this branch is the rename token's holder.
-    """
-    import os
-
-    from comms.auth import require_rename_bearer
-
-    os.environ.pop("COMMS_RENAME_TOKEN", None)
-
-    with pytest.raises(HTTPException) as refused:
-        require_rename_bearer(
-            x_rename_token="", authorization="Bearer anything-at-all"
-        )
-
-    assert refused.value.status_code == 503
 
 
 def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
@@ -146,42 +100,17 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
     """
     client.put(
         "/sessions/sess-1/name",
-        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING},
         json={"name": "Health"},
     )
     client.delete("/sessions/sess-1", headers=REACHES_EVERYTHING)
 
     response = client.put(
         "/sessions/sess-1/name",
-        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING},
         json={"name": "Later"},
     )
     assert response.status_code == 404
-
-
-def test_a_hive_with_an_administrator_but_no_rename_token_says_renaming_is_off(
-    monkeypatch, broker_db
-) -> None:
-    """R8: the sentence naming the misconfiguration has to be reachable.
-
-    A deployment that simply never set the rename token must say so, not
-    answer 401 to every surface and send the operator to the network.
-    """
-    admin_person_key(ADMIN)
-    monkeypatch.delenv("COMMS_RENAME_TOKEN", raising=False)
-
-    from comms import server as server_module
-
-    importlib.reload(server_module)
-    with TestClient(server_module.app) as test_client:
-        _seed_live_session()
-        refused = test_client.put(
-            "/sessions/sess-1/name",
-            headers={**REACHES_EVERYTHING, "X-Rename-Token": "some-other-secret"},
-            json={"name": "Health"},
-        )
-
-    assert refused.status_code == 503
 
 
 def test_every_name_the_hive_holds_is_readable_in_one_call(client) -> None:
@@ -196,7 +125,7 @@ def test_every_name_the_hive_holds_is_readable_in_one_call(client) -> None:
     """
     client.put(
         "/sessions/sess-1/name",
-        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING},
         json={"name": "Fittimus Maximus", "color": "#3481cc"},
     )
 
@@ -264,11 +193,10 @@ def creating(client):
         yield client
 
 
-def _create(http, mind_id, token, rename=None, **body):
+def _create(http, mind_id, token, **body):
     return http.post(
         "/sessions",
-        headers={"Authorization": f"Bearer {token}",
-                 **({"X-Rename-Token": rename} if rename else {})},
+        headers={"Authorization": f"Bearer {token}"},
         json={
             "surface": "web", "surface_id": "terminal",
             "client_ref": f"staff-{body.get('name', 'bare')}",
@@ -277,31 +205,16 @@ def _create(http, mind_id, token, rename=None, **body):
     )
 
 
-def test_a_minds_own_credential_cannot_name_the_conversation_it_creates(
-    creating,
-) -> None:
-    """R8 reaches the create: owning the mind was never enough to label.
-
-    The same credential makes both requests, and the one without a label
-    succeeds — so the refusal is this guard and not the service gate or the
-    ownership check above it. It matters because `core.bind_surface` replaces
-    whatever binding a `client_ref` already had: a create may repoint an
-    existing chat at a conversation of the caller's own, and a name and colour
-    on that row are the disguise the rename token exists to deny. Breaks the
-    moment the create stamps a name without checking for the credential.
-    """
+def test_a_mind_names_the_conversation_it_creates_with_its_own_key(creating) -> None:
+    """No second credential guards a label: the mind's own key, held to a mind
+    its owner owns, is enough."""
     mind = _a_mind_with_its_own_credential()
     token = _own_credential(mind)
 
-    bare = _create(creating, mind, token)
-    assert bare.status_code == 200, bare.text
-    assert bare.json()["name"] is None
+    labelled = _create(creating, mind, token, name="deploy-prod")
 
-    labelled = _create(creating, mind, token, name="deploy-prod — approve")
-    assert labelled.status_code == 401, labelled.text
-
-    coloured = _create(creating, mind, token, color="#5c913b")
-    assert coloured.status_code == 401, coloured.text
+    assert labelled.status_code == 200, labelled.text
+    assert labelled.json()["name"] == "deploy-prod"
 
 
 def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
@@ -318,7 +231,7 @@ def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
     mind = _a_mind_with_its_own_credential("dave")
 
     refused = _create(
-        creating, mind, ADMIN, rename="rename-only", color="red; content:url(x)",
+        creating, mind, ADMIN, color="red; content:url(x)",
     )
 
     assert refused.status_code == 400, refused.text
