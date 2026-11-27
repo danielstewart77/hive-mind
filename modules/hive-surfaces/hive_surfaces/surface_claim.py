@@ -77,7 +77,7 @@ class ClaimResolver:
         session_factory=None,
     ) -> None:
         self._base_url = (base_url or "").rstrip("/")
-        self._token = token or ""
+        self._token = token or ""  # a value, or a function read at each ask
         self._mind_id = mind_id or ""
         self._surface = surface
         self._ttl = ttl_seconds
@@ -107,7 +107,8 @@ class ClaimResolver:
 
     # -- transport ---------------------------------------------------------
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        token = self._token() if callable(self._token) else self._token
+        return {"Authorization": f"Bearer {token}"} if token else {}
 
     async def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
         url = f"{self._base_url}{path}"
