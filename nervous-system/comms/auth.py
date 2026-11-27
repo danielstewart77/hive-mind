@@ -7,13 +7,9 @@ tokens:
   except health/root. Empty/unset = bypass mode (with a startup
   warning), so a fresh container can come up before the operator
   finishes wiring secrets.
-- ``COMMS_ADMIN_BEARER_TOKEN`` — admin token. Required for
-  consequential routes (secret-scope grant/revoke, broker
-  register/update/delete). Unset = admin endpoints return 503; we do
-  not bypass admin.
 
-The per-holder gate lives in `user_access.UserAccess`; what is left
-here is the admin credential.
+There is no admin token: an administrator acts with their own person key,
+which the per-holder gate in `user_access.UserAccess` resolves.
 """
 
 from __future__ import annotations
@@ -47,10 +43,7 @@ def require_rename_bearer(
 
     So it rides its own header rather than ``Authorization``: the global
     bearer gate has already consumed that one, and a caller reaching this
-    route proves the service token *and* the rename token. The admin token is
-    accepted in the same header because the console and the operator have to
-    be able to fix a name without being handed a third secret.
-
+    route proves the service token *and* the rename token. 
     **Unset refuses.** The service gate bypasses when its token is unset so a
     fresh container can boot before the secrets are wired; doing that here
     would mean a deployment missing one variable silently lets anything on the
@@ -58,16 +51,7 @@ def require_rename_bearer(
     which that is the safer default.
     """
     expected = os.environ.get("COMMS_RENAME_TOKEN", "")
-    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
     offered = x_rename_token.strip()
-    # An admin caller is answered whatever else is configured: the console and
-    # the operator need a way in.
-    if admin and secrets.compare_digest(
-        (offered or authorization[7:].strip() if authorization.startswith("Bearer ")
-         else offered).encode("utf-8"),
-        admin.encode("utf-8"),
-    ):
-        return
     # Nothing to check against means renaming is not configured, and that is
     # what the answer has to say. Gating this on *both* tokens being absent
     # made the sentence unreachable on any hive that has an admin token — which
@@ -78,34 +62,10 @@ def require_rename_bearer(
         raise HTTPException(
             503, "Renaming disabled: COMMS_RENAME_TOKEN unset"
         )
-    if not offered and authorization.startswith("Bearer "):
-        # A caller holding only the admin token may present it the usual way.
-        offered = authorization[7:].strip()
     # Bytes, not str: `compare_digest` raises TypeError on a str holding
     # anything outside ASCII, and a 500 here would read as the route being
     # missing rather than the credential being refused.
     candidate = offered.encode("utf-8")
-    for accepted in (expected, admin):
-        if accepted and secrets.compare_digest(candidate, accepted.encode("utf-8")):
-            return
+    if secrets.compare_digest(candidate, expected.encode("utf-8")):
+        return
     raise HTTPException(401, "Invalid rename token")
-
-
-def require_admin_bearer(authorization: str = Header(default="")) -> None:
-    expected = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    if not expected:
-        raise HTTPException(
-            503, "Admin endpoints disabled: COMMS_ADMIN_BEARER_TOKEN unset"
-        )
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid Authorization header")
-    if authorization[7:] != expected:
-        raise HTTPException(401, "Invalid admin token")
-
-
-if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN"):
-    log.warning(
-        "COMMS_ADMIN_BEARER_TOKEN is unset — admin endpoints "
-        "(secret-scope grant/revoke, broker register/update/delete) "
-        "will return 503 until it is set."
-    )

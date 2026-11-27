@@ -517,13 +517,10 @@ async def resolve_caller(token: str, *, allow_person_key: bool = False) -> Calle
     `allow_person_key` is for the one route class that takes a person's key
     (`CHANGE`); everywhere else a person's key resolves to nobody.
 
-    The admin credential is checked first, because the console and the
-    operator must keep a way into a wedged conversation whatever else is
-    configured, and because it is the one credential that stands for every
-    holder at once — the console serves whoever is logged in and does its own
-    filtering from that session.
+    No credential of the gateway's own stands for every holder: an
+    administrator is a person's key whose person is an administrator.
 
-    Everything else resolves out of the credentials table and nowhere else.
+    Everything resolves out of the credentials table and nowhere else.
     The shared `COMMS_BEARER_TOKEN` is deliberately absent: one value that
     every mind, every surface bot and two boxes in the boys' bedrooms all
     presented is a value whose theft is indistinguishable from its use, and
@@ -536,11 +533,8 @@ async def resolve_caller(token: str, *, allow_person_key: bool = False) -> Calle
     serving every route open while it works that out is how a hive stays
     green for a week with its front door off its hinges.
     """
-    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
     if not token:
         return Caller()
-    if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
-        return Caller(is_admin=True, is_service=True, unscoped=True)
     found = await credential_for_token(token)
     if not found:
         return Caller()
@@ -899,18 +893,7 @@ class UserAccess:
             await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
             return
         if rule.kind == ADMIN:
-            person_ok = caller.role == USER_KEY and rule.person
-            if not person_ok and not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
-                # The same sentence `require_admin_bearer` gives. A 401 here
-                # would send the operator to check a credential when the
-                # problem is one unset variable.
-                await self._refuse(
-                    scope, receive, send, 503,
-                    b'{"detail":"Admin endpoints disabled: '
-                    b'COMMS_ADMIN_BEARER_TOKEN unset"}',
-                )
-                return
-            if not caller.is_admin and not (rule.person and caller.person_admin):
+            if not (rule.person and caller.person_admin):
                 if not (rule.person and rule.mind_param and caller.role == USER_KEY
                         and await self._person_owns(caller, params.get(rule.mind_param) or "")):
                     await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')

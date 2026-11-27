@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from comms.config import config
 import comms.broker as broker
-from comms.auth import require_admin_bearer, require_rename_bearer
+from comms.auth import require_rename_bearer
 
 
 def require_admin_or_person(request: Request) -> None:
@@ -3141,7 +3141,7 @@ async def secrets_get(key: str, request: Request):
     return {"key": key, "value": value}
 
 
-@app.post("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
+@app.post("/secrets/scopes")
 async def secrets_grant_scopes(body: SecretScopeRequest):
     """Grant a mind access to one or more secret keys. Admin-only."""
     for key in body.secret_keys:
@@ -3149,7 +3149,7 @@ async def secrets_grant_scopes(body: SecretScopeRequest):
     return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
 
 
-@app.delete("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
+@app.delete("/secrets/scopes")
 async def secrets_revoke_scopes(body: SecretScopeRequest):
     """Revoke a mind's access to one or more secret keys. Admin-only."""
     for key in body.secret_keys:
@@ -3162,27 +3162,17 @@ async def secrets_list_scopes(mind_name: str, request: Request):
     """List all secret keys a mind is allowed to access.
 
     Auth paths:
-    - Admin bearer (cross-mind listing — caller doesn't have to match mind_name)
     - Network identity (a mind listing its own scopes — caller IP resolves to mind_name)
 
     The gate in front of every route is already satisfied at this point;
     here we just decide whether the caller can read THIS specific mind's scopes.
     """
-    admin_token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    auth_header = request.headers.get("authorization", "")
-    is_admin = (
-        admin_token
-        and auth_header.startswith("Bearer ")
-        and auth_header[7:] == admin_token
-    )
-
-    if not is_admin:
-        caller_ip = request.client.host if request.client else None
-        if not caller_ip:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        caller_name = await resolve_container_name(caller_ip)
-        if caller_name != mind_name:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    caller_ip = request.client.host if request.client else None
+    if not caller_ip:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    caller_name = await resolve_container_name(caller_ip)
+    if caller_name != mind_name:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     keys = await get_secret_scopes(mind_name)
     return {"mind_name": mind_name, "secret_keys": keys}
