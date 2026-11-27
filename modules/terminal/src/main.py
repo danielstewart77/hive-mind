@@ -93,6 +93,15 @@ app = FastAPI(
 # of every route and websocket; a route the table does not name is admin-only.
 app.add_middleware(route_access.AccessMiddleware, table=terminal_access.TABLE)
 
+
+async def _read_person_key(username: str) -> str | None:
+    return person_key.read_person_key(username)
+
+
+# The registry is read for the signed-in person, with that person's own key:
+# this site holds no gateway key of its own.
+route_access.set_person_key_reader(_read_person_key)
+
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 # Where the console lives, for the brand link back to it. From the

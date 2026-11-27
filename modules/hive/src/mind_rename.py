@@ -104,7 +104,7 @@ async def _tools(operation, method, suffix=''):
     import main
     base = main._hive_tools_base_url().rstrip('/')
     url = f'{base}/docker/mind-renames/{operation["operation_id"]}{suffix}'
-    return await _request(method, url, main._hive_tools_headers(), params={'path': operation['project_path']}, timeout=180)
+    return await _request(method, url, await _requester_headers(operation.get('requester')), params={'path': operation['project_path']}, timeout=180)
 
 
 async def _requester_headers(username):
@@ -194,7 +194,7 @@ async def request_rename(mind_id, new, user):
         save(operation)
         try:
             await _request('POST', main._hive_tools_base_url().rstrip('/') + '/docker/mind-renames/reserve',
-                           main._hive_tools_headers(), {key: operation[key] for key in ('operation_id', 'mind_id', 'old', 'new')},
+                           await _requester_headers(user['username']), {key: operation[key] for key in ('operation_id', 'mind_id', 'old', 'new')},
                            {'path': operation['project_path']})
         except ValueError:
             await _recover(operation, 'The rename reservation could not finish')
@@ -263,7 +263,7 @@ async def advance(operation_id):
                     stage = result.get('stage', stage)
                 else:
                     import main
-                    result = await _request('GET', main._hive_tools_base_url().rstrip('/') + '/hitl/' + operation['hitl_request_id'], main._hive_tools_headers())
+                    result = await _request('GET', main._hive_tools_base_url().rstrip('/') + '/hitl/' + operation['hitl_request_id'], await _requester_headers(operation.get('requester')))
                     if result.get('status') in ('denied', 'expired'):
                         return await _recover(operation, 'The rename was not approved')
                     return public(operation)

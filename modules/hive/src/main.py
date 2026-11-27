@@ -239,6 +239,16 @@ app = FastAPI(
 app.add_middleware(mind_runtime.PersonScope)
 app.add_middleware(mind_rename.EditGate)
 app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
+
+
+async def _read_person_key(username: str) -> str | None:
+    import holder_credentials
+    return await holder_credentials.user_key(username)
+
+
+# The registry is read for the signed-in person, with that person's own key:
+# this site holds no gateway key of its own.
+route_access.set_person_key_reader(_read_person_key)
 install_fastapi_logging(app, log, "hive-control-plane")
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -412,7 +422,14 @@ def _actor_fields(user: dict | None) -> dict:
 
 
 def _login_redirect_for(request: Request) -> RedirectResponse:
-    next_path = urllib.parse.quote(request.url.path, safe="/")
+    path = request.url.path
+    # A decision is posted, and a sign-in lands on a page by GET: after signing
+    # in the person is put on the request they were deciding, not on a path
+    # that answers a GET with 405.
+    decision = re.fullmatch(r"(/approvals/[^/]+)/decision", path)
+    if decision:
+        path = decision.group(1)
+    next_path = urllib.parse.quote(path, safe="/")
     return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
 
 
@@ -3230,7 +3247,7 @@ async def _broadcast_canvas(data: dict, exclude: WebSocket | None = None) -> Non
 
 @app.post("/canvas/push")
 async def canvas_push(request: Request):
-    """A mind drawing. Its bearer (console_access.canvas_push_token) is
+    """A mind drawing. Its own key (console_access.a_minds_key) is
     verified by the route table before this runs; nothing else reaches it."""
     data = await request.json()
     if not isinstance(data, dict) or not _apply_canvas_message(data):
@@ -3304,8 +3321,8 @@ async def canvas_submit(request: Request):
     content = (
         f"{who} finished a drawing pass on the hive whiteboard and wants you "
         f"to look. The board currently has {element_count} element(s). Fetch "
-        f"the snapshot with `curl -H \"Authorization: Bearer $CANVAS_PUSH_TOKEN\" "
-        f"{snapshot}` — the bearer you draw with (CANVAS_PUSH_TOKEN); without it the console "
+        f"the snapshot with `curl -H \"Authorization: Bearer $MIND_KEY\" "
+        f"{snapshot}` — your own key, the one you draw with; without it the console "
         "refuses. Rasterize it and respond on Telegram with what you see."
     )
     if note:
@@ -5273,11 +5290,14 @@ def _hive_tools_console_url() -> str:
     return ""
 
 
-def _hive_tools_headers() -> dict[str, str]:
-    token = os.getenv("HIVE_TOOLS_TOKEN", "")
-    if not token:
-        raise HTTPException(status_code=503, detail="Hive Tools authorization is not configured")
-    return {"Authorization": f"Bearer {token}"}
+async def _hive_tools_headers() -> dict[str, str]:
+    """The signed-in person's own key, as the tools' bearer.
+
+    The tools take no key that stands for this site: every call the site makes
+    to them is made because a person asked, so it carries that person's key.
+    Refused with a sentence when nobody is signed in or their key cannot be
+    had (see `_person_headers`)."""
+    return await _person_headers()
 
 
 async def _hive_tools_request(
@@ -5301,7 +5321,7 @@ async def _hive_tools_request(
                 f"{_hive_tools_base_url().rstrip('/')}{path}",
                 params=params,
                 json=json_body,
-                headers=_hive_tools_headers(),
+                headers=await _hive_tools_headers(),
             )
         response.raise_for_status()
         data = response.json() if response.content else {}
@@ -6360,7 +6380,7 @@ async def require_design_writer(request: Request) -> dict:
 
     Applied to every design route including the reads: a design session
     carries source text pulled off Daniel's disks. The bearer
-    (console_access.design_push_token) is verified by the route table, which
+    (a mind's own key, console_access.a_minds_key) is verified by the route table, which
     refuses a wrong one outright; this only reads which of the two it was.
     """
     if route_access.bearer_of(request) == console_access.DESIGN:

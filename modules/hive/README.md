@@ -46,12 +46,12 @@ Runs as container `hive-site` on :8710, on the `hivemind` docker network
 bind-mounted, so template
 and static edits deploy live; route changes need a container restart.
 
-Copy `.env.example` to `.env`. `LUCENT_BEARER_TOKEN` and
-`COMMS_BEARER_TOKEN` authorize the core services;
-`COMMS_ADMIN_BEARER_TOKEN` is required separately for every consequential
-write — registering a Mind, changing its registry row, and setting its
-default model. `HIVE_TOOLS_TOKEN` enables approval-gated Mind restarts from
-the configuration page. Capability Node
+Copy `.env.example` to `.env`. This site holds no key for the gateway or for
+the tools: each call it makes is made for a signed-in person and carries that
+person's own key (an approval-gated Mind restart, a rename, a registry read).
+`LUCENT_BEARER_TOKEN` is the memory store value the rules page still uses.
+`HIVE_SITE_PUBLIC_URL` is the address of this site as a browser reaches it,
+which hive-tools puts in an approval notice. Capability Node
 endpoints can be supplied with `OLLAMA_URL` and `PIHOLE_URL`, then changed
 without a restart from the Capability Nodes page. `EDGE_COMMS_URL`,
 `EDGE_LUCENT_URL`, and `EDGE_HIVE_TOOLS_URL` are the LAN-reachable addresses
@@ -266,13 +266,12 @@ three — which is why page three is published before page two even though
 Daniel reads them the other way round. Anything else leaves the page
 unresolved, and an unresolved page cannot be accepted.
 
-`DESIGN_PUSH_TOKEN` is the credential a Mind publishes with. It has no
-fallback to `COMMS_BEARER_TOKEN` or `COMMS_ADMIN_BEARER_TOKEN` on purpose:
-every Mind in the hive already holds those, so either as a fallback would
-let any Mind rewrite Daniel's requirements and press Build. Unset means the
-design routes refuse with 503 rather than opening. Daniel's own browser
-login is accepted on the same routes, reads included — a design session
-carries source text pulled off his disks.
+A mind publishes design pages, and draws on the canvas, with its own key
+(`MIND_KEY`), recognised from the one record of keys in the hive database. A
+person's key presented by a mind is refused, and a key cut off or replaced
+stops working on the next request. There is no design or canvas token.
+Daniel's own browser login is accepted on the same routes, reads included — a
+design session carries source text pulled off his disks.
 
 A mind reads and writes the Kanban board, and changes roles, with its own key
 (`MIND_KEY`, the one key it uses for everything). The console finds whose key

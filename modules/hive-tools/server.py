@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -61,6 +62,11 @@ def create_app() -> FastAPI:
         # anything below can read an empty store and seed it.
         await store.open()
         log.info("hive-tools store: postgres")
+        if not os.environ.get("HIVE_SITE_PUBLIC_URL", "").strip():
+            log.warning(
+                "HIVE_SITE_PUBLIC_URL is not set: an approval notice will carry "
+                "only the path /approvals/<id>, not a link a person can open. "
+                "Set it to the hive site's address as a browser reaches it.")
 
         await seed_default_hitl_settings()
 

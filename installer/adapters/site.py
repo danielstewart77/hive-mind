@@ -13,6 +13,9 @@ Assumed interface:
 from __future__ import annotations
 
 TERMINAL_URL = "HIVE_TERMINAL_URL"
+#: The hive site's own address as a browser reaches it: the tools link an
+#: approval notice to it, and the site names itself by it.
+PUBLIC_URL = "HIVE_SITE_PUBLIC_URL"
 CONSOLE_URL = "HIVE_CONSOLE_URL"
 SEED_USERNAME = "HIVE_SEED_USERNAME"
 SEED_PASSWORD = "HIVE_SEED_PASSWORD"  # secret-guard: allow — a variable name

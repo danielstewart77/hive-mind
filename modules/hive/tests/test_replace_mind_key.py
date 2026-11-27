@@ -348,3 +348,62 @@ async def test_a_cleaned_saved_copy_stays_private_and_no_temporary_file_is_left(
     assert stat.S_IMODE(saved.stat().st_mode) == 0o600
     assert sorted(p.name for p in backups.iterdir()) == [saved.name]
     assert result["copies_still_holding_old_key"] == []
+
+
+async def test_recovery_cleans_the_saved_copies_when_the_console_stopped_while_cleaning_them_and_no_copy_keeps_the_old_key(hive, tmp_path):
+    hive.env.write_text(f"MIND_PROXY_KEY={OLD}\nOTHER={BOB}\n")
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    first = backups / "hive_mind-MIND_PROXY_KEY-20261126T000000Z.env"
+    first.write_text(f"MIND_PROXY_KEY={OLD}\nOTHER={BOB}\n")
+    second = backups / "hive_mind-MIND_PROXY_KEY-20261126T000001Z-1.env"
+    second.write_text(f"export MIND_PROXY_KEY='{OLD}'\n")
+    real = holder_credentials.scrub_backups
+
+    def stop_while_cleaning(*args, **kwargs):
+        if kwargs.get("check_only"):
+            return real(*args, **kwargs)  # the look beforehand, before anything changed
+        raise KeyboardInterrupt  # the console is gone as the copies are being cleaned
+
+    holder_credentials.scrub_backups = stop_while_cleaning
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            await _replace()
+    finally:
+        holder_credentials.scrub_backups = real
+    assert OLD in first.read_text() and OLD in second.read_text()
+
+    handled = await holder_credentials.recover_replacements()
+
+    assert handled == [{"mind": "ada", "recovered": True}]
+    assert _every_file_holding(tmp_path, OLD) == []
+    assert f"OTHER={BOB}" in first.read_text()
+
+
+async def test_a_replacement_that_could_not_clean_a_saved_copy_leaves_a_record_so_the_next_start_cleans_it(hive, tmp_path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    copy = backups / "hive_mind-MIND_PROXY_KEY-20261126T000000Z.env"
+    copy.write_text(f"MIND_PROXY_KEY={OLD}\nOTHER={BOB}\n")
+    real = holder_credentials.scrub_backups
+
+    def cannot_clean_it_now(*args, **kwargs):
+        if kwargs.get("check_only"):
+            return real(*args, **kwargs)
+        return [copy.name]  # the copy could not be rewritten this time
+
+    holder_credentials.scrub_backups = cannot_clean_it_now
+    try:
+        result = await _replace()
+    finally:
+        holder_credentials.scrub_backups = real
+    assert result["copies_still_holding_old_key"] == [copy.name]
+    assert OLD in copy.read_text()
+    journal = " ".join(p.read_text() for p in key_journal.JOURNAL_DIR.glob("*.json"))
+    assert OLD not in journal and NEW not in journal
+
+    handled = await holder_credentials.recover_replacements()
+
+    assert handled == [{"mind": "ada", "recovered": True}]
+    assert OLD not in copy.read_text() and f"OTHER={BOB}" in copy.read_text()
+    assert list(key_journal.JOURNAL_DIR.glob("*.json")) == []

@@ -248,7 +248,7 @@ def test_the_migration_routes_answer_to_an_admin_or_the_operators_bearer_and_to_
     from starlette.testclient import TestClient
     import main
 
-    monkeypatch.setenv("KEY_MIGRATION_TOKEN", "operator-bearer-0123456789")  # secret-guard: allow
+    monkeypatch.setenv("HIVE_OPERATOR_KEY", "operator-bearer-0123456789")  # secret-guard: allow
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "a-minds-gateway-key-0123456789")  # secret-guard: allow
     seen = []
 
@@ -369,7 +369,7 @@ def test_a_move_and_an_undo_through_the_routes_clear_the_credential_check_cache_
 
     cleared = []
     monkeypatch.setattr(credential_registry, "forget_all", lambda: cleared.append(1))
-    monkeypatch.delenv("KEY_MIGRATION_TOKEN", raising=False)
+    monkeypatch.delenv("HIVE_OPERATOR_KEY", raising=False)
     monkeypatch.setenv("COMMS_BEARER_TOKEN", ADA_COMMS)
     admin = builtin_console.admin()
     base = "/api/settings/key-migration/ada"

@@ -2523,12 +2523,14 @@ def _canonical_address(url: object) -> str:
 async def _refuse_address_change(caller, body) -> None:
     """An ordinary mind's own key may not move its own address (requirement 20).
 
-    The console sends a person's key to the address a mind registered, so a
-    mind that could re-register a different `gateway_url` could capture it.
-    A first registration, a refresh of the same address and a session-token
-    refresh keep working; the admin (which this function is never asked
-    about), the owner's key (admin route on the console) and an operator mind
-    - read from the roles tables now - may change it.
+    The gateway shows a mind a value made from the mind's key at the address
+    the mind registered, and the hive site sends a person's request there, so a
+    mind that could re-register a different `gateway_url` could capture what
+    is sent. A first registration, a refresh of the same address and a
+    credential refresh keep working. An administrator or the mind's owner
+    (each with their own person key, by the route that changes a mind - this
+    function is never asked about them) and an operator mind - read from the
+    roles tables now - may change it.
     """
     row = await core.get_mind(str(body.mind_id or "").strip())
     if not row:
@@ -2575,7 +2577,7 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
         # A mind's own credential registers a mind of its credential's
         # person and nobody else's. Without this a kid's box could register a
         # fresh row naming Daniel as owner, at a server of its own, and the
-        # gateway would send that address his admin credential.
+        # gateway would send that address what it sends for Daniel's mind.
         mine = user_access.normalize_username(caller.username)
         named = user_access.normalize_username(body.owner)
         if named and named != mine:

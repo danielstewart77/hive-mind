@@ -5,31 +5,19 @@ Port 9421, GET /health. Required env HIVE_DATABASE_URL (tools schema),
 HT_SECRET_KEY, HT_ADMIN_PASSWORD; INFERENCE_PROXY_URL and INFERENCE_PROXY_KEY
 (its model calls go through the proxy, never Ollama — story 10.16.1) and
 HIVE_TOOLS_DEFAULT_MODEL naming a chat model the proxy serves. Build context its own folder, modules/hive-tools of hive-mind, plus the
-extra context `hive_data` (modules/hive-data). Every mount optional. A token is minted inside the container
-with `auth_api.generate_token(name)`, which adds a new token on every call —
-so the installer mints once and keeps what it got.
+extra context `hive_data` (modules/hive-data). Every mount optional. The tools hold no
+credential of their own and the installer mints none: a mind calls them with
+its own key and a person (through the hive site) with theirs, both recognised
+from the hive database's one record of keys.
 """
 
 from __future__ import annotations
 
-from installer.shell import Shell, StepFailed
-
 PORT = 9421
 SERVICE = "hive-tools"
 URL = f"http://{SERVICE}:{PORT}"
-#: A route behind the token check: 401 for a token the store does not hold,
-#: anything else (404 for this id) for one it does.
 DOCKER_SOCKET = "/var/run/docker.sock"
-TOKEN_CHECK = "/hitl/installer-token-check"  # secret-guard: allow — a route path
 SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD")
-
-_MINT = """import asyncio,store,auth_api
-async def m():
-    await store.open()
-    try: print(await auth_api.generate_token({name!r}))
-    finally: await store.close()
-asyncio.run(m())"""
-
 
 def build_args(host) -> dict[str, str]:
     return {"UID": str(host.uid), "GID": str(host.gid), "DOCKER_GID": str(host.docker_gid)}
@@ -45,14 +33,3 @@ def environment(env_ref, *, dsn_ref: str, proxy_url: str, key_ref: str,
         "INFERENCE_PROXY_KEY": key_ref,
         "HIVE_TOOLS_DEFAULT_MODEL": model_ref,
     }
-
-
-def mint_token(sh: Shell, compose: list[str], name: str = "lucent") -> str:
-    """A new tools API token. Each call adds one, so call it only when the
-    install holds none."""
-    proc = sh.run([*compose, "exec", "-T", SERVICE, "python", "-c", _MINT.format(name=name)],
-                  timeout=60, quiet=True)
-    token = (proc.stdout or "").strip().splitlines()[-1:] or [""]
-    if not token[0]:
-        raise StepFailed("the tools service minted no token")
-    return token[0].strip()

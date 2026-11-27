@@ -66,8 +66,9 @@ shutdown is recorded as cut off, with the tool's effect unknown. `GET /hitl/{id}
 as `outcome` on an approved request — `null` until the replay has landed —
 and hive-tools then sends the asking mind one broker message through
 hive-comms (`POST /broker/messages`, from and to that mind's id, on a fresh
-conversation id, `metadata.request_type` `hitl_result`), using the
-`COMMS_URL` and `COMMS_BEARER_TOKEN` service credential. A message that
+conversation id, `metadata.request_type` `hitl_result`), sent with the
+key of the person who decided the request, as that person (`COMMS_URL` is the
+only setting; the tools hold no gateway key of their own). A message that
 cannot be delivered is logged; the stored outcome stands.
 
 A gated call whose body holds a NUL byte is refused with a 400 rather than

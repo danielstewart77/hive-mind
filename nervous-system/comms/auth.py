@@ -1,15 +1,12 @@
-"""Bearer-token auth for comms.
+"""What comms takes as a credential, and what it does not.
 
-Mirrors ``lucent_api/auth.py`` (same env-var shape, same logic). Two
-tokens:
-
-- ``COMMS_BEARER_TOKEN`` — service token. Required for every route
-  except health/root. Empty/unset = bypass mode (with a startup
-  warning), so a fresh container can come up before the operator
-  finishes wiring secrets.
-
-There is no admin token: an administrator acts with their own person key,
-which the per-holder gate in `user_access.UserAccess` resolves.
+Every request is judged by the per-holder gate in `user_access` against the
+hive database's one record of keys, read on every request: a person's own key,
+a mind's own key, or a `service` holder's key where one has been minted. The
+old shared ``COMMS_BEARER_TOKEN`` is not accepted, and there is no administrator
+token and no bypass mode: a request that presents nothing the record knows is
+refused. This module keeps only the paths that carry a credential of their own
+(an HMAC-signed webhook), which the bearer gate would wrongly refuse.
 """
 
 from __future__ import annotations

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import hmac
 import logging
 import os
@@ -210,15 +211,53 @@ def _comms_url() -> str:
     return (os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424").rstrip("/")
 
 
-def _comms_headers() -> dict[str, str]:
-    token = os.getenv("COMMS_BEARER_TOKEN", "")
-    return {"Authorization": f"Bearer {token}"} if token else {}
+#: Who the registry is read for. This library holds no key of its own for the
+#: gateway: every read is made for a signed-in person and carries that
+#: person's own key, which the site that mounts this library says how to find
+#: (`set_person_key_reader`). Set for a request by the middleware once it has
+#: resolved the person, and by `acting_as` for work outside a request.
+_ACTING: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "route_access_acting", default=None)
+_KEY_READER: Callable[[str], Awaitable[str | None]] | None = None
+
+
+def set_person_key_reader(reader: Callable[[str], Awaitable[str | None]] | None) -> None:
+    """How this site finds a signed-in person's own key (a coroutine)."""
+    global _KEY_READER
+    _KEY_READER = reader
+
+
+@contextlib.contextmanager
+def acting_as(username: str | None):
+    """Read the registry as this person for the work inside."""
+    token = _ACTING.set(str(username or "").strip().lower() or None)
+    try:
+        yield
+    finally:
+        _ACTING.reset(token)
+
+
+async def _comms_headers() -> dict[str, str]:
+    """The acting person's own key as the gateway's bearer. Nobody acting, or
+    no key to be had: no header, which the gateway refuses, and the caller
+    reads that as the registry not being readable."""
+    person = _ACTING.get()
+    if not person or _KEY_READER is None:
+        return {}
+    try:
+        key = await _KEY_READER(person)
+    except Exception:  # noqa: BLE001 - a key that cannot be read is no key
+        return {}
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 async def _comms_get(path: str) -> object | None:
+    headers = await _comms_headers()
+    if not headers:
+        return None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{_comms_url()}{path}", headers=_comms_headers())
+            response = await client.get(f"{_comms_url()}{path}", headers=headers)
     except httpx.HTTPError:
         return None
     if response.status_code != 200:
@@ -565,6 +604,10 @@ class AccessMiddleware:
             user = await auth.resolve_user(conn)
         except auth.ServiceUnavailable as exc:
             return _unavailable(exc.message, page)
+        if user is not None:
+            # From here on, in this request, the registry is read as this
+            # person (see `_comms_headers`).
+            _ACTING.set(auth.normalize_username(str(user.get("username") or "")) or None)
         if user is None:
             if page:
                 target = urllib.parse.quote(conn.url.path, safe="/")

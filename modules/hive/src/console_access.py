@@ -55,26 +55,44 @@ async def requester_of(request_id: str) -> str | None:
 # ── the bearers a mind presents ────────────────────────────────────────
 
 
-def canvas_push_token() -> str:
-    """What a mind draws on, and reads, the canvas with.
+async def a_minds_key(presented: str) -> str | None:
+    """The name of the mind whose own key this is, or None.
 
-    Prefers a dedicated CANVAS_PUSH_TOKEN; falls back to the house
-    COMMS_BEARER_TOKEN, which both this container and Skippy already hold,
-    so drawing works without recreating the container.
-    """
-    return os.getenv("CANVAS_PUSH_TOKEN") or os.getenv("COMMS_BEARER_TOKEN") or ""
+    What a mind draws on the canvas, and publishes design pages, with: its own
+    key, recognised from the one record of keys on this request. A person's
+    key, a replaced one and a cut-off one are nobody's here. No token of this
+    site's own stands for a mind."""
+    import hashlib
+
+    from hive_data import core
+
+    value = str(presented or "").strip()
+    if not value:
+        return None
+    try:
+        row = await core.credential_for_token(
+            hashlib.sha256(value.encode("utf-8")).hexdigest())
+        if row is None or str(row["role"] or "") != "mind":
+            return None
+        mind = await core.get_mind_by_id_or_name(str(row["holder"]))
+    except Exception:  # noqa: BLE001 - a key that cannot be read admits nobody
+        return None
+    return str(mind["name"]) if mind else None
 
 
-def design_push_token() -> str:
-    """The credential a Mind publishes design pages with.
+async def an_administrators_key(presented: str) -> str | None:
+    """The username of the administrator whose own key this is, or None.
 
-    Deliberately its own, with no fallback to the house tokens. Every Mind
-    in the hive already holds `COMMS_ADMIN_BEARER_TOKEN` and
-    `COMMS_BEARER_TOKEN`, so either of those as the fallback would let any
-    Mind — a kid's Windows box included — rewrite Daniel's requirements and
-    press Build. Unset means the publish routes refuse rather than open.
-    """
-    return os.getenv("DESIGN_PUSH_TOKEN", "")
+    What the operator's key-migration command moves minds with: their own
+    key, from a command line with no browser session. A mind's key and a
+    non-administrator's are refused."""
+    from hive_data import access
+
+    try:
+        found = await access.administrator_for(str(presented or "").strip())
+    except Exception:  # noqa: BLE001 - a key that cannot be read admits nobody
+        return None
+    return found.username if found else None
 
 
 #: The board roles, given on the roles page. A mind writes to the board with
@@ -127,18 +145,6 @@ def _holding(*slugs: str):
     return recognise
 
 
-def key_migration_token() -> str:
-    """The credential the operator's key-migration command moves minds with.
-
-    Moving a mind, undoing it and retiring the old keys are the operator's,
-    and a command-line run has no browser session. Deliberately its own, with
-    no fallback to any house token: every mind holds those, and a mind must
-    never reach these routes. Unset means these routes admit no bearer and
-    only a signed-in admin reaches them.
-    """
-    return os.getenv("KEY_MIGRATION_TOKEN", "")
-
-
 CANVAS = "canvas"
 KEY_MIGRATION = "key_migration"
 DESIGN = "design"
@@ -156,13 +162,9 @@ TABLE = RouteTable(
         "request_id": requester_of,
     },
     bearers={
-        CANVAS: BearerToken(
-            canvas_push_token, unset_status=503, unset_message="canvas push token not configured"
-        ),
-        DESIGN: BearerToken(
-            design_push_token, unset_status=503,
-            unset_message="DESIGN_PUSH_TOKEN is not configured",
-        ),
+        # A mind's own key, recognised from the one record.
+        CANVAS: BearerToken(lambda: "", recognise=a_minds_key),
+        DESIGN: BearerToken(lambda: "", recognise=a_minds_key),
         # A mind's own key, recognised from the one record, plus its role.
         BOARD: BearerToken(
             lambda: "", recognise=_holding(BOARD_PUSH_ROLE),
@@ -173,10 +175,8 @@ TABLE = RouteTable(
         ROLES: BearerToken(
             lambda: "", recognise=_holding(OPERATOR_ROLE),
         ),
-        KEY_MIGRATION: BearerToken(
-            key_migration_token, unset_status=401,
-            unset_message="Authentication required",
-        ),
+        # An administrator's own key, for the operator's command line.
+        KEY_MIGRATION: BearerToken(lambda: "", recognise=an_administrators_key),
     },
 )
 

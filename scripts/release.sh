@@ -46,7 +46,7 @@
 # console-built mind fetches the release from; default: origin),
 # HIVE_RELEASE_MINDS_REPORT (a command printing the key-migration report as
 # JSON; default tools/stateless/key_migration/key_migration.py report, which
-# needs HIVE_SITE_URL and KEY_MIGRATION_TOKEN).
+# needs HIVE_SITE_URL and HIVE_OPERATOR_KEY).
 set -uo pipefail
 
 die() { echo "release: $1" >&2; [ -n "${2:-}" ] && echo "  fix: $2" >&2; exit "${3:-1}"; }
@@ -151,7 +151,7 @@ except Exception:
 ')"
   if [ "$rc" -ne 0 ] || [ "$moved" = "?UNREADABLE" ]; then
     die "going to an older release needs to know no mind has been moved to its one key, and the console's report could not be read" \
-        "set HIVE_SITE_URL and KEY_MIGRATION_TOKEN so key_migration.py report works, or run it yourself and put every moved mind back first"
+        "set HIVE_SITE_URL and HIVE_OPERATOR_KEY so key_migration.py report works, or run it yourself and put every moved mind back first"
   fi
   [ -z "$moved" ] || die "these minds have been moved to their one key: $moved. The release you are going to does not know that key" \
       "put each back first: python3 tools/stateless/key_migration/key_migration.py undo <mind> (not possible after the old keys were retired: then going back no longer holds for those minds)"

@@ -91,14 +91,16 @@ BASE_SECRETS = (
     "HIVE_SECRET_KEY",
 )
 
-#: Comms holders minted for a service, by the piece that runs them. Role
-#: `service`: each reads the mind registry, which a person holder may not. The
-#: bots and the voice servers are not here: a bot presents its mind's own key
-#: and a voice server presents the key of whoever calls it.
-COMMS_SERVICE_HOLDERS = {
-    "console": CONSOLE, "terminal": TERMINAL, "tools": tools.SERVICE,
-}
-#: Comms itself reads lucent, as a service holder of its own.
+#: Comms holders minted for a service: none. The two sites and the tools ask
+#: the gateway with the key of the person (or mind) they act for, and the bots
+#: and the voice servers likewise (a bot presents its mind's own key, a voice
+#: server the key of whoever calls it), so no service holds a gateway key that
+#: stands for anyone.
+COMMS_SERVICE_HOLDERS: dict[str, str] = {}
+#: Memory-store holders minted for a service, role `service`, which may name the
+#: mind it reads for. Comms composes every mind's prompt from the memory store,
+#: so it reads for any mind; the hive site's rules page still lists and edits
+#: rules with the site's own value (held for later, with the rules page).
 LUCENT_SERVICE_HOLDERS = {"comms": COMMS, "console": CONSOLE}
 
 
@@ -297,7 +299,7 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
         given("telegram_token")
     if "discord" in pieces:
         given("discord_token")
-    for name in ("MIND_PROXY_KEY", SERVICE_PROXY_KEY, "HIVE_TOOLS_TOKEN"):
+    for name in ("MIND_PROXY_KEY", SERVICE_PROXY_KEY):
         if current.get(name) and name not in values:
             values[name] = current[name]
     if plan.runs_here(answers, "proxy"):
@@ -322,7 +324,6 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
             values.pop(mind_key_var(mind), None)
     values.setdefault(EMBEDDING_MODEL_VAR, "")
     values.setdefault(CLASSIFIER_MODEL_VAR, "")
-    values.setdefault("HIVE_TOOLS_TOKEN", "")
     # What the compose file of a mind the console creates is written with:
     # where the install is on this host, and where its dsh tree is.
     values["HOST_PROJECT_DIR"] = str(home.root)
@@ -466,11 +467,14 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
 
     link = links(answers, host)
     site_links = site.links(link.get("console", ""), link.get("terminal", ""))
+    # The hive site as a person's browser reaches it: what the tools put in an
+    # approval notice, and what the terminal links to. Empty without a site
+    # here, which the tools say at start.
+    tools_links = {site.PUBLIC_URL: link.get("console", "")}
     if "console" in pieces:
         env = {"HIVE_HOST": "0.0.0.0", "HIVE_PORT": str(CONSOLE_PORT), "HIVE_LOG_FORMAT": "json",
                "HIVE_DATABASE_URL": dsn, "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"),
                "COMMS_URL": COMMS_URL, "GATEWAY_API_URL": COMMS_URL,
-               "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", CONSOLE)),
                "LUCENT_API_URL": LUCENT_URL,
                "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", CONSOLE)),
                # What issues a new mind its memory-store credential: Add a
@@ -507,7 +511,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         if voice:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
-            env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
+            env.update({"HIVE_TOOLS_URL": tools.URL})
         # The Hive Tools card reports what is really there: the module, read
         # only, where the console looks for a checkout.
         env["HIVE_TOOLS_DIR"] = str(repo("hive-tools"))
@@ -529,7 +533,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     if "terminal" in pieces:
         env = {"TERMINAL_HOST": "0.0.0.0", "HIVE_DATABASE_URL": dsn,
                "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"), "GATEWAY_API_URL": COMMS_URL,
-               "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", TERMINAL)),
                "HIVE_KEY_ROOT": CONSOLE_KEY_ROOT, **site_links}
         if voice:
             env["VOICE_API_URL"] = voice
@@ -566,7 +569,9 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                                 key_ref=env_ref(SERVICE_PROXY_KEY),
                                 model_ref=env_ref(CLASSIFIER_MODEL_VAR)),
             "COMMS_URL": COMMS_URL,
-            "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", tools.SERVICE)),
+            # Where an approval is decided, and the link in a notice: the hive
+            # site's address as a person's browser reaches it.
+            **tools_links,
             "LUCENT_URL": LUCENT_URL})
         # The console restarts a mind through the tools service, which runs
         # `docker compose` against this install: the socket, and the install
@@ -607,8 +612,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         mind_env["MIND_KEY_FILE"] = f"{KEY_MOUNT}/{KEY_FILE}"
     if "tools" in pieces:
         mind_env.update({"HIVE_TOOLS_URL": tools.URL})
-        if not one_key:
-            mind_env["HIVE_TOOLS_TOKEN"] = env_ref("HIVE_TOOLS_TOKEN")
     svc = base(mind, image="hive/mind:local", needs=(COMMS, LUCENT), build=mind_build, env=mind_env)
     svc["container_name"] = f"hive-mind-{mind}"
     svc["working_dir"] = APP

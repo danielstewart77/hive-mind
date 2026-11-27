@@ -32,7 +32,6 @@ services:
       # refusal on their own repository. Matching the mount point instead is
       # not enough: when the destination does not exist yet, Docker creates
       # the bind source root-owned, and there is nothing to match.
-      - DESIGN_PUSH_TOKEN=${DESIGN_PUSH_TOKEN:-}
       - HOST_UID=${HOST_UID:-1000}
       - HIVE_KEY_ROOT=/mind_keys
       - HIVE_MIND_UID=${HIVE_MIND_UID:-1000}

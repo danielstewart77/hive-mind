@@ -764,13 +764,11 @@ def reachability(ctx: Ctx):
 
 
 # ---- 16. service credentials ------------------------------------------------
-def _tools_token_ok(ctx: Ctx, token: str) -> bool:
-    out = ctx.http("GET", tools.URL + tools.TOKEN_CHECK,
-                   headers={"Authorization": f"Bearer {token}"}, timeout=10)
-    return out.get("status") not in (0, 401, 403)
-
-
 def mint_credentials(ctx: Ctx):
+    """Give the services that read the mind registry their gateway and
+    memory-store credentials. The tools get none: they act with the key of
+    whoever asks (a mind's, or the person's through the hive site), and a
+    tools token that stood for the hive site is not made."""
     a, env = ctx.answers, ctx.env()
     holders = compose.service_holders(a)
     admin = collisions.username(a["admin_username"])
@@ -781,18 +779,6 @@ def mint_credentials(ctx: Ctx):
         done[store] = hive_api.mint(ctx.sh, dsn, image, store, wanted, admin,
                                     role=hive_api.SERVICE,
                                     on_minted=lambda h, s=store: _record_minted(ctx, s, [h]))
-    if "tools" in plan.installed(a):
-        token = env.get("HIVE_TOOLS_TOKEN")
-        # Checked, not trusted: a tools database rebuilt since has none of
-        # the tokens this install recorded.
-        if not token or not _tools_token_ok(ctx, token):
-            token = tools.mint_token(ctx.sh, ctx.compose)
-            ctx.set_env(HIVE_TOOLS_TOKEN=token)
-            if "console" in plan.installed(a):
-                ctx.sh.run([*ctx.compose, "up", "-d", compose.CONSOLE], timeout=300)
-            done["tools"] = "token minted"
-        else:
-            done["tools"] = "token kept"
     return done
 
 

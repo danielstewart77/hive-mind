@@ -1777,6 +1777,18 @@ async def replace_mind_key(
                 key_journal.clear(holder)
             except OSError:
                 pass  # the replacement is complete; a stale record is harmless
+            if unscrubbed:
+                # Saved copies that still hold the old key must not be left
+                # because the record that would have found them is gone: a
+                # record of their own, holding a fingerprint and no key, is
+                # tried again on every console start until they are clean.
+                try:
+                    cleanup = key_journal.begin("scrub", holder, [])
+                    key_journal.update(
+                        cleanup, old_fingerprint=fingerprint(old),
+                        detail=f"saved copies {', '.join(unscrubbed)} still hold the old key")
+                except OSError:
+                    pass
             if location is None:
                 # A mind whose key is not kept here: now registered at every
                 # service, and the console cannot read its file. Remembered, so

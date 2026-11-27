@@ -216,7 +216,7 @@ mind onto its one key (story 884) replaces its old per-service keys at the
 gateway and memory store. An older release's mind presents the old values, so:
 
 - `release.sh` refuses to go to an older release while any mind is moved. It reads
-  the console's report (`HIVE_SITE_URL`, `KEY_MIGRATION_TOKEN`); if the console
+  the console's report (`HIVE_SITE_URL`, `HIVE_OPERATOR_KEY`); if the console
   is down, check by hand (`python3 tools/stateless/key_migration/key_migration.py
   report`) and pass `--minds-checked`.
 - Put each moved mind back first:
@@ -233,8 +233,9 @@ gateway and memory store. An older release's mind presents the old values, so:
 This is the operator work the code stories left. Do it after Part 2 and Part 3
 hold, a mind at a time.
 
-1. On the console set `KEY_MIGRATION_TOKEN` (any long random value); in your
-   shell set the same and `HIVE_SITE_URL`.
+1. In your shell set `HIVE_SITE_URL` and `HIVE_OPERATOR_KEY`, an administrator's
+   own key (the console has no setting for it; it recognises the key from the
+   hive's record of keys, and a mind's key or a non-administrator's is refused).
 2. `python3 tools/stateless/key_migration/key_migration.py report`. It lists every
    holder on the gateway, memory store and tools and every mind with a state.
    Names plainly any mind on another machine not yet registered (paste its key

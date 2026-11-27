@@ -17,8 +17,9 @@ rotation lock is in-process, and this command is a separate process: writing
 the env file or the services from here would interleave with a mind's creation
 or a key replacement and leave the files and the services disagreeing. So it
 only asks the console, which holds the lock, the journal and the backup. The
-console is `HIVE_SITE_URL` and the credential is `KEY_MIGRATION_TOKEN`, a value
-the operator issued for this and which no mind holds.
+console is `HIVE_SITE_URL` and the credential is `HIVE_OPERATOR_KEY`: the
+operator's own key as a person (an administrator's), which no mind holds. The
+console recognises it from the hive's record of keys; it has no setting for it.
 
 What it prints: names, files, variable names and digest prefixes at most, as
 the console gives them. A key never appears in anything this command reads
@@ -73,9 +74,9 @@ def _console() -> str:
 
 
 def _token() -> str:
-    token = (os.getenv("KEY_MIGRATION_TOKEN") or "").strip()
+    token = (os.getenv("HIVE_OPERATOR_KEY") or "").strip()
     if not token:
-        raise Refused("KEY_MIGRATION_TOKEN is unset: it is the operator's credential "
+        raise Refused("HIVE_OPERATOR_KEY is unset: it is an administrator's own key, "
                       "for these routes, and without it the console answers 401.")
     return token
 

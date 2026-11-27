@@ -244,11 +244,13 @@ async def deliver_notice(notice_id: int) -> bool:
             return False
         # A session opened before any mind attached names its conversation
         # but no mind; the conversation's own mind is then the owner's.
-        person = (
-            await route_access.owner_of_mind(str(record.get("mind_id") or ""))
-            if record.get("mind_id")
-            else await route_access.owner_of_session(conversation_id)
-        ) or ""
+        # Read for the person who submitted, with their own key.
+        with route_access.acting_as(submitter_of(notice)):
+            person = (
+                await route_access.owner_of_mind(str(record.get("mind_id") or ""))
+                if record.get("mind_id")
+                else await route_access.owner_of_session(conversation_id)
+            ) or ""
         content = compose_message(record, notice["page"], notice["kind"], person)
         headers = await _submitter_headers(notice)
         await adopt_conversation(record["id"], conversation_id, headers)
