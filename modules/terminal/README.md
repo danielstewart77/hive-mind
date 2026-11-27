@@ -71,8 +71,7 @@ checkout; `HIVE_DATA_DIR` and `HIVE_SITE_DIR` are no longer read);
 `HIVE_DATABASE_URL` (required); `HIVE_SECRET_KEY` only if
 the console sets one (left unset on both, the key is generated once and kept
 in the shared store); and, when the console signs in through auth-service,
-the same `AUTH_SERVICE_URL` and `AUTH_SERVICE_ADMIN_TOKEN` (or
-`HIVE_AUTH_BACKEND`) the console holds; `HIVE_CONSOLE_URL`, the console's
+the same `AUTH_SERVICE_URL` (or `HIVE_AUTH_BACKEND`) the console holds; `HIVE_CONSOLE_URL`, the console's
 address for the brand link (unset, it links to this site's front page). The
 two sites must use the same store to share a session.
 

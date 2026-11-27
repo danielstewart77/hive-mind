@@ -123,7 +123,6 @@ def page(live_app):
 # the store both apps share.
 
 from multiuser_support import (  # noqa: E402
-    AUTH_SERVICE_ADMIN_TOKEN,
     AUTH_SERVICE_REF,
     AUTH_SERVICE_REPO,
     SEED_PASSWORD,
@@ -217,9 +216,23 @@ class Terminal:
     def store():
         return auth.get_store()
 
+    def as_admin(self, call):
+        """Run a store call as the signed-in administrator: the auth-service
+        store manages people with the acting person's own session, so setup
+        signs in as the seeded admin rather than holding a shared token."""
+        service = self.auth_service
+
+        async def run_it():
+            if service is not None:
+                from hive_site import auth as site_auth
+                site_auth._acting_token.set(service._admin_session())
+            return await call()
+
+        return accounts.run(run_it())
+
     def create_user(self, username: str, temp_password: str):
-        return accounts.run(
-            self.store().create_user(username, temp_password=temp_password))
+        return self.as_admin(
+            lambda: self.store().create_user(username, temp_password=temp_password))
 
     def settled_user(self, username: str, password: str):
         """A user who has signed in with their temporary password and changed it."""
@@ -257,7 +270,6 @@ def terminal(request, tmp_path, monkeypatch, fake_comms):
         assert granted.status_code == 204, granted.text
         monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
         monkeypatch.setenv("AUTH_SERVICE_URL", service.url)
-        monkeypatch.setenv("AUTH_SERVICE_ADMIN_TOKEN", AUTH_SERVICE_ADMIN_TOKEN)
         yield Terminal("auth-service", service)
 
 

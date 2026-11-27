@@ -37,7 +37,6 @@ AUTH_SERVICE_REPO = Path(
     os.getenv("AUTH_SERVICE_REPO", "/home/daniel/Storage/Dev/auth-service")
 )
 AUTH_SERVICE_REF = os.getenv("AUTH_SERVICE_REF", "main")
-AUTH_SERVICE_ADMIN_TOKEN = "test-auth-service-admin-token"  # secret-guard: allow
 SEED_USERNAME = "daniel"
 SEED_PASSWORD = "daniel-seed-password"  # secret-guard: allow
 
@@ -224,7 +223,6 @@ class AuthServiceProcess:
             "AUTH_COOKIE_DOMAIN": "",
             "AUTH_SEED_USERNAME": SEED_USERNAME,
             "AUTH_SEED_PASSWORD": SEED_PASSWORD,
-            "AUTH_SERVICE_ADMIN_TOKEN": AUTH_SERVICE_ADMIN_TOKEN,
             "AUTH_RESET_EMAIL": "",
             "SMTP_HOST": "",
         }
@@ -260,11 +258,21 @@ class AuthServiceProcess:
             except subprocess.TimeoutExpired:
                 self._process.kill()
 
+    def _admin_session(self) -> str:
+        """The seeded administrator's own session: the service has no shared
+        admin token, so setup signs in as the admin like a person does."""
+        if getattr(self, "_session", None) is None:
+            signed = httpx.post(f"{self.url}/login", timeout=10,
+                                json={"username": SEED_USERNAME, "password": SEED_PASSWORD})
+            assert signed.status_code == 200, signed.text
+            self._session = signed.json()["token"]
+        return self._session
+
     def admin(self, method: str, path: str, **kwargs) -> httpx.Response:
         return httpx.request(
             method,
             f"{self.url}{path}",
-            headers={"Authorization": f"Bearer {AUTH_SERVICE_ADMIN_TOKEN}"},
+            headers={"Authorization": f"Bearer {self._admin_session()}"},
             timeout=10,
             **kwargs,
         )

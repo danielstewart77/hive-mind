@@ -91,7 +91,7 @@ def test_a_disabled_user_is_refused_at_terminal_sign_in_and_turned_away_mid_sess
     sloan = terminal.settled_user("sloan", "sloans-own-pass")
     assert sloan.get("/terminal", follow_redirects=False).status_code == 200
 
-    accounts.run(terminal.store().update_user("sloan", disabled=True))
+    terminal.as_admin(lambda: terminal.store().update_user("sloan", disabled=True))
 
     page = sloan.get("/terminal", follow_redirects=False)
     assert page.status_code == 303
