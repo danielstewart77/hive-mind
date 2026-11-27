@@ -1,10 +1,9 @@
-"""A mind's own credential, and the gateway calls it guards.
+"""What the gateway shows a mind, and the gateway calls it guards.
 
-Every call hive-comms makes to a mind carries a credential that mind can
-check, and each mind's is its own: one taken off a kid's Windows box opens
-that box and nothing else in the hive. The mind mints it, keeps it, and
-publishes it only through the admin-guarded registration it already performs
-on every boot.
+Every call hive-comms makes to a mind carries a value that mind can check. It is
+made from the mind's one key (feature 834, story 902): the mind works out the
+same value from the key it holds and compares. Nothing else is stored on the
+mind: no second secret file, no MIND_SESSION_TOKEN.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from core import mind_key
 from minds import runtime_api
 
 RUNTIME = """\
@@ -31,21 +31,28 @@ default_model: sonnet
 """
 
 
+MIND_KEY = "the-one-key-of-this-mind-0001"
+OTHER_KEY = "the-one-key-of-another-mind-02"
+
+
 @pytest.fixture()
 def mind_dir(tmp_path):
     (tmp_path / "runtime.yaml").write_text(RUNTIME)
-    # The token is cached per process, so a test inheriting the previous
-    # test's value would never touch the file it means to be asserting on.
-    runtime_api._token_cache.clear()
     return tmp_path
 
 
 @pytest.fixture(autouse=True)
-def no_injected_token():
-    """The file is the subject here; an ambient env var would mask it."""
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("MIND_SESSION_TOKEN", None)
-        yield
+def the_minds_one_key(monkeypatch):
+    """The mind's one key is the subject; ambient values would mask it."""
+    for gone in ("MIND_SESSION_TOKEN", "MIND_KEY_FILE", "COMMS_BEARER_TOKEN"):
+        monkeypatch.delenv(gone, raising=False)
+    monkeypatch.setenv("MIND_KEY", MIND_KEY)
+    yield
+
+
+def shown(key):
+    """What the gateway presents for a mind holding this key."""
+    return mind_key.gateway_credential(key)
 
 
 def _request(headers: dict[str, str] | None = None) -> Request:
@@ -54,152 +61,96 @@ def _request(headers: dict[str, str] | None = None) -> Request:
 
 
 # ---------------------------------------------------------------------------
-# R3 — the mind's credential is its own to make and its own to keep
+# B13 — what the gateway shows a mind is made from the mind's one key
 # ---------------------------------------------------------------------------
-class TestMintingTheToken:
-    def test_mints_one_when_there_is_none(self, mind_dir):
-        token = runtime_api.session_token(mind_dir)
-        assert token
-        assert (mind_dir / "session_token").read_text().strip() == token
+class TestWhatTheGatewayShowsIsMadeFromTheKey:
+    def test_the_value_made_from_this_minds_key_is_accepted(self, mind_dir):
+        headers = {"Authorization": f"Bearer {shown(MIND_KEY)}"}
+        assert runtime_api.authorize_session(_request(headers), mind_dir) is None
 
-    def test_only_the_mind_can_read_the_file(self, mind_dir):
+    def test_the_value_made_from_another_minds_key_is_refused(self, mind_dir):
+        headers = {"Authorization": f"Bearer {shown(OTHER_KEY)}"}
+        denied = runtime_api.authorize_session(_request(headers), mind_dir)
+        assert denied is not None and denied.status_code == 401
+
+    def test_after_the_key_is_replaced_the_old_value_is_refused_and_the_new_one_taken(
+        self, mind_dir, tmp_path, monkeypatch
+    ):
+        key_file = tmp_path / "key"
+        key_file.write_text(MIND_KEY + "\n")
+        monkeypatch.delenv("MIND_KEY")
+        monkeypatch.setenv("MIND_KEY_FILE", str(key_file))
+        old = {"Authorization": f"Bearer {shown(MIND_KEY)}"}
+        assert runtime_api.authorize_session(_request(old), mind_dir) is None
+
+        replaced = tmp_path / "key.new"
+        replaced.write_text(OTHER_KEY + "\n")
+        os.replace(replaced, key_file)
+
+        denied = runtime_api.authorize_session(_request(old), mind_dir)
+        assert denied is not None and denied.status_code == 401
+        new = {"Authorization": f"Bearer {shown(OTHER_KEY)}"}
+        assert runtime_api.authorize_session(_request(new), mind_dir) is None
+
+    def test_the_raw_key_is_not_what_the_guard_takes(self, mind_dir):
+        headers = {"Authorization": f"Bearer {MIND_KEY}"}
+        denied = runtime_api.authorize_session(_request(headers), mind_dir)
+        assert denied is not None and denied.status_code == 401
+
+    def test_the_value_does_not_contain_or_equal_the_key_and_differs_from_its_fingerprint(self):
+        import hashlib
+
+        value = shown(MIND_KEY)
+        assert MIND_KEY not in value
+        assert value != hashlib.sha256(MIND_KEY.encode()).hexdigest()
+        assert value != shown(OTHER_KEY)
+
+    def test_no_session_token_file_is_made_by_asking_for_the_value(self, mind_dir):
         runtime_api.session_token(mind_dir)
-        mode = (mind_dir / "session_token").stat().st_mode & 0o777
-        assert mode == 0o600
+        runtime_api.authorize_session(_request(), mind_dir)
+        assert not (mind_dir / "session_token").exists()
 
-    def test_the_same_token_comes_back_on_every_later_ask(self, mind_dir):
-        first = runtime_api.session_token(mind_dir)
-        assert runtime_api.session_token(mind_dir) == first
-        # A restart is a fresh read of the same directory and nothing else.
-        assert runtime_api.session_token(mind_dir) == first
+    def test_a_session_token_env_value_is_not_read(self, mind_dir, monkeypatch):
+        monkeypatch.setenv("MIND_SESSION_TOKEN", "injected-by-an-old-install")
+        headers = {"Authorization": "Bearer injected-by-an-old-install"}
+        denied = runtime_api.authorize_session(_request(headers), mind_dir)
+        assert denied is not None and denied.status_code == 401
 
-    def test_an_injected_token_overrides_the_file(self, mind_dir):
-        runtime_api.session_token(mind_dir)
-        with patch.dict(os.environ, {"MIND_SESSION_TOKEN": "from-the-env"}):
-            assert runtime_api.session_token(mind_dir) == "from-the-env"
-
-    def test_the_token_is_read_once_per_process(self, mind_dir):
-        """The guard asks on every request; the file is read on the first."""
-        token = runtime_api.session_token(mind_dir)
-        (mind_dir / "session_token").unlink()
-        assert runtime_api.session_token(mind_dir) == token
-
-    def test_an_unwritable_directory_refuses_rather_than_serving_open(self, tmp_path):
-        missing = tmp_path / "nowhere" / "deeper"
-        with pytest.raises(runtime_api.SessionTokenUnavailable):
-            runtime_api.session_token(missing)
-
-    def test_an_unreadable_file_is_not_treated_as_an_absent_one(self, mind_dir):
-        """Folding the two together is how a mind serves every session route
-        open because a migration chowned its own directory.
-
-        The message is asserted, not just the raise: an unreadable file is also
-        unwritable, so a build that folded unreadable into absent would still
-        raise — from the reclaim path, a second later, having first decided the
-        file was abandoned and tried to mint over a credential that is sitting
-        right there.
-        """
-        runtime_api.session_token(mind_dir)
-        (mind_dir / "session_token").chmod(0o000)
-        runtime_api._token_cache.clear()
-        try:
-            with pytest.raises(runtime_api.SessionTokenUnavailable) as refused:
-                runtime_api.session_token(mind_dir)
-            assert "cannot read" in str(refused.value)
-        finally:
-            (mind_dir / "session_token").chmod(0o600)
-
-    def test_a_file_holding_non_utf8_bytes_is_refused_not_crashed_through(
+    def test_an_old_file_is_not_a_fallback_and_is_deleted_when_the_mind_starts_on_its_key(
         self, mind_dir
     ):
-        (mind_dir / "session_token").write_bytes(b"\xff\xfe not text")
-        runtime_api._token_cache.clear()
-        with pytest.raises(runtime_api.SessionTokenUnavailable):
-            runtime_api.session_token(mind_dir)
+        old = mind_dir / "session_token"
+        old.write_text("the-old-second-secret\n")
+        headers = {"Authorization": "Bearer the-old-second-secret"}
+        denied = runtime_api.authorize_session(_request(headers), mind_dir)
+        assert denied is not None and denied.status_code == 401
+        assert runtime_api.retire_session_token_file(mind_dir) is True
+        assert not old.exists()
 
-    def test_an_abandoned_empty_file_is_reclaimed_rather_than_waited_on(
-        self, mind_dir
-    ):
-        """A mint killed between the create and the write leaves a zero-byte
-        file no amount of waiting will fill. Waiting anyway cost a second of
-        the event loop on every request, forever, for something only `rm` could
-        fix."""
-        path = mind_dir / "session_token"
-        # Created wide, the way an older build or a loose umask would leave it.
-        # Asserting 0600 against a file the test itself made 0600 asserts the
-        # fixture, since writing to an existing file preserves its mode.
-        path.touch(mode=0o644)
-        stale = time.time() - 60
-        os.utime(path, (stale, stale))
-
-        token = runtime_api.session_token(mind_dir)
-        assert token
-        assert path.read_text().strip() == token
-        assert path.stat().st_mode & 0o777 == 0o600
-
-    def test_reclaiming_does_not_stall_the_event_loop(self, mind_dir):
-        path = mind_dir / "session_token"
-        path.touch(mode=0o600)
-        stale = time.time() - 60
-        os.utime(path, (stale, stale))
-
-        started = time.monotonic()
-        runtime_api.session_token(mind_dir)
-        assert time.monotonic() - started < 0.1
-
-    def test_a_fresh_empty_file_is_given_its_window_and_then_reclaimed(
+    def test_a_mind_with_no_key_leaves_an_old_file_alone_and_refuses_everyone(
         self, mind_dir, monkeypatch
     ):
-        """It might be a race in flight, so it gets the window. Nothing
-        arrives, so it is reclaimed — bounded, and never a wait that repeats on
-        every later request."""
-        monkeypatch.setattr(runtime_api, "_RACE_WINDOW_S", 0.05)
-        monkeypatch.setattr(runtime_api, "_RACE_PAUSE_S", 0.01)
-        path = mind_dir / "session_token"
-        path.touch(mode=0o600)
-
-        started = time.monotonic()
-        token = runtime_api.session_token(mind_dir)
-        waited = time.monotonic() - started
-
-        assert token
-        assert waited >= 0.05, "a file that might be mid-write was not waited on"
-        assert waited < 1.0
-
-    def test_a_token_written_mid_race_is_adopted_not_overwritten(
-        self, mind_dir, monkeypatch
-    ):
-        path = mind_dir / "session_token"
-        path.touch(mode=0o600)
-        reads = {"n": 0}
-
-        def _late_writer(_pause):
-            reads["n"] += 1
-            if reads["n"] == 2:
-                path.write_text("the-winner-s-token\n")
-
-        monkeypatch.setattr(runtime_api.time, "sleep", _late_writer)
-        assert runtime_api.session_token(mind_dir) == "the-winner-s-token"
+        monkeypatch.delenv("MIND_KEY")
+        old = mind_dir / "session_token"
+        old.write_text("the-old-second-secret\n")
+        assert runtime_api.retire_session_token_file(mind_dir) is False
+        for bearer in ("the-old-second-secret", shown(MIND_KEY), ""):
+            headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+            denied = runtime_api.authorize_session(_request(headers), mind_dir)
+            assert denied is not None and denied.status_code == 503
 
 
 class TestTheTokenIsNotServed:
     def test_the_runtime_view_does_not_carry_it(self, mind_dir):
-        runtime_api.session_token(mind_dir)
         view = runtime_api.public_runtime(mind_dir / "runtime.yaml")
         assert "session_token" not in view
         assert runtime_api.session_token(mind_dir) not in str(view)
 
-    def test_the_registration_payload_does_carry_it(self, mind_dir):
+    def test_the_registration_payload_carries_no_secret(self, mind_dir):
         payload = runtime_api.registration_payload(mind_dir / "runtime.yaml", "example")
-        assert payload["session_token"] == runtime_api.session_token(mind_dir)
-
-    def test_a_mind_with_no_token_registers_without_the_field(self, tmp_path):
-        (tmp_path / "runtime.yaml").write_text(RUNTIME)
-        with patch.object(runtime_api, "session_token", return_value=""):
-            payload = runtime_api.registration_payload(
-                tmp_path / "runtime.yaml", "example"
-            )
         assert "session_token" not in payload
+        assert MIND_KEY not in str(payload)
+        assert shown(MIND_KEY) not in str(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -259,17 +210,6 @@ class TestTheSessionGuard:
         token = runtime_api.session_token(mind_dir)
         headers = {"Sec-WebSocket-Protocol": token}
         assert runtime_api.authorize_session(_request(headers), mind_dir) is None
-
-    def test_a_mind_that_cannot_read_its_own_token_refuses_rather_than_opens(
-        self, tmp_path
-    ):
-        """Serving open here would answer every caller on the LAN while the
-        gateway went on presenting a token nobody checked."""
-        denied = runtime_api.authorize_session(
-            _request(), tmp_path / "nowhere" / "deeper"
-        )
-        assert denied is not None
-        assert denied.status_code == 503
 
     def test_a_non_ascii_credential_is_refused_rather_than_raising(self, mind_dir):
         """On `str`, compare_digest raises TypeError — a 500 where a 401
@@ -349,7 +289,7 @@ class TestTheConfigSurfaceTakesTheGatewayAndTheMindOnly:
             return asyncio.run(runtime_api.authorize_admin(_request(headers)))
 
     def test_the_gateways_credential_is_taken(self, mind_dir):
-        token = runtime_api.session_token(mind_dir)
+        token = shown("the-mind-key")
         assert self._ask(token, MIND_KEY="the-mind-key") is None
 
     def test_the_minds_own_key_is_taken(self):
@@ -364,22 +304,10 @@ class TestTheConfigSurfaceTakesTheGatewayAndTheMindOnly:
             assert denied is not None and denied.status_code == 401, presented
         assert self._ask(None, MIND_KEY="the-mind-key").status_code == 401
 
-    def test_a_keyless_mind_takes_the_gateways_delivery_and_refuses_everyone_else(self, mind_dir):
-        token = runtime_api.session_token(mind_dir)
-        assert self._ask(token) is None
-        denied = self._ask("a-persons-key")
-        assert denied is not None and denied.status_code == 503
-
-    def test_a_mind_that_cannot_establish_the_gateways_credential_refuses_plainly(
-        self, tmp_path
-    ):
-        runtime_api.bind_mind_dir(tmp_path / "missing" / "dir")
-        runtime_api._token_cache.clear()
-        denied = self._ask("a-persons-key", MIND_KEY="the-mind-key")
-        assert denied is not None and denied.status_code == 503
-        assert b"cannot establish" in denied.body
-        # Its own key still speaks for the mind itself.
-        assert self._ask("the-mind-key", MIND_KEY="the-mind-key") is None
+    def test_a_keyless_mind_has_no_gateway_credential_and_refuses_everyone(self):
+        for bearer in (shown(MIND_KEY), "a-persons-key", ""):
+            denied = self._ask(bearer)
+            assert denied is not None and denied.status_code == 503, bearer
 
     def test_the_owner_key_question_is_gone_from_the_mind(self):
         assert not hasattr(runtime_api, "owner_key_check")

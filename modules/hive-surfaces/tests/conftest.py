@@ -12,7 +12,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 os.environ["COMMS_URL"] = "http://127.0.0.1:9"
 os.environ["COMMS_ADMIN_BEARER_TOKEN"] = "test-token-never-valid"
 os.environ["COMMS_BEARER_TOKEN"] = "test-token-never-valid"
-os.environ["MIND_SESSION_TOKEN"] = "test-mind-session-token"
 
 
 import pytest

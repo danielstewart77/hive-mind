@@ -696,6 +696,7 @@ install_pty_attach(
     conversation_env=conversation_env,
     before_attach=release_idle_chat,
 )
+runtime_api.retire_session_token_file(MIND_DIR)
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 rotation_marker_api.install_rotation_marker_route(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)

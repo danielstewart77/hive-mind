@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import os
 import re
 import secrets
@@ -2094,6 +2095,19 @@ def user_key_variable(username: str) -> str:
 def _legacy_location(username: str) -> Location | None:
     path = ENV_FILES.get(MIND_ENV_LABEL)
     return None if path is None else Location(MIND_ENV_LABEL, user_key_variable(username))
+
+
+#: Same label as `core/mind_key.py` and the gateway's `user_access`; a test
+#: holds the three together.
+GATEWAY_CREDENTIAL_LABEL = b"hive-mind: what the gateway shows this mind, v1"
+
+
+def gateway_credential(key: str) -> str:
+    """What the gateway shows a mind, made from the mind's one key (HMAC-SHA256
+    of a fixed label under it). One way: it is what a registration made here
+    carries, and the key itself is never sent."""
+    return hmac.new(key.strip().encode("utf-8"), GATEWAY_CREDENTIAL_LABEL,
+                    hashlib.sha256).hexdigest()
 
 
 def _digest(value: str) -> str:

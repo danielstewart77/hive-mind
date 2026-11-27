@@ -51,6 +51,21 @@ class MindCallFailed(RuntimeError):
     """
 
 
+async def _mind_is_cut_off(mind_id: str) -> bool:
+    """Whether this mind's one key has been cut off (its credential row is
+    revoked). A mind with no row yet is not cut off, only not known."""
+    row = await core.get_mind_by_id_or_name(mind_id)
+    if row is None:
+        return False
+    for holder in (str(row["name"] or "").strip().lower(), str(row["mind_id"] or "").strip().lower()):
+        if not holder:
+            continue
+        credential = await core.get_credential(holder)
+        if credential is not None and credential.get("revoked_at"):
+            return True
+    return False
+
+
 class MindRefusedCredential(MindCallFailed):
     """A mind answered, and rejected the credential this gateway presented.
 
@@ -4639,10 +4654,12 @@ class SessionManager:
     async def mind_auth_headers(self, mind_id: str | None) -> dict[str, str]:
         """The credential this gateway presents when it calls that mind.
 
-        Empty when the broker holds no token for the mind — one running a
-        build that predates this has nothing to check, which is what lets the
-        fleet move a machine at a time. The admin token is deliberately not a
-        fallback: it unlocks `PATCH /runtime`, the skills write-back and the
+        What the gateway shows the mind is made from the mind's one key
+        (`user_access.gateway_credential`) and kept as that calculated value,
+        never the key. Empty when the broker holds none for the mind — one
+        running a build that predates this has nothing to check, which is what
+        lets the fleet move a machine at a time. A mind whose key was cut off
+        is not called. The admin token is deliberately not a fallback: it unlocks `PATCH /runtime`, the skills write-back and the
         file editor, and putting it on the wire for every chat turn would make
         a routine path carry the credential that owns the machine.
         """
@@ -4650,6 +4667,7 @@ class SessionManager:
             return {}
         try:
             token = await core.mind_session_token(mind_id)
+            cut_off = await _mind_is_cut_off(mind_id)
         except Exception as exc:
             # Not `{}`. An uncredentialed call gets a 401 whose handler tells
             # the operator to re-register the mind — a remedy aimed at the
@@ -4659,6 +4677,11 @@ class SessionManager:
                 f"could not read mind {mind_id}'s credential from the broker: "
                 f"{exc}"
             ) from exc
+        if cut_off:
+            # Its key was cut off on purpose: it is not called, and the
+            # gateway does not show it a credential made from a dead key.
+            raise MindCallFailed(
+                f"mind {mind_id}'s key has been cut off, so it is not called")
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     async def _mind_auth_headers_for_session(

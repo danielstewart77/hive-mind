@@ -899,9 +899,8 @@ def create_mind(ctx: Ctx):
         (folder / sub).mkdir(parents=True, exist_ok=True)
     if (example / "container").is_dir() and not (folder / "container").exists():
         shutil.copytree(example / "container", folder / "container")
-    token = folder / "session_token"
-    if not token.exists() or not token.read_text().strip():
-        write_private(token, _random.token_urlsafe(32) + "\n")
+    # An old second secret is not carried forward: the mind holds its one key.
+    (folder / "session_token").unlink(missing_ok=True)
     runtime = folder / "runtime.yaml"
     if not runtime.exists():
         app_mind = f"{compose.APP}/minds/{name}"

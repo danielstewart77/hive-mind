@@ -242,6 +242,25 @@ def digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+#: The label the credential shown to a mind is made under. The same value is
+#: in `core/mind_key.py` (the mind's side), and a test holds the two together.
+GATEWAY_CREDENTIAL_LABEL = b"hive-mind: what the gateway shows this mind, v1"
+
+
+def gateway_credential(mind_key_value: str) -> str:
+    """What this gateway shows a mind on every call: made from the mind's key.
+
+    HMAC-SHA256 of a fixed label under the key. It cannot be turned back into
+    the key, and it is not the `digest` kept to recognise the key, so what a
+    reader of the credentials table finds opens nothing here, and this value
+    presented as a key is no key of any holder. Worked out when the key is
+    seen (a mind registering with it, the key being replaced) and kept in
+    `core.minds.session_token`; the raw key is never kept.
+    """
+    return hmac.new(str(mind_key_value).strip().encode("utf-8"),
+                    GATEWAY_CREDENTIAL_LABEL, hashlib.sha256).hexdigest()
+
+
 def normalize_holder(name: object) -> str:
     return str(name or "").strip().lower()
 
@@ -312,6 +331,14 @@ async def put_credential(
         raise ValueError(
             _held_by(await broker_ops.holder_of_digest(sha) or "another holder")
         ) from exc
+    if role == MIND:
+        # The mind's key was just replaced (or made): what the gateway shows
+        # the mind is made from it now, so the next call carries the new value
+        # and the old one is refused, with no step by a person.
+        known = await core.get_mind_by_id_or_name(key)
+        if known is not None:
+            await broker_ops.update_mind(
+                known["mind_id"], session_token=gateway_credential(token))
     return {"holder": key, "username": name, "role": role, "created_at": now}
 
 

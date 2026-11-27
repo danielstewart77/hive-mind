@@ -98,11 +98,9 @@ def mint(api: Api, holders: dict[str, str], username: str, role: str = SERVICE,
 
 
 def register_mind(comms: Api, *, mind_id: str, name: str, gateway_url: str, model: str,
-                  owner: str, harness: str = "dsh", session_token: str | None = None) -> dict:
+                  owner: str, harness: str = "dsh") -> dict:
     body = {"mind_id": mind_id, "name": name, "gateway_url": gateway_url, "model": model,
             "harness": harness, "owner": owner}
-    if session_token:
-        body["session_token"] = session_token
     status, answer = comms.request("POST", "/broker/minds", body)
     if status != 200:
         raise StepFailed(f"comms refused to register {name!r} ({status}): {answer}")

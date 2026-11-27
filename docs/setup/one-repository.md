@@ -336,8 +336,8 @@ and is never limited by this.
 
 What produces it: the installer's container for a mind (`HOST_CODE_DIR` in the
 `.env` is its own clean clone, `repos/hive-mind`), the console's container for a
-mind made on the page (its own folder and key folder, and still the read-only
-`session_token` file: the check lists it until the one-key story removes it), and the tracked
+mind made on the page (its own folder and key folder, and no second secret file),
+and the tracked
 example every hand-made mind is copied from (`minds/example/container/compose.yaml`:
 the code from `HOST_CODE_DIR` read-only, its own folder, its own key folder, no
 credential line). A mind that works on the hive's own code still has all of it,

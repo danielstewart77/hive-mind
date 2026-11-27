@@ -309,38 +309,6 @@ MIND_BUILD_TARGET = "locked-mind"
 #: is handed to it, because this console writes as root.
 DEFAULT_MIND_UID = 1000
 
-#: The credential the gateway presents on every call it makes to a mind,
-#: in the file the mind reads it from (hive-mind `minds/runtime_api.py`).
-SESSION_TOKEN_FILENAME = "session_token"
-
-
-_SESSION_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
-
-
-def mind_session_token(name: str) -> str:
-    """The session credential a scaffolded mind will present, or "".
-
-    Minted with the scaffold so the console can register the mind with it:
-    a mind created here holds no gateway admin credential, so it cannot
-    register itself, and the gateway learns the credential from no one else.
-    Read as the console wrote it - a regular file, never through a link, in
-    the shape `secrets.token_urlsafe(32)` mints - or not at all: this console
-    reads as root, and whatever it reads here it hands to the gateway.
-    """
-    if not _MIND_NAME_RE.fullmatch(name):
-        raise ValueError("Invalid Mind name")
-    path = HIVE_MIND_MINDS_CONFIG_DIR / name / SESSION_TOKEN_FILENAME
-    try:
-        handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return ""
-    with os.fdopen(handle) as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            return ""
-        value = stream.read(128).strip()
-    return value if _SESSION_TOKEN_RE.fullmatch(value) else ""
-
-
 def internal_mind_exists(name: str) -> bool:
     if not _MIND_NAME_RE.fullmatch(name):
         raise ValueError("Invalid Mind name")
@@ -548,13 +516,12 @@ def scaffold_internal_mind(
                 # writing a new file beside the old one and putting it in
                 # its place, so the folder is mounted and not the file
                 # (Daniel, 2026-11-17: "No such thing as lockdown"). Its
-                # compose folder and its session credential are read-only
-                # inside it: what it is started with, and what the console
-                # registered for it, are not its to rewrite.
+                # compose folder is read-only inside it: what it is
+                # started with is not its to rewrite. It holds one key and no
+                # second secret file.
                 "volumes": [
                     f"{host}:{own}:rw",
                     f"{host}/container:{own}/container:ro",
-                    f"{host}/{SESSION_TOKEN_FILENAME}:{own}/{SESSION_TOKEN_FILENAME}:ro",
                     # Its key folder, and no other mind's: outside the checkout,
                     # read-only here, written only by the console.
                     key_folder_mount(name),
@@ -638,13 +605,6 @@ def scaffold_internal_mind(
             os.chown(mind_dir / writable, uid, uid)
         os.chown(runtime_path, uid, uid)
         os.chown(mind_dir, uid, uid)
-        token_path = mind_dir / SESSION_TOKEN_FILENAME
-        handle = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
-        with os.fdopen(handle, "w") as stream:
-            stream.write(secrets.token_urlsafe(32) + "\n")
-        # The mind reads it; it is mounted read-only, so owning it is not
-        # being able to change it.
-        os.chown(token_path, uid, uid)
     except BaseException:
         shutil.rmtree(mind_dir, ignore_errors=True)
         raise

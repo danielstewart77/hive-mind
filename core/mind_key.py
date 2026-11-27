@@ -42,6 +42,8 @@ Standard library only, so a hook or a skill script may copy `resolve`.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -75,6 +77,25 @@ MEMORY = ("LUCENT_BEARER_TOKEN",)
 TOOLS = ("HIVE_TOOLS_TOKEN",)
 INFERENCE = ("MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "DSH_API_KEY")
 GENERIC_NAMES = GATEWAY + MEMORY + TOOLS + INFERENCE
+
+
+#: The fixed label the gateway's credential for a mind is made under.
+GATEWAY_CREDENTIAL_LABEL = b"hive-mind: what the gateway shows this mind, v1"
+
+
+def gateway_credential(mind_key_value: str) -> str:
+    """What the gateway shows a mind on every call, made from the mind's key.
+
+    HMAC-SHA256 of a fixed label under the key, as hex: one way (the key
+    cannot be got back from it), a different value for every key, and not the
+    sha256 fingerprint the services keep to recognise the key, so what a reader
+    of those tables finds opens nothing here. The gateway works it out when it
+    sees the key (a registration made with it, the key being replaced); the mind
+    works out the same value from the key it holds and compares. Nothing is
+    stored on the mind. The same formula is in the gateway's `user_access`.
+    """
+    return hmac.new(str(mind_key_value).strip().encode("utf-8"),
+                    GATEWAY_CREDENTIAL_LABEL, hashlib.sha256).hexdigest()
 
 
 def shared_variable(mind: str) -> str:

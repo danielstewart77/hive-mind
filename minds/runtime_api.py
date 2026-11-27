@@ -396,148 +396,51 @@ def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
     owner = str(loaded.get("owner") or "").strip()
     if owner:
         payload["owner"] = owner
-    # The admin-guarded registration this mind already performs every boot is
-    # the only channel by which the gateway learns the credential. Omitted
-    # when there is none, because a registration that sent an empty one would
-    # erase the gateway's working copy.
-    token = session_token(Path(path).parent)
-    if token:
-        payload["session_token"] = token
+    # Nothing secret rides in it. The gateway works out what it shows this
+    # mind from the key this registration is made with (`gateway_credential`).
     return payload
 
 
-# The credential the gateway must present on every call it makes to this
-# mind. Lives beside runtime.yaml rather than inside it: runtime.yaml is
-# served to the console through `public_runtime`, and a secret one allowlist
-# edit away from being published is a secret waiting to be published.
-SESSION_TOKEN_FILENAME = "session_token"
+# What the gateway shows this mind on every call is worked out from the mind's
+# one key (`core.mind_key.gateway_credential`) and nothing is stored on the
+# mind. The file the mind used to make for itself is never read, never written
+# and never made; one that is still there is deleted when the mind runs on its
+# key (`retire_session_token_file`).
+LEGACY_SESSION_TOKEN_FILENAME = "session_token"
 
 log = logging.getLogger("hive-mind.runtime")
 
 
-class SessionTokenUnavailable(ValueError):
-    """A mind cannot establish the credential its session routes require.
+def session_token(mind_dir: Path | None = None) -> str:
+    """What the gateway must show this mind: made from the mind's one key.
 
-    A `ValueError` so the boot registration loop treats it as a retryable
-    payload problem rather than a crash: the mind is still reachable, it just
-    refuses every session call until whatever is wrong with its own directory
-    is fixed.
+    Looked up on every call, so a key replaced in the mind's key file is the
+    key this is made from on the next request. "" when the mind holds no key:
+    then every caller from outside is refused, never is the door open.
     """
+    own = _own_key()
+    return mind_key.gateway_credential(own) if own else ""
 
 
-# How long an empty token file can plausibly be mid-write. Past this the
-# process that created it is gone and the file is reclaimed, rather than
-# stalling every later request on a write that will never land.
-_RACE_WINDOW_S = 1.0
-_RACE_PAUSE_S = 0.02
+def retire_session_token_file(mind_dir: Path) -> bool:
+    """Delete the old second secret's file once this mind runs on its one key.
 
-# One read per process, not one per request. The middleware asks on every
-# `/sessions` call, and the broker only learns a token at boot anyway, so a
-# value that changed under a running mind could not be published to anyone.
-_token_cache: dict[str, str] = {}
-
-
-def session_token(mind_dir: Path) -> str:
-    """This mind's own session credential, minted once and kept.
-
-    Minted rather than issued: a mind nobody provisioned still ends up with a
-    credential of its own, and one taken off it opens that mind and no other.
-    `MIND_SESSION_TOKEN` overrides the file for installs that inject secrets
-    instead of letting a container write them.
-
-    Raises `SessionTokenUnavailable` when no credential can be established.
-    It never returns "" for that case: a mind that cannot read its own token
-    would otherwise serve its session routes — `attach-pty` among them — open
-    to the LAN, while the gateway went on presenting a credential nobody
-    checked and every surface stayed green.
+    True when a file went. A file that cannot be removed (a read-only mount)
+    is logged and left: nothing reads it.
     """
-    injected = os.environ.get("MIND_SESSION_TOKEN", "").strip()
-    if injected:
-        return injected
-
-    key = str(mind_dir)
-    cached = _token_cache.get(key)
-    if cached:
-        return cached
-
-    token = _mint_or_read_token(Path(mind_dir) / SESSION_TOKEN_FILENAME)
-    _token_cache[key] = token
-    return token
-
-
-def _mint_or_read_token(path: Path) -> str:
-    existing = _read_token(path)
-    if existing:
-        return existing
-
+    if not mind_key.key():
+        return False
+    path = Path(mind_dir) / LEGACY_SESSION_TOKEN_FILENAME
     try:
-        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return _adopt_or_reclaim(path)
-    except OSError as exc:
-        raise SessionTokenUnavailable(f"cannot write {path}: {exc}") from exc
-
-    minted = secrets.token_urlsafe(32)
-    with os.fdopen(handle, "w") as stream:
-        stream.write(minted + "\n")
-    return minted
-
-
-def _adopt_or_reclaim(path: Path) -> str:
-    """Resolve an empty token file: someone mid-write, or someone who died.
-
-    `O_EXCL` creates the file before its winner writes into it, so an empty
-    file can mean a write still in flight — and minting a second token over
-    that would leave the winner enforcing a credential that exists nowhere.
-    It can equally mean a process that was killed in the microseconds between
-    the create and the write, which leaves a zero-byte file that no amount of
-    waiting will fill.
-
-    The file's own age separates them, and it always resolves: inside the
-    window this waits in short hops, and the moment the file is older than the
-    window the mint that made it is gone and the file is reclaimed. So the cost
-    is bounded by the window once — never the old behaviour, which was a full
-    second of the event loop (shared here with the surface bots and the pty
-    pumps) on *every* request, forever, for a file only `rm` could fix.
-    """
-    while True:
-        adopted = _read_token(path)
-        if adopted:
-            return adopted
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError as exc:
-            raise SessionTokenUnavailable(f"cannot stat {path}: {exc}") from exc
-        if age > _RACE_WINDOW_S:
-            # Nobody is coming. Reclaim it in place, keeping the inode so a
-            # concurrent reader holding it open sees the token rather than a
-            # file that vanished under them.
-            minted = secrets.token_urlsafe(32)
-            try:
-                with open(path, "w", encoding="utf-8") as stream:
-                    stream.write(minted + "\n")
-                os.chmod(path, 0o600)
-            except OSError as exc:
-                raise SessionTokenUnavailable(
-                    f"cannot reclaim empty {path}: {exc}"
-                ) from exc
-            return minted
-        time.sleep(_RACE_PAUSE_S)
-
-
-def _read_token(path: Path) -> str:
-    """The credential on disk, or "" when the file is not there at all.
-
-    A file that exists and cannot be read is not an absent one. Folding the
-    two together is how a mind serves every session route open because a
-    migration chowned its own directory — so only genuine absence returns "".
-    """
-    try:
-        return path.read_text(encoding="utf-8").strip()
+        path.unlink()
     except FileNotFoundError:
-        return ""
-    except (OSError, UnicodeDecodeError) as exc:
-        raise SessionTokenUnavailable(f"cannot read {path}: {exc}") from exc
+        return False
+    except OSError as exc:
+        log.warning("The old session_token file %s could not be removed (%s); "
+                    "nothing reads it", path, exc)
+        return False
+    log.info("Removed the old session_token file: this mind runs on its one key")
+    return True
 
 
 def tokens_match(presented: str, expected: str) -> bool:
@@ -603,29 +506,22 @@ def presented_bearers(request) -> list[str]:
 def authorize_session(request, mind_dir: Path) -> JSONResponse | None:
     """Guard a session route. None means the caller may proceed.
 
-    Accepts the mind's session token — the gateway, which is the only real
-    caller — and nothing else. No hive-wide administrator key is accepted here
-    or anywhere on a mind.
-
-    A mind that cannot establish a credential of its own refuses with 503
-    rather than serving open. The transitional state the rollout needs is
-    supplied by minds still running code that has no notion of a credential,
-    not by a mind that has one and cannot read it.
+    Accepts what the gateway shows this mind, which is made from the mind's one
+    key (`session_token`) — the gateway is the only real caller — and nothing
+    else. No hive-wide administrator key is accepted here or anywhere on a
+    mind. A mind with no key refuses with 503 rather than serving open.
     """
-    try:
-        expected = session_token(mind_dir)
-    except SessionTokenUnavailable as exc:
-        log.error("Refusing session requests — %s", exc)
+    expected = session_token(mind_dir)
+    if not expected:
+        # A mind with no key yet refuses every call from outside.
         return JSONResponse(
-            {"error": f"this mind cannot establish its session credential: {exc}"},
+            {"error": "this mind holds no key, so it takes no session call"},
             status_code=503,
         )
-    accepted = [expected]
     offered = presented_bearers(request)
     for token in offered:
-        for candidate in accepted:
-            if tokens_match(token, candidate):
-                return None
+        if tokens_match(token, expected):
+            return None
     # Logged here, because the guard is the outermost middleware and its
     # refusal never reaches the request logger below it. Without this line a
     # mind whose broker row holds a stale token refuses every gateway call and
@@ -747,32 +643,18 @@ async def authorize_admin(request: Request) -> JSONResponse | None:
     gateway needs nothing else, and the owner's key sent straight to every
     mind (which every sibling of the same owner would also accept) is gone.
 
-    A mind with no key of its own still takes a delivery that carries the
-    gateway's valid credential, which is not open; every other caller gets 503
-    from such a mind, never a way in. A mind that cannot establish the
-    gateway's credential refuses with a plain message; a wrong value is 401.
+    The gateway's credential is made from this mind's own key, so a mind with
+    no key has none: it answers every caller 503, never a way in. A wrong
+    value is 401.
     """
     header = request.headers.get("Authorization", "")
     presented = header[7:].strip() if header.startswith("Bearer ") else ""
     own = _own_key()
     if presented and own and tokens_match(presented, own):
         return None
-    unavailable = None
-    expected = ""
-    if _mind_dir is not None:
-        try:
-            expected = session_token(_mind_dir)
-        except SessionTokenUnavailable as exc:
-            unavailable = exc
+    expected = session_token(_mind_dir)
     if presented and expected and tokens_match(presented, expected):
         return None
-    if unavailable is not None:
-        log.error("Refusing a configuration request: %s", unavailable)
-        return JSONResponse(
-            {"error": "this mind cannot establish the gateway's credential, "
-                      f"so it takes no change: {unavailable}"},
-            status_code=503,
-        )
     if not own:
         return JSONResponse(
             {"error": "this mind holds no key, so its settings cannot be changed"},

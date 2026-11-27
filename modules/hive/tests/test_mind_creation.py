@@ -314,9 +314,10 @@ def test_register_sends_the_scaffolded_identity_to_the_broker(client):
         "harness": "codex_cli",
         # A new mind is the registering admin's unless another owner is named.
         "owner": "daniel",
-        # The credential the gateway presents to it, minted with the scaffold.
-        "session_token": (client.minds_dir / "atlas" / "session_token").read_text().strip(),
+        # What the gateway shows it, made from its one key (never the key).
+        "session_token": holder_credentials.gateway_credential(PASTED_KEY),
     }
+    assert PASTED_KEY not in str(payload)
 
 
 @pytest.fixture()
@@ -376,8 +377,8 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
     credentials. Its container is built from the published hive-mind tree
     and mounts its own folder alone - not the checkout, its .env, the shared
     keyring or another mind - and keeps its keyring in that folder. The
-    folder is its own to write; its compose folder and session credential are
-    read-only inside it."""
+    folder is its own to write; its compose folder is
+    read-only inside it and no second secret file is mounted."""
     release = "https://github.com/danielstewart77/hive-mind.git#" + "d" * 40
     (client.minds_dir / ".release-context").write_text(release + "\n")
     monkeypatch.delenv("HIVE_MIND_BUILD_CONTEXT")
@@ -391,7 +392,6 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
     assert service["volumes"] == [
         f"{host}:{own}:rw",
         f"{host}/container:{own}/container:ro",
-        f"{host}/session_token:{own}/session_token:ro",
         # The install's generated skills, read-only: the one folder of the
         # checkout a role's skill may come from.
         # Its own key folder and no other mind's, read-only, outside the checkout.
@@ -861,3 +861,38 @@ def test_a_release_file_that_names_a_branch_is_not_taken_for_a_release(client, m
 
     assert answer.status_code >= 400
     assert not (client.minds_dir / "atlas").exists()
+
+
+def test_the_container_a_new_mind_is_made_with_passes_the_mounts_check_with_no_session_token_mount(
+    client, tmp_path, monkeypatch, capsys
+):
+    """Story 904's check listed this container's session_token mount as the
+    one thing left for the one-key story; with the second secret gone the
+    check names nothing."""
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    tool = Path(__file__).resolve().parents[3] / "tools/stateless/mind_mounts/mind_mounts.py"
+    spec = importlib.util.spec_from_file_location("mind_mounts_for_creation", tool)
+    mind_mounts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mind_mounts)
+
+    assert _create(client).status_code == 200
+    root = tmp_path / "install"
+    (root / "keys" / "atlas").mkdir(parents=True)
+    (root / "minds").mkdir(parents=True)
+    (root / "minds" / "atlas").symlink_to(client.minds_dir / "atlas")
+    (root / ".env").write_text("")
+    for name in ("HOST_PROJECT_DIR", "HOST_DEV_DIR", "HOST_KEY_DIR", "HOST_CODE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOST_PROJECT_DIR", str(root))
+    monkeypatch.setenv("HOST_KEY_DIR", str(root / "keys"))
+
+    code = mind_mounts.main([
+        "check", "--root", str(root), "--operators", "nobody",
+        "--compose", str(client.minds_dir / "atlas" / "container" / "compose.yaml")])
+    report = json.loads(capsys.readouterr().out)
+
+    assert not [f for f in report["findings"] if "session_token" in json.dumps(f)], report["findings"]
+    assert code == 0 and report["findings"] == [], report["findings"]

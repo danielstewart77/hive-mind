@@ -662,8 +662,11 @@ class RegisterMindRequest(BaseModel):
     gateway_url: str
     model: str
     harness: str
-    # The credential the gateway presents on every call it makes to this mind.
-    # Optional on the wire so a mind running an older build still registers.
+    # What the gateway shows this mind, made from the mind's key
+    # (`user_access.gateway_credential`). A mind registering with its own key
+    # has it worked out here from that key and anything it sends is ignored;
+    # an administrator registering a mind may carry the calculated value, never
+    # the key. Optional: a registration without it leaves the stored one.
     session_token: str | None = None
     # The voice this mind is spoken in, and the engine that speaks it.
     # Optional for the same reason, and an omission leaves the stored value
@@ -2560,6 +2563,13 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
             )
         body.owner = mine or None
         await _refuse_address_change(caller, body)
+        # What the gateway shows this mind is made from the key it registers
+        # with. A build that predates the one key still sends the value it
+        # keeps in its old file, and that stays its own affair until it moves
+        # (items 841 and 842); a mind on its one key sends nothing.
+        if not body.session_token:
+            body.session_token = user_access.gateway_credential(
+                user_access.bearer_of(request.scope))
     try:
         await broker.register_mind(
             mind_id=body.mind_id,
