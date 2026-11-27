@@ -6417,7 +6417,6 @@ async def api_design_submit(
     design_id: str, page: str, payload: dict,
     actor: dict = Depends(require_design_writer),
 ):
-    del actor
     try:
         record = await design_data.submit_page(
             design_id,
@@ -6425,6 +6424,7 @@ async def api_design_submit(
             items=payload.get("items") or {},
             action=str(payload.get("action") or "feedback"),
             revision=payload.get("revision"),
+            submitted_by=str(actor.get("username") or ""),
         )
     except design_data.DesignError as exc:
         raise _design_error(exc) from exc
@@ -6446,10 +6446,10 @@ async def api_design_accept(
     design_id: str, page: str, payload: dict,
     actor: dict = Depends(require_design_writer),
 ):
-    del actor
     try:
         record = await design_data.accept_page(
-            design_id, page, revision=payload.get("revision")
+            design_id, page, revision=payload.get("revision"),
+            submitted_by=str(actor.get("username") or ""),
         )
     except design_data.DesignError as exc:
         raise _design_error(exc) from exc

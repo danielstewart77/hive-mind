@@ -30,8 +30,14 @@ class StubGateway:
 
     def install(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_API_URL", "http://hive-comms:8424")
-        monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+        # The boundary replaced is only the key folder: a person's key is
+        # what they are, so each person's stand-in differs.
+        import holder_credentials
+
+        async def _key(username):
+            return f"key-of-{username}"
+
+        monkeypatch.setattr(holder_credentials, "user_key", _key)
         monkeypatch.setattr(design_delivery, "_post_sync", self._post)
         return self
 
@@ -89,6 +95,7 @@ async def _session_with_feedback(store, conversation_id="conv-1"):
         "requirements",
         items={"r2": {"feedback": "Does that remove its notices too?"}},
         revision=published["revision"],
+        submitted_by="daniel",
     )
 
 
@@ -105,7 +112,9 @@ async def test_the_conversation_is_adopted_before_it_is_spoken_to(store, gateway
     activate = gateway.calls[0]["body"]
     assert activate["surface"] == "design"
     assert activate["surface_id"] == record["id"]
-    assert gateway.calls[0]["authorization"] == "Bearer service-token"
+    # Sent with the key of the person who submitted, and no other.
+    assert gateway.calls[0]["authorization"] == "Bearer key-of-daniel"
+    assert gateway.calls[1]["authorization"] == "Bearer key-of-daniel"
 
 
 async def test_the_message_carries_the_question_daniel_asked(store, gateway):
@@ -281,7 +290,8 @@ async def test_accepting_a_page_queues_a_notice_for_the_mind(store):
     assert await store.pending_notices(record["id"]) == []
 
     accepted = await store.accept_page(
-        record["id"], "requirements", revision=record["revision"]
+        record["id"], "requirements", revision=record["revision"],
+        submitted_by="daniel",
     )
 
     notices = await store.pending_notices(accepted["id"])
@@ -293,7 +303,8 @@ async def test_the_accepted_page_is_delivered_into_the_conversation(store, gatew
     adopting the conversation first."""
     record = await _accepted_requirements(store)
     accepted = await store.accept_page(
-        record["id"], "requirements", revision=record["revision"]
+        record["id"], "requirements", revision=record["revision"],
+        submitted_by="daniel",
     )
     notice_id = (await store.pending_notices(accepted["id"]))[0]["id"]
 
@@ -339,7 +350,7 @@ async def test_the_shutdown_settles_an_in_flight_delivery_before_the_store_goes(
     sending = asyncio.Event()
     never = asyncio.Event()
 
-    async def hangs(conversation_id, content):
+    async def hangs(conversation_id, content, headers):
         sending.set()
         await never.wait()
 
@@ -403,7 +414,8 @@ async def test_a_second_users_design_session_names_them_not_daniel(store, gatewa
         revision=record["revision"])
     await store.submit_page(
         published["id"], "requirements",
-        items={"r1": {"feedback": "Why this?"}}, revision=published["revision"])
+        items={"r1": {"feedback": "Why this?"}}, revision=published["revision"],
+        submitted_by="sloan")
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
     await design_delivery.deliver_notice(notice_id)
@@ -412,6 +424,8 @@ async def test_a_second_users_design_session_names_them_not_daniel(store, gatewa
     assert "Sloan submitted feedback" in content
     assert "Sloan asks: Why this?" in content
     assert "Daniel" not in content
+    # Requirement 39: it goes out as the person who submitted it, with their key.
+    assert gateway.calls[1]["authorization"] == "Bearer key-of-sloan"
 
 
 async def test_the_build_and_accept_messages_name_the_owner_and_nobody_else(store):
