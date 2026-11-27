@@ -166,7 +166,7 @@ HITL_RESULT_REQUEST_TYPE = "hitl_result"
 #: keeps only a weak reference to a task, so a fire-and-forget replay can be
 #: collected before it finishes; and so shutdown can land an outcome for
 #: each one before the store closes.
-_IN_FLIGHT: dict[asyncio.Task[None], tuple[str, str, str]] = {}
+_IN_FLIGHT: dict[asyncio.Task[None], tuple[str, str, str, str | None]] = {}
 
 #: What a replay still running at shutdown is recorded as.
 CUT_OFF_ERROR = (
@@ -175,11 +175,15 @@ CUT_OFF_ERROR = (
 
 
 def schedule_replay(request_id: str, tool_name: str, caller_mind: str,
-                    replay: dict[str, str] | None) -> asyncio.Task[None]:
-    """Run an approved request's call in the background and report it."""
+                    replay: dict[str, str] | None,
+                    person_key: str | None = None) -> asyncio.Task[None]:
+    """Run an approved request's call in the background and report it.
+
+    `person_key` is the deciding person's own key, held in memory for this
+    task alone to tell the asking mind with; it is never stored."""
     task = asyncio.create_task(
-        replay_and_report(request_id, tool_name, caller_mind, replay))
-    _IN_FLIGHT[task] = (request_id, tool_name, caller_mind)
+        replay_and_report(request_id, tool_name, caller_mind, replay, person_key))
+    _IN_FLIGHT[task] = (request_id, tool_name, caller_mind, person_key)
     task.add_done_callback(lambda done: _IN_FLIGHT.pop(done, None))
     return task
 
@@ -201,9 +205,9 @@ async def settle_replays(timeout: float | None = None) -> None:
     if unfinished:
         await asyncio.wait(unfinished)
     for task in unfinished:
-        request_id, tool_name, caller_mind = pending[task]
+        request_id, tool_name, caller_mind, person_key = pending[task]
         await _land(request_id, tool_name, caller_mind, None,
-                    json.dumps({"error": CUT_OFF_ERROR}))
+                    json.dumps({"error": CUT_OFF_ERROR}), person_key)
 
 
 def _parsed(text: str) -> Any:
@@ -276,7 +280,8 @@ async def _run_replay(method: str, path: str,
 
 
 async def replay_and_report(request_id: str, tool_name: str, caller_mind: str,
-                            replay: dict[str, str] | None) -> None:
+                            replay: dict[str, str] | None,
+                            person_key: str | None = None) -> None:
     """Replay an approved call, store what it did, then tell the mind.
 
     Stored before it is sent, and a failure to send never touches what was
@@ -293,11 +298,12 @@ async def replay_and_report(request_id: str, tool_name: str, caller_mind: str,
     else:
         status, text = await _run_replay(
             replay["method"], replay["path"], replay["body"])
-    await _land(request_id, tool_name, caller_mind, status, text)
+    await _land(request_id, tool_name, caller_mind, status, text, person_key)
 
 
 async def _land(request_id: str, tool_name: str, caller_mind: str,
-                status: int | None, text: str) -> None:
+                status: int | None, text: str,
+                person_key: str | None = None) -> None:
     """Store an outcome, then tell the mind; the store first, always."""
     result = _parsed(text)
     error = _error_in(status, result)
@@ -321,16 +327,19 @@ async def _land(request_id: str, tool_name: str, caller_mind: str,
         return
     try:
         await notify_caller(request_id, tool_name, caller_mind, ok, status,
-                            result, error)
+                            result, error, person_key)
     except Exception:
         log.warning("HITL result for %s could not be sent to %s; the outcome "
                     "is stored and GET /hitl/%s returns it", request_id,
                     caller_mind, request_id, exc_info=True)
 
 
-def _comms() -> tuple[str, dict[str, str]] | None:
+def _comms(person_key: str | None) -> tuple[str, dict[str, str]] | None:
+    """The gateway and the bearer for telling the asking mind: the key of the
+    person who decided the request, as that person. The tools hold no key of
+    their own for the gateway."""
     url = os.environ.get("COMMS_URL", "").strip().rstrip("/")
-    token = os.environ.get("COMMS_BEARER_TOKEN", "").strip()
+    token = (person_key or "").strip()
     if not url or not token:
         return None
     return url, {"Authorization": f"Bearer {token}"}
@@ -338,20 +347,24 @@ def _comms() -> tuple[str, dict[str, str]] | None:
 
 async def notify_caller(request_id: str, tool_name: str, caller_mind: str,
                         ok: bool, status: int | None, result: Any,
-                        error: str | None) -> bool:
+                        error: str | None, person_key: str | None = None) -> bool:
     """Send the asking mind one broker message carrying the outcome.
 
     Addressed the way a scheduler wakes a mind: from the mind to itself,
     which the broker delivers into that mind's standing wake session, on a
     conversation id of its own. hive-tools knows the caller by its API token
     name and the broker routes by mind id, so the name is resolved against
-    the broker's registry first. hive-tools' comms credential is a service
-    one, which may name any mind as the sender. Returns whether it was sent.
+    the broker's registry first. It is sent with the key of the person who
+    decided the request, as that person (an owner of the mind or an
+    administrator, who may write to it): the tools hold no gateway key of
+    their own. Without that key (a replay cut off at shutdown, which kept
+    none) nothing is sent and the stored outcome is the record. Returns
+    whether it was sent.
     """
-    comms = _comms()
+    comms = _comms(person_key)
     if comms is None:
-        log.warning("HITL result for %s not sent: COMMS_URL or "
-                    "COMMS_BEARER_TOKEN is unset", request_id)
+        log.warning("HITL result for %s not sent: COMMS_URL is unset or no "
+                    "deciding person's key is at hand", request_id)
         return False
     base, headers = comms
     async with httpx.AsyncClient(transport=_COMMS_TRANSPORT,
@@ -406,17 +419,21 @@ async def notify_caller(request_id: str, tool_name: str, caller_mind: str,
     return True
 
 
-def hitl_gate(tool_name: str):
+def hitl_gate(tool_name: str, who=None):
     """Factory that returns a FastAPI dependency for HITL checks.
 
     Side effect: records `tool_name` in `_REGISTERED_TOOLS` at import time so
     `sync_tool_registry` can upsert it into `tool_hitl_settings` at startup.
+
+    `who` is the dependency that names the caller: a mind's key by default;
+    the routes the hive site calls for a person pass one that also takes a
+    person's own key.
     """
     _REGISTERED_TOOLS.add(tool_name)
 
     async def _check(
         request: Request,
-        caller_mind: str = Depends(require_api_token),
+        caller_mind: str = Depends(who or require_api_token),
     ) -> str:
         # Internal replay calls bypass the gate entirely
         if caller_mind == "internal":

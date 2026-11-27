@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import auth_api
-from auth_api import may_decide, require_api_token, require_person
+from auth_api import bearer_value, may_decide, require_api_token_or_person, require_person
 import store
 from hitl import (
     HITLPendingException,
@@ -145,7 +145,7 @@ def create_app() -> FastAPI:
     @app.get("/hitl/{request_id}")
     async def hitl_status(
         request_id: str,
-        caller: str = Depends(require_api_token),
+        caller: str = Depends(require_api_token_or_person),
     ) -> Any:
         status = await get_hitl_status(request_id, caller)
         if status is None:
@@ -167,6 +167,7 @@ def create_app() -> FastAPI:
     async def hitl_respond(
         request_id: str,
         body: HITLRespondRequest,
+        request: Request,
         # A person's own key only: a mind's key is refused before anything is
         # decided, so a mind cannot approve the call it asked for.
         caller: str = Depends(require_person),
@@ -197,7 +198,8 @@ def create_app() -> FastAPI:
             # call to replay: that is reported as a failure rather than as an
             # approval that silently did nothing.
             schedule_replay(request_id, result["tool_name"],
-                            result["caller_mind"], replay)
+                            result["caller_mind"], replay,
+                            bearer_value(request.headers.get("Authorization", "")))
         return JSONResponse(result, status_code=200)
 
     # Exception handlers

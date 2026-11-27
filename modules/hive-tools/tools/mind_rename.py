@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 import yaml
 from hive_data import core
 
-from auth_api import require_api_token
+from auth_api import require_api_token_or_person as require_api_token
 from tools.docker_ops import docker_mutate_gate
 
 router = APIRouter(prefix='/docker/mind-renames', tags=['docker'])

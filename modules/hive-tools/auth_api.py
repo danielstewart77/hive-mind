@@ -93,6 +93,40 @@ async def require_api_token(request: Request) -> str:
     return name
 
 
+async def require_api_token_or_person(request: Request) -> str:
+    """A mind's key as `require_api_token` takes it, or a live person's own key.
+
+    For the routes the hive site calls on a signed-in person's behalf (restart
+    a mind, rename one, read an approval's outcome). The answer is the
+    person's username, so the request that results is theirs. Every tool a
+    mind calls on an account (mail, calendar, messages) keeps
+    `require_api_token`, which still refuses a person's key.
+    """
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        key = await access.key_for(bearer_value(header))
+        if key is not None and key.role == access.USER_KEY:
+            if (not key.username or key.username in RESERVED_HOLDERS
+                    or await access.live_person(key.username) is None):
+                raise HTTPException(status_code=401, detail="Invalid or revoked key")
+            return key.username
+    return await require_api_token(request)
+
+
+async def require_api_token_or_administrator(request: Request) -> str:
+    """As `require_api_token_or_person`, but a person's key must be an
+    administrator's: the training pages are the administrator's."""
+    who = await require_api_token_or_person(request)
+    header = request.headers.get("Authorization", "")
+    key = (await access.key_for(bearer_value(header))
+           if header.startswith("Bearer ") else None)
+    if key is not None and key.role == access.USER_KEY \
+            and not await access.person_is_administrator(key.username):
+        raise HTTPException(status_code=403,
+                            detail="This needs an administrator's own key")
+    return who
+
+
 #: What a mind owned by someone other than this hive-tools' admin is told.
 #: Refused outright, before any tool runs or any approval is raised: the
 #: approval would go to the person whose accounts these are, who is not the

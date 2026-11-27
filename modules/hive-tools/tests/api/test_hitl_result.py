@@ -47,7 +47,7 @@ def _comms_answers(monkeypatch: pytest.MonkeyPatch,
                    message_status: int = 200) -> list[httpx.Request]:
     """hive-comms' far side: a registry holding Ada, and a message sink."""
     monkeypatch.setenv("COMMS_URL", COMMS)
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)  # the tools hold none
     posted: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -109,9 +109,15 @@ def _approver() -> dict[str, str]:
     return {"Authorization": f"Bearer {run(generate_person_key('daniel', admin=True))}"}
 
 
+#: The key the last approval was made with: what the asking mind is told by.
+DECIDED_WITH: list[str] = []
+
+
 def _approve(client: TestClient, request_id: str) -> None:
+    headers = _approver()
+    DECIDED_WITH.append(headers["Authorization"])
     decided = client.post(f"/hitl/{request_id}/respond",
-                          json={"action": "approve"}, headers=_approver())
+                          json={"action": "approve"}, headers=headers)
     assert decided.status_code == 200
     run(hitl.settle_replays(timeout=10))
 
@@ -210,7 +216,10 @@ def test_the_outcome_is_sent_once_to_the_asking_mind_through_comms(
 
     assert len(comms) == 1
     sent: dict[str, Any] = json.loads(comms[0].content)
-    assert comms[0].headers["Authorization"] == "Bearer service-token"
+    # Told with the deciding person's own key, as that person: the tools hold
+    # no key for the gateway of their own.
+    assert comms[0].headers["Authorization"] == DECIDED_WITH[-1]
+    assert comms[0].headers["Authorization"] != "Bearer service-token"
     assert sent["to"] == ADA_ID
     assert sent["from"] == ADA_ID
     assert sent["metadata"]["request_type"] == "hitl_result"

@@ -175,7 +175,7 @@ def test_send_surfaces_gateway_error_status(
 
 def _comms_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "test-token")
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)  # the tools hold none
 
 
 def test_inbound_enabled_get_proxies_to_comms(
@@ -202,7 +202,8 @@ def test_inbound_enabled_get_proxies_to_comms(
 
     args, kwargs = mock_client.get.call_args
     assert args[0].endswith("/sms/inbound/enabled")
-    assert kwargs["headers"]["Authorization"] == "Bearer test-token"
+    # The gateway is asked with the key the caller presented here.
+    assert kwargs["headers"]["Authorization"] == auth_header["Authorization"]
 
 
 def test_inbound_enabled_put_proxies_to_comms(

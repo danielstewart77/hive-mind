@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
-from auth_api import require_api_token
+from auth_api import require_api_token, require_api_token_or_person
 from hitl import _check_hitl, hitl_gate
 
 log = logging.getLogger(__name__)
@@ -76,7 +76,11 @@ def _result_json(rc: int, stdout: str, stderr: str) -> dict[str, Any]:
 
 
 def docker_mutate_gate(tool_name: str):
-    """Dependency for mutating docker endpoints."""
+    """Dependency for mutating docker endpoints.
+
+    A mind's key, or a person's own key: the hive site restarts a mind for a
+    signed-in person with that person's key, and the request waits on an
+    approval as theirs."""
 
     # Register for default approval seeding just like other gated tools.
     # Keep the Docker dependency below: it captures the query string that
@@ -86,7 +90,7 @@ def docker_mutate_gate(tool_name: str):
     async def _check(
         request: Request,
         path: str = Query(...),
-        caller_mind: str = Depends(require_api_token),
+        caller_mind: str = Depends(require_api_token_or_person),
     ) -> str:
         if caller_mind == "internal":
             return caller_mind

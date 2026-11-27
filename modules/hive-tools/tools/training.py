@@ -37,7 +37,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from auth_api import require_api_token
+from auth_api import require_api_token_or_administrator as require_api_token
 from hitl import hitl_gate
 from tools import training_gpu
 
@@ -368,7 +368,7 @@ async def training_runs(kind: str | None = None, limit: int = 20) -> dict[str, A
 @router.post("/curate")
 async def training_curate(
     body: CurateRequest,
-    caller: str = Depends(hitl_gate("training_curate")),
+    caller: str = Depends(hitl_gate("training_curate", who=require_api_token)),
 ) -> dict[str, Any]:
     """Run a curation pass, writing verdicts in place. Never deletes rows."""
     del caller
@@ -397,7 +397,7 @@ async def training_curate(
 @router.post("/export")
 async def training_export(
     body: ExportRequest,
-    caller: str = Depends(hitl_gate("training_export")),
+    caller: str = Depends(hitl_gate("training_export", who=require_api_token)),
 ) -> dict[str, Any]:
     """Render kept rows to train/eval JSONL with credentials redacted."""
     del caller
@@ -427,7 +427,7 @@ async def training_export(
 @router.post("/train")
 async def training_train(
     body: TrainRequest,
-    caller: str = Depends(hitl_gate("training_train")),
+    caller: str = Depends(hitl_gate("training_train", who=require_api_token)),
 ) -> dict[str, Any]:
     """Plan a fine-tune, or launch one when ``dry_run`` is false."""
     del caller
@@ -567,7 +567,7 @@ async def training_base_models() -> dict[str, Any]:
 @router.post("/deploy")
 async def training_deploy(
     body: DeployRequest,
-    caller: str = Depends(hitl_gate("training_deploy")),
+    caller: str = Depends(hitl_gate("training_deploy", who=require_api_token)),
 ) -> dict[str, Any]:
     """Serve a trained adapter, or start the merge that will let us."""
     del caller

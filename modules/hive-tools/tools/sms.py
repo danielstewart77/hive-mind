@@ -13,7 +13,8 @@ Env vars:
   ``http://sms-gateway:3000`` (reached over the ``sms-private`` Docker network).
 - ``SMS_GATEWAY_USER`` / ``SMS_GATEWAY_PASS`` — basic-auth credentials issued
   by the server when the phone registers as a device.
-- ``COMMS_URL`` / ``COMMS_BEARER_TOKEN`` — used by the inbound-toggle proxy.
+- ``COMMS_URL`` — used by the inbound-toggle proxy, which asks the gateway with
+  the key the caller presented (the tools hold no gateway key of their own).
 """
 from __future__ import annotations
 
@@ -22,9 +23,9 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from auth_api import require_api_token
+from auth_api import bearer_value, require_api_token
 from hitl import hitl_gate
 from schemas import SmsInboundEnabledRequest, SmsSendRequest
 
@@ -96,19 +97,22 @@ async def send_sms(
 # ---------------------------------------------------------------------------
 
 
-def _comms_config() -> tuple[str, dict[str, str]]:
+def _comms_config(request: Request) -> tuple[str, dict[str, str]]:
+    """The gateway, asked with the key the caller presented here: the tools
+    hold no gateway key of their own, so the toggle is the caller's own ask."""
     url = os.environ.get("COMMS_URL", "").strip().rstrip("/")
-    token = os.environ.get("COMMS_BEARER_TOKEN", "").strip()
     if not url:
         raise HTTPException(503, "COMMS_URL not configured")
+    token = bearer_value(request.headers.get("Authorization", ""))
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return url, headers
 
 
 @router.get("/inbound/enabled")
-async def get_inbound_enabled(_caller: str = Depends(require_api_token)) -> Any:
+async def get_inbound_enabled(request: Request,
+                              _caller: str = Depends(require_api_token)) -> Any:
     """Proxy: read the current inbound-listener flag from hive-comms."""
-    base_url, headers = _comms_config()
+    base_url, headers = _comms_config(request)
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             resp = await client.get(f"{base_url}/sms/inbound/enabled", headers=headers)
@@ -121,10 +125,10 @@ async def get_inbound_enabled(_caller: str = Depends(require_api_token)) -> Any:
 
 
 @router.put("/inbound/enabled")
-async def set_inbound_enabled(body: SmsInboundEnabledRequest,
+async def set_inbound_enabled(body: SmsInboundEnabledRequest, request: Request,
                               _caller: str = Depends(require_api_token)) -> Any:
     """Proxy: flip the inbound-listener flag in hive-comms."""
-    base_url, headers = _comms_config()
+    base_url, headers = _comms_config(request)
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             resp = await client.put(
