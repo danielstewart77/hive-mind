@@ -321,24 +321,29 @@ async def put_credential(
         raise ValueError(_held_by(clash))
     now = time.time()
     try:
-        await core.upsert_credential(
-            holder=key, username=name, role=role, token_sha=sha,
-            created_at=now, revoked_at=None,
-        )
+        # One unit: the key and what the gateway shows the mind (made from it)
+        # change together or not at all, so a failure between the two cannot
+        # leave the mind refusing the gateway with the new key live.
+        async with hive_data.transaction() as unit:
+            await core.upsert_credential(
+                holder=key, username=name, role=role, token_sha=sha,
+                created_at=now, revoked_at=None, unit=unit,
+            )
+            if role == MIND:
+                # The mind's key was just replaced (or made): the next call
+                # carries the value made from the new key and the old one is
+                # refused, with no step by a person.
+                known = await core.get_mind_by_id_or_name(key, unit=unit)
+                if known is not None:
+                    await broker_ops.update_mind(
+                        known["mind_id"], unit=unit,
+                        session_token=gateway_credential(token))
     except hive_data.Conflict as exc:
         # The same value minted for another holder between the check and the
         # write. Still a sentence, not a 500.
         raise ValueError(
             _held_by(await broker_ops.holder_of_digest(sha) or "another holder")
         ) from exc
-    if role == MIND:
-        # The mind's key was just replaced (or made): what the gateway shows
-        # the mind is made from it now, so the next call carries the new value
-        # and the old one is refused, with no step by a person.
-        known = await core.get_mind_by_id_or_name(key)
-        if known is not None:
-            await broker_ops.update_mind(
-                known["mind_id"], session_token=gateway_credential(token))
     return {"holder": key, "username": name, "role": role, "created_at": now}
 
 

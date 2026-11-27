@@ -136,8 +136,8 @@ every one of them, and `[]` reads as success: two confirmed owners for one
 bot.
 
 Columns a caller must ask for by name are withheld by default, and not only
-on sessions. `minds.session_token` is the credential the gateway
-authenticates to a mind with; `credentials.token_sha` is a bearer digest, and
+on sessions. `minds.session_token` is what the gateway shows a
+mind (calculated from the mind's key, never the key); `credentials.token_sha` is a bearer digest, and
 reading it is how one holder authenticates as another; `users.password_hash`
 is a password hash. On sessions, `carry_forward` is a composed system prompt
 and `resend_content` a queued user message. All of those listings answer to

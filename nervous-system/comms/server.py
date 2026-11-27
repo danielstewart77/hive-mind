@@ -662,11 +662,12 @@ class RegisterMindRequest(BaseModel):
     gateway_url: str
     model: str
     harness: str
-    # What the gateway shows this mind, made from the mind's key
-    # (`user_access.gateway_credential`). A mind registering with its own key
-    # has it worked out here from that key and anything it sends is ignored;
-    # an administrator registering a mind may carry the calculated value, never
-    # the key. Optional: a registration without it leaves the stored one.
+    # What the gateway shows this mind. A mind on its one key sends none and
+    # the gateway works it out from the key the mind registers with
+    # (`user_access.gateway_credential`). Only a build that predates the one key
+    # still sends the value from its old file, and that is kept until it moves
+    # (items 841 and 842); an administrator registering a mind may carry the
+    # calculated value, never the key.
     session_token: str | None = None
     # The voice this mind is spoken in, and the engine that speaks it.
     # Optional for the same reason, and an omission leaves the stored value
@@ -2051,6 +2052,11 @@ async def ws_attach(ws: WebSocket, session_id: str):
     except aiohttp.ClientError as exc:
         log.warning("attach-pty proxy to %s failed: %s", attach_url, exc)
         await ws.close(code=1011, reason="mind unreachable")
+    except sessions.MindCallFailed as exc:
+        # A mind whose key was cut off is not called, and one whose credential
+        # cannot be read is told so; neither is an unhandled error on the tile.
+        log.warning("attach-pty to %s not made: %s", attach_url, exc)
+        await ws.close(code=1011, reason="mind is not called: its key is cut off or unreadable")
 
 
 # ---------------------------------------------------------------------------
