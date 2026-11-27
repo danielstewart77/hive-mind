@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import credentials_data
 import holder_credentials
+from hive_site import testing
 
 
 def _write_env(path, **kv):
@@ -312,7 +313,7 @@ def test_a_duplicated_key_rotates_the_copy_the_service_loads(tmp_path, monkeypat
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-for-tests")
     _accept_every_mint(monkeypatch)
 
-    asyncio.run(
+    testing.run(
         holder_credentials.mint(
             holder_credentials.SERVICES["comms"], "ada", "daniel", role="mind"
         )
@@ -356,7 +357,7 @@ def test_a_write_that_fails_partway_leaves_the_file_as_it_was(tmp_path, monkeypa
     monkeypatch.setattr(credentials_data.os, "fsync", failing_fsync)
 
     with pytest.raises(holder_credentials.Stranded):
-        asyncio.run(
+        testing.run(
             holder_credentials.mint(
                 holder_credentials.SERVICES["comms"], "ada", "daniel", role="mind"
             )
