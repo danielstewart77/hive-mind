@@ -48,6 +48,7 @@ import hashlib
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2066,92 +2067,215 @@ async def unprovision_mind(name: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# A person's own key (feature 834, requirement 19)
+# A person's own key (feature 834, requirements 19 and 31)
 # ---------------------------------------------------------------------------
 
-#: A person's key is held like a mind's: a credential at the gateway with the
-#: person's username as holder and kind `user`, and a line in the shared env
-#: file this console keeps for it. Random, never pasted (no proxy is involved
-#: for people), shown to nobody.
+#: A person's key is held like a mind's, but where no mind can read it: a
+#: file in the console's own folder under the key root (`mind_key_files`,
+#: `.people`), which no mind mounts, and a fingerprint in the hive database's
+#: credentials table under the person's username with the role `user`. The
+#: console writes that table itself (`hive_data`, the write the gateway uses):
+#: it holds no administrator credential of the gateway, and the gateway reads
+#: the same row on every request, so a replacement takes effect at once. The
+#: key is random, never typed, never shown.
 USER_KEY_PREFIX = "USER_KEY_"
 USER_ROLE = "user"
 
 
 def user_key_variable(username: str) -> str:
-    # Injective: every character other than a letter or digit becomes its own
-    # hex code, so `dan.s`, `dan-s` and `dan_s` never share one line.
+    """The name the key had as a line in the install's settings file, before
+    it moved to the key folder. Kept to find and remove such a line, so it
+    keeps the rule it was written under (the whole name upper-cased)."""
     stem = "".join(c if c.isalnum() and c.isascii() else f"_{ord(c):X}_"
                    for c in username.strip().upper())
     return USER_KEY_PREFIX + stem
 
 
-def _user_key_location(username: str) -> Location:
-    if MIND_ENV_LABEL not in ENV_FILES:
-        raise MintRefused(f"no {MIND_ENV_LABEL} env file is configured (HIVE_ENV_FILES)")
-    return Location(MIND_ENV_LABEL, user_key_variable(username))
+def _legacy_location(username: str) -> Location | None:
+    path = ENV_FILES.get(MIND_ENV_LABEL)
+    return None if path is None else Location(MIND_ENV_LABEL, user_key_variable(username))
 
 
-async def _issue_user_key(username: str, location: Location, previous: str | None) -> str:
-    """Register a fresh random key for this person at the gateway and keep it
-    in the file. Under `_ROTATION_LOCK`, taken by the caller. The gateway is
-    told first and put back when the file cannot take it, so the file never
-    holds a value the gateway does not."""
-    gateway = SERVICES["comms"]
-    # A holder of that name that is not a person's key is somebody else's
-    # credential (a mind, a surface bot, a service): never taken over.
-    row = await _holder_row(gateway, username)
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+async def _record_user_key(username: str, value: str) -> None:
+    """Make `value` the one the gateway accepts for this person: write its
+    fingerprint to the hive database. Refused for a holder that is not a
+    person's key (a mind, a service) and for a value another holder has."""
+    from hive_data import core
+    from hive_data import broker_ops
+
+    row = await core.get_credential(username)
     if row is not None and str(row.get("role") or "") != USER_ROLE:
         raise MintRefused(
             f"the gateway already has a holder called {username!r} that is not "
             "a person's key, so this person's key cannot be made under that name")
-    value = secrets.token_urlsafe(32)
-    _ensure_key(location.path, location.env_key)
-    await _put(gateway, username, username, value, USER_ROLE, None)
+    if await core.get_mind_by_id_or_name(username) is not None:
+        raise MintRefused(f"{username!r} is a mind, not a person")
+    sha = _digest(value)
+    clash = await broker_ops.holder_of_digest(sha)
+    if clash is not None and clash != username:
+        raise MintRefused("that key is already held by another holder")
+    try:
+        await core.upsert_credential(
+            holder=username, username=username, role=USER_ROLE, token_sha=sha,
+            created_at=time.time(), revoked_at=None)
+    except Exception as exc:  # noqa: BLE001 - one sentence, never the value
+        raise MintRefused(
+            f"the hive database did not take {username!r}'s key ({type(exc).__name__})") from None
+
+
+async def _recorded(username: str, value: str) -> bool | None:
+    """Whether the gateway's row for this person is live and holds `value`;
+    None when the row was cut off on purpose (revoked), which is never undone
+    here."""
+    from hive_data import broker_ops, core
+
+    row = await core.get_credential(username)
+    if row is not None and str(row.get("role") or "") == USER_ROLE and row.get("revoked_at"):
+        return None
+    return (row is not None and str(row.get("role") or "") == USER_ROLE
+            and await broker_ops.holder_of_digest(_digest(value)) == username)
+
+
+async def _unrecord_user_key(username: str) -> None:
+    from hive_data import core
+
+    await core.revoke_credential(username, time.time())
+
+
+def _remove_legacy_line(username: str, value: str | None) -> bool:
+    """Take the person's old line out of the install's settings file, and the
+    console's saved copies of that file with it. True when a line went."""
+    location = _legacy_location(username)
+    if location is None:
+        return False
+    keys = (location.env_key,)
     with credentials_data._WRITE_LOCK:
-        written = credentials_data._write_location(
-            location.path, location.env_key, value, location.file)
-        try:
-            verified = bool(written["written"]) and _loaded_value(location) == value
-        except Unreadable:
-            verified = False
+        text = credentials_data._read_text(location.path)
+        lines = text.splitlines(keepends=True)
+        kept = [line for line in lines if not line.startswith(tuple(f"{k}=" for k in keys))]
+        if len(kept) == len(lines):
+            return False
+        credentials_data._write_file_in_place(
+            location.path, "".join(kept), location.file, location.env_key, text)
+    if value:
+        failed = scrub_backups(value)
+        if failed:
+            import logging
+            logging.getLogger(__name__).warning(
+                "a saved copy of the settings file still holds a person's old key: %s",
+                ", ".join(failed))
+    return True
+
+
+async def _issue_user_key(username: str, previous: str | None, value: str | None = None) -> str:
+    """Make a person's key (random, or `value` when moving an old one) and keep
+    it. Under `_ROTATION_LOCK`, taken by the caller. The database is told
+    first and put back when the file cannot take it, so the file never holds a
+    value the gateway does not."""
+    value = value or secrets.token_urlsafe(32)
+    await _record_user_key(username, value)
+    try:
+        mind_key_files.write_person(username, value)
+        verified = mind_key_files.read_person(username) == value
+        reason = ""
+    except mind_key_files.KeyFileError as exc:
+        verified, reason = False, f" ({exc})"
     if not verified:
-        # Put the gateway back to what the file still holds (or cut it off
+        # Put the database back to what the file still holds (or cut it off
         # when this person had no key before): never a key nothing can read.
         try:
             if previous:
-                await _put(gateway, username, username, previous, USER_ROLE, None)
+                await _record_user_key(username, previous)
             else:
-                await _request(gateway, "DELETE", f"/credentials/{username}")
+                await _unrecord_user_key(username)
         except Exception:  # noqa: BLE001 - the refusal below says it
             pass
-        raise MintRefused(
-            f"{location.path} did not take the new key"
-            + (f" ({written['reason']})" if written.get("reason") else ""))
+        raise MintRefused(f"the key folder did not take the new key{reason}")
     return value
+
+
+def _stored_user_key(username: str) -> str | None:
+    try:
+        return mind_key_files.read_person(username)
+    except mind_key_files.KeyFileError as exc:
+        raise Unreadable(str(exc)) from None
+
+
+def _legacy_value(username: str) -> str | None:
+    location = _legacy_location(username)
+    if location is None or not location.path.is_file():
+        return None
+    return _loaded_value(location) or None
+
+
+def _legacy_line_absent(username: str) -> bool:
+    try:
+        return _legacy_value(username) is None
+    except Unreadable:
+        return True  # a file this console cannot read is not a reason to refuse the key
+
+
+def _legacy_value_or_none(username: str) -> str | None:
+    try:
+        return _legacy_value(username)
+    except Unreadable:
+        return None
+
+
+def _remove_legacy_line_quietly(username: str, value: str) -> None:
+    try:
+        _remove_legacy_line(username, value)
+    except (Unreadable, OSError) as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "the old line of %r's key could not be removed: %s", username, type(exc).__name__)
 
 
 async def user_key(username: str) -> str | None:
     """This person's key, made on their first need and then kept.
 
-    None when it cannot be had (no gateway admin credential, no env file this
-    console can write): the caller falls back to the mind's own key rather
-    than failing the change."""
+    A key still in the install's settings file is moved: written to the key
+    folder, its fingerprint recorded, its line removed. None when it cannot be
+    had (no key folder, an unreadable file): the caller falls back to the
+    mind's own key rather than failing the change."""
     name = username.strip().lower()
     if not name:
         return None
     try:
-        location = _user_key_location(name)
-        # Without the lock when the key exists: a settings read must not queue
-        # behind a key move. Only making one is serialised.
-        existing = _loaded_value(location) if location.path.is_file() else None
+        # Without the lock when the key exists and the database agrees: a
+        # settings read must not queue behind a key move. Only making or
+        # mending one is serialised.
+        existing = _stored_user_key(name)
         if existing:
-            return existing
-        async with _ROTATION_LOCK:
-            existing = _loaded_value(location) if location.path.is_file() else None
-            if existing:
+            state = await _recorded(name, existing)
+            if state is None:
+                return None  # cut off on purpose: replace_user_key makes a new one
+            if state and _legacy_line_absent(name):
                 return existing
-            return await _issue_user_key(name, location, None)
-    except (MintRefused, MintUncertain, Unreadable, OSError) as exc:
+        async with _ROTATION_LOCK:
+            existing = _stored_user_key(name)
+            old = _legacy_value_or_none(name)
+            if existing:
+                # A crash between the database write and the file write, or
+                # between the file and the old line's removal, leaves this
+                # half done: finish it here, from the file, which is the key.
+                state = await _recorded(name, existing)
+                if state is None:
+                    return None
+                if not state:
+                    await _record_user_key(name, existing)
+                if old:
+                    _remove_legacy_line_quietly(name, old)
+                return existing
+            value = await _issue_user_key(name, old, old)
+            if old:
+                _remove_legacy_line_quietly(name, old)
+            return value
+    except Exception as exc:  # noqa: BLE001 - a database that cannot answer is no key, never a 500
         import logging
         logging.getLogger(__name__).warning(
             "no key could be made for user %r: %s", name, type(exc).__name__ + ": " + str(exc)[:200])
@@ -2160,21 +2284,55 @@ async def user_key(username: str) -> str | None:
 
 async def replace_user_key(username: str) -> dict[str, Any]:
     """Cut a person's key off and give them a new one. The old one is refused
-    by every mind at its next request (the gateway holds one value per holder);
-    the new one is made now. Small on purpose: no page, no history."""
+    by the gateway at its next request (one value per holder); the new one is
+    made now and shown to nobody."""
     name = username.strip().lower()
     if not name:
         raise MintRefused("a key belongs to a person")
-    location = _user_key_location(name)
     async with _ROTATION_LOCK:
         try:
-            previous = _loaded_value(location) if location.path.is_file() else None
+            previous = _stored_user_key(name)
+            legacy = _legacy_value(name)
         except Unreadable:
             raise MintRefused(
-                f"{location.path} could not be read, so the old key could not be "
+                "the person's key could not be read, so the old key could not be "
                 "put back if something failed. Nothing was changed") from None
-        await _issue_user_key(name, location, previous)
+        await _issue_user_key(name, previous or legacy)
+        if legacy:
+            try:
+                _remove_legacy_line(name, legacy)
+            except (Unreadable, OSError) as exc:
+                # The replacement took; the old value is refused. The line is
+                # taken out the next time this person's key is asked for.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "the old line of %r's key could not be removed: %s", name, type(exc).__name__)
     return {"replaced": True, "holder": name}
+
+
+def user_key_status(username: str) -> dict[str, Any]:
+    """Whether this person has a key and when it was made; never the key."""
+    name = username.strip().lower()
+    made = mind_key_files.person_key_made_at(name)
+    return {"has_key": made is not None, "made_at": made}
+
+
+async def move_user_keys() -> list[str]:
+    """Move every person's key still held as a line in the install's settings
+    file into the key folder, at console start. The names moved."""
+    path = ENV_FILES.get(MIND_ENV_LABEL)
+    if path is None or not Path(path).is_file():
+        return []
+    moved: list[str] = []
+    try:
+        text = credentials_data._read_text(path)
+    except Unreadable:
+        return []
+    for match in re.finditer(rf"^{USER_KEY_PREFIX}([A-Z0-9_]+)=", text, flags=re.MULTILINE):
+        name = re.sub(r"_([0-9A-F]+)_", lambda m: chr(int(m.group(1), 16)), match.group(1)).lower()
+        if name and await user_key(name):
+            moved.append(name)
+    return moved
 
 
 async def check(service: Service, holder: str, role: str = "") -> dict[str, Any]:

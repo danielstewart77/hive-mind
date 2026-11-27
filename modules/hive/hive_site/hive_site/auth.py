@@ -934,8 +934,66 @@ async def resolve_user(conn: HTTPConnection) -> dict | None:
         sso_token = conn.cookies.get(SSO_COOKIE_NAME) or ""
         user = (await user_for_sso_token(store, sso_token)
                 if sso_token else None)
+    if user is not None and isinstance(store, AuthServiceStore):
+        await mirror_admin_membership(user)
     state[_STATE_KEY] = user
     return user
+
+
+#: What a mirrored person's password hash is. It is no hash of any scheme
+#: `verify_password` knows, so it verifies nothing: the person signs in at the
+#: authentication service, never here.
+_MIRROR_NO_PASSWORD = "!auth-service"
+
+
+async def mirror_admin_membership(user: dict) -> None:
+    """Make the hive database say what the authentication service just said
+    about this person: in the `admins` group or not.
+
+    Feature 834, requirement 32. With the authentication service as the
+    sign-in, who is an administrator lives in its own file, and the gateway
+    reads the hive database only. So each request that service answered for
+    writes its answer here first, before anything done for that person can
+    reach the gateway. A person with no row in `core.users` gets one (the
+    membership table needs it). Nothing is written when the database already
+    agrees, so an ordinary request costs two reads.
+
+    Raises ServiceUnavailable when the answer cannot be recorded: a request
+    the database cannot vouch for is not served, never served with a stale
+    membership."""
+    name = normalize_username(user.get("username"))
+    if not name:
+        return
+    want = ADMINS in {str(g).lower() for g in user.get("groups") or []}
+    try:
+        row = await data_store.get_user(name)
+        if row is None:
+            try:
+                row = await data_store.create_user(
+                    username=name, password_hash=_MIRROR_NO_PASSWORD,
+                    created_at=int(time.time()), email=user.get("email"))
+            except Exception as exc:  # noqa: BLE001 - a concurrent request made it first
+                if not _is_duplicate(exc):
+                    raise
+                row = await data_store.get_user(name)
+            if row is None:
+                # The email is unique too; a clash there must not block the
+                # person: the row is made without it.
+                row = await data_store.create_user(
+                    username=name, password_hash=_MIRROR_NO_PASSWORD,
+                    created_at=int(time.time()))
+        groups = await data_store.groups_of(row["id"])
+        if want and ADMINS not in groups:
+            await data_store.create_group(name=ADMINS, created_at=int(time.time()))
+            await data_store.add_group_member(group_name=ADMINS, user_id=row["id"])
+        elif not want and ADMINS in groups:
+            await data_store.remove_group_member(group_name=ADMINS, user_id=row["id"])
+    except ServiceUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one answer for any database failure
+        raise ServiceUnavailable(
+            "The sign-in answered, but who is an administrator could not be "
+            "recorded in the hive database.") from exc
 
 
 # ── Microsoft and Windows sessions ──────────────────────────────────────
