@@ -10,12 +10,11 @@ something wrong is a Mind you may not want to leave running while you fix
 it. Routing the edit through the Mind would make the broken thing a
 prerequisite for repairing it.
 
-The credential is `LUCENT_SOUL_BEARER_TOKEN`, which lucent accepts on
-`/graph/soul` and nowhere else, and which is neither the service bearer nor
-the admin bearer. The console holds it because the operator editing a Mind's
-soul directly is the one case that should bypass the Mind entirely. Every
-write from here is recorded with `actor="console"` so it stays
-distinguishable, forever, from a line the Mind wrote about itself.
+The key is the signed-in person's own (feature 834, story 906): the memory
+store opens a soul to a mind's owner for that mind, and to an administrator for
+any, and holds no soul credential of its own. Every write from here is
+recorded with `actor="console"` so it stays distinguishable, forever, from a
+line the Mind wrote about itself.
 """
 
 from __future__ import annotations
@@ -33,17 +32,23 @@ def _base_url() -> str:
     return (os.getenv("LUCENT_API_URL") or "http://hive-lucent:8424").rstrip("/")
 
 
-def soul_headers() -> dict[str, str]:
-    token = os.getenv("LUCENT_SOUL_BEARER_TOKEN", "")
-    if not token:
+async def soul_headers() -> dict[str, str]:
+    """The signed-in person's own key. Nobody signed in, or a key that cannot
+    be had, is a sentence and never another credential."""
+    import holder_credentials
+    import mind_runtime
+
+    person = mind_runtime._PERSON.get()
+    if not person:
+        raise HTTPException(
+            status_code=403,
+            detail="nobody is signed in, so no soul is asked for or changed")
+    key = await holder_credentials.user_key(person)
+    if not key:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "LUCENT_SOUL_BEARER_TOKEN is not configured for this console. "
-                "Souls are unwritable from here until it is set."
-            ),
-        )
-    return {"Authorization": f"Bearer {token}"}
+            detail="your own key could not be found on this site, so the memory store was not asked")
+    return {"Authorization": f"Bearer {key}"}
 
 
 def node_name(mind_name: str) -> str:
@@ -85,7 +90,7 @@ async def fetch_soul(mind_name: str) -> dict:
         response = await client.get(
             f"{_base_url()}/graph/soul",
             params={"name": node_name(mind_name)},
-            headers=soul_headers(),
+            headers=await soul_headers(),
         )
     return _unwrap(response)
 
@@ -96,7 +101,7 @@ async def fetch_history(mind_name: str, limit: int = 25) -> list[dict]:
         response = await client.get(
             f"{_base_url()}/graph/soul/history",
             params={"name": node_name(mind_name), "limit": limit},
-            headers=soul_headers(),
+            headers=await soul_headers(),
         )
     body = _unwrap(response)
     changes = body.get("changes")
@@ -202,6 +207,6 @@ async def push_soul(mind_name: str, soul_values: list[str], reason: str) -> dict
                 "reason": reason,
                 "allow_shrink": True,
             },
-            headers=soul_headers(),
+            headers=await soul_headers(),
         )
     return _unwrap(response)

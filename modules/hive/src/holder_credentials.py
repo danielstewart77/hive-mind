@@ -122,13 +122,15 @@ class Service:
     #: console that credential needs no restart of the console.
     admin_file: str | None = None
 
-    def configured(self) -> bool:
-        """Whether this console has been given this service at all.
+    @property
+    def in_the_record(self) -> bool:
+        """The gateway, the memory store and the tools all recognise a key from
+        the one record in the hive database; only the proxy has a key list of
+        its own (the person's, never written here)."""
+        return self.key != "proxy"
 
-        Only the tools can be absent: a hive installed without them names no
-        address and holds no administrator credential for them, and a mind
-        created there has nothing to be registered with. A service that is
-        named but cannot be written is a failure, never a skip."""
+    def configured(self) -> bool:
+        """Whether this console has been given this service at all."""
         return bool(os.getenv(self.url_env, "").strip() or self.admin_token())
 
     def url(self) -> str:
@@ -136,6 +138,8 @@ class Service:
         return base
 
     def admin_token(self) -> str:
+        if not self.admin_env:
+            return ""
         value = os.getenv(self.admin_env) or ""
         if value or not self.admin_file or self.admin_file not in ENV_FILES:
             return value
@@ -152,7 +156,7 @@ SERVICES: dict[str, Service] = {
         label="the gateway",
         url_env="GATEWAY_API_URL",
         url_default="http://hive-comms:8424",
-        admin_env="COMMS_ADMIN_BEARER_TOKEN",
+        admin_env="",
         prefix="COMMS",
         own_files={
             "skippy": "skippy",
@@ -166,7 +170,7 @@ SERVICES: dict[str, Service] = {
         label="the memory store",
         url_env="LUCENT_API_URL",
         url_default="http://hive-lucent:8424",
-        admin_env="LUCENT_ADMIN_BEARER_TOKEN",
+        admin_env="",
         prefix="LUCENT",
         own_files={
             "skippy": "skippy",
@@ -203,11 +207,10 @@ SERVICES: dict[str, Service] = {
         label="the tools",
         url_env="HIVE_TOOLS_URL",
         url_default="http://hive-tools:9421",
-        admin_env="TOOLS_ADMIN_BEARER_TOKEN",
+        admin_env="",
         prefix="TOOLS",
         own_files={},
         wants_mind_id=False,
-        admin_file="hive_tools",
     ),
 }
 
@@ -216,6 +219,10 @@ SERVICES: dict[str, Service] = {
 #: before any service is written, so a refused name leaves nothing behind on
 #: the gateway or the memory store; the tools refuse them again on their own.
 TOOLS_RESERVED_HOLDERS = frozenset({"hitl-approver", "internal", "skippy"})
+
+#: What the page calls the one record of keys, which the gateway, the memory
+#: store and the tools all read.
+RECORD_LABEL = "the hive's record of keys"
 
 #: What has to be restarted for a value written into each file to be read.
 #: Keyed by file rather than by holder, which is the honest direction: a
@@ -474,27 +481,13 @@ async def _request(
     body: dict[str, Any] | None = None,
     timeout: float = MINT_TIMEOUT_S,
 ) -> httpx.Response:
-    if service.key == "comms":
-        # The gateway is asked with the key of the person who asked (feature
-        # 834, story 905); this site holds no key of its own that stands for
-        # anyone. The one use left is work with no person behind it: the
-        # operator's key-migration command, run from a shell, which carries
-        # the administrator credential it was given (named on the feature row
-        # as work with no person; removed with the credential itself).
-        import mind_runtime
-
-        person = mind_runtime._PERSON.get()
-        if person:
-            admin = await _asking_person_key(person)
-            if not admin:
-                raise MintRefused(
-                    "your own key could not be found, so "
-                    f"{service.label} was not asked"
-                )
-        else:
-            admin = service.admin_token()
-    else:
-        admin = service.admin_token()
+    """A call to a service's own key-management route. Only the inference
+    proxy has one: the gateway, the memory store and the tools read the one
+    record of keys (`_record_*` below) and register nothing of their own."""
+    if service.in_the_record:
+        raise MintRefused(
+            f"{service.label} holds no key list of its own; the one record of keys is read")
+    admin = service.admin_token()
     if not admin:
         raise MintRefused(
             f"this console holds no {service.admin_env}, so it cannot mint "
@@ -524,6 +517,86 @@ async def _request(
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# The one record of keys (feature 834, story 906)
+# ---------------------------------------------------------------------------
+#
+# A mind's key is one row in `core.credentials`, written here directly (this
+# site opens the hive database, as the gateway does). The gateway, the memory
+# store and the tools each read that row on every request, so recording,
+# replacing or cutting a key off is one write and lands at all three on their
+# next request. There is no second or third registration and so no
+# partial-failure state between services.
+
+async def _record_rows() -> list[dict[str, Any]]:
+    from hive_data import broker_ops, core
+
+    rows: list[dict[str, Any]] = []
+    for row in await broker_ops.list_credentials():
+        role = str(row["role"] or "")
+        mind_id = None
+        if role == "mind":
+            known = await core.get_mind_by_id_or_name(str(row["holder"]))
+            mind_id = known["mind_id"] if known is not None else None
+        rows.append({
+            "holder": row["holder"], "username": row["username"], "role": role,
+            "mind_id": mind_id, "created_at": row["created_at"],
+            "revoked_at": row["revoked_at"], "live": row["revoked_at"] is None,
+        })
+    return rows
+
+
+async def _record_put(holder: str, username: str, token: str, role: str) -> None:
+    """Record `token` as this holder's one key; replacing clears a cut-off."""
+    import hive_data
+    from hive_data import broker_ops, core
+
+    key = holder.strip().lower()
+    if not key or not token:
+        raise MintRefused("a key belongs to a holder and has a value")
+    if key == "shared":
+        raise MintRefused("'shared' is not a holder")
+    sha = _digest(token)
+    clash = await broker_ops.holder_of_digest(sha)
+    if clash is not None and clash != key:
+        raise MintRefused(
+            f"that value is already held by {clash!r}; a credential belongs to one holder")
+    try:
+        async with hive_data.transaction() as unit:
+            await core.upsert_credential(
+                holder=key, username=str(username or "").strip().lower(),
+                role=role, token_sha=sha, created_at=time.time(),
+                revoked_at=None, unit=unit)
+            if role == "mind":
+                # What the gateway shows the mind is made from the key.
+                known = await core.get_mind_by_id_or_name(key, unit=unit)
+                if known is not None:
+                    await broker_ops.update_mind(
+                        known["mind_id"], unit=unit,
+                        session_token=gateway_credential(token))
+    except hive_data.Conflict:
+        raise MintRefused(
+            f"that value is already held by "
+            f"{await broker_ops.holder_of_digest(sha) or 'another holder'!r}; "
+            "a credential belongs to one holder") from None
+
+
+async def _record_revoke(holder: str) -> bool:
+    """Cut a holder's key off. True when it was live."""
+    from hive_data import broker_ops
+
+    result = await broker_ops.revoke_live_credential(holder.strip().lower(), time.time())
+    return int(result["rows"]) > 0
+
+
+async def _record_remove(holder: str) -> bool:
+    """Delete a mind's row outright, freeing its digest. True when one went."""
+    from hive_data import broker_ops
+
+    result = await broker_ops.delete_mind_credential(holder.strip().lower())
+    return int(result["rows"]) > 0
+
+
 async def list_holders(service: Service) -> list[dict[str, Any]]:
     """Who this service says holds a credential.
 
@@ -533,6 +606,8 @@ async def list_holders(service: Service) -> list[dict[str, Any]]:
     goes stale silently — which is how a holder gets missed and is refused the
     moment the service comes up.
     """
+    if service.in_the_record:
+        return await _record_rows()
     # The listing is the whole content of the page. A mint may wait twenty
     # seconds; a read may not.
     response = await _request(service, "GET", "/credentials", timeout=PROBE_TIMEOUT_S)
@@ -547,6 +622,9 @@ async def list_holders(service: Service) -> list[dict[str, Any]]:
 async def _put(
     service: Service, holder: str, username: str, token: str, role: str, mind_id: str | None
 ) -> None:
+    if service.in_the_record:
+        await _record_put(holder, username, token, role)
+        return
     body: dict[str, Any] = {"username": username, "token": token, "role": role}
     if service.wants_mind_id and mind_id:
         body["mind_id"] = mind_id
@@ -694,6 +772,9 @@ async def revoke(service: Service, holder: str) -> dict[str, Any]:
     live is the thing per-holder credentials existed to stop.
     """
     await _require_managed_proxy(service, holder)
+    if service.in_the_record:
+        return {"service": service.key, "holder": holder,
+                "revoked": await _record_revoke(holder)}
     response = await _request(service, "DELETE", f"/credentials/{holder}")
     if response.status_code >= 400:
         raise MintRefused(
@@ -1007,11 +1088,11 @@ def mind_proxy_key_sources(name: str) -> list[tuple[str, str]]:
 async def provision_mind(
     name: str, mind_id: str, owner: str, *, proxy_key: str | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Give a brand-new containerised mind its one key, on every service.
+    """Give a brand-new containerised mind its one key, recorded once.
 
-    The person pasted the key; the hive invents nothing. The gateway, the
-    memory store and the tools are each made to accept exactly that value as
-    this mind, and
+    The person pasted the key; the hive invents nothing. The record of keys
+    in the hive database is made to hold exactly that value as this mind (the
+    gateway, the memory store and the tools all read it), and
     it is written once, to the mind's own key file (`mind_key_files`), which
     its generated compose file mounts. Nothing is written to the install's
     `.env`. The proxy is sent nothing: the key is already its client's.
@@ -1046,31 +1127,25 @@ async def provision_mind(
     async with _ROTATION_LOCK:
         _refuse_if_another_holds(proxy_key, name)
         minted.append(_store_mind_proxy_key_locked(name, owner, proxy_key, creating=True))
-    for service in SERVICES.values():
-        if service.key == "proxy":
-            continue
-        if service.key == "tools" and not service.configured():
-            continue
-        try:
-            minted.append(
-                await mint(
-                    service,
-                    name,
-                    owner,
-                    role="mind",
-                    mind_id=mind_id,
-                    location=key_file_location(name),
-                    value=proxy_key,
-                )
+    # One write: the record of keys the gateway, the memory store and the
+    # tools all read. There is no second or third registration to fail.
+    service = SERVICES["comms"]
+    try:
+        minted.append(
+            await mint(
+                service,
+                name,
+                owner,
+                role="mind",
+                mind_id=mind_id,
+                location=key_file_location(name),
+                value=proxy_key,
             )
-        except Exception as exc:
-            if "already held by" in str(exc):
-                held = True
-            # Each service on its own. One of the two landing is a different
-            # state from neither — a mind with a gateway credential and no
-            # memory-store one authenticates, answers, and silently remembers
-            # nothing — and the caller is told which it has.
-            failures.append(f"{service.label}: {exc}")
+        )
+    except Exception as exc:
+        if "already held by" in str(exc):
+            held = True
+        failures.append(f"{RECORD_LABEL}: {exc}")
     if held:
         raise KeyHeldByAnother(KEY_HELD_MESSAGE)
     return minted, ("; ".join(failures) if failures else None)
@@ -1193,10 +1268,10 @@ class ReplacementFailed(Exception):
 
 
 def _one_key_services() -> list[Service]:
-    """The services that each hold the mind's key: not the proxy, which is the
-    person's, and the tools only where this hive has them."""
-    return [s for s in SERVICES.values()
-            if s.key != "proxy" and (s.key != "tools" or s.configured())]
+    """Where a mind's key is written: the one record, once. The gateway, the
+    memory store and the tools all read it, so there is nothing to write at
+    the other two. (The proxy is the person's and is never written.)"""
+    return [SERVICES["comms"]]
 
 
 def stored_key_location(holder: str) -> Location | None:
@@ -1460,6 +1535,9 @@ def _is_revoked(row: dict[str, Any] | None) -> bool:
 
 
 async def _revoke_row(service: Service, holder: str) -> None:
+    if service.in_the_record:
+        await _record_revoke(holder)
+        return
     response = await _request(service, "DELETE", f"/credentials/{holder}")
     if response.status_code >= 400:
         raise MintRefused("not revoked again")
@@ -1726,10 +1804,7 @@ async def replace_mind_key(
                 row = rows[service.key]
                 try:
                     if row is None and state[service.key] in ("new", "unknown"):
-                        response = await _request(
-                            service, "DELETE", f"/credentials/{holder}?remove=true")
-                        if response.status_code >= 400:
-                            raise MintRefused("not removed")
+                        await _record_remove(holder)
                         state[service.key] = "none"
                     elif old is not None:
                         await _put_key(service, holder, owner, mind_id, row, old)
@@ -1738,10 +1813,7 @@ async def replace_mind_key(
                             await _revoke_row(service, holder)
                         state[service.key] = "old"
                     elif row is None:
-                        response = await _request(
-                            service, "DELETE", f"/credentials/{holder}?remove=true")
-                        if response.status_code >= 400:
-                            raise MintRefused("not removed")
+                        await _record_remove(holder)
                         state[service.key] = "none"
                     else:
                         was = state[service.key]
@@ -1897,62 +1969,40 @@ async def recover_replacements() -> list[dict[str, Any]]:
 
 
 async def cut_off_mind(name: str) -> dict[str, Any]:
-    """Refuse a mind's key on the gateway, the memory store and the tools.
+    """Refuse a mind's key everywhere, in one write.
 
-    One action, each service on its own: a service that cannot be reached or
-    refuses does not stop the others being cut off, and the answer says which
-    one still accepts the key. Each revocation keeps the holder's row marked
-    revoked (nothing is deleted, the key stays burned for every other mind)
-    and lands on the service's next request, so nothing is restarted. The
-    stored key lines stay, so the page can still say where the mind reads,
-    and pasting a key for the mind again brings it back. Revoking a holder
+    The key is one row in the hive's record of keys, which the gateway, the
+    memory store and the tools read on every request, so cutting it off once
+    refuses it at all three on their next request, with nothing restarted. The
+    row is kept marked revoked (the key stays burned for every other mind), the
+    stored key lines stay so the page can still say where the mind reads, and
+    pasting a key for the mind again brings it back. Cutting off a mind
     already cut off is a success. The proxy is never called here: cutting off
     inference belongs to whoever runs the proxy and is its own step.
 
-    `ok` is true only when every service answered that the holder is cut off.
+    `ok` is true only when the record says the holder is cut off.
     """
     holder = name.strip().lower()
     results: list[dict[str, Any]] = []
+    entry: dict[str, Any] = {"service": "record", "label": RECORD_LABEL}
     async with _ROTATION_LOCK:
-        for service in _one_key_services():
-            entry: dict[str, Any] = {"service": service.key, "label": service.label}
-            if service.key == "tools" and holder in TOOLS_RESERVED_HOLDERS:
+        try:
+            await _record_revoke(holder)
+            row = await _holder_row(SERVICES["comms"], holder)
+            if row is None:
                 entry.update(
-                    status="shared token",
-                    detail="the tools know this name by the shared service token, which is not cut off here")
-                results.append(entry)
-                continue
-            try:
-                response = await _request(service, "DELETE", f"/credentials/{holder}")
-                if response.status_code >= 400:
-                    entry.update(
-                        status="still accepting",
-                        detail=f"{service.label} answered {response.status_code} to the cut-off")
-                else:
-                    try:
-                        revoked = bool(response.json().get("revoked"))
-                    except (ValueError, AttributeError):
-                        revoked = False
-                    if revoked:
-                        entry.update(status="cut off")
-                    else:
-                        # Nothing was live: either already cut off, or this
-                        # service never held a key for the mind.
-                        row = await _holder_row(service, holder)
-                        if row is not None and row.get("live") is False:
-                            entry.update(status="cut off")
-                        elif row is None:
-                            entry.update(
-                                status="no key here",
-                                detail=f"{service.label} holds no key for this mind, so "
-                                       "it may reach it by another credential")
-                        else:
-                            entry.update(status="still accepting",
-                                         detail=f"{service.label} did not revoke it")
-            except Exception as exc:  # noqa: BLE001 - reported per service, the rest still runs
-                entry.update(status="unreachable", detail=str(exc)[:300] or type(exc).__name__)
-            results.append(entry)
-        if any(r["status"] == "cut off" for r in results):
+                    status="no key here",
+                    detail="the record holds no key for this mind, so it may "
+                           "reach the services by another credential")
+            elif row.get("live") is False:
+                entry.update(status="cut off")
+            else:
+                entry.update(status="still accepting",
+                             detail="the record did not take the cut-off")
+        except Exception as exc:  # noqa: BLE001 - reported
+            entry.update(status="unreachable", detail=str(exc)[:300] or type(exc).__name__)
+        results.append(entry)
+        if entry["status"] == "cut off":
             try:
                 # A replacement left unfinished must not be re-applied on the next
                 # start and quietly bring this mind back.
@@ -1963,9 +2013,6 @@ async def cut_off_mind(name: str) -> dict[str, Any]:
                     "status": "still accepting",
                     "detail": f"an unfinished key replacement could not be cleared ({exc.__class__.__name__}); "
                               "the next console start could bring this mind back"})
-    if not any(r["service"] == "tools" for r in results):
-        results.append({"service": "tools", "label": SERVICES["tools"].label,
-                        "status": "not held", "detail": "this hive has no tools configured"})
     return {
         "mind": holder,
         "ok": all(r["status"] in ("cut off", "not held") for r in results),
@@ -2027,7 +2074,7 @@ async def accept_mind_provider_token(
 
 async def unprovision_mind(name: str) -> list[str]:
     """Undo `provision_mind` for a mind whose creation failed, or a mind
-    deleted: the gateway and the memory store drop the mind's row outright
+    deleted: the record of keys drops the mind's row outright
     (a revoked row would keep the pasted key refused for every other mind),
     and the mind's three lines leave the shared env file. The proxy is sent
     nothing: its client is the person's, and was never the hive's to revoke. Returns what could not be undone, in words; empty is all
@@ -2040,37 +2087,14 @@ async def unprovision_mind(name: str) -> list[str]:
     failures: list[str] = []
     holder = name.strip().lower()
     key_journal.unmark_registered_not_stored(holder)
+    try:
+        # One row in the one record: deleting it frees the pasted key for
+        # another mind and refuses it at all three services.
+        await _record_remove(holder)
+    except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
+        failures.append(f"the record of keys could not drop {holder}'s key ({exc})")
     for service in SERVICES.values():
         keys = (one_key_variable(holder), variable_name(service, holder))
-        try:
-            # A service this console holds no admin credential for is one it
-            # cannot have issued anything at: the value there, if any, was
-            # pasted in, and is its owner's to keep.
-            response = (await _request(
-                service, "DELETE", f"/credentials/{holder}?remove=true")
-                if service.admin_token() and service.key != "proxy" else None)
-            if (response is not None and response.status_code >= 400
-                    and response.status_code != 404):
-                failures.append(
-                    f"{service.label} still accepts {holder}'s credential "
-                    f"(it answered {response.status_code} to the revocation)")
-            elif response is not None and response.status_code != 404:
-                try:
-                    answered = response.json()
-                except ValueError:
-                    answered = None
-                if not isinstance(answered, dict) or "removed" not in answered:
-                    # A service older than this console ignores the request
-                    # to remove and merely revokes, which leaves the pasted
-                    # key refused for every other mind.
-                    failures.append(
-                        f"{service.label} revoked {holder}'s credential but "
-                        "did not remove it, so the key stays refused for other "
-                        "minds; update that service")
-        except Exception as exc:  # noqa: BLE001 - reported, the rest still runs
-            failures.append(
-                f"{service.label} could not be asked to revoke {holder}'s "
-                f"credential ({exc})")
         path = ENV_FILES.get(MIND_ENV_LABEL)
         if path is None:
             continue

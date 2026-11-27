@@ -62,9 +62,9 @@ def digest_prefix(value: str) -> str:
 
 
 def _services() -> list[hc.Service]:
-    """The three services a mind is accounted on (the tools only where this hive has them)."""
-    return [s for s in hc.SERVICES.values()
-            if s.key != "proxy" and (s.key != "tools" or s.configured())]
+    """Where a mind is accounted: the one record of keys, which the gateway, the
+    memory store and the tools all read. Listed once, under the gateway."""
+    return [hc.SERVICES["comms"]]
 
 
 def _tools_applies(holder: str) -> bool:
@@ -614,9 +614,7 @@ async def move_mind(name: str) -> dict[str, Any]:
             return {
                 "mind": holder,
                 "services": [{"service": s.key, "label": s.label, "status": "moved"} for s in services]
-                            + ([] if _tools_applies(holder) or not hc.SERVICES["tools"].configured() else
-                               [{"service": "tools", "label": hc.SERVICES["tools"].label,
-                                 "status": "registered when the shared tools token is retired"}]),
+
                 "stored": f"{target.file}:{target.env_key}",
                 "compose": compose,
                 "restart_target": target.restart_target,
@@ -639,9 +637,7 @@ async def move_mind(name: str) -> dict[str, Any]:
                 try:
                     previous = old.get(service.key)
                     if previous is None:
-                        response = await hc._request(service, "DELETE", f"/credentials/{holder}?remove=true")
-                        if response.status_code >= 400:
-                            raise MintRefused("not removed")
+                        await hc._record_remove(holder)
                         state[service.key] = "none"
                     else:
                         await hc._put_key(service, holder, owner, mind_id, rows[service.key], previous)
@@ -746,15 +742,10 @@ async def undo_move(name: str) -> dict[str, Any]:
         failures: list[str] = []
         for service in services:
             try:
-                if service.key == "tools":
-                    response = await hc._request(service, "DELETE", f"/credentials/{holder}?remove=true")
-                    if response.status_code >= 400:
-                        raise MintRefused(f"{service.label} did not remove its credential")
-                else:
-                    await hc._put_key(service, holder, str(row.get("owner") or owner), mind_id,
-                                      rows[service.key], old[service.key])
-                    if hc._is_revoked(rows[service.key]):
-                        await hc._revoke_row(service, holder)
+                await hc._put_key(service, holder, str(row.get("owner") or owner), mind_id,
+                                  rows[service.key], old[service.key])
+                if hc._is_revoked(rows[service.key]):
+                    await hc._revoke_row(service, holder)
                 done.append(service.key)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{service.label}: {hc._failure_sentence(exc)}")
@@ -782,60 +773,13 @@ async def undo_move(name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def issue_tools_credential(holder: str) -> dict[str, Any]:
-    """Give a surface bot or the console a tools credential of its own, so the
-    shared token can be retired without them. A random value is registered with
-    the tools under the holder's name and written once to `TOOLS_TOKEN_<HOLDER>`
-    in the shared env file, where the consumer's compose is pointed at it (that
-    repoint is the operator's). Never returned."""
-    name = holder.strip().lower()
-    tools = hc.SERVICES["tools"]
-    if not tools.configured():
-        raise MintRefused("this hive has no tools to issue a credential on")
-    if name in await _registry():
-        raise MintRefused(f"{name} is a mind: it is moved, not issued a separate credential")
-    if name in hc.TOOLS_RESERVED_HOLDERS:
-        raise MintRefused(f"{name!r} is a name the tools keep for themselves")
-    path = hc.ENV_FILES.get(hc.MIND_ENV_LABEL)
-    if path is None or not path.is_file():
-        raise MintRefused("no shared env file to write the credential into; nothing was changed")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name):
-        raise MintRefused("a holder here is lowercase letters, digits and hyphens")
-    variable = "TOOLS_TOKEN_" + name.replace("-", "_").upper()
-    async with hc._ROTATION_LOCK:
-        if await hc._holder_row(tools, name) is not None:
-            raise MintRefused(
-                f"the tools already hold a credential for {name}; it is not replaced by this tool. "
-                "Nothing was changed")
-        if credentials_data._read_env_value(path, variable) is not None:
-            raise MintRefused(f"{variable} is already in {path}; nothing was changed")
-        value = secrets.token_urlsafe(32)
-        try:
-            await hc._put(tools, name, "", value, "service", None)
-        except hc.MintUncertain:
-            try:
-                await hc._request(tools, "DELETE", f"/credentials/{name}?remove=true")
-            except Exception:  # noqa: BLE001
-                pass
-            raise MintRefused("the tools did not answer, so whether a credential was registered is unknown; "
-                             "a removal was attempted. Check the tools' holder list before trying again") from None
-        try:
-            hc._ensure_key(path, variable)
-            with credentials_data._WRITE_LOCK:
-                written = credentials_data._write_location(path, variable, value, hc.MIND_ENV_LABEL)
-            if not written["written"] or hc._loaded_value(hc.Location(hc.MIND_ENV_LABEL, variable)) != value:
-                raise MintRefused(f"{path} did not take the credential")
-        except Exception as exc:  # noqa: BLE001 - the tools row would hold a value nobody has
-            try:
-                _line_remove(path, variable)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await hc._request(tools, "DELETE", f"/credentials/{name}?remove=true")
-            except Exception:  # noqa: BLE001
-                pass
-            raise MintRefused(f"{hc._failure_sentence(exc)}. The tools credential was taken out again.") from None
-    return {"holder": name, "variable": variable, "file": hc.MIND_ENV_LABEL,
-            "next_step": f"Point the consumer's compose at ${{{variable}}} for its tools token and recreate it."}
+    """Gone: the tools keep no key list of their own any more. They recognise a
+    key from the one record in the hive database, and a surface bot or this
+    console holds no key of its own that stands for anyone (feature 834, story
+    906); nothing is issued here."""
+    raise MintRefused(
+        "the tools register no keys of their own any more; they read the hive's one record "
+        "of keys, and a bot or this site holds no key of its own. Nothing was changed")
 
 
 # ---------------------------------------------------------------------------
@@ -883,7 +827,6 @@ async def retire() -> dict[str, Any]:
     touched. Repeating it is safe. Afterwards each moved mind's key is read
     back from every service, and each old value that can be read is probed:
     the result says which still answer."""
-    tools = hc.SERVICES["tools"]
     registry = await _registry()
     old_values: list[tuple[hc.Service, str, str]] = []
     removed: list[str] = []
@@ -901,18 +844,11 @@ async def retire() -> dict[str, Any]:
                     value = hc._loaded_value(location)
                     if value:
                         old_values.append((service, name, value))
-        shared_value = None
         # Before the first irreversible step, whether or not the tools are
         # configured: once the marker exists no undo can bring an old value back,
         # whatever fails after this. A marker that already existed (a repeat) is
         # never taken away.
         existed = _retired_marker().exists()
-        # Defence in depth: the readiness report above already refuses when the tools
-        # cannot be asked, so this is not reachable today and has no test.
-        if tools.configured() and not tools.admin_token():
-            raise MintRefused(
-                f"this console holds no {tools.admin_env}, so it cannot retire the shared "
-                "tools token; nothing was retired")
         try:
             key_journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
             _retired_marker().write_text("retired\n")
@@ -922,38 +858,6 @@ async def retire() -> dict[str, Any]:
             raise MintRefused(
                 f"the record that retirement happened could not be written "
                 f"({exc.strerror or exc}); nothing was retired") from None
-        if tools.configured():
-            import os
-            import httpx
-            shared_value = os.environ.get("HIVE_TOOLS_TOKEN") or None
-            try:
-                retired = await hc._request(tools, "POST", "/credentials/shared-token/retire")
-            except Exception as exc:
-                # Only a request that was never sent proves nothing was retired.
-                # A timeout may have landed, so the marker stays and undo stays closed.
-                if not existed and isinstance(exc.__cause__, httpx.ConnectError):
-                    _retired_marker().unlink(missing_ok=True)
-                raise
-            if retired.status_code != 200:
-                if not existed and 400 <= retired.status_code < 500 and retired.status_code != 408:
-                    _retired_marker().unlink(missing_ok=True)  # a clean refusal: nothing retired
-                raise MintRefused(
-                    f"the tools did not retire the shared token (they answered {retired.status_code}); "
-                    "the old mind keys were left as they were"
-                    + ("" if 400 <= retired.status_code < 500 and retired.status_code != 408 else
-                       ", but the tools may have retired it before failing, so undo stays closed; "
-                       "check the tools and run retire again"))
-            holder = SHARED_HOLDER
-            if holder in registry:
-                location = _stored(holder)
-                value = hc._loaded_value(location) if location else None
-                if not value:
-                    raise MintRefused(
-                        "the shared tools token was retired but the stored key of the mind that held "
-                        "its name could not be read; register it by hand")
-                row = await hc._holder_row(tools, holder)
-                await hc._put_key(tools, holder, str(registry[holder].get("owner") or ""),
-                                  str(registry[holder].get("mind_id") or ""), row, value)
         compose_text = _compose_texts()
         for name in sorted(registry):
             for service in (hc.SERVICES["comms"], hc.SERVICES["lucent"]):
@@ -991,8 +895,6 @@ async def retire() -> dict[str, Any]:
         if await hc._accepts(service, value) is True:
             still.append(f"{name} on {service.label}")
     shared_answer = None
-    if shared_value and tools.configured():
-        shared_answer = await hc._accepts(tools, shared_value)
     keys_ok: list[str] = []
     for name in sorted(registry):
         location = _stored(name)
@@ -1008,8 +910,7 @@ async def retire() -> dict[str, Any]:
         "retired": True,
         "old_lines_removed": removed,
         "old_lines_kept_because_a_compose_file_reads_them": kept,
-        "shared_tools_token": ("refused on the next request" if shared_answer is False else
-                               "still accepted" if shared_answer else "not checked here"),
+        "shared_tools_token": "the tools keep no key list of their own; the old rows were emptied by the schema step",
         "old_values_still_accepted": still,
         "moved_minds": keys_ok,
         "warning": RETIREMENT_WARNING + " " + REPOINT_NOTE,

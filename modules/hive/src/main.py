@@ -5940,8 +5940,10 @@ async def api_settings_credentials(user: dict = Depends(require_auth)):
     # the moment the service it answers to comes up.
     holders: list[dict] = []
     holder_errors: dict[str, str] = {}
+    # The gateway, the memory store and the tools read one record of keys, so
+    # it is listed once (under the gateway), not three times.
     services = [s for s in holder_credentials.SERVICES.values()
-                if s.key != "tools" or s.configured()]
+                if s.key in ("comms", "proxy")]
     # Together, not one after the other: two services that hang would
     # otherwise hold the page for the sum of their timeouts.
     answers = await asyncio.gather(
@@ -6700,14 +6702,12 @@ async def api_hive_errors(user: dict = Depends(require_auth)):
     del user
     targets = []
     withheld = []
-    # The gateway is asked with the signed-in administrator's own key (story
-    # 905). The memory store keeps its own administrator credential: flagged
-    # on the feature row as the memory store's own story.
+    # The gateway and the memory store are asked with the signed-in
+    # administrator's own key (stories 905, 906).
     gateway_headers = await _person_headers_or_none()
     for name, url, headers in [
         ("Hive Comms", _gateway_base_url(), gateway_headers),
-        ("Lucent", _lucent_base_url(),
-         {"Authorization": f"Bearer {os.getenv('LUCENT_ADMIN_BEARER_TOKEN', '')}"}),
+        ("Lucent", _lucent_base_url(), gateway_headers),
     ]:
         targets.append({"name": name, "url": url, "headers": headers})
     # A failed registry read must stay visible rather than reporting zero minds.
