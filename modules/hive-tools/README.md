@@ -143,10 +143,8 @@ phones.
 
 ### Security notes
 
-- **Set `HT_SECRET_KEY` and `HT_ADMIN_PASSWORD` before first boot.** Both have
-  insecure fallbacks in code (`change-this-in-production`, `changeme`), and the
-  first boot seeds an `admin` user from the latter. Leaving them unset gives you
-  a deployment whose admin credential is published in this README.
+- This service has no pages or sign-in of its own (no `HT_SECRET_KEY`, no
+  `HT_ADMIN_PASSWORD`): a person acts with their own key from the hive site.
 - `credentials/` and `data/` are ignored wholesale, not by file extension —
   OAuth tokens and service-account JSON never enter git.
 - The Docker socket is mounted for the `docker_ops` router. That is root-

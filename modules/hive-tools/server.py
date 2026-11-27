@@ -2,24 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
 import auth_api
 from auth_api import require_api_token, require_approver
-from auth_session import (
-    create_user,
-    get_current_user_from_request,
-    set_session_cookie,
-    verify_user_credentials,
-)
 import store
-from config import BASE_DIR
 from hitl import (
     HITLPendingException,
     UncapturableCall,
@@ -37,21 +28,11 @@ from tools.docker_ops import BlockedProjectError
 
 log = configure_logging("hive-tools")
 
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
 #: How long shutdown waits for replays in flight before recording each one
 #: still running as cut off. Inside the container's stop grace period
 #: (`stop_grace_period` in docker-compose.yml), with room left to record
 #: and send those outcomes.
 REPLAY_SETTLE_SECONDS = 10
-
-
-def _already_seeded(exc: BaseException) -> bool:
-    """Whether a failed admin seed failed because the admin already exists."""
-    from hive_data.errors import Conflict
-
-    return any(isinstance(cause, Conflict)
-               for cause in (exc, exc.__cause__, exc.__context__))
 
 
 def create_app() -> FastAPI:
@@ -77,25 +58,6 @@ def create_app() -> FastAPI:
         # anything below can read an empty store and seed it.
         await store.open()
         log.info("hive-tools store: postgres")
-
-        if await store.count_users() == 0:
-            import os
-
-            bootstrap_password = os.getenv("HT_ADMIN_PASSWORD", "changeme")
-            try:
-                await create_user("admin", bootstrap_password, is_admin=True)
-            except Exception as exc:
-                # A read, a check and a write. The database is shared now, so
-                # an overlapping redeploy or a second process on this schema
-                # can seed between the two - and a uniqueness conflict raised
-                # here is a crash loop rather than a boot, over a user that
-                # exists. Anything else still raises.
-                if not _already_seeded(exc):
-                    raise
-                log.info("Admin user was already seeded by another process")
-            else:
-                log.info("Admin user seeded from HT_ADMIN_PASSWORD (env var "
-                         "no longer needed after this boot)")
 
         await seed_default_hitl_settings()
 
@@ -140,28 +102,6 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
-
-    # ---- Login ----
-    @app.get("/login", response_class=HTMLResponse)
-    async def login_page(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request, "login.html")
-
-    @app.post("/login")
-    async def login_submit(
-        request: Request,
-        username: str = Form(...),
-        password: str = Form(...),
-    ) -> Any:
-        user = await verify_user_credentials(username, password)
-        if not user:
-            log_event(log, "tools.login.rejected", level=logging.WARNING, username=username)
-            return JSONResponse(
-                {"detail": "Invalid credentials"}, status_code=401
-            )
-        response = RedirectResponse(url="/", status_code=303)
-        set_session_cookie(response, user)
-        log_event(log, "tools.login.succeeded", username=username)
-        return response
 
     # ---- HITL polling endpoints ----
     @app.get("/hitl/{request_id}")
@@ -214,16 +154,6 @@ def create_app() -> FastAPI:
             schedule_replay(request_id, result["tool_name"],
                             result["caller_mind"], replay)
         return JSONResponse(result, status_code=200)
-
-    # ---- Dashboard (requires session auth) ----
-    @app.get("/")
-    async def dashboard(request: Request) -> Any:
-        user = await get_current_user_from_request(request)
-        if not user:
-            return RedirectResponse(url="/login", status_code=303)
-        return templates.TemplateResponse(
-            request, "dashboard.html", {"user": user}
-        )
 
     # Exception handlers
     @app.exception_handler(HITLPendingException)
@@ -328,14 +258,6 @@ def create_app() -> FastAPI:
         from tools.schema import router as schema_router
 
         app.include_router(schema_router)
-    except ImportError:
-        pass
-
-    # Include UI router
-    try:
-        from ui import router as ui_router
-
-        app.include_router(ui_router)
     except ImportError:
         pass
 

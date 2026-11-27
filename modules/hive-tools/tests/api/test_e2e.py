@@ -210,7 +210,6 @@ def test_all_tool_routes_registered(app: FastAPI) -> None:
 
     expected_paths = [
         "/health",
-        "/login",
         "/hitl/{request_id}",
         "/hitl/{request_id}/respond",
         "/calendar/events",
@@ -230,7 +229,6 @@ def test_all_tool_routes_registered(app: FastAPI) -> None:
         "/docker/status",
         "/docker/containers",
         "/docker/networks",
-        "/tools",
     ]
 
     for path in expected_paths:

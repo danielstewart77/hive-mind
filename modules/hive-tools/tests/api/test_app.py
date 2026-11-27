@@ -45,9 +45,8 @@ def test_starting_the_app_opens_its_store(app: FastAPI) -> None:
         run(store.count_users())
 
     with TestClient(app):
-        # The bootstrap admin is seeded at start, so a read answering at all
-        # is the store being open and a count of one is the seed having run.
-        assert run(store.count_users()) == 1
+        # A read answering at all is the store being open.
+        assert run(store.count_users()) == 0
 
     with pytest.raises(RuntimeError):
         run(store.count_users())

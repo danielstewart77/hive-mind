@@ -1,8 +1,5 @@
 fastapi
 uvicorn[standard]
-jinja2
-itsdangerous
-bcrypt
 aiohttp
 httpx
 google-api-python-client
