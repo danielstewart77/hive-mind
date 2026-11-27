@@ -54,24 +54,6 @@ def test_a_request_is_decided_once_and_hands_back_its_call() -> None:
     assert stale["status"] == "pending"
 
 
-def test_a_token_is_revoked_once() -> None:
-    """The count is the arbitration, and it is the thing a caller branches
-    on - getting it wrong is a revocation reported as a repeat, or the other
-    way round."""
-    async def sequence() -> list[Any]:
-        at = 1_800_000_000
-        await store.create_token("console", "digest-one", at)
-        token = await store.live_token("digest-one")
-        first = await store.revoke_token(token["id"], at + 1)
-        second = await store.revoke_token(token["id"], at + 2)
-        return [token["name"], first, second,
-                await store.live_token("digest-one"),
-                await store.revoke_token(9999, at + 3)]
-
-    answered = run(sequence())
-    assert answered == ["console", 1, 0, None, 0]
-
-
 def test_seeding_a_mode_never_replaces_one() -> None:
     """Insert-if-absent, and the count is which tools were new. A replacing
     write re-arms every approval gate the operator

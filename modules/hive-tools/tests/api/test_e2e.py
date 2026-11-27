@@ -12,7 +12,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from auth_api import generate_approver_token, generate_token
+from auth_api import generate_approver_token
+from tests.scratch import generate_token
 from tests.scratch import db, run
 
 
@@ -230,7 +231,6 @@ def test_all_tool_routes_registered(app: FastAPI) -> None:
         "/docker/containers",
         "/docker/networks",
         "/tools",
-        "/tokens",
     ]
 
     for path in expected_paths:

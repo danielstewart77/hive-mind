@@ -219,3 +219,21 @@ class RawSQL:
 
 
 db = RawSQL()
+
+
+async def generate_token(name: str) -> str:
+    """Record a key for the mind `name` in the one record of keys, as the hive
+    site does, and return it. The tools read it from there on each request."""
+    import secrets
+    import time
+
+    from hive_data import access, core
+
+    raw = secrets.token_urlsafe(32)
+    registered = await core.get_mind_by_id_or_name(name)
+    owner = str(registered["owner"] or "") if registered else ""
+    await core.upsert_credential(
+        holder=name.strip().lower(), username=owner or name.strip().lower(),
+        role="mind", token_sha=access.digest(raw), created_at=time.time(),
+        revoked_at=None)
+    return raw

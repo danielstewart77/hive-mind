@@ -25,7 +25,7 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from auth_api import require_api_token
@@ -67,28 +67,34 @@ class RequestNewTypeBody(BaseModel):
 # ---- Lucent admin call ----
 
 
-def _lucent_admin_call(path: str, body: dict[str, Any]) -> dict[str, Any]:
-    """POST to a bearer-gated lucent admin endpoint.
+def _calling_key(request: Request) -> str:
+    """The key of the mind that made this call, as it was presented."""
+    header = request.headers.get("Authorization", "")
+    return header[7:].strip() if header.startswith("Bearer ") else ""
 
-    `LUCENT_URL` and `LUCENT_ADMIN_BEARER_TOKEN` are read from env at call
-    time, not at import — keeps the failure mode honest (returns a clean
-    error dict instead of crashing the import).
+
+def _lucent_admin_call(path: str, body: dict[str, Any], key: str) -> dict[str, Any]:
+    """POST to a lucent administrator endpoint with the calling mind's own key.
+
+    The tools hold no credential of their own, so this carries the key of the
+    mind that asked and nothing else. The memory store accepts these routes
+    only for an administrator's own person key, so a mind's key is refused
+    there. A replay of an approved call arrives with the tools' internal
+    secret and no mind's key at all; then nothing is sent.
     """
     lucent_url = os.environ.get("LUCENT_URL", "http://hive-lucent:8424")
-    admin_token = os.environ.get("LUCENT_ADMIN_BEARER_TOKEN", "")
-
-    if not admin_token:
+    if not key:
         return {
             "ok": False,
-            "code": "admin_token_unset",
-            "detail": "LUCENT_ADMIN_BEARER_TOKEN is not set in hive-tools env",
+            "code": "no_calling_key",
+            "detail": "this call has no calling mind's key to carry to the memory store",
         }
 
     try:
         resp = httpx.post(
             f"{lucent_url}{path}",
             json=body,
-            headers={"Authorization": f"Bearer {admin_token}"},
+            headers={"Authorization": f"Bearer {key}"},
             timeout=30.0,
         )
         if resp.status_code != 200:
@@ -109,6 +115,7 @@ def _lucent_admin_call(path: str, body: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/request-new-type")
 async def request_new_type(
+    request: Request,
     body: RequestNewTypeBody,
     caller_mind: str = Depends(hitl_gate("schema_new_type")),
 ) -> Any:
@@ -132,6 +139,7 @@ async def request_new_type(
                 "kind": body.node_class,
                 "property_schema": body.schema_def,
             },
+            _calling_key(request),
         )
 
     if body.kind == "edge":
@@ -150,6 +158,7 @@ async def request_new_type(
                 "attr_schema": body.schema_def,
                 "symmetric": body.symmetric,
             },
+            _calling_key(request),
         )
 
     return {

@@ -207,33 +207,6 @@ async def record_token_use(token_id: int, at: int) -> None:
     await tools.record_token_use(token_id, at, unit=_live())
 
 
-async def tokens() -> list[Row]:
-    """Every token, newest first, and never the digests."""
-    return await tools.tokens(unit=_live())
-
-
-async def register_token(name: str, token_hash: str, created_at: int) -> None:
-    """Make a supplied digest the holder's one live credential.
-
-    Raises `hive_data.Conflict` naming the holder when another holder has the
-    digest, live or revoked."""
-    await tools.register_token(name, token_hash, created_at, unit=_live())
-
-
-async def holder_tokens() -> list[Row]:
-    """One row per holder, never a digest."""
-    return await tools.holder_tokens(unit=_live())
-
-
-async def revoke_holder_tokens(name: str, at: int) -> int:
-    return int((await tools.revoke_holder_tokens(name, at,
-                                                 unit=_live()))["rows"])
-
-
-async def remove_holder_tokens(name: str) -> int:
-    return int((await tools.remove_holder_tokens(name, unit=_live()))["rows"])
-
-
 async def expire_pending_requests(caller_mind: str, now: int) -> int:
     return int((await tools.expire_pending_requests(caller_mind, now,
                                                     unit=_live()))["rows"])
@@ -243,21 +216,10 @@ async def clear_sudo_grants(caller_mind: str) -> int:
     return int((await tools.clear_sudo_grants(caller_mind, unit=_live()))["rows"])
 
 
-async def hold_holder(name: str) -> None:
-    """Serialize against a register for the same holder."""
-    await _live().hold(f"tools:token:{name}")
-
-
 async def mind_names() -> set[str]:
     """Every registered mind's name, lowercased."""
     return {str(row["name"] or "").strip().lower()
             for row in await core.list_minds(unit=_live())}
-
-
-async def revoke_token(token_id: int, at: int) -> int:
-    """Revoke a token if it is not revoked already, reporting what changed."""
-    return int((await tools.revoke_token(token_id, at,
-                                         unit=_live()))["rows"])
 
 
 # ----------------------------------------------------------------- settings

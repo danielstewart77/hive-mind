@@ -11,7 +11,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import store
-from auth_api import generate_token, list_tokens, revoke_token
 from auth_session import get_current_user_from_request
 from config import BASE_DIR
 from hitl import (
@@ -73,59 +72,6 @@ async def tools_settings_save(
 
     await store.set_setting(tool_name, mode, sudo_timeout_minutes)
     return RedirectResponse(url="/tools", status_code=303)
-
-
-# ---- Tokens ----
-
-
-@router.get("/tokens", response_class=HTMLResponse)
-async def tokens_page(request: Request) -> Any:
-    user = await get_current_user_from_request(request)
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-
-    tokens = await list_tokens()
-    return templates.TemplateResponse(
-        request, "tokens.html",
-        {"user": user, "tokens": tokens,
-         "notice": request.query_params.get("notice") or ""})
-
-
-@router.post("/tokens/create", response_class=HTMLResponse)
-async def tokens_create(
-    request: Request,
-    name: str = Form(...),
-) -> Any:
-    user = await get_current_user_from_request(request)
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-
-    raw_token = await generate_token(name)
-    tokens = await list_tokens()
-    return templates.TemplateResponse(
-        request,
-        "tokens.html",
-        {"user": user, "tokens": tokens, "new_token": raw_token, "new_token_name": name},
-    )
-
-
-@router.post("/tokens/{token_id}/revoke")
-async def tokens_revoke(
-    request: Request,
-    token_id: int,
-) -> Any:
-    user = await get_current_user_from_request(request)
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-
-    # The count, which the revocation was changed to report and this route
-    # used to throw away - so the operator could not tell a revocation they
-    # performed from one they merely repeated.
-    revoked = await revoke_token(token_id)
-    notice = ("Token revoked." if revoked
-              else "That token was already revoked; nothing changed.")
-    return RedirectResponse(
-        url=f"/tokens?notice={urllib.parse.quote(notice)}", status_code=303)
 
 
 # ---- HITL UI ----

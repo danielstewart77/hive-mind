@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from auth_api import generate_token
+from tests.scratch import generate_token
 from tests.scratch import db, run
 
 

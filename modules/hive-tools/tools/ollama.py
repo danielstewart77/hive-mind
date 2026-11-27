@@ -3,7 +3,7 @@
 Three endpoints, model-agnostic. Their paths still say `ollama` because every
 mind's capture hook and remember skill calls them by that name; what answers
 them is the inference proxy named by `INFERENCE_PROXY_URL`, authenticated
-with `INFERENCE_PROXY_KEY` — the same path every other mind and service
+with the calling mind's own key — the same path every other mind and service
 takes. Nothing here calls Ollama, and there is no fallback to it.
 
 - POST /ollama/structured — structured output. The caller's JSON schema goes
@@ -28,7 +28,7 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from auth_api import require_api_token
@@ -64,20 +64,33 @@ def _unset(*names: str) -> HTTPException:
     )
 
 
-def _proxy() -> tuple[str, str]:
-    """(proxy root, key), read when the call is made.
+def _proxy() -> str:
+    """The proxy's root, read when the call is made.
 
     A trailing `/v1` on the address is dropped so either spelling addresses
-    `/v1/...` once.
+    `/v1/...` once. The tools hold no proxy key of their own: every call
+    carries the key of the mind that made it (`_calling_key`).
     """
     root = os.environ.get("INFERENCE_PROXY_URL", "").strip().rstrip("/")
     if root.endswith("/v1"):
         root = root[: -len("/v1")]
-    key = os.environ.get("INFERENCE_PROXY_KEY", "").strip()
-    missing = [n for n, v in (("INFERENCE_PROXY_URL", root), ("INFERENCE_PROXY_KEY", key)) if not v]
-    if missing:
-        raise _unset(*missing)
-    return root, key
+    if not root:
+        raise _unset("INFERENCE_PROXY_URL")
+    return root
+
+
+def _calling_key(request: Request) -> str:
+    """The calling mind's own key, which is its proxy key. A replay of an
+    approved call carries no mind's key (it arrives under the tools' internal
+    secret), and then there is nothing to send: refused, never a key of the
+    tools' own."""
+    header = request.headers.get("Authorization", "")
+    key = header[7:].strip() if header.startswith("Bearer ") else ""
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="this call carries no calling mind's key, so the proxy was not asked")
+    return key
 
 
 def _model(asked: str | None) -> str:
@@ -99,7 +112,7 @@ def _refused(resp: httpx.Response) -> HTTPException:
     if resp.status_code in (401, 403):
         return HTTPException(
             status_code=503,
-            detail=f"a credential was refused ({resp.status_code}): hive-tools' proxy key, "
+            detail=f"a credential was refused ({resp.status_code}): the calling mind's key, "
                    f"or the proxy's key for the model's provider: {detail}",
         )
     return HTTPException(
@@ -108,8 +121,8 @@ def _refused(resp: httpx.Response) -> HTTPException:
     )
 
 
-async def _send(method: str, path: str, *, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
-    root, key = _proxy()
+async def _send(method: str, path: str, key: str, *, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+    root = _proxy()
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
             resp = await client.request(
@@ -130,7 +143,7 @@ async def _send(method: str, path: str, *, json_body: dict[str, Any] | None = No
 
 
 async def _complete(
-    *, model: str, prompt: str, system: str | None, schema: dict[str, Any] | None
+    key: str, *, model: str, prompt: str, system: str | None, schema: dict[str, Any] | None
 ) -> str:
     """One chat completion through the proxy; the answer's text, or "" when it has none."""
     messages: list[dict[str, str]] = []
@@ -145,7 +158,7 @@ async def _complete(
             "type": "json_schema",
             "json_schema": {"name": "response", "strict": False, "schema": schema},
         }
-    payload = await _send("POST", "/v1/chat/completions", json_body=body)
+    payload = await _send("POST", "/v1/chat/completions", key, json_body=body)
     try:
         content = payload["choices"][0]["message"].get("content")
     except (KeyError, IndexError, TypeError, AttributeError):
@@ -155,6 +168,7 @@ async def _complete(
 
 @router.post("/structured")
 async def structured(
+    request: Request,
     body: StructuredRequest,
     caller: str = Depends(hitl_gate("ollama_structured")),
 ) -> dict[str, Any]:
@@ -167,7 +181,7 @@ async def structured(
     del caller
     _proxy()  # an unset proxy is named before an unset default model
     raw = await _complete(
-        model=_model(body.model), prompt=body.prompt, system=body.system, schema=body.json_schema
+        _calling_key(request), model=_model(body.model), prompt=body.prompt, system=body.system, schema=body.json_schema
     )
     try:
         parsed = json.loads(raw)
@@ -181,18 +195,19 @@ async def structured(
 
 @router.post("/chat")
 async def chat(
+    request: Request,
     body: ChatRequest,
     caller: str = Depends(hitl_gate("ollama_chat")),
 ) -> dict[str, str]:
     """Plain-text generation. Returns `{"response": "<text>"}`."""
     del caller
     _proxy()  # an unset proxy is named before an unset default model
-    text = await _complete(model=_model(body.model), prompt=body.prompt, system=body.system, schema=None)
+    text = await _complete(_calling_key(request), model=_model(body.model), prompt=body.prompt, system=body.system, schema=None)
     return {"response": text}
 
 
 @router.get("/models")
-async def models(caller: str = Depends(require_api_token)) -> dict[str, Any]:
+async def models(request: Request, caller: str = Depends(require_api_token)) -> dict[str, Any]:
     """The chat models the inference proxy offers hive-tools' key.
 
     Read-only metadata; no HITL gate. Wraps the proxy's
@@ -206,8 +221,8 @@ async def models(caller: str = Depends(require_api_token)) -> dict[str, Any]:
         }
     """
     del caller
-    root, _ = _proxy()
-    payload = await _send("GET", "/v1/models?purpose=chat")
+    root = _proxy()
+    payload = await _send("GET", "/v1/models?purpose=chat", _calling_key(request))
     listed = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(listed, list):
         raise HTTPException(status_code=502, detail="inference proxy answered no model list")

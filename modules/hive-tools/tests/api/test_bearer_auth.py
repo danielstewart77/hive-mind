@@ -13,7 +13,8 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 import store
-from auth_api import generate_token, require_api_token
+from auth_api import require_api_token
+from tests.scratch import generate_token
 from tests.scratch import run
 
 

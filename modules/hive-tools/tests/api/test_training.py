@@ -41,7 +41,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_headers(client: TestClient) -> dict[str, str]:
-    from auth_api import generate_token
+    from tests.scratch import generate_token
 
     raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}

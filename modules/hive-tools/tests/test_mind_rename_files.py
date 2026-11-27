@@ -106,7 +106,8 @@ def test_rename_waits_for_approval_then_replays_the_selected_project_and_require
     """P2: real API/replay cannot bypass approval or the safe-turn boundary."""
     import httpx
     import hitl
-    from auth_api import generate_approver_token, generate_token
+    from auth_api import generate_approver_token
+    from tests.scratch import generate_token
     from fastapi.testclient import TestClient
     from server import create_app
     from tests.scratch import run

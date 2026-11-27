@@ -2,7 +2,7 @@
 
 `/ollama/structured`, `/ollama/chat` and `/ollama/models` keep their paths
 because every mind's capture hook calls them; what answers is the proxy named
-by `INFERENCE_PROXY_URL`, authenticated with `INFERENCE_PROXY_KEY`. The only
+by `INFERENCE_PROXY_URL`, authenticated with the calling mind's own key. The only
 stub is the HTTP transport — the point where the process stops being ours —
 and it answers in the proxy's OpenAI shape.
 """
@@ -20,7 +20,6 @@ from fastapi.testclient import TestClient
 from tests.scratch import run
 
 PROXY = "http://proxy.invalid:8899"
-KEY = "hive-tools-proxy-key"
 
 
 @pytest.fixture()
@@ -41,7 +40,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_headers(app: FastAPI) -> dict[str, str]:
-    from auth_api import generate_token
+    from tests.scratch import generate_token
 
     raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
@@ -74,7 +73,6 @@ def proxy(monkeypatch: pytest.MonkeyPatch) -> _Proxy:
     import tools.ollama as module
 
     monkeypatch.setenv("INFERENCE_PROXY_URL", PROXY + "/v1")
-    monkeypatch.setenv("INFERENCE_PROXY_KEY", KEY)
     monkeypatch.setenv("HIVE_TOOLS_DEFAULT_MODEL", "model-of-record")
     wire = _Proxy()
     real = httpx.AsyncClient
@@ -99,7 +97,7 @@ def test_a_structured_call_is_answered_by_the_proxy_with_the_key_and_schema(
     assert resp.json() == {"yes": True}
     (sent,) = proxy.sent
     assert str(sent.url) == f"{PROXY}/v1/chat/completions"
-    assert sent.headers["Authorization"] == f"Bearer {KEY}"
+    assert sent.headers["Authorization"] == auth_headers["Authorization"]
     (body,) = proxy.bodies()
     assert body["model"] == "model-of-record"
     assert body["messages"] == [{"role": "system", "content": "be brief"},
@@ -122,7 +120,7 @@ def test_a_chat_call_returns_the_proxys_text_for_the_model_the_caller_named(
     assert body["model"] == "caller-model"
     assert body["messages"] == [{"role": "user", "content": "hi"}]
     assert "response_format" not in body
-    assert proxy.sent[0].headers["Authorization"] == f"Bearer {KEY}"
+    assert proxy.sent[0].headers["Authorization"] == auth_headers["Authorization"]
 
 
 def test_a_structured_call_goes_to_the_model_the_caller_named(
@@ -167,7 +165,7 @@ def test_the_model_list_is_the_proxys_chat_listing(
     (sent,) = proxy.sent
     assert sent.url.path == "/v1/models"
     assert sent.url.params["purpose"] == "chat"
-    assert sent.headers["Authorization"] == f"Bearer {KEY}"
+    assert sent.headers["Authorization"] == auth_headers["Authorization"]
 
 
 _CALLS = {
@@ -185,7 +183,7 @@ def _call(client: TestClient, headers: dict[str, str], route: str):
 @pytest.mark.parametrize(("route", "unset"), [
     (route, unset)
     for route in _CALLS
-    for unset in ("INFERENCE_PROXY_URL", "INFERENCE_PROXY_KEY", "HIVE_TOOLS_DEFAULT_MODEL")
+    for unset in ("INFERENCE_PROXY_URL", "HIVE_TOOLS_DEFAULT_MODEL")
     if not (route == "models" and unset == "HIVE_TOOLS_DEFAULT_MODEL")
 ])
 def test_an_unconfigured_proxy_is_named_and_nothing_is_sent(
@@ -232,7 +230,6 @@ def test_an_unreachable_proxy_is_a_502(
     import tools.ollama as module
 
     monkeypatch.setenv("INFERENCE_PROXY_URL", PROXY)
-    monkeypatch.setenv("INFERENCE_PROXY_KEY", KEY)
     real = httpx.AsyncClient
 
     def refused(request: httpx.Request) -> httpx.Response:

@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from auth_api import generate_token
+from tests.scratch import generate_token
 from auth_session import create_session_token, create_user
 from tests.scratch import db, run
 
@@ -74,41 +74,6 @@ def test_tools_page_save_updates_hitl_mode(
     ).fetchone()
     assert row is not None
     assert row["mode"] == "on"
-
-
-def test_tokens_page_lists_tokens(app: FastAPI, authed_client: TestClient) -> None:
-    run(generate_token("ada"))
-    resp = authed_client.get("/tokens")
-    assert resp.status_code == 200
-    assert "ada" in resp.text
-
-
-def test_tokens_create_shows_raw_token_once(authed_client: TestClient) -> None:
-    resp = authed_client.post(
-        "/tokens/create",
-        data={"name": "bob"},
-    )
-    assert resp.status_code == 200
-    # The raw token should be displayed in the response
-    assert "bob" in resp.text
-
-
-def test_tokens_revoke_sets_revoked_at(
-    app: FastAPI, authed_client: TestClient
-) -> None:
-    run(generate_token("ada"))
-    row = db.execute(
-        "SELECT id FROM api_tokens WHERE name = ?", ("ada",)
-    ).fetchone()
-    token_id = row["id"]
-
-    resp = authed_client.post(f"/tokens/{token_id}/revoke")
-    assert resp.status_code in (200, 302, 303)
-
-    row = db.execute(
-        "SELECT revoked_at FROM api_tokens WHERE id = ?", (token_id,)
-    ).fetchone()
-    assert row["revoked_at"] is not None
 
 
 def test_hitl_page_lists_pending_requests(
@@ -217,22 +182,3 @@ def test_deciding_a_settled_request_says_who_got_there_first(
                               data={"action": "approve"})
     followed = authed_client.get(resp.headers["location"]).text
     assert "already denied" in followed
-
-
-def test_revoking_a_token_twice_says_nothing_changed(
-    app: FastAPI, authed_client: TestClient
-) -> None:
-    """The count the revocation reports, which this route used to throw
-    away - so the operator could not tell a revocation they performed from
-    one they merely repeated."""
-    run(generate_token("ada"))
-    token_id = db.execute(
-        "SELECT id FROM api_tokens WHERE name = 'ada'").fetchone()["id"]
-
-    first = authed_client.post(f"/tokens/{token_id}/revoke")
-    assert "Token revoked." in authed_client.get(
-        first.headers["location"]).text
-
-    again = authed_client.post(f"/tokens/{token_id}/revoke")
-    assert "already revoked" in authed_client.get(
-        again.headers["location"]).text

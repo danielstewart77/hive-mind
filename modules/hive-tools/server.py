@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import auth_api
-from auth_api import require_admin_bearer, require_api_token, require_approver
+from auth_api import require_api_token, require_approver
 from auth_session import (
     create_user,
     get_current_user_from_request,
@@ -32,7 +32,7 @@ from hitl import (
     sync_tool_registry,
 )
 from hive_logging import configure_logging, install_fastapi_logging, log_event
-from schemas import CredentialRequest, HITLRespondRequest
+from schemas import HITLRespondRequest
 from tools.docker_ops import BlockedProjectError
 
 log = configure_logging("hive-tools")
@@ -162,33 +162,6 @@ def create_app() -> FastAPI:
         set_session_cookie(response, user)
         log_event(log, "tools.login.succeeded", username=username)
         return response
-
-    # ---- Credential routes (the console's, behind the admin bearer) ----
-    @app.put("/credentials/{holder}", dependencies=[Depends(require_admin_bearer)])
-    async def put_holder_credential(holder: str, body: CredentialRequest) -> Any:
-        """Register the value the person supplied as this holder's one key."""
-        try:
-            return await auth_api.register_credential(holder, body.token)
-        except auth_api.CredentialRefused as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-
-    @app.delete("/credentials/{holder}", dependencies=[Depends(require_admin_bearer)])
-    async def delete_holder_credential(holder: str, remove: bool = False) -> Any:
-        """Cut one holder off; `remove=true` also frees its value."""
-        try:
-            return await auth_api.revoke_credential(holder, remove=remove)
-        except auth_api.CredentialRefused as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-
-    @app.post("/credentials/shared-token/retire", dependencies=[Depends(require_admin_bearer)])
-    async def retire_shared_service_token() -> Any:
-        """Revoke the shared service token (story 884); every other holder stands."""
-        return await auth_api.retire_shared_token()
-
-    @app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
-    async def list_holder_credentials() -> Any:
-        """Which holders have a credential and whether it is live. Never a value."""
-        return await auth_api.list_credentials()
 
     # ---- HITL polling endpoints ----
     @app.get("/hitl/{request_id}")

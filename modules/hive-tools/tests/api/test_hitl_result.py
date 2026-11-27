@@ -19,7 +19,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hitl
-from auth_api import generate_approver_token, generate_token
+from auth_api import generate_approver_token
+from tests.scratch import generate_token
 from tests.scratch import run
 
 ADA_ID = "565e5a66-d20c-4266-872a-3268c4c894fc"
