@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from fastapi import HTTPException
 
 import credentials_data
 
@@ -637,19 +638,22 @@ async def check_mind(credential: str, holder: str, gateway_url: str) -> _Checked
             detail="registered with no gateway URL",
         )
     try:
-        from mind_runtime import admin_headers
+        import mind_runtime
 
-        headers = await admin_headers(base)
-    except Exception as exc:  # noqa: BLE001
-        # No admin token on this console. That is this console's problem, not
-        # the holder's, and must not read as a mind that is down.
+        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
+            response = await mind_runtime.send(client, "GET", f"{base}{spec.route}")
+    except HTTPException as exc:
+        if exc.status_code in (502, 504) and "could not be reached" in str(exc.detail):
+            return remember(
+                credential, holder, status=UNREACHABLE,
+                detail=f"the mind could not be reached: {exc.detail}",
+            )
+        # The request was not sent, or the gateway refused it: that is this
+        # console's or the person's standing, not the mind's state.
         return remember(
             credential, holder, status=UNDETERMINED,
-            detail=f"this console cannot authenticate to minds: {exc}",
+            detail=f"this console could not ask the mind through the gateway: {exc.detail}",
         )
-    try:
-        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_S) as client:
-            response = await client.get(f"{base}{spec.route}", headers=headers)
     except httpx.HTTPError as exc:
         return remember(
             credential, holder, status=UNREACHABLE,

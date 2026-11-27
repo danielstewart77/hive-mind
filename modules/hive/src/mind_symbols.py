@@ -15,13 +15,12 @@ import httpx
 from fastapi import HTTPException
 
 import mind_runtime
-from mind_runtime import admin_headers
 
 _TIMEOUT = 20.0
 
 
-def _endpoint(gateway_url: str, suffix: str = "") -> str:
-    url = (gateway_url or "").strip().rstrip("/")
+def _endpoint(mind_url: str, suffix: str = "") -> str:
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
@@ -57,7 +56,6 @@ def _unwrap(response: httpx.Response) -> dict:
                 detail="This Mind is running a version without the /symbols API",
             )
         raise HTTPException(status_code=404, detail=_detail(response))
-    mind_runtime._refused_key(response)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=_detail(response))
     body = response.json()
@@ -69,7 +67,7 @@ def _unwrap(response: httpx.Response) -> dict:
 async def _call(url: str, params: dict | None = None) -> dict:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(url, headers=await admin_headers(url), params=params)
+            response = await mind_runtime.send(client, "GET", url, params=params)
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -77,13 +75,13 @@ async def _call(url: str, params: dict | None = None) -> dict:
     return _unwrap(response)
 
 
-async def resolve(gateway_url: str, repo: str, path: str, name: str) -> dict:
+async def resolve(mind_url: str, repo: str, path: str, name: str) -> dict:
     """One named function as it actually exists on that Mind's disk."""
     return await _call(
-        _endpoint(gateway_url), {"repo": repo, "path": path, "name": name}
+        _endpoint(mind_url), {"repo": repo, "path": path, "name": name}
     )
 
 
-async def roots(gateway_url: str) -> dict:
+async def roots(mind_url: str) -> dict:
     """The checkouts that Mind will read for a design session."""
-    return await _call(_endpoint(gateway_url, "/roots"))
+    return await _call(_endpoint(mind_url, "/roots"))

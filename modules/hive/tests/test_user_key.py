@@ -2,7 +2,7 @@
 
 The gateway is the real application over ASGI on the suite's scratch Postgres,
 so "accepted" and "refused" are its own answers to the question a mind asks
-(`/broker/owner-key-check`), and the console's own functions are called, not
+(the forward route), and the console's own functions are called, not
 imitated. Protected behaviour 2, widened: a key reaches only what it should.
 """
 import httpx
@@ -26,12 +26,16 @@ ADA_URL, DORA_URL = "http://ada.test:8420", "http://dora.test:8420"
 
 
 async def _asked(mind_key: str, presented: str) -> bool:
+    """Whether the gateway lets `presented` change the mind that holds
+    `mind_key`: its own answer on the forward route (a refusal is 401 or 403;
+    anything else means it was let through to the delivery step, where the
+    stand-in mind is not reachable)."""
+    mind_id = ADA_ID if mind_key == OLD else SLOAN_MIND_ID
     async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "http://comms.test/broker/owner-key-check", json={"key": presented},
-            headers={"Authorization": f"Bearer {mind_key}"})
-    assert response.status_code == 200
-    return response.json()["owned"]
+        response = await client.get(
+            f"http://comms.test/broker/minds/{mind_id}/forward/health",
+            headers={"Authorization": f"Bearer {presented}"})
+    return response.status_code not in (401, 403)
 
 
 @pytest.fixture
@@ -66,31 +70,36 @@ async def test_a_users_key_is_made_on_first_need_kept_and_accepted_only_for_mind
     assert "USER_KEY_" not in two_owners.env.read_text()
     assert await holder_credentials.user_key("daniel") == key  # kept, not made again
     assert await _asked(OLD, key) is True            # ada is daniel's
-    assert await _asked(SLOAN_MIND_KEY, key) is False  # dora is sloan's
+    # Dora is sloan's. Daniel is the console's administrator, so his key may
+    # change any mind; sloan, who is not, may change only dora.
+    assert await _asked(SLOAN_MIND_KEY, key) is True
+    sloan = await holder_credentials.user_key("sloan")
+    assert await _asked(SLOAN_MIND_KEY, sloan) is True
+    assert await _asked(OLD, sloan) is False
 
 
-async def test_the_console_presents_the_signed_in_owners_key_and_never_another_persons_to_a_mind(two_owners):
+async def test_the_console_presents_the_signed_in_owners_key_through_the_gateway_and_never_another_persons(two_owners):
     token = mind_runtime._PERSON.set("daniel")
     try:
-        ours = await mind_runtime.admin_headers(ADA_URL)
-        daniel_key = ours["Authorization"].removeprefix("Bearer ")
-        # Dora is sloan's: daniel's key is not sent there, and this console
-        # holds no key for Dora, so nothing is sent at all.
+        url, headers = await mind_runtime.via_gateway(ADA_URL + "/runtime")
+        daniel_key = headers["Authorization"].removeprefix("Bearer ")
+        # Dora is sloan's and daniel is no administrator: nothing is sent.
         with pytest.raises(HTTPException) as refused:
-            await mind_runtime.admin_headers(DORA_URL)
+            await mind_runtime.via_gateway(DORA_URL + "/runtime")
     finally:
         mind_runtime._PERSON.reset(token)
 
-    assert refused.value.status_code == 503
+    assert url.endswith(f"/broker/minds/{ADA_ID}/forward/runtime")
+    assert "ada.test" not in url
+    assert refused.value.status_code == 403
     assert await _asked(OLD, daniel_key) is True
-    assert await _asked(SLOAN_MIND_KEY, daniel_key) is False
     assert daniel_key != OLD
 
 
-async def test_with_no_person_signed_in_a_mind_the_console_holds_is_still_changed_with_its_own_key(two_owners):
-    headers = await mind_runtime.admin_headers(ADA_URL)
-
-    assert headers == {"Authorization": f"Bearer {OLD}"}
+async def test_with_no_person_signed_in_nothing_is_sent_to_a_mind(two_owners):
+    with pytest.raises(HTTPException) as refused:
+        await mind_runtime.via_gateway(ADA_URL + "/runtime")
+    assert refused.value.status_code == 403
 
 
 async def test_replacing_a_users_key_refuses_the_old_one_at_the_next_question_and_accepts_the_new(two_owners):
@@ -107,7 +116,6 @@ async def test_replacing_a_users_key_refuses_the_old_one_at_the_next_question_an
 async def test_a_users_key_is_not_made_over_a_holder_that_is_not_a_users_key(two_owners):
     # `ada` is a mind at the gateway: a person called ada must not take it over.
     assert await holder_credentials.user_key("ada") is None
-    assert await _asked(OLD, OLD) is False  # the mind's own key is not a user key either
 
 
 async def test_a_mind_on_another_machine_registered_by_its_pasted_key_counts_as_moved_and_says_so(old_hive):  # noqa: F811

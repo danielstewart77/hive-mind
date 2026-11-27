@@ -21,17 +21,16 @@ import httpx
 from fastapi import HTTPException
 
 import mind_runtime
-from mind_runtime import admin_headers
 
 _TIMEOUT = 20.0
 
 TREES = ("skills", "hooks")
 
 
-def _endpoint(gateway_url: str, tree: str, suffix: str = "") -> str:
+def _endpoint(mind_url: str, tree: str, suffix: str = "") -> str:
     if tree not in TREES:
         raise HTTPException(status_code=400, detail=f"Unknown tree: {tree}")
-    url = (gateway_url or "").strip().rstrip("/")
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
@@ -59,7 +58,6 @@ def _unwrap(response: httpx.Response, *, collection: bool = False) -> dict:
             status_code=501,
             detail="This Mind is running a version without the file editor API",
         )
-    mind_runtime._refused_key(response)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=_detail(response))
     body = response.json()
@@ -78,8 +76,8 @@ async def _call(
 ) -> dict:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.request(
-                method, url, headers=await admin_headers(url), json=json, params=params
+            response = await mind_runtime.send(
+                client, method, url, json=json, params=params
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -88,20 +86,20 @@ async def _call(
     return _unwrap(response, collection=collection)
 
 
-async def fetch_tree(gateway_url: str, tree: str) -> dict:
+async def fetch_tree(mind_url: str, tree: str) -> dict:
     """Every file this Mind's harness reads under one of the two roots."""
-    return await _call("GET", _endpoint(gateway_url, tree), collection=True)
+    return await _call("GET", _endpoint(mind_url, tree), collection=True)
 
 
-async def fetch_file(gateway_url: str, tree: str, path: str) -> dict:
+async def fetch_file(mind_url: str, tree: str, path: str) -> dict:
     """One file's text, or the Mind's reason it cannot be shown as text."""
     return await _call(
-        "GET", _endpoint(gateway_url, tree, "/content"), params={"path": path}
+        "GET", _endpoint(mind_url, tree, "/content"), params={"path": path}
     )
 
 
 async def save_file(
-    gateway_url: str, tree: str, path: str, text: str, revision: str
+    mind_url: str, tree: str, path: str, text: str, revision: str
 ) -> dict:
     """Replace one existing file's contents on the Mind.
 
@@ -112,6 +110,6 @@ async def save_file(
     """
     return await _call(
         "PUT",
-        _endpoint(gateway_url, tree, "/content"),
+        _endpoint(mind_url, tree, "/content"),
         json={"path": path, "text": text, "revision": revision},
     )

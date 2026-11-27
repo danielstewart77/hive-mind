@@ -28,6 +28,14 @@ import accounts
 from hive_site.testing import run
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = run(auth.create_user("daniel", "secret-pass", is_admin=True, replace=True))
@@ -286,6 +294,7 @@ class _Response:
         self.status_code = status_code
         self._payload = payload or {}
         self.text = text
+        self.headers = {"x-hive-forwarded": "1"}
 
     def json(self):
         return self._payload
@@ -308,6 +317,9 @@ class _Client:
             raise self._result
         return self._result
 
+    async def request(self, method, *args, **kwargs):
+        return await self.get(*args, **kwargs)
+
 
 def _probe(monkeypatch, result, *, token="admin-token"):
     if token:
@@ -318,8 +330,7 @@ def _probe(monkeypatch, result, *, token="admin-token"):
     # The registry the admin credential is judged against: nothing in it.
     import configuration_data
     # The console holds this mind's own key; it is the only thing sent.
-    monkeypatch.setattr(configuration_data, "own_credential_for",
-                        AsyncMock(return_value="the-minds-own-key" if token else None))
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     import asyncio
 
     return asyncio.run(
@@ -358,14 +369,25 @@ def test_a_reporting_mind_carries_its_reading_through(monkeypatch):
     assert report["reading"]["host"]["host_id"] == "boot-1"
 
 
-def test_an_unset_console_token_does_not_condemn_every_machine(monkeypatch):
-    """`admin_headers()` raises when the console has no admin token. Called
-    inside the request's try block that exception is caught by the
-    unreachable arm, and one unset variable on this box names every machine
-    in the hive as down."""
-    report = _probe(monkeypatch, _Response(200, {"host": {}}), token="")
+def test_a_refusal_to_send_does_not_condemn_every_machine(monkeypatch):
+    """When nothing can be sent for the person (nobody signed in, no key of
+    theirs), the page says that, and does not call the machine unreachable:
+    one missing key on this console would otherwise name every machine in the
+    hive as down."""
+    from fastapi import HTTPException
+
+    async def refuse(url):
+        raise HTTPException(503, "your own key could not be found on this console")
+
+    monkeypatch.setattr("mind_runtime.via_gateway", refuse)
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", lambda **kw: _Client(_Response(200, {"host": {}})))
+    import asyncio
+
+    report = asyncio.run(main_mod._probe_mind_host(
+        {"name": "skippy", "id": "m1", "gateway_url": "http://skippy:8420"}))
 
     assert report["status"] == "unconfigured"
+    assert "your own key" in report["error"]
 
 
 def test_a_mind_with_no_gateway_url_is_not_called_unreachable(monkeypatch):

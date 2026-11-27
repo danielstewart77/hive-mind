@@ -1886,19 +1886,23 @@ async def _probe_mind_host(mind: dict) -> dict:
     if not gateway:
         return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
                 "reading": None, "error": "no gateway URL in the registry"}
-    # Outside the try, and deliberately. `admin_headers()` raises when the
-    # console has no admin token, and inside the try that exception would be
-    # caught by the unreachable arm — naming every machine in the hive as
-    # unreachable because of one unset variable on this box, which is the
-    # exact conflation `host_status_for` exists to prevent.
-    try:
-        headers = await mind_runtime.admin_headers(gateway)
-    except HTTPException as exc:
-        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
-                "reading": None, "error": str(exc.detail)}
+    # The request goes to the gateway as the signed-in person (story 900); a
+    # refusal to send (nobody signed in, not this person's mind, no key) is
+    # `unconfigured` with the sentence, never "unreachable": it is not a
+    # statement about the machine.
     try:
         async with httpx.AsyncClient(timeout=dashboard_data.HOST_PROBE_TIMEOUT) as client:
-            response = await client.get(f"{gateway}/host", headers=headers)
+            response = await mind_runtime.send(client, "GET", f"{gateway}/host")
+    except HTTPException as exc:
+        said = str(exc.detail)
+        if exc.status_code in (502, 504) and "could not be reached" in said:
+            status_word = "unreachable"
+        elif "the mind refused" in said:
+            status_word = "refused"
+        else:
+            status_word = "unconfigured"
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": status_word,
+                "reading": None, "error": str(exc.detail)}
     except Exception as exc:  # noqa: BLE001 — unreachable is a state
         return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unreachable",
                 "reading": None, "error": str(exc)}
@@ -6681,15 +6685,11 @@ async def api_hive_errors(user: dict = Depends(require_auth)):
         for mind in minds:
             if isinstance(mind, dict) and mind.get("gateway_url"):
                 name = mind.get("name") or "Mind"
-                # Each mind is asked with its own key, where this console
-                # holds it; one it does not hold is listed as withheld.
-                try:
-                    headers = await mind_runtime.admin_headers(mind["gateway_url"])
-                except HTTPException as refused:
-                    withheld.append({"name": name, "status": "withheld", "errors": [],
-                                     "detail": str(refused.detail)})
-                    continue
-                targets.append({"name": name, "url": mind["gateway_url"], "headers": headers})
+                # Each mind is asked through the gateway as the signed-in
+                # person (story 900); a mind that person may not change
+                # reports as withheld with the sentence.
+                targets.append({"name": name, "url": mind["gateway_url"], "headers": {},
+                                "through": mind_runtime.send})
     except Exception:
         minds = None
     for name, variable in [("Voice (Chatterbox)", "CHATTERBOX_VOICE_URL"), ("Voice (Kokoro)", "KOKORO_VOICE_URL"),

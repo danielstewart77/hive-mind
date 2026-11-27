@@ -38,17 +38,18 @@ def test_feature_choices_belong_to_the_signed_in_account(builtin_console):
 def test_hive_errors_endpoint_reports_a_mind_failure(builtin_console, monkeypatch):
     client = builtin_console.admin()
     monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'stand-in-admin')
-    import configuration_data
-    async def own_key(url):
-        return 'the-minds-own-key'
-    monkeypatch.setattr(configuration_data, 'own_credential_for', own_key)
     original_client = httpx.AsyncClient
     feed = {'started_at': '2026-11-13T18:00:00Z', 'errors': [
         {'message': 'Failed to open terminal', 'detail': 'no context window for gpt-5.6-sol'}]}
+    asked = {}
     def transport(request):
         if request.url.path == '/broker/minds':
-            return httpx.Response(200, json=[{'name': 'Atlas', 'gateway_url': 'http://atlas:8420'}])
-        return httpx.Response(200, json=feed)
+            return httpx.Response(200, json=[
+                {'id': 'atlas-id', 'name': 'Atlas', 'owner': 'daniel', 'gateway_url': 'http://atlas:8420'},
+                {'id': 'kid-id', 'name': 'Kidbox', 'owner': 'sloan', 'gateway_url': 'http://kidbox:8433'}])
+        asked.setdefault(request.url.host, []).append(
+            (request.url.path, request.headers.get('authorization')))
+        return httpx.Response(200, json=feed, headers={'x-hive-forwarded': '1'})
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(
         **kwargs, transport=httpx.MockTransport(transport)))
     result = client.get('/api/hive-errors')
@@ -56,31 +57,13 @@ def test_hive_errors_endpoint_reports_a_mind_failure(builtin_console, monkeypatc
     atlas = next(c for c in result.json()['components'] if c['name'] == 'Atlas')
     assert atlas['errors'][0]['detail'] == 'no context window for gpt-5.6-sol'
     assert client.get('/hive-errors').status_code == 200
-
-
-def test_a_mind_the_credential_guard_refuses_is_listed_as_withheld_and_never_asked(builtin_console, monkeypatch):
-    client = builtin_console.admin()
-    monkeypatch.setenv('COMMS_ADMIN_BEARER_TOKEN', 'stand-in-admin')
-    original_client = httpx.AsyncClient
-    asked = {}
-    def transport(request):
-        if request.url.path == '/broker/minds':
-            return httpx.Response(200, json=[
-                {'id': 'kid-id', 'name': 'Kidbox', 'owner': 'sloan',
-                 'gateway_url': 'http://kidbox:8433', 'admin_credential_allowed': False},
-                {'id': 'atlas-id', 'name': 'Atlas', 'owner': 'daniel',
-                 'gateway_url': 'http://atlas:8420', 'admin_credential_allowed': True}])
-        asked[request.url.host] = request.headers.get('authorization')
-        return httpx.Response(200, json={'errors': []})
-    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(
-        **kwargs, transport=httpx.MockTransport(transport)))
-    components = {c['name']: c for c in client.get('/api/hive-errors').json()['components']}
-    assert components['Kidbox']['status'] == 'withheld'
-    # Atlas is the signed-in person's own: it is asked, with that person's own
-    # key, which is made here with no gateway administrator credential.
-    assert components['Atlas']['status'] == 'ok'
-    assert 'kidbox' not in asked
-    assert asked['atlas'].startswith('Bearer ') and asked['atlas'] != 'Bearer stand-in-admin'
+    # Every mind is asked through the gateway, never at its own address, with
+    # the signed-in person's own key and never the gateway administrator's.
+    assert 'atlas' not in asked and 'kidbox' not in asked
+    forwarded = [(p, a) for calls in asked.values() for p, a in calls if '/forward/' in p]
+    assert any(p.startswith('/broker/minds/atlas-id/forward/') for p, _ in forwarded)
+    assert len({a for _, a in forwarded}) == 1
+    assert all(a.startswith('Bearer ') and a != 'Bearer stand-in-admin' for _, a in forwarded)
 
 
 async def test_terminal_start_exception_reaches_component_error_report():

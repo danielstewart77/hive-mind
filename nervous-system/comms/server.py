@@ -2592,7 +2592,7 @@ _FORWARDED = (
     ("GET", r"runtime"), ("PATCH", r"runtime"),
     ("GET", r"runtime/settings"), ("PATCH", r"runtime/settings"),
     ("GET", r"models"),
-    ("GET", r"health"), ("GET", r"diagnostics/errors"),
+    ("GET", r"health"), ("GET", r"host"), ("GET", r"diagnostics/errors"),
     ("GET", r"surface-token"), ("PUT", r"surface-token"),
     ("GET", r"github-token"), ("PUT", r"github-token"),
     ("GET", r"files/[A-Za-z0-9_.-]+"),
@@ -2715,7 +2715,11 @@ async def broker_forward_to_mind(request: Request, mind_id: str, tail: str):
     if 300 <= status < 400:
         raise HTTPException(502, "that mind answered with a redirect, which is not followed")
     from fastapi import Response
-    return Response(content=payload, status_code=status, media_type=answer_type.split(";")[0])
+    # Marked as the mind's own answer, so a caller can tell it from the
+    # gateway's own refusals (a mind's 404 and the gateway's 404 mean different
+    # things to a person reading the page).
+    return Response(content=payload, status_code=status, media_type=answer_type.split(";")[0],
+                    headers={"X-Hive-Forwarded": "1"})
 
 
 async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:

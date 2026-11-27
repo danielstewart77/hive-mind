@@ -442,9 +442,10 @@ off one mind opens that mind and no other, which matters most for the minds
 trusted least — the two Windows boxes the boys use.
 
 No administrator key is on this path, and no mind holds or accepts one. A
-mind's `PATCH /runtime`, skills write-back and file editor answer to that
-mind's own key, which the console presents; a routine chat turn carries only
-the session credential.
+mind's `PATCH /runtime`, skills write-back and file editor answer to the
+gateway's credential for that mind (a change is sent to the gateway with the
+person's own key, which decides and delivers it) and to the mind's own key,
+and to nobody else.
 
 All seven outbound paths carry it — spawn, message, interrupt, release,
 rotate-pty, kill, and the terminal WebSocket proxy — and **a refusal is

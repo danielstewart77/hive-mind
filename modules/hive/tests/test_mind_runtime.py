@@ -17,6 +17,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import mind_runtime
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 class _Client:
     """Stand-in for httpx.AsyncClient that answers with a fixed response."""
 
@@ -39,6 +47,9 @@ class _Client:
         if self._error is not None:
             raise self._error
         return self._response
+
+    async def request(self, method, url, **kwargs):
+        return await self._respond(method, url, **kwargs)
 
     async def get(self, url, **kwargs):
         return await self._respond("GET", url, **kwargs)
@@ -71,6 +82,7 @@ def _response(status: int, json_body=None, text: str = "") -> httpx.Response:
         json=json_body if json_body is not None else None,
         text=None if json_body is not None else text,
         request=httpx.Request("GET", "http://mind/runtime"),
+        headers={"x-hive-forwarded": "1"},  # what the gateway puts on a mind's own answer
     )
 
 
@@ -81,7 +93,7 @@ def admin_token(monkeypatch):
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
 
 
 def _run(coro):
@@ -165,25 +177,6 @@ def test_a_mind_with_no_gateway_url_is_a_bad_request():
 
     _run(scenario())
 
-
-def test_a_mind_whose_key_is_not_held_here_refuses_the_write(monkeypatch):
-    async def scenario():
-        import configuration_data
-
-        async def no_key(url):
-            return None
-
-        monkeypatch.setattr(configuration_data, "own_credential_for", no_key)
-        monkeypatch.setattr(
-            httpx, "AsyncClient", _Client(_response(200, {"configuration": {}}))
-        )
-
-        with pytest.raises(HTTPException) as exc:
-            await mind_runtime.push_default_model("http://bob:8420", "opus")
-
-        assert exc.value.status_code == 503
-
-    _run(scenario())
 
 # ---------------------------------------------------------------- model picker
 

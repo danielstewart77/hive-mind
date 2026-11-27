@@ -17,13 +17,12 @@ import httpx
 from fastapi import HTTPException
 
 import mind_runtime
-from mind_runtime import admin_headers
 
 _TIMEOUT = 12.0
 
 
-def _endpoint(gateway_url: str, suffix: str = "") -> str:
-    url = (gateway_url or "").strip().rstrip("/")
+def _endpoint(mind_url: str, suffix: str = "") -> str:
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
@@ -43,7 +42,6 @@ def _unwrap(response: httpx.Response, *, collection: bool = False) -> dict:
         )
     if response.status_code == 404:
         raise HTTPException(status_code=404, detail=_detail(response))
-    mind_runtime._refused_key(response)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=_detail(response))
     body = response.json()
@@ -67,7 +65,7 @@ async def _call(method: str, url: str, *, collection: bool = False) -> dict:
     # the full text of every skill it runs.
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.request(method, url, headers=await admin_headers(url))
+            response = await mind_runtime.send(client, method, url)
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -75,26 +73,26 @@ async def _call(method: str, url: str, *, collection: bool = False) -> dict:
     return _unwrap(response, collection=collection)
 
 
-async def fetch_skills(gateway_url: str) -> dict:
+async def fetch_skills(mind_url: str) -> dict:
     """Every skill this Mind knows, repo side and installed side."""
-    return await _call("GET", _endpoint(gateway_url), collection=True)
+    return await _call("GET", _endpoint(mind_url), collection=True)
 
 
-async def fetch_diff(gateway_url: str, name: str) -> dict:
+async def fetch_diff(mind_url: str, name: str) -> dict:
     """What differs between the repo's copy and this Mind's."""
-    return await _call("GET", _endpoint(gateway_url, f"/{name}/diff"))
+    return await _call("GET", _endpoint(mind_url, f"/{name}/diff"))
 
 
-async def install(gateway_url: str, name: str) -> dict:
+async def install(mind_url: str, name: str) -> dict:
     """Put the repo's version on this Mind — apply and revert alike."""
-    return await _call("POST", _endpoint(gateway_url, f"/{name}/install"))
+    return await _call("POST", _endpoint(mind_url, f"/{name}/install"))
 
 
-async def write_back(gateway_url: str, name: str) -> dict:
+async def write_back(mind_url: str, name: str) -> dict:
     """Put this Mind's version into its repo checkout, uncommitted."""
-    return await _call("POST", _endpoint(gateway_url, f"/{name}/write-back"))
+    return await _call("POST", _endpoint(mind_url, f"/{name}/write-back"))
 
 
-async def remove(gateway_url: str, name: str) -> dict:
+async def remove(mind_url: str, name: str) -> dict:
     """Delete this Mind's copy. Its repo keeps whatever it had."""
-    return await _call("DELETE", _endpoint(gateway_url, f"/{name}"))
+    return await _call("DELETE", _endpoint(mind_url, f"/{name}"))

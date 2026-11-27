@@ -27,6 +27,14 @@ import accounts
 GATEWAY = "http://nagatha.local:8421"
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     import configuration_data
@@ -34,7 +42,7 @@ def _authed_client(tmp_path, monkeypatch):
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     user = accounts.make_user("daniel", "secret-pass", is_admin=True,
                               replace=True)
     client = TestClient(main_mod.app)
@@ -288,7 +296,7 @@ def test_an_unreachable_mind_says_so_rather_than_showing_nothing(hive):
     response = client.get("/api/minds/nagatha/skills")
 
     assert response.status_code == 502
-    assert "unreachable" in response.json()["detail"].lower()
+    assert "could not be reached" in response.json()["detail"].lower()
 
 
 def test_writes_carry_the_admin_bearer_to_the_mind(hive):
@@ -302,7 +310,7 @@ def test_writes_carry_the_admin_bearer_to_the_mind(hive):
     mind.repo = {"memory": "repo body"}
     mind.installed = {"memory": "mind body"}
 
-    with patch.object(mind_skills, "admin_headers", side_effect=HTTPException(503, "x")):
+    with patch("mind_runtime.via_gateway", side_effect=HTTPException(503, "x")):
         for call in (
             lambda: client.get("/api/minds/nagatha/skills"),
             lambda: client.get("/api/minds/nagatha/skills/memory/diff"),

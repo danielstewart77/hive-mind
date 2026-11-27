@@ -43,7 +43,7 @@ SHARED_HOLDER = "skippy"
 REGISTERED_NOT_STORED = (
     "registered, key not stored here: a mind on another machine whose pasted key "
     "is registered at the gateway, the memory store and the tools; the console "
-    "never holds that key, and its settings are changed with its owner's key")
+    "never holds that key, and its settings are changed through the gateway with its owner's key")
 
 REPOINT_NOTE = (
     "The report checks that each tools consumer other than a mind has a credential of its "

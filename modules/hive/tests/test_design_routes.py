@@ -24,6 +24,14 @@ from hive_site import testing as suite
 PUSH_TOKEN = "design-push-token"  # secret-guard: allow
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DESIGN_PUSH_TOKEN", PUSH_TOKEN)
@@ -304,10 +312,10 @@ async def test_a_mind_with_no_symbols_route_is_reported_as_out_of_date(tmp_path,
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
 
     async def route_missing(url, headers=None, params=None):
-        return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(404, json={"detail": "Not Found"}, headers={"x-hive-forwarded": "1"})
 
     class _Client:
         async def __aenter__(self):
@@ -318,6 +326,9 @@ async def test_a_mind_with_no_symbols_route_is_reported_as_out_of_date(tmp_path,
 
         async def get(self, url, headers=None, params=None):
             return await route_missing(url, headers, params)
+
+        async def request(self, method, url, headers=None, params=None):
+            return await self.get(url, headers=headers, params=params)
 
     monkeypatch.setattr(mind_symbols.httpx, "AsyncClient", lambda **kw: _Client())
 
@@ -340,7 +351,7 @@ async def test_a_mind_refusing_a_repository_is_passed_through_as_a_404(monkeypat
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
 
 
     class _Client:
@@ -352,8 +363,12 @@ async def test_a_mind_refusing_a_repository_is_passed_through_as_a_404(monkeypat
 
         async def get(self, url, headers=None, params=None):
             return httpx.Response(
-                404, json={"error": "Repository is not one this mind will read"}
+                404, json={"error": "Repository is not one this mind will read"},
+                headers={"x-hive-forwarded": "1"},
             )
+
+        async def request(self, method, url, headers=None, params=None):
+            return await self.get(url, headers=headers, params=params)
 
     monkeypatch.setattr(mind_symbols.httpx, "AsyncClient", lambda **kw: _Client())
 

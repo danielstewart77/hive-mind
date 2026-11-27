@@ -35,6 +35,14 @@ import store
 GATEWAY = "http://stash.local:8420"
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 def _client(monkeypatch, *, admin=True, username="daniel"):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     import configuration_data
@@ -42,7 +50,7 @@ def _client(monkeypatch, *, admin=True, username="daniel"):
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     user = accounts.make_user(username, "secret-pass", is_admin=admin, replace=True)
     client = TestClient(main_mod.app)
     client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))

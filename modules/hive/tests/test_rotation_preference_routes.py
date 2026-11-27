@@ -21,6 +21,14 @@ import mind_runtime
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = run(auth.create_user("rotation-admin", "secret-pass", is_admin=True, replace=True))
@@ -83,7 +91,7 @@ def test_console_percentage_write_targets_only_requested_mind(tmp_path, monkeypa
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     _broker_rows(monkeypatch)
     requests = []
 
@@ -124,7 +132,7 @@ def test_console_rotation_write_preserves_the_minds_validation_refusal(
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     _broker_rows(monkeypatch)
     requests = []
 
@@ -164,7 +172,7 @@ def test_console_settings_read_retains_the_saved_percent_and_capacity_state(
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     _broker_rows(monkeypatch)
     requests = []
 

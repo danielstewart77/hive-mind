@@ -459,40 +459,58 @@ def test_a_mind_made_from_the_console_is_not_locked_and_its_settings_card_reache
         {"id": "bob-id", "name": "bob", "gateway_url": "http://bob:8420"},
     ]
     monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
-    assert asyncio.run(mind_runtime.admin_headers(runtime["gateway_url"])) == {
-        "Authorization": f"Bearer {issued}"}
+    # The console sends a change for this mind to the gateway, never to the
+    # mind, and never with the mind's own key (story 900).
+    import holder_credentials
+
+    async def _a_persons_key(name):
+        return "daniel-person-key"  # secret-guard: allow
+
+    monkeypatch.setattr(holder_credentials, "user_key", _a_persons_key)
+    token = mind_runtime._PERSON.set("daniel")
+    try:
+        url, headers = asyncio.run(mind_runtime.via_gateway(runtime["gateway_url"] + "/runtime"))
+    finally:
+        mind_runtime._PERSON.reset(token)
+    assert f"/broker/minds/{runtime['mind_id']}/forward/runtime" in url
+    assert issued not in str(headers)
 
 
-def test_the_console_sends_a_mind_only_its_own_key_and_only_at_its_own_address(client, monkeypatch):
+def test_the_console_names_a_mind_by_its_address_only_when_one_mind_claims_it(client, monkeypatch):
     """However that mind's address is written: it can re-register itself with
-    the gateway at any address - a server of its own, or another mind's. So its
-    key goes only where every registry row claiming the address is that one
-    mind, and nothing else is ever sent in its place (no administrator key)."""
+    the gateway at any address - a server of its own, or another mind's. So a
+    request is sent for a mind only where every registry row claiming the
+    address is that one mind; nothing is sent for an address two minds claim
+    or one nobody does."""
     import asyncio
     import route_access
     import mind_runtime
 
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
-    monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "tools-admin-token")
     assert _create(client).status_code == 200
     mind_id = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())["mind_id"]
     registry = [
-        {"id": mind_id, "name": "atlas", "gateway_url": "http://ada:8420"},
-        {"id": "ada-id", "name": "ada", "gateway_url": "http://ada:8420"},
-        {"id": mind_id, "name": "atlas", "gateway_url": "http://atlas:8420"},
-        {"id": "bob-id", "name": "bob", "gateway_url": "http://bob:8420"},
+        {"id": mind_id, "name": "atlas", "owner": "daniel", "gateway_url": "http://ada:8420"},
+        {"id": "ada-id", "name": "ada", "owner": "daniel", "gateway_url": "http://ada:8420"},
+        {"id": mind_id, "name": "atlas", "owner": "daniel", "gateway_url": "http://atlas:8420"},
     ]
     monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
 
-    # An address two minds claim gets nothing; neither does one nobody claims,
-    # and bob, whose key this console does not hold, is not sent the admin key.
-    for url in ("http://ada:8420", "http://10.9.0.7:7777", "http://bob:8420"):
-        with pytest.raises(main_mod.HTTPException) as refused:
-            asyncio.run(mind_runtime.admin_headers(url))
-        assert refused.value.status_code == 503, url
-    sent = asyncio.run(mind_runtime.admin_headers("http://atlas:8420"))
-    assert sent == {"Authorization": f"Bearer {PASTED_KEY}"}
-    assert "admin-token" not in str(sent)
+    import holder_credentials
+
+    async def _a_persons_key(name):
+        return "daniel-person-key"  # secret-guard: allow
+
+    monkeypatch.setattr(holder_credentials, "user_key", _a_persons_key)
+    token = mind_runtime._PERSON.set("daniel")
+    try:
+        for url in ("http://ada:8420/runtime", "http://10.9.0.7:7777/runtime"):
+            with pytest.raises(main_mod.HTTPException) as refused:
+                asyncio.run(mind_runtime.via_gateway(url))
+            assert refused.value.status_code == 502, url
+        sent_to, _ = asyncio.run(mind_runtime.via_gateway("http://atlas:8420/runtime"))
+    finally:
+        mind_runtime._PERSON.reset(token)
+    assert sent_to.endswith(f"/broker/minds/{mind_id}/forward/runtime")
 
 
 def test_a_mind_cannot_be_named_after_an_address_on_the_hives_network(client):

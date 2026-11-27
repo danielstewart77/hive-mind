@@ -238,14 +238,6 @@ class Console:
 
 @pytest.fixture(params=["builtin", "auth-service"])
 def console(request, tmp_path, monkeypatch, fake_comms):
-    # The console holds each mind's own key and presents it at that mind's
-    # address; no administrator key exists for a mind (feature 834).
-    import configuration_data
-
-    async def own_key(url):
-        return "the-minds-own-key"
-
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     monkeypatch.setenv("HIVE_TOOLS_URL", fake_comms.url)
     monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)

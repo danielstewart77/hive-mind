@@ -2240,8 +2240,8 @@ async def user_key(username: str) -> str | None:
 
     A key still in the install's settings file is moved: written to the key
     folder, its fingerprint recorded, its line removed. None when it cannot be
-    had (no key folder, an unreadable file): the caller falls back to the
-    mind's own key rather than failing the change."""
+    had (no key folder, an unreadable file): the caller then sends nothing and
+    says so; there is no fallback to a mind's key or to another credential."""
     name = username.strip().lower()
     if not name:
         return None

@@ -16,6 +16,7 @@ was unreachable would be overwritten the moment it came back.
 from __future__ import annotations
 
 import contextvars
+import urllib.parse
 
 import httpx
 from fastapi import HTTPException
@@ -27,10 +28,11 @@ _TIMEOUT = 8.0
 #: authorised request so the many places that reach a mind for them need not
 #: each be handed the user. None outside a request, and on a bearer-only call.
 _PERSON: contextvars.ContextVar[str | None] = contextvars.ContextVar("mind_runtime_person", default=None)
+_PERSON_IS_ADMIN: contextvars.ContextVar[bool] = contextvars.ContextVar("mind_runtime_is_admin", default=False)
 
 
 class PersonScope:
-    """ASGI middleware (innermost): records who is signed in, for `admin_headers`.
+    """ASGI middleware (innermost): records who is signed in, for `send`.
 
     Added before the authorisation middleware so it runs inside it, where the
     request's user is already resolved and cached."""
@@ -42,65 +44,179 @@ class PersonScope:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        person = None
+        person, admin = None, False
         try:
             import auth
             from starlette.requests import HTTPConnection
 
             user = await auth.resolve_user(HTTPConnection(scope))
             person = str((user or {}).get("username") or "").strip().lower() or None
+            admin = bool((user or {}).get("is_admin")) if person else False
         except Exception:  # noqa: BLE001 - no person is not a failure of the request
-            person = None
+            person, admin = None, False
         token = _PERSON.set(person)
+        admin_token = _PERSON_IS_ADMIN.set(admin)
         try:
             await self.app(scope, receive, send)
         finally:
+            _PERSON_IS_ADMIN.reset(admin_token)
             _PERSON.reset(token)
 
 
-async def admin_headers(target_url: str) -> dict[str, str]:
-    """The bearer a Mind accepts on its config-write route, for `target_url`.
+# ---------------------------------------------------------------------------
+# Every change to a mind, and every reading of one, goes to the gateway
+# ---------------------------------------------------------------------------
+# Feature 834, requirements 23, 24 and 28 (story 900). The console never calls
+# a mind's own address and never holds or sends a mind's key: it sends the
+# request to the gateway, which works out whether this person may change that
+# mind (its owner, an administrator) and delivers it with the credential the
+# gateway holds for that mind. What the console sends is the signed-in
+# person's own key and nothing else; with nobody signed in, or the person's
+# key out of reach, nothing is sent (no fallback to a mind's key or to a
+# credential of the console's own).
+#
+# `mind_url` throughout this module is the mind's own registered address plus
+# the path wanted on it. It is only used to find which mind is meant and what
+# is asked of it; it is never called.
 
-    When the person signed in owns the mind at that address, that person's own
-    key (feature 834, requirement 19): the mind asks the gateway whether it is
-    its owner's and accepts it, so a mind on another machine is changed
-    without this console ever holding that mind's key. Otherwise the mind's
-    own key, where this console holds it. Never a hive-wide administrator key:
-    no mind holds or accepts one (requirement 17). A mind this console has
-    neither for is answered 503 with a sentence saying so, not sent something
-    else.
+#: Set by the gateway on every answer it relays from a mind, so an answer the
+#: gateway made itself (a refusal, a missing route on an older gateway) is
+#: never taken for the mind's.
+DELIVERED_HEADER = "x-hive-forwarded"
+
+
+def _gateway_base() -> str:
+    import os
+
+    return (os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424").rstrip("/")
+
+
+async def via_gateway(mind_url: str) -> tuple[str, dict[str, str]]:
+    """Where to send a request meant for the mind at `mind_url`, and with what.
+
+    Returns the gateway's forward URL for the same path and the signed-in
+    person's own key. Refuses with a sentence, and never with 401 (the layout
+    would sign the person out), when nobody is signed in, the mind is not in
+    the registry, the person is neither the mind's owner nor an administrator,
+    or the person's key cannot be had.
     """
     import configuration_data
+    import holder_credentials
 
     person = _PERSON.get()
-    if person:
-        key = await configuration_data.user_credential_for(target_url, person)
-        if key:
-            return {"Authorization": f"Bearer {key}"}
-    own = await configuration_data.own_credential_for(target_url)
-    if own:
-        return {"Authorization": f"Bearer {own}"}
-    raise HTTPException(
-        status_code=503,
-        detail="this console has no key to change this mind with: it does not "
-        "hold the mind's own key, and the person signed in is not the mind's owner",
-    )
+    if not person:
+        raise HTTPException(
+            status_code=403,
+            detail="nobody is signed in, so nothing is sent to this mind",
+        )
+    parts = urllib.parse.urlsplit((mind_url or "").strip())
+    row = await configuration_data._mind_at(f"{parts.scheme}://{parts.netloc}")
+    mind_id = str((row or {}).get("id") or "").strip()
+    if not mind_id:
+        raise HTTPException(
+            status_code=502,
+            detail="this mind is not in the registry under an address of its own, "
+            "so the gateway cannot be asked to reach it",
+        )
+    owner = str((row or {}).get("owner") or "").strip().lower()
+    if owner and owner != person and not _PERSON_IS_ADMIN.get():
+        raise HTTPException(
+            status_code=403,
+            detail="you are neither this mind's owner nor an administrator, so you cannot change it",
+        )
+    key = await holder_credentials.user_key(person)
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="your own key could not be found on this console, so nothing was sent to the mind",
+        )
+    tail = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
+    base = f"{_gateway_base()}/broker/minds/{urllib.parse.quote(mind_id, safe='')}/forward"
+    return f"{base}/{tail}", {"Authorization": f"Bearer {key}"}
+
+
+def _gateway_words(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:300]
+    if isinstance(body, dict):
+        return str(body.get("detail") or body.get("error") or "")[:300]
+    return ""
+
+
+def _gateway_refusal(response: httpx.Response) -> None:
+    """Turn what the gateway itself said into a sentence the page can show.
+
+    Only answers the gateway made itself land here; an answer relayed from the
+    mind carries `DELIVERED_HEADER` and is the caller's to read. A 401 is never
+    passed on as 401: the layout redirects every 401 to the sign-in page."""
+    status = response.status_code
+    if status < 400:
+        return
+    if DELIVERED_HEADER in response.headers:
+        if status == 401:
+            # The mind itself refused what the gateway presented for it.
+            raise HTTPException(
+                status_code=502,
+                detail="the mind refused what the gateway presented for it; it refreshes when the mind next registers",
+            )
+        return
+    words = _gateway_words(response)
+    if status == 401:
+        raise HTTPException(
+            status_code=502,
+            detail="the gateway did not accept your key; replace it under Account settings, Your key",
+        )
+    if status == 403:
+        raise HTTPException(status_code=403, detail=words or "the gateway refused this change")
+    if status == 404 and words in ("", "Not Found"):
+        raise HTTPException(
+            status_code=502,
+            detail="the gateway does not take changes for minds yet; restart the gateway on the new release first",
+        )
+    if status == 504:
+        raise HTTPException(
+            status_code=504,
+            detail=words or "the mind did not answer in time; it is not known whether the change was applied, reload to see",
+        )
+    raise HTTPException(status_code=status, detail=words or f"the gateway answered {status}")
+
+
+async def send(client, method: str, mind_url: str, **kwargs) -> httpx.Response:
+    """One request for the mind at `mind_url`, through the gateway, as the
+    signed-in person. Raises `HTTPException` with a sentence for everything
+    the gateway or the path to it got wrong; what comes back is the mind's own
+    answer, for the caller to read."""
+    url, headers = await via_gateway(mind_url)
+    try:
+        response = await client.request(method, url, headers=headers, **kwargs)
+    except httpx.TimeoutException as exc:
+        if isinstance(exc, httpx.ConnectTimeout):
+            raise HTTPException(status_code=502, detail="the gateway could not be reached") from exc
+        raise HTTPException(
+            status_code=504,
+            detail="no answer in time; it is not known whether it was applied, reload to see",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="the gateway could not be reached") from exc
+    _gateway_refusal(response)
+    return response
 
 
 def _refused_key(response: httpx.Response) -> None:
-    """A mind answering 401 to the key this console presented is a problem with
-    that mind's key, not with the person's sign-in: passed on as 401 it would
-    log the operator out of the console (the layout redirects any 401)."""
+    """Kept for callers that pass a relayed answer on: the mind refusing the
+    gateway's credential reaches here as the gateway's own sentence, never as
+    a 401 (which would sign the person out)."""
     if response.status_code == 401:
         raise HTTPException(
             status_code=502,
-            detail="this mind refused its own key as the console presented it; "
-            "the key it holds may have been replaced (paste it again; a mind reading its key file takes it at its next request)",
+            detail="the mind refused what the gateway presented for it; it refreshes when the mind next registers",
         )
 
 
-def _endpoint(gateway_url: str) -> str:
-    url = (gateway_url or "").strip().rstrip("/")
+def _endpoint(mind_url: str) -> str:
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
@@ -114,7 +230,6 @@ def _unwrap(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the /runtime API",
         )
-    _refused_key(response)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     body = response.json()
@@ -124,7 +239,7 @@ def _unwrap(response: httpx.Response) -> dict:
     return configuration
 
 
-async def fetch_configuration(gateway_url: str) -> dict:
+async def fetch_configuration(mind_url: str) -> dict:
     """This Mind's runtime configuration, straight from its own file.
 
     With the admin credential, like the write beside it. This read used to be
@@ -135,7 +250,7 @@ async def fetch_configuration(gateway_url: str) -> dict:
     """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(_endpoint(gateway_url), headers=await admin_headers(gateway_url))
+            response = await send(client, "GET", _endpoint(mind_url))
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -144,7 +259,7 @@ async def fetch_configuration(gateway_url: str) -> dict:
 
 
 async def push_default_model(
-    gateway_url: str, default_model: str, provider: str = ""
+    mind_url: str, default_model: str, provider: str = ""
 ) -> dict:
     """Write the provider and `default_model` into this Mind's runtime.yaml.
 
@@ -156,11 +271,7 @@ async def push_default_model(
         payload["provider"] = provider
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.patch(
-                _endpoint(gateway_url),
-                json=payload,
-                headers=await admin_headers(gateway_url),
-            )
+            response = await send(client, "PATCH", _endpoint(mind_url), json=payload)
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -168,7 +279,7 @@ async def push_default_model(
     return _unwrap(response)
 
 
-async def fetch_models(gateway_url: str) -> list[dict]:
+async def fetch_models(mind_url: str) -> list[dict]:
     """What this Mind may run, asked with this Mind's own credential.
 
     The Mind queries the inference proxy with its own client key, so the
@@ -182,12 +293,12 @@ async def fetch_models(gateway_url: str) -> list[dict]:
     yields an empty list rather than raising — the editor is still usable
     by typing a name, and an error here would hide the whole form.
     """
-    url = (gateway_url or "").strip().rstrip("/")
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         return []
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(f"{url}/models", headers=await admin_headers(gateway_url))
+            response = await send(client, "GET", f"{url}/models")
     except (httpx.HTTPError, HTTPException):
         return []
     if response.status_code != 200:
@@ -212,8 +323,8 @@ async def fetch_models(gateway_url: str) -> list[dict]:
 # session cookie away from being impersonated.
 
 
-def _surface_token_endpoint(gateway_url: str, surface: str = "telegram") -> str:
-    url = (gateway_url or "").strip().rstrip("/")
+def _surface_token_endpoint(mind_url: str, surface: str = "telegram") -> str:
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
@@ -233,7 +344,6 @@ def _unwrap_surface_token(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the surface-token API",
         )
-    _refused_key(response)
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -249,7 +359,7 @@ def _unwrap_surface_token(response: httpx.Response) -> dict:
     return body
 
 
-async def fetch_surface_token(gateway_url: str, surface: str = "telegram") -> dict:
+async def fetch_surface_token(mind_url: str, surface: str = "telegram") -> dict:
     """Whether this Mind's surface has a token the bot API accepts.
 
     Three states reach the page, because they have different remedies:
@@ -261,10 +371,7 @@ async def fetch_surface_token(gateway_url: str, surface: str = "telegram") -> di
     """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(
-                _surface_token_endpoint(gateway_url, surface),
-                headers=await admin_headers(gateway_url),
-            )
+            response = await send(client, "GET", _surface_token_endpoint(mind_url, surface))
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -288,7 +395,7 @@ async def fetch_surface_token(gateway_url: str, surface: str = "telegram") -> di
 
 
 async def push_surface_token(
-    gateway_url: str, token: str, surface: str = "telegram"
+    mind_url: str, token: str, surface: str = "telegram"
 ) -> dict:
     """Hand a Mind a new bot token for it to verify and store.
 
@@ -298,10 +405,9 @@ async def push_surface_token(
     """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT + 12.0) as client:
-            response = await client.put(
-                _surface_token_endpoint(gateway_url, surface),
+            response = await send(
+                client, "PUT", _surface_token_endpoint(mind_url, surface),
                 json={"token": token},
-                headers=await admin_headers(gateway_url),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -323,8 +429,8 @@ async def push_surface_token(
 # cookie.
 
 
-def _github_token_endpoint(gateway_url: str) -> str:
-    url = (gateway_url or "").strip().rstrip("/")
+def _github_token_endpoint(mind_url: str) -> str:
+    url = (mind_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
@@ -345,7 +451,6 @@ def _unwrap_github_token(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the GitHub-token API",
         )
-    _refused_key(response)
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -361,7 +466,7 @@ def _unwrap_github_token(response: httpx.Response) -> dict:
     return body
 
 
-async def push_github_token(gateway_url: str, token: str) -> dict:
+async def push_github_token(mind_url: str, token: str) -> dict:
     """Hand a Mind a new GitHub token for it to verify and store.
 
     The Mind checks it against GitHub before storing, so a refusal leaves the
@@ -370,10 +475,8 @@ async def push_github_token(gateway_url: str, token: str) -> dict:
     """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT + 12.0) as client:
-            response = await client.put(
-                _github_token_endpoint(gateway_url),
-                json={"token": token},
-                headers=await admin_headers(gateway_url),
+            response = await send(
+                client, "PUT", _github_token_endpoint(mind_url), json={"token": token},
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -405,7 +508,7 @@ VOICE_ENGINES: tuple[str, ...] = (CHATTERBOX, KOKORO)
 DEFAULT_VOICE_ENGINE = CHATTERBOX
 
 
-async def push_voice(gateway_url: str, voice: str, engine: str = "") -> dict:
+async def push_voice(mind_url: str, voice: str, engine: str = "") -> dict:
     """Write this Mind's voice, and the engine that speaks it, into its file.
 
     On their own, without restating the model: a picker that resent the model
@@ -421,11 +524,7 @@ async def push_voice(gateway_url: str, voice: str, engine: str = "") -> dict:
         body["voice_engine"] = engine
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.patch(
-                _endpoint(gateway_url),
-                json=body,
-                headers=await admin_headers(gateway_url),
-            )
+            response = await send(client, "PATCH", _endpoint(mind_url), json=body)
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -529,8 +628,8 @@ async def fetch_voice_catalogue(voice_server_url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _settings_endpoint(gateway_url: str) -> str:
-    return f"{_endpoint(gateway_url)}/settings"
+def _settings_endpoint(mind_url: str) -> str:
+    return f"{_endpoint(mind_url)}/settings"
 
 
 def _unwrap_settings(response: httpx.Response) -> dict:
@@ -539,7 +638,6 @@ def _unwrap_settings(response: httpx.Response) -> dict:
             status_code=501,
             detail="This Mind is running a version without the settings API",
         )
-    _refused_key(response)
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -555,13 +653,11 @@ def _unwrap_settings(response: httpx.Response) -> dict:
     return body
 
 
-async def fetch_settings(gateway_url: str) -> dict:
+async def fetch_settings(mind_url: str) -> dict:
     """The controls this Mind's harness honours, with their current values."""
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(
-                _settings_endpoint(gateway_url), headers=await admin_headers(gateway_url)
-            )
+            response = await send(client, "GET", _settings_endpoint(mind_url))
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -569,7 +665,7 @@ async def fetch_settings(gateway_url: str) -> dict:
     return _unwrap_settings(response)
 
 
-async def push_settings(gateway_url: str, settings: dict) -> dict:
+async def push_settings(mind_url: str, settings: dict) -> dict:
     """Write the settings the operator changed into this Mind's runtime.yaml.
 
     Only the changed ones travel: a form that resent every field would write a
@@ -580,10 +676,8 @@ async def push_settings(gateway_url: str, settings: dict) -> dict:
         raise HTTPException(status_code=400, detail="Nothing was changed")
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.patch(
-                _settings_endpoint(gateway_url),
-                json={"settings": settings},
-                headers=await admin_headers(gateway_url),
+            response = await send(
+                client, "PATCH", _settings_endpoint(mind_url), json={"settings": settings},
             )
     except httpx.HTTPError as exc:
         raise HTTPException(

@@ -22,6 +22,10 @@ import credential_registry as registry
 import credentials_data
 
 
+async def _pass_through(url):
+    return url, {"Authorization": "Bearer a"}
+
+
 @pytest.fixture(autouse=True)
 def forget():
     registry.forget_all()
@@ -85,7 +89,7 @@ def _answer(request, routes):
             if isinstance(outcome, Exception):
                 raise outcome
             status, body = outcome
-            return httpx.Response(status, json=body)
+            return httpx.Response(status, json=body, headers={"x-hive-forwarded": "1"})
     return httpx.Response(599, json={})
 
 
@@ -305,9 +309,7 @@ class TestWhatALiveCheckFinds:
             _mind("bad", gateway="http://bad:8420"),
             _mind("gone", gateway="http://gone:8420"),
         ]
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["good:8420"] = (200, {"stored": True, "accepted": True, "login": "dan"})
         network["bad:8420"] = (200, {"stored": True, "accepted": False, "detail": "no"})
         network["gone:8420"] = httpx.ConnectError("no route")
@@ -329,9 +331,7 @@ class TestWhatALiveCheckFinds:
         self, tmp_path, monkeypatch, network
     ) -> None:
         _patch_env_files(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["cypher:8420"] = (
             200,
             {
@@ -354,9 +354,7 @@ class TestWhatALiveCheckFinds:
     ) -> None:
         """One remedy is a redeploy and the other is a trip to the machine."""
         _patch_env_files(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["old:8420"] = (404, {})
         network["down:8420"] = httpx.ConnectTimeout("timed out")
         minds = [_mind("old", "http://old:8420"), _mind("down", "http://down:8420")]
@@ -373,9 +371,7 @@ class TestWhatALiveCheckFinds:
         """The stored token was never judged. Reporting it refused would send
         the operator off to revoke one that is fine."""
         _patch_env_files(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["cypher:8420"] = (401, {"error": "unauthorized"})
 
         answer = _run(registry.check(
@@ -389,10 +385,11 @@ class TestWhatALiveCheckFinds:
     ) -> None:
         _patch_env_files(monkeypatch, tmp_path)
 
-        def _refuse():
-            raise RuntimeError("no admin token configured")
+        async def _refuse(url):
+            from fastapi import HTTPException
+            raise HTTPException(503, "your own key could not be found on this console")
 
-        monkeypatch.setattr("mind_runtime.admin_headers", _refuse)
+        monkeypatch.setattr("mind_runtime.via_gateway", _refuse)
 
         answer = _run(registry.check(
             "mind_github_token", "cypher", [_mind("cypher", "http://cypher:8420")]
@@ -524,9 +521,7 @@ class TestWhatAHolderSaysAboutItself:
         Offering it a box that can only ever fail is worse than offering
         none."""
         _patch_env_files(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["bob:8420"] = (
             200,
             {"stored": False, "accepted": None, "settable": False,
@@ -550,9 +545,7 @@ class TestWhatAHolderSaysAboutItself:
         """Four characters say which token this is; the console never holds
         one."""
         _patch_env_files(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["cypher:8420"] = (
             200,
             {"stored": True, "accepted": True, "login": "dan", "preview": "...wxyz"},
@@ -657,9 +650,7 @@ class TestWhatACheckHandsBack:
         """The page redraws the row from this answer, so a field missing here
         is a Value column that stays empty over a token that is stored."""
         _patch_env_files(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            "mind_runtime.admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr("mind_runtime.via_gateway", _pass_through)
         network["cypher:8420"] = (
             200,
             {"stored": True, "accepted": True, "login": "dan", "preview": "...wxyz"},

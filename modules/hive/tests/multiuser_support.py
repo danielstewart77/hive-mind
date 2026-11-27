@@ -49,7 +49,7 @@ class ThreadedServer:
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self._server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning")
+            uvicorn.Config(app, host="0.0.0.0", port=self.port, log_level="warning")
         )
         self._thread = threading.Thread(target=self._server.run, daemon=True)
 
@@ -93,9 +93,28 @@ def fake_comms_app() -> FastAPI:
     base = {"url": ""}
     received: list[dict] = []
 
+    @app.middleware("http")
+    async def _forward_route(request: Request, call_next):
+        """The gateway's forward route (story 898): a request for a mind is
+        answered as that mind's own route would answer it, and marked as the
+        mind's answer so the console tells it from the gateway's own."""
+        path = request.scope.get("path", "")
+        marker = "/forward/"
+        if path.startswith("/broker/minds/") and marker in path:
+            request.scope["path"] = "/" + path.split(marker, 1)[1]
+            request.scope["raw_path"] = request.scope["path"].encode()
+            response = await call_next(request)
+            response.headers["x-hive-forwarded"] = "1"
+            return response
+        return await call_next(request)
+
     @app.get("/broker/minds")
     async def minds():
-        return [dict(m, gateway_url=base["url"]) for m in MINDS]
+        # Each mind has an address of its own (a different loopback address on
+        # the one port), as it has on a real hive: the console finds which mind
+        # is meant by the address, and two minds at one address name nobody.
+        port = base["url"].rsplit(":", 1)[-1]
+        return [dict(m, gateway_url=f"http://127.0.0.{n + 2}:{port}") for n, m in enumerate(MINDS)]
 
     # The inference proxy's meter, per holder, as it answers the console.
     usage: list[dict] = [

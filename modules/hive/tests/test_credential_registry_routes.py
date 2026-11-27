@@ -25,6 +25,10 @@ import accounts
 from hive_site.testing import run
 
 
+async def _pass_through(url):
+    return url, {"Authorization": "Bearer a"}
+
+
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = run(auth.create_user("daniel", "secret-pass", is_admin=True, replace=True))
@@ -355,14 +359,17 @@ class TestTheRelayItself:
 
         import mind_runtime
 
-        monkeypatch.setattr(
-            mind_runtime, "admin_headers", AsyncMock(return_value={"Authorization": "Bearer a"})
-        )
+        monkeypatch.setattr(mind_runtime, "via_gateway", _pass_through)
         original = httpx.AsyncClient
 
         class _Client(original):
             def __init__(self, *args, **kwargs):
-                kwargs["transport"] = httpx.MockTransport(handler)
+                def marked(request):
+                    answer = handler(request)
+                    answer.headers["x-hive-forwarded"] = "1"
+                    return answer
+
+                kwargs["transport"] = httpx.MockTransport(marked)
                 super().__init__(*args, **kwargs)
 
         monkeypatch.setattr(httpx, "AsyncClient", _Client)

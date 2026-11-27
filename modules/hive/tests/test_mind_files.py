@@ -28,6 +28,14 @@ import accounts
 GATEWAY = "http://nagatha.local:8421"
 
 
+async def _direct_for_tests(url):
+    """Stand-in for the console's gateway hop in tests whose subject is the
+    page, not the hop: the request goes to the stub mind at its own address
+    with the key the stub expects. The hop itself is tested in
+    test_send_through_gateway.py."""
+    return url, {"Authorization": "Bearer the-minds-own-key"}
+
+
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     import configuration_data
@@ -35,7 +43,7 @@ def _authed_client(tmp_path, monkeypatch):
     async def own_key(url):
         return "the-minds-own-key"
 
-    monkeypatch.setattr(configuration_data, "own_credential_for", own_key)
+    monkeypatch.setattr("mind_runtime.via_gateway", _direct_for_tests)
     user = accounts.make_user("daniel", "secret-pass", is_admin=True,
                               replace=True)
     client = TestClient(main_mod.app)
@@ -64,7 +72,7 @@ class StubMind:
         if (headers or {}).get("Authorization") != "Bearer the-minds-own-key":
             return httpx.Response(401, json={"error": "unauthorized"})
         if not self.has_files_api:
-            return httpx.Response(404, text="Not Found")
+            return httpx.Response(404, text="Not Found", headers={"x-hive-forwarded": "1"})
 
         parts = [p for p in str(path).split("/") if p]
         if parts[:1] != ["files"] or len(parts) < 2:
@@ -177,7 +185,7 @@ def test_a_mind_that_cannot_be_reached_says_so_rather_than_showing_nothing(hive)
         ),
     ):
         assert response.status_code == 502
-        assert "unreachable" in response.json()["detail"]
+        assert "could not be reached" in response.json()["detail"]
 
     # And a Mind that is up but predates this API is a different sentence
     # again, because "no route here" must never render as "no files there".
