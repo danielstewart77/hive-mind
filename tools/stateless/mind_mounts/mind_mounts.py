@@ -94,7 +94,7 @@ def _env_file(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return out
     for line in text.splitlines():
         line = line.strip()
@@ -359,7 +359,7 @@ def _line_of(text: str, needle: str) -> int | None:
     return None
 
 
-def _mind_services(path: Path) -> list[tuple[str, dict, str]]:
+def _mind_services(path: Path, known: set[str] = frozenset()) -> list[tuple[str, dict, str]]:
     try:
         raw = path.read_text()
         doc = yaml.safe_load(raw) or {}
@@ -367,14 +367,16 @@ def _mind_services(path: Path) -> list[tuple[str, dict, str]]:
         raise Stop(f"cannot read {path}: {exc}") from exc
     if not isinstance(doc, dict):
         raise Stop(f"{path} is not a compose file")
-    found = []
-    for key, service in (doc.get("services") or {}).items():
-        if not isinstance(service, dict):
-            continue
-        names = {n for n, _, _ in _environment(service)}
-        if "MIND_NAME" in names:
-            found.append((key, service, raw))
-    return found
+    services = doc.get("services") or {}
+    if not isinstance(services, dict):
+        raise Stop(f"{path} has a services section that is not a mapping")
+    # A service is a mind's when it declares MIND_NAME or is named like a mind
+    # folder of this install: an override file that only adds a mount to a
+    # mind's service is exactly where a secret would slip in.
+    return [(key, service, raw) for key, service in services.items()
+            if isinstance(service, dict)
+            and ("MIND_NAME" in {n for n, _, _ in _environment(service)}
+                 or str(key).lower() in known)]
 
 
 def _mind_name(service: dict, env: dict[str, str], key: str) -> str:
@@ -402,8 +404,8 @@ def _mind_id(service: dict, env: dict[str, str], root: Path, name: str) -> str:
                 break
     try:
         runtime = yaml.safe_load((root / "minds" / name / "runtime.yaml").read_text()) or {}
-        return str(runtime.get("mind_id") or name)
-    except (OSError, yaml.YAMLError):
+        return str(runtime.get("mind_id") or name) if isinstance(runtime, dict) else name
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return name
 
 
@@ -458,8 +460,11 @@ def check(root: Path, compose_files: list[Path], env_file: Path | None,
     skipped: list[str] = []
     checked: list[str] = []
 
+    minds_dir = root / "minds"
+    known = ({p.name.lower() for p in minds_dir.iterdir() if p.is_dir()}
+             if minds_dir.is_dir() else set())
     for path in compose_files:
-        for key, service, raw in _mind_services(path):
+        for key, service, raw in _mind_services(path, known):
             name = _mind_name(service, env, key)
             ident = _mind_id(service, env, root, name)
             if ident in operator_set or name in operator_set:

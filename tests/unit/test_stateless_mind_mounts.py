@@ -274,3 +274,15 @@ def test_env_file_and_a_dict_environment_with_a_passed_through_credential_are_na
 
     entries = {f["entry"] for f in report["findings"]}
     assert code == 1 and entries == {"env_file", "GATEWAY_TOKEN"}, entries
+
+
+def test_an_override_file_that_only_adds_a_mount_to_a_minds_service_is_checked(tmp_path, capsys) -> None:
+    root = tmp_path / "install"
+    (root / "minds" / "ada").mkdir(parents=True)
+    (root / ".env").write_text("X=1\n")
+    override = tmp_path / "override.yaml"
+    override.write_text(f"services:\n  ada:\n    volumes:\n      - {root}:/x:rw\n")
+    code, report = _check(root, "--compose", str(override), "--operators", "nobody", capsys=capsys)
+    assert code == 1
+    assert report["checked"] == ["ada"]
+    assert report["findings"] and report["findings"][0]["mind"] == "ada"
