@@ -121,7 +121,7 @@ def test_list_labels_returns_array(
     assert isinstance(data, list)
 
 
-def test_send_email_hitl_on_returns_202(
+def test_send_email_hitl_on_refuses_when_nobody_approves(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
@@ -139,10 +139,10 @@ def test_send_email_hitl_on_returns_202(
         json={"to": "test@example.com", "subject": "hi", "body": "hello"},
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
-def test_reply_email_hitl_on_returns_202(
+def test_reply_email_hitl_on_refuses_when_nobody_approves(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
@@ -160,10 +160,10 @@ def test_reply_email_hitl_on_returns_202(
         json={"message_id": "msg1", "body": "reply text"},
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
-def test_delete_email_hitl_on_returns_202(
+def test_delete_email_hitl_on_refuses_when_nobody_approves(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
@@ -181,7 +181,7 @@ def test_delete_email_hitl_on_returns_202(
         json={"message_id": "msg1"},
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
 # ---- Labels, move by name, unsubscribe ----

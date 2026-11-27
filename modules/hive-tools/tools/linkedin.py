@@ -125,13 +125,12 @@ async def post_to_linkedin(
     token = _load_token()
     if token is None:
         return {"error": "LinkedIn token file not found. Authenticate first."}
-    # Token exists — now request HITL approval if configured. The call is
-    # captured so an approval can replay it, and the replay itself (the
-    # internal caller) is the approved call rather than a new request.
-    if caller_mind != "internal":
-        raw = await request.body()
-        await _check_hitl(
-            "linkedin_post", caller_mind,
-            tool_method=request.method, tool_path=str(request.url.path),
-            tool_body=raw.decode("utf-8", errors="replace"))
+    # Token exists — now hold the call for approval if configured. It carries
+    # on only when a person approves it.
+    raw = await request.body()
+    await _check_hitl(
+        "linkedin_post", caller_mind,
+        tool_method=request.method, tool_path=str(request.url.path),
+        tool_body=raw.decode("utf-8", errors="replace"),
+        gone=request.is_disconnected)
     return _post_to_linkedin_impl(body.content, body.image_path)

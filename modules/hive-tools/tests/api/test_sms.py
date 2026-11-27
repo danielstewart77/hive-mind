@@ -58,7 +58,7 @@ def test_send_requires_auth(client: TestClient) -> None:
     assert resp.status_code == 401
 
 
-def test_send_hitl_on_returns_202(
+def test_send_hitl_on_refuses_when_nobody_approves(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
@@ -78,7 +78,7 @@ def test_send_hitl_on_returns_202(
         json={"to": "+15551234567", "body": "hi"},
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
 def test_send_returns_error_when_gateway_unconfigured(

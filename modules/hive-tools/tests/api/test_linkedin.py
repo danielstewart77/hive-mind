@@ -43,7 +43,7 @@ def test_post_linkedin_requires_auth(client: TestClient) -> None:
 
 
 @patch("tools.linkedin._load_token")
-def test_post_linkedin_hitl_on_returns_202(
+def test_post_linkedin_hitl_on_refuses_when_nobody_approves(
     mock_load: MagicMock,
     app: FastAPI,
     client: TestClient,
@@ -63,7 +63,7 @@ def test_post_linkedin_hitl_on_returns_202(
         json={"content": "Hello LinkedIn"},
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
 @patch("tools.linkedin._load_token")

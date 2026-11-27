@@ -11,19 +11,17 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import auth_api
-from auth_api import bearer_value, may_decide, require_api_token_or_person, require_person
+from auth_api import may_decide, require_api_token_or_person, require_person
 import store
 from hitl import (
-    HITLPendingException,
+    HITLRefused,
     UncapturableCall,
     UnknownAction,
-    approval_url,
-    get_hitl_status,
+    close_waiting_requests,
+    effective_status,
     review_of,
     respond_to_hitl,
-    schedule_replay,
     seed_default_hitl_settings,
-    settle_replays,
     sync_tool_registry,
 )
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -31,13 +29,6 @@ from schemas import HITLRespondRequest
 from tools.docker_ops import BlockedProjectError
 
 log = configure_logging("hive-tools")
-
-#: How long shutdown waits for replays in flight before recording each one
-#: still running as cut off. Inside the container's stop grace period
-#: (`stop_grace_period` in docker-compose.yml), with room left to record
-#: and send those outcomes.
-REPLAY_SETTLE_SECONDS = 10
-
 
 def create_app() -> FastAPI:
     """Application factory."""
@@ -68,6 +59,13 @@ def create_app() -> FastAPI:
                 "only the path /approvals/<id>, not a link a person can open. "
                 "Set it to the hive site's address as a browser reaches it.")
 
+        # A request still waiting belongs to a call the last process held and
+        # lost with it; nothing is left to release, so none stays decidable.
+        closed = await close_waiting_requests()
+        if closed:
+            log.info("closed %d request(s) whose held call died with the "
+                     "last process", closed)
+
         await seed_default_hitl_settings()
 
         # Every tool router has been imported by now, so `hitl_gate()`'s
@@ -91,10 +89,6 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            # A replay still running when the process stops would otherwise
-            # reach a closed store and lose the outcome it was about to
-            # record. Bounded, because shutdown must still happen.
-            await settle_replays(timeout=REPLAY_SETTLE_SECONDS)
             await store.close()
 
     app = FastAPI(
@@ -147,33 +141,35 @@ def create_app() -> FastAPI:
                 status_code=403)
         return review
 
-    # ---- HITL polling endpoints ----
+    # ---- What a request is: the record of who asked, for what, and how it ended
     @app.get("/hitl/{request_id}")
     async def hitl_status(
         request_id: str,
         caller: str = Depends(require_api_token_or_person),
     ) -> Any:
-        status = await get_hitl_status(request_id, caller)
-        if status is None:
+        """A request's record: who asked, for what, when, and who decided it.
+        The call itself is answered on the connection that made it; this is
+        only the record. The content of the call is not in it."""
+        row = await store.request(request_id)
+        if row is None:
             return JSONResponse({"detail": "Not found"}, status_code=404)
-
-        s = status["status"]
-        if s == "pending":
-            return JSONResponse(status, status_code=202)
-        if s == "approved":
-            return JSONResponse(status, status_code=200)
-        if s == "denied":
-            return JSONResponse(status, status_code=403)
-        if s == "expired":
-            return JSONResponse(status, status_code=408)
-
-        return JSONResponse(status, status_code=200)
+        status = effective_status(row, int(time.time()))
+        answer = {
+            "hitl_request_id": row["id"],
+            "status": status,
+            "tool_name": row["tool_name"],
+            "caller_mind": row["caller_mind"],
+            "created_at": row["created_at"],
+            "decided_at": row["decided_at"],
+            "decided_by": row.get("decided_by"),
+        }
+        code = {"pending": 202, "denied": 403, "expired": 408}.get(status, 200)
+        return JSONResponse(answer, status_code=code)
 
     @app.post("/hitl/{request_id}/respond")
     async def hitl_respond(
         request_id: str,
         body: HITLRespondRequest,
-        request: Request,
         # A person's own key only: a mind's key is refused before anything is
         # decided, so a mind cannot approve the call it asked for.
         caller: str = Depends(require_person),
@@ -193,32 +189,23 @@ def create_app() -> FastAPI:
             return JSONResponse({"detail": "Not found"}, status_code=404)
         if "error" in result and result["error"] == "already_resolved":
             return JSONResponse(result, status_code=409)
-        replay = result.pop("_replay", None)
-        approved = result["status"] == "approved"
         log_event(
             log, "hitl.responded", request_id=request_id, action=body.action,
-            caller=caller, replay_scheduled=approved,
+            caller=caller, status=result["status"],
         )
-        if approved:
-            # Every approval gets an outcome, including one with no captured
-            # call to replay: that is reported as a failure rather than as an
-            # approval that silently did nothing.
-            schedule_replay(request_id, result["tool_name"],
-                            result["caller_mind"], replay,
-                            bearer_value(request.headers.get("Authorization", "")))
         return JSONResponse(result, status_code=200)
 
     # Exception handlers
-    @app.exception_handler(HITLPendingException)
-    async def hitl_pending_handler(request: Request, exc: HITLPendingException) -> JSONResponse:
+    @app.exception_handler(HITLRefused)
+    async def hitl_refused_handler(request: Request, exc: HITLRefused) -> JSONResponse:
+        """The held call's answer when no person said yes: the same call that
+        waited is told no, plainly. 403 for a denial, 408 for no answer in
+        time."""
         return JSONResponse(
-            {"hitl_request_id": exc.request_id, "status": "pending",
-             "approve_at": approval_url(exc.request_id),
-             "message": ("This waits on a person's yes. Tell them to approve "
-                         "or deny it here, signed in to the hive site: "
-                         + approval_url(exc.request_id))},
-            status_code=202,
-        )
+            {"hitl_request_id": exc.request_id, "status": exc.status,
+             "decided_by": exc.decided_by, "approved": False,
+             "error": exc.message},
+            status_code=403 if exc.status == "denied" else 408)
 
     @app.exception_handler(UncapturableCall)
     async def uncapturable_call_handler(

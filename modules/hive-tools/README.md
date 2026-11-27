@@ -25,65 +25,76 @@ than taking the service down.
 
 ## Human-in-the-loop
 
-Outward-facing actions are gated. `hitl_gate("<tool_name>")` intercepts a call
-and raises `HITLPendingException` until a human approves it; approval prompts go
-to the operator's Telegram. New tool names auto-register into
-`tool_hitl_settings` at startup (`sync_tool_registry` in `hitl.py`) defaulting to
-**always prompt** — a newly added tool is gated by default, never open by
-default. That seed is insert-if-absent: it runs for every gated tool on
-every start, so a replacing write would re-arm every gate the operator had
-turned off on each deploy.
+Outward-facing actions are gated. `hitl_gate("<tool_name>")` holds the mind's
+call **open** until a person decides it. The mind calls a gated tool such as
+send mail and simply waits on that call, as it would on any slow tool. The
+tools record the request (who asked, for what, when) and notify the operator
+with a link; the owner of the mind, or an administrator, approves or denies it
+on the hive site. On approval the same open call is released, runs the tool,
+and the tool's result is the reply to that call. On a denial, or when
+`HITL_WAIT_SECONDS` runs out with nobody having decided, the same call is
+answered with a plain refusal telling the mind no (403 for a denial, 408 for no
+answer in time; the body has `approved: false` and an `error` sentence). Nothing
+is replayed later, no mind's key is stored or used again, and no message is sent
+to the mind afterwards: there is nothing to tell it that its own call has not
+already said.
+
+New tool names auto-register into `tool_hitl_settings` at startup
+(`sync_tool_registry` in `hitl.py`) defaulting to **always prompt** — a newly
+added tool is gated by default, never open by default. That seed is
+insert-if-absent: it runs for every gated tool on every start, so a replacing
+write would re-arm every gate the operator had turned off on each deploy.
+
+`HITL_WAIT_SECONDS` (default 300, five minutes; zero refuses at once; a value
+that is not a whole number falls back to 300) is how long a call is held. Five
+minutes is long enough for a person to be paged, open the hive site and
+decide, and short of the limits a caller commonly has: a shell tool call is
+two minutes by default and ten at most (`BASH_DEFAULT_TIMEOUT_MS`,
+`BASH_MAX_TIMEOUT_MS`), the hive site waits 310 seconds on a gated call, and
+the gateway's 45 second forward does not carry tool calls. A mind whose own
+tool-call limit is shorter than the wait should be given a smaller wait.
 
 A request is decided on the hive site, by a person signed in as themselves:
 the hive site sends that person's own key to `POST /hitl/{id}/respond`, and the
 tools accept it only from the owner of the mind that asked or an administrator,
 recording that person's name on the request. A mind's key is refused with a 403
-before anything is decided, so the request stays pending. `GET /hitl/{id}/review`
-(the whole saved call, for a person who may decide it) and `GET /hitl/waiting`
-(what waits for the caller) take a person's key too. The notice carries
-`HIVE_SITE_PUBLIC_URL/approvals/{id}`; there is no button and no approver credential.
+before anything is decided, so the request stays pending and the call stays
+held. `GET /hitl/{id}/review` (the whole call, for a person who may decide it)
+and `GET /hitl/waiting` (what waits for the caller) take a person's key too.
+`GET /hitl/{id}` is only the record: who asked, which tool, when, its status and
+who decided it. The notice carries `HIVE_SITE_PUBLIC_URL/approvals/{id}`; there
+is no button and no approver credential.
 
 A decision is one guarded statement, so two people reaching the queue at the
 same moment produce one decision and the loser is told which of three
 reasons it lost — no such request, already settled, or expired while the
 page was open. Those have different remedies, which is why they are not
-folded together. An expired request is drawn as expired: nothing ever writes
-`expired` to a row, the expiry is a rule applied when the row is read, and
-`effective_status` is the one place it lives.
+folded together. An expired request is drawn as expired: the expiry is a rule
+applied when the row is read, and `effective_status` is the one place it
+lives. A held call closes its own request when its time is up, so a yes that
+arrives a moment later finds it closed and runs nothing.
 
 The decision and the sudo grant it may earn are one unit of work. Committed
 separately they leave an end state nothing can recover from — the request
-says approved, the call it authorised was never replayed, and the decision
-is guarded on `pending` so it can never be approved again.
+says approved with no grant, and the decision is guarded on `pending` so it can
+never be approved again.
 
-An approval replays the captured call with the internal credential, and what
-the replay did is stored on the request: whether it succeeded, its HTTP
-status, and the body the tool answered with. A status outside 2xx, a replay
-that never got an answer (it is given 15 minutes), and a 2xx whose body
-reports a caught failure (`error`, `_error`, `ok: false`, or
-`status: "error"`) are all stored as failed. A replay still running at
-shutdown is recorded as cut off, with the tool's effect unknown. `GET /hitl/{id}` returns it
-as `outcome` on an approved request — `null` until the replay has landed —
-and hive-tools then sends the asking mind one broker message through
-hive-comms (`POST /broker/messages`, from and to that mind's id, on a fresh
-conversation id, `metadata.request_type` `hitl_result`), sent with the
-key of the person who decided the request, as that person (`COMMS_URL` is the
-only setting; the tools hold no gateway key of their own). A message that
-cannot be delivered is logged; the stored outcome stands.
+A held call lives in the process that holds it. If the caller hangs up, its
+request is closed at once; if the tools restart, every request still waiting is
+closed at the next start (`close_waiting_requests`), because the call that was
+waiting on it is gone and a yes now would run nothing.
 
 A gated call whose body holds a NUL byte is refused with a 400 rather than
-queued. A NUL is valid UTF-8, so `errors="replace"` leaves it alone, and
-Postgres refuses it outright. Refused rather than escaped,
-because the whole purpose of capturing the body is that an approval replays
-the call that was approved, and a body stored with the NUL taken out is a
-different call.
+held. A NUL is valid UTF-8, so `errors="replace"` leaves it alone, and
+Postgres refuses it outright. Refused rather than escaped, because the person
+must see exactly the call they approve, and a body stored with the NUL taken
+out is a different call.
 
 ## A mind's one key
 
 A mind presents one key to the gateway, the memory store and these tools, and
 each knows which mind is calling: the tools record a gated call under the
-holder the key belongs to, send the approval notice naming that mind, and
-address the result to that mind's id. The console registers the key the person
+holder the key belongs to and name that mind in the approval notice. The console registers the key the person
 pasted when the mind is created, with these admin-guarded routes (bearer
 `TOOLS_ADMIN_BEARER_TOKEN`, held by the console and by no mind):
 
@@ -93,7 +104,7 @@ pasted when the mind is created, with these admin-guarded routes (bearer
   The holders `hitl-approver`, `internal` and `skippy` are refused on every
   credential route, so no administrator credential can make an approver.
 - `DELETE /credentials/{holder}` revokes the holder and expires its pending
-  requests, so approving one later replays nothing. `?remove=true` deletes the
+  requests, so approving one later runs nothing. `?remove=true` deletes the
   holder's rows, freeing the value for a mind (the undo of a creation).
 - `GET /credentials` lists holders, whether each is live, never a value or digest.
 

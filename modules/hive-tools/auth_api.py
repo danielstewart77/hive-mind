@@ -23,7 +23,7 @@ MIND_CANNOT_DECIDE = (
     "but never approve or deny one. A person decides, on the hive site, "
     "signed in as themselves.")
 
-#: Holders no mind may be named after: the tools keep these for their own use.
+#: Holders no mind may be named after.
 RESERVED_HOLDERS = frozenset({"internal", "skippy", "shared-token-retired"})
 
 
@@ -68,18 +68,11 @@ async def require_api_token(request: Request) -> str:
     """FastAPI dependency: validate bearer token from Authorization header.
 
     Returns the caller mind name on success, raises 401 on failure.
-    Accepts 'Internal <INTERNAL_SECRET>' for HITL replay calls.
 
     A person's own key is refused here (validate_token answers None for it):
     a person decides approvals and makes no gated call as a mind.
     """
-    from config import INTERNAL_SECRET
-
     auth_header = request.headers.get("Authorization", "")
-
-    # Internal HITL replay bypass
-    if auth_header == f"Internal {INTERNAL_SECRET}":
-        return "internal"
 
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -178,17 +171,11 @@ async def require_person(request: Request) -> str:
     Only a person's own key passes, and the answer is that person's
     username. A mind's key - any mind's, the operator mind's included - is
     refused with 403 before anything is read or decided, so the request stays
-    pending; so is hive-tools' own internal replay secret, which replays a
-    decision and never makes one. Nothing else (no bot credential, no
-    service value) is a way to decide.
+    pending. Nothing else (no bot credential, no service value) is a way to
+    decide.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        if auth_header.startswith("Internal "):
-            raise HTTPException(
-                status_code=403,
-                detail="hive-tools' internal secret replays a decision and "
-                       "never makes one; the request is still pending.")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
     key = await access.key_for(bearer_value(auth_header))

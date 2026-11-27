@@ -83,8 +83,8 @@ def docker_mutate_gate(tool_name: str):
     approval as theirs."""
 
     # Register for default approval seeding just like other gated tools.
-    # Keep the Docker dependency below: it captures the query string that
-    # selects the project, so an approved replay targets the same path.
+    # Keep the Docker dependency below: it records the query string that
+    # selects the project, so the person sees which project they approve.
     hitl_gate(tool_name)
 
     async def _check(
@@ -92,8 +92,6 @@ def docker_mutate_gate(tool_name: str):
         path: str = Query(...),
         caller_mind: str = Depends(require_api_token_or_person),
     ) -> str:
-        if caller_mind == "internal":
-            return caller_mind
         if os.path.basename(os.path.normpath(path)) in MUTATE_BLOCKED:
             raise BlockedProjectError(
                 f"Mutating operations on '{path}' are blocked. This project "
@@ -108,6 +106,7 @@ def docker_mutate_gate(tool_name: str):
             tool_method=request.method,
             tool_path=tool_path,
             tool_body=body_bytes.decode("utf-8", errors="replace"),
+            gone=request.is_disconnected,
         )
 
     return _check

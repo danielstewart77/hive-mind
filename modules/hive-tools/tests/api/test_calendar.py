@@ -122,7 +122,7 @@ def test_list_calendars_returns_array(
     assert isinstance(data, list)
 
 
-def test_create_event_hitl_on_returns_202(
+def test_create_event_hitl_on_refuses_when_nobody_approves(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
@@ -144,7 +144,7 @@ def test_create_event_hitl_on_returns_202(
         },
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
 @patch("tools.calendar._get_calendar_service")

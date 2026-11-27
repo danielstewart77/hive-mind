@@ -42,7 +42,7 @@ def test_docker_status_requires_auth(client: TestClient) -> None:
     assert resp.status_code == 401
 
 
-def test_docker_compose_up_hitl_on_returns_202(
+def test_docker_compose_up_hitl_on_refuses_when_nobody_approves(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
@@ -61,7 +61,7 @@ def test_docker_compose_up_hitl_on_returns_202(
         f"/docker/up?path={tmp_path}",
         headers=auth_header,
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 408
 
 
 @patch("tools.docker_ops._run_subprocess")
@@ -122,7 +122,7 @@ def test_a_gated_call_whose_body_cannot_be_stored_is_refused(
     SQLite stored it and Postgres refuses it outright, so the same gated call
     was queued on one store and 500ed on the other with no approval row and
     no notification. Refused here instead, because a body stored with the NUL
-    taken out would replay a different call than the one approved."""
+    taken out would show a different call than the one approved."""
     db.execute(
         "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
         "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
@@ -138,19 +138,19 @@ def test_a_gated_call_whose_body_cannot_be_stored_is_refused(
 
     assert resp.status_code == 400
     assert "NUL" in resp.json()["error"]
-    # Nothing queued, so nothing is waiting on a person for a call that
-    # cannot be replayed.
+    # Nothing recorded, so nothing is waiting on a person for a call that
+    # cannot be shown as it was.
     assert db.execute(
         "SELECT count(*) AS c FROM hitl_requests").fetchone()["c"] == 0
 
 
-def test_a_body_with_invalid_utf8_is_still_queued(
+def test_a_body_with_invalid_utf8_is_still_gated_and_recorded(
     app: FastAPI,
     client: TestClient,
     auth_header: dict[str, str],
     tmp_path,
 ) -> None:
-    """Only the NUL is refused. Invalid UTF-8 has always been captured with
+    """Only the NUL is refused. Invalid UTF-8 has always been recorded with
     the replacement character and is still gated, so the refusal is as narrow
     as the thing the database cannot hold."""
     db.execute(
@@ -166,7 +166,7 @@ def test_a_body_with_invalid_utf8_is_still_queued(
         headers={**auth_header, "Content-Type": "application/json"},
     )
 
-    assert resp.status_code == 202
+    assert resp.status_code == 408
     assert db.execute(
         "SELECT count(*) AS c FROM hitl_requests").fetchone()["c"] == 1
 

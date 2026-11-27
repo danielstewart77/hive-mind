@@ -26,9 +26,8 @@ services:
         hive_data: ../hive-data
     container_name: hive-tools
     env_file: ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/.env
-    # Shutdown waits for approved calls still replaying, then records the
-    # rest as cut off and tells the asking mind. Docker's default 10s would
-    # SIGKILL it partway through that.
+    # A call held open for a person's yes is lost when the container stops,
+    # and its request is closed at the next start; nothing is replayed.
     stop_grace_period: 30s
     ports:
       - "9421:9421"

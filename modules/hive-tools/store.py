@@ -310,16 +310,10 @@ async def request_payload(request_id: str) -> Row | None:
     return await tools.request_payload(request_id, unit=_live())
 
 
-async def record_outcome(request_id: str, ok: bool, status: int | None,
-                         body: str, at: int) -> int:
-    """Store what an approved request's replay did, once; report if it did."""
-    return int((await tools.record_outcome(
-        request_id, ok, status, body, at, unit=_live()))["rows"])
-
-
-async def request_outcome(request_id: str) -> Row | None:
-    """A request's replay outcome, with the body the tool answered."""
-    return await tools.request_outcome(request_id, unit=_live())
+async def run_out(request_id: str, now: int) -> int:
+    """Let one request still waiting run out, now; report how many changed."""
+    return int((await tools.run_out_request(request_id, now,
+                                            unit=_live()))["rows"])
 
 
 # ------------------------------------------------------------------- grants

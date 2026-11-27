@@ -384,7 +384,7 @@ def owned(root, operation_id, caller):
         operation = load(root, operation_id)
     except (OSError, ValueError):
         raise HTTPException(404, 'Rename not found') from None
-    if caller != 'internal' and operation['caller'] != caller:
+    if operation['caller'] != caller:
         raise HTTPException(404, 'Rename not found')
     return operation
 

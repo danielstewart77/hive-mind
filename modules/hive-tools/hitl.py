@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
 from fastapi import Depends, Request
 
 import store
@@ -18,7 +17,16 @@ from auth_api import require_api_token
 
 log = logging.getLogger(__name__)
 
-HITL_EXPIRY_SECONDS = 300  # 5 minutes
+#: How long a call that needs a person's yes is held open, in seconds, when
+#: `HITL_WAIT_SECONDS` names nothing usable. Five minutes: long enough for a
+#: person to be paged, open the hive site and decide; short enough that the
+#: caller's own limits (a shell tool's default is two minutes, its maximum ten)
+#: and the hive site's 310 second gated calls outlast it with room to spare.
+HITL_WAIT_DEFAULT_SECONDS = 300
+
+#: The setting that overrides it. Zero means do not wait: the request is
+#: recorded for the page and the call is refused at once.
+HITL_WAIT_ENV = "HITL_WAIT_SECONDS"
 
 # Auto-registration: every hitl_gate("tool_name") call records the name here
 # at import time. sync_tool_registry() upserts these into tool_hitl_settings
@@ -51,11 +59,11 @@ class UncapturableCall(ValueError):
     on one store and 500ed on the other.
 
     Refused at the route rather than escaped on the way in. An escaped body
-    is a different body, and the whole purpose of capturing it is that the
-    replay re-makes the call the person approved - so a gate that quietly
-    rewrote it would show Daniel one call and run another. A caller whose
-    body cannot be stored faithfully is told so, now, instead of being
-    queued against a replay that cannot be honoured.
+    is a different body, and the whole purpose of recording it is that the
+    person sees the call they are approving - so a gate that quietly rewrote
+    it would show Daniel one call and run another. A caller whose body cannot
+    be stored faithfully is told so, now, instead of being held against a
+    request that does not show what it will run.
     """
 
 
@@ -64,25 +72,38 @@ def _capturable(text: str | None, what: str) -> str | None:
     if text is not None and "\x00" in text:
         raise UncapturableCall(
             f"this call's {what} holds a NUL byte, which the hive's database "
-            "cannot store in a text column. The gate captures the call so an "
-            "approval can replay it exactly, and a body stored with the NUL "
-            "removed would replay a different call - so the call is refused "
-            "here rather than queued against a replay that cannot be "
-            "honoured.")
+            "cannot store in a text column. The gate records the call so a "
+            "person sees exactly what they approve, and a body stored with "
+            "the NUL removed would show a different call - so the call is "
+            "refused here rather than held against a request that does not "
+            "show it.")
     return text
 
 
-class HITLPendingException(Exception):
-    """Raised when a tool call requires human approval.
+class HITLRefused(Exception):
+    """A held call that a person denied, or that nobody answered in time.
 
-    Use a custom exception instead of HTTPException so the response body
-    is returned flat ({"hitl_request_id": ..., "status": "pending"}) rather
-    than wrapped under the FastAPI {"detail": ...} envelope.
+    The same call is answered with this: a plain refusal that tells the mind
+    no, and says why, rather than a promise of an answer later.
     """
 
-    def __init__(self, request_id: str) -> None:
+    def __init__(self, request_id: str, status: str, decided_by: str | None,
+                 waited: int) -> None:
         self.request_id = request_id
-        super().__init__(f"HITL approval required: {request_id}")
+        self.status = status
+        self.decided_by = decided_by
+        if status == "denied":
+            who = decided_by or "a person"
+            self.message = (
+                f"Refused: {who} denied this request. The call did not run. "
+                "Do not repeat it unless asked to.")
+        else:
+            self.message = (
+                f"Refused: nobody approved this request within {waited} "
+                "seconds, so it timed out. The call did not run. Tell the "
+                "person you work for it is waiting for their approval on the "
+                "hive site, and try again only if they ask.")
+        super().__init__(self.message)
 
 
 async def _check_hitl(
@@ -92,8 +113,11 @@ async def _check_hitl(
     tool_method: str | None = None,
     tool_path: str | None = None,
     tool_body: str | None = None,
+    gone: Callable[[], Awaitable[bool]] | None = None,
 ) -> str:
-    """Core HITL logic. Returns caller_mind if allowed, raises HITLPendingException otherwise."""
+    """Core HITL logic. Returns caller_mind once the call is allowed (at once, or
+    when a person approves the held call); raises HITLRefused if it is denied
+    or times out."""
     # Checked here rather than at each gated route, so a route added later
     # cannot ship without it. Before the mode is read, because a call that
     # cannot be captured is refused whether or not it would have been gated
@@ -118,10 +142,13 @@ async def _check_hitl(
         if grant is not None:
             return caller_mind
 
-    # mode == "on" or "sudo" without valid grant — create HITL request
+    # mode == "on" or "sudo" without valid grant: record the request and hold
+    # the caller's own call open until a person decides it or the wait runs
+    # out. Nothing is replayed later; the call that comes out of here is the
+    # one the mind made, and it carries on to the tool.
     request_id = str(uuid.uuid4())
-    now = int(time.time())
-    expires_at = now + HITL_EXPIRY_SECONDS
+    now = _now()
+    expires_at = now + wait_seconds()
 
     await store.create_request(
         request_id, tool_name, caller_mind, params_json, now, expires_at,
@@ -133,291 +160,111 @@ async def _check_hitl(
     except Exception:
         log.warning("HITL notification failed for %s", request_id, exc_info=True)
 
-    raise HITLPendingException(request_id)
+    status, decided_by = await _held(request_id, expires_at, gone)
+    if status == "approved":
+        return caller_mind
+    raise HITLRefused(request_id, status, decided_by, wait_seconds())
 
 
-#: The replay's transport. None is httpx's real one, to this process's own
-#: port; tests swap in a MockTransport for the far side of the call.
-_REPLAY_TRANSPORT: httpx.AsyncBaseTransport | None = None
-
-#: The transport to hive-comms, for telling the asking mind. Same rule.
-_COMMS_TRANSPORT: httpx.AsyncBaseTransport | None = None
-
-#: How long a replay may take to answer. Long, because the gated tools
-#: include a browser search that waits on a page for over a minute and a
-#: compose `up` that may pull or build. A replay cut off early is reported
-#: as failed while the tool may still finish, which invites a retry that
-#: does the thing twice.
-REPLAY_TIMEOUT_SECONDS = 900
-COMMS_TIMEOUT_SECONDS = 10
-
-#: The longest error carried in the message to the mind.
-MESSAGE_ERROR_CHARS = 1000
-
-#: The longest result carried in the message to the mind. The full body is
-#: on the request row and `GET /hitl/{id}` returns it; the message is a
-#: wake-up prompt, and a browser page in one is a turn spent reading it.
-MESSAGE_RESULT_CHARS = 4000
-
-#: What the broker files the message under, and what a mind's skill keys on.
-HITL_RESULT_REQUEST_TYPE = "hitl_result"
-
-#: Replays still running, and whose they are. Held because the event loop
-#: keeps only a weak reference to a task, so a fire-and-forget replay can be
-#: collected before it finishes; and so shutdown can land an outcome for
-#: each one before the store closes.
-_IN_FLIGHT: dict[asyncio.Task[None], tuple[str, str, str, str | None]] = {}
-
-#: What a replay still running at shutdown is recorded as.
-CUT_OFF_ERROR = (
-    "hive-tools shut down before the replay answered, so whether the tool "
-    "ran is unknown; check its effect before making the call again")
-
-
-def schedule_replay(request_id: str, tool_name: str, caller_mind: str,
-                    replay: dict[str, str] | None,
-                    person_key: str | None = None) -> asyncio.Task[None]:
-    """Run an approved request's call in the background and report it.
-
-    `person_key` is the deciding person's own key, held in memory for this
-    task alone to tell the asking mind with; it is never stored."""
-    task = asyncio.create_task(
-        replay_and_report(request_id, tool_name, caller_mind, replay, person_key))
-    _IN_FLIGHT[task] = (request_id, tool_name, caller_mind, person_key)
-    task.add_done_callback(lambda done: _IN_FLIGHT.pop(done, None))
-    return task
-
-
-async def settle_replays(timeout: float | None = None) -> None:
-    """Wait for every replay in flight to land its outcome.
-
-    Given a timeout, a replay still running when it passes is cancelled and
-    recorded as cut off, and the mind told so, rather than left approved
-    with no outcome for ever - which `GET /hitl/{id}` cannot tell from a
-    replay still running.
-    """
-    pending = dict(_IN_FLIGHT)
-    if not pending:
-        return
-    _, unfinished = await asyncio.wait(set(pending), timeout=timeout)
-    for task in unfinished:
-        task.cancel()
-    if unfinished:
-        await asyncio.wait(unfinished)
-    for task in unfinished:
-        request_id, tool_name, caller_mind, person_key = pending[task]
-        await _land(request_id, tool_name, caller_mind, None,
-                    json.dumps({"error": CUT_OFF_ERROR}), person_key)
-
-
-def _parsed(text: str) -> Any:
-    """A response body as JSON when it is JSON, otherwise the text."""
+def wait_seconds() -> int:
+    """How long a call needing a person's yes is held open: the setting
+    `HITL_WAIT_SECONDS`, or five minutes when it is unset or not a whole
+    number of seconds. Zero means not at all: the request is recorded for the
+    page and the call is refused at once. Read on each call, so a changed
+    setting needs no code change."""
+    raw = os.environ.get(HITL_WAIT_ENV, "").strip()
     try:
-        return json.loads(text)
+        seconds = int(raw)
     except ValueError:
-        return text
+        return HITL_WAIT_DEFAULT_SECONDS
+    return seconds if seconds >= 0 else HITL_WAIT_DEFAULT_SECONDS
 
 
-def _error_in(status: int | None, result: Any) -> str | None:
-    """The tool's own error, or None when the call succeeded.
-
-    Every gated tool answers through the same HTTP surface, so success is
-    judged there and not per tool: a status outside 2xx is a refusal, and a
-    2xx is still a failure when the body says so in any of the shapes this
-    service's routes report a caught failure in - `{"error": ...}` (gmail,
-    calendar, sms, linkedin), `{"ok": false, ...}` (schema), `{"status":
-    "error", ...}` (docker compose exiting non-zero) and `{"_error": ...}`
-    (ollama). Counting any of them as success is how an approved send that
-    never left would be reported as sent.
-    """
-    if isinstance(result, dict):
-        for key in ("error", "_error"):
-            if result.get(key):
-                return str(result[key])
-        if result.get("ok") is False:
-            return str(result.get("detail") or result.get("code")
-                       or "the tool answered ok: false")
-        if result.get("status") == "error":
-            return str(result.get("stderr") or result.get("detail")
-                       or f"the tool exited {result.get('return_code')}")
-    if status is None or not 200 <= status < 300:
-        if isinstance(result, dict) and result.get("detail"):
-            return str(result["detail"])
-        text = result if isinstance(result, str) else json.dumps(result)
-        return (f"the replay answered HTTP {status}: {text[:500]}"
-                if status is not None else text[:500])
-    return None
+#: The clock the hold reads. A seam, so the hold's deadline is proven with
+#: an injected time rather than by sleeping through it.
+def _now() -> int:
+    return int(time.time())
 
 
-async def _run_replay(method: str, path: str,
-                      body: str) -> tuple[int | None, str]:
-    """Re-make the call, as `(HTTP status, body)`; status None if it never ran."""
-    from config import INTERNAL_SECRET
+#: Requests being held, each with the signal its decision sets. The signal is
+#: only a prompt to look at the record sooner: the record is what is believed.
+_WAKE: dict[str, asyncio.Event] = {}
 
-    url = f"http://127.0.0.1:9421{path}"
-    headers = {
-        "Authorization": f"Internal {INTERNAL_SECRET}",
-        "Content-Type": "application/json",
-    }
+#: How often a held call looks at its record when nothing has signalled, so a
+#: decision made through another process is still seen.
+HOLD_POLL_SECONDS = 2.0
+
+
+async def _pause(event: asyncio.Event, seconds: float) -> None:
+    """Wait up to `seconds` for the signal. The other half of the clock seam."""
     try:
-        async with httpx.AsyncClient(transport=_REPLAY_TRANSPORT) as client:
-            response = await client.request(
-                method, url, content=body, headers=headers,
-                timeout=REPLAY_TIMEOUT_SECONDS)
-    except httpx.TimeoutException as exc:
-        log.warning("HITL replay timed out: %s %s", method, path)
-        return None, json.dumps(
-            {"error": f"the replay did not answer within "
-                      f"{REPLAY_TIMEOUT_SECONDS}s ({type(exc).__name__}), so "
-                      "whether the tool ran is unknown; check its effect "
-                      "before making the call again"})
-    except Exception as exc:  # noqa: BLE001 - every failure is an outcome
-        log.warning("HITL replay failed: %s %s", method, path, exc_info=True)
-        return None, json.dumps(
-            {"error": f"the replay never got an answer: "
-                      f"{type(exc).__name__}: {exc}"})
-    return response.status_code, response.text
+        await asyncio.wait_for(event.wait(), seconds)
+    except asyncio.TimeoutError:
+        pass
 
 
-async def replay_and_report(request_id: str, tool_name: str, caller_mind: str,
-                            replay: dict[str, str] | None,
-                            person_key: str | None = None) -> None:
-    """Replay an approved call, store what it did, then tell the mind.
+async def _held(request_id: str, expires_at: int,
+                gone: Callable[[], Awaitable[bool]] | None = None,
+                ) -> tuple[str, str | None]:
+    """Hold until the request is decided or its time runs out.
 
-    Stored before it is sent, and a failure to send never touches what was
-    stored: the row is the record, and the message is only the asking mind
-    being told the record exists. A request approved with no captured call
-    has nothing to replay, which is a failure the mind is told about rather
-    than an approval that silently did nothing.
+    Returns `(status, decided_by)`: `approved`, `denied`, or `expired`. The
+    record is read each time round and its expiry is the rule that ends the
+    hold (`effective_status`), so a request past its time is refused here as
+    it is everywhere else, whatever else happens.
+
+    A caller that goes away (`gone` says the connection dropped, or the hold
+    is cancelled as the process stops) ends the hold; its request is then let
+    run out, so that a yes given afterwards cannot run a tool nobody is
+    waiting on.
     """
-    if replay is None:
-        status: int | None = None
-        text = json.dumps({"error": "the request was approved, but it holds "
-                                    "no captured call to replay, so the tool "
-                                    "did not run"})
-    else:
-        status, text = await _run_replay(
-            replay["method"], replay["path"], replay["body"])
-    await _land(request_id, tool_name, caller_mind, status, text, person_key)
-
-
-async def _land(request_id: str, tool_name: str, caller_mind: str,
-                status: int | None, text: str,
-                person_key: str | None = None) -> None:
-    """Store an outcome, then tell the mind; the store first, always."""
-    result = _parsed(text)
-    error = _error_in(status, result)
-    ok = error is None
-    if ok:
-        log.info("HITL replay succeeded: %s %s -> %s", tool_name, request_id,
-                 status)
-    else:
-        log.warning("HITL replay failed: %s %s -> %s: %s", tool_name,
-                    request_id, status, error)
+    event = _WAKE.setdefault(request_id, asyncio.Event())
     try:
-        written = await store.record_outcome(
-            request_id, ok, status, text, int(time.time()))
+        while True:
+            row = await store.request(request_id)
+            if row is None:
+                return "expired", None
+            now = _now()
+            status = effective_status(row, now)
+            if status != "pending":
+                return status, row.get("decided_by")
+            if gone is not None and await gone():
+                await _abandon(request_id)
+                return "expired", None
+            if now >= row["expires_at"]:
+                # Time is up. Closed in the one statement the decision is
+                # guarded by, so a yes landing at this very second either
+                # wins (and is read next time round) or finds it closed.
+                await store.run_out(request_id, now)
+                continue
+            event.clear()
+            await _pause(event, min(HOLD_POLL_SECONDS,
+                                    row["expires_at"] - now))
+    except asyncio.CancelledError:
+        await asyncio.shield(_abandon(request_id))
+        raise
+    finally:
+        _WAKE.pop(request_id, None)
+
+
+async def _abandon(request_id: str) -> None:
+    """Let a request whose caller has gone run out now."""
+    try:
+        await store.run_out(request_id, _now())
     except Exception:
-        log.exception("HITL outcome for %s could not be stored", request_id)
-        return
-    if not written:
-        # Already has one. A second replay of one approval should not exist;
-        # if it does, the first answer stands and nobody is told twice.
-        log.warning("HITL outcome for %s was already recorded", request_id)
-        return
-    try:
-        await notify_caller(request_id, tool_name, caller_mind, ok, status,
-                            result, error, person_key)
-    except Exception:
-        log.warning("HITL result for %s could not be sent to %s; the outcome "
-                    "is stored and GET /hitl/%s returns it", request_id,
-                    caller_mind, request_id, exc_info=True)
+        log.warning("HITL request %s could not be closed after its caller "
+                    "went away", request_id, exc_info=True)
 
 
-def _comms(person_key: str | None) -> tuple[str, dict[str, str]] | None:
-    """The gateway and the bearer for telling the asking mind: the key of the
-    person who decided the request, as that person. The tools hold no key of
-    their own for the gateway."""
-    url = os.environ.get("COMMS_URL", "").strip().rstrip("/")
-    token = (person_key or "").strip()
-    if not url or not token:
-        return None
-    return url, {"Authorization": f"Bearer {token}"}
-
-
-async def notify_caller(request_id: str, tool_name: str, caller_mind: str,
-                        ok: bool, status: int | None, result: Any,
-                        error: str | None, person_key: str | None = None) -> bool:
-    """Send the asking mind one broker message carrying the outcome.
-
-    Addressed the way a scheduler wakes a mind: from the mind to itself,
-    which the broker delivers into that mind's standing wake session, on a
-    conversation id of its own. hive-tools knows the caller by its API token
-    name and the broker routes by mind id, so the name is resolved against
-    the broker's registry first. It is sent with the key of the person who
-    decided the request, as that person (an owner of the mind or an
-    administrator, who may write to it): the tools hold no gateway key of
-    their own. Without that key nothing is sent and the stored outcome is
-    the record; a replay cut off at shutdown is told with the key
-    `settle_replays` still holds in memory for it. Returns whether it was
-    sent.
-    """
-    comms = _comms(person_key)
-    if comms is None:
-        log.warning("HITL result for %s not sent: COMMS_URL is unset or no "
-                    "deciding person's key is at hand", request_id)
-        return False
-    base, headers = comms
-    async with httpx.AsyncClient(transport=_COMMS_TRANSPORT,
-                                 timeout=COMMS_TIMEOUT_SECONDS) as client:
-        listed = await client.get(f"{base}/broker/minds", headers=headers)
-        listed.raise_for_status()
-        wanted = caller_mind.strip().lower()
-        mind_id = next(
-            (str(m["id"]) for m in listed.json()
-             if str(m.get("id", "")).lower() == wanted
-             or str(m.get("name", "")).lower() == wanted), None)
-        if mind_id is None:
-            log.warning("HITL result for %s not sent: no registered mind is "
-                        "called %r", request_id, caller_mind)
-            return False
-        shown = result if isinstance(result, str) else json.dumps(result)
-        if len(shown) > MESSAGE_RESULT_CHARS:
-            shown = (shown[:MESSAGE_RESULT_CHARS]
-                     + f"... [truncated; GET /hitl/{request_id} has it whole]")
-        if error is not None and len(error) > MESSAGE_ERROR_CHARS:
-            error = error[:MESSAGE_ERROR_CHARS] + "... [truncated]"
-        verdict = "succeeded" if ok else f"FAILED: {error}"
-        content = (
-            f"HITL result for your {tool_name} call (request {request_id}): "
-            f"Daniel approved it, hive-tools ran it, and it {verdict} "
-            f"(HTTP {status if status is not None else 'none'}).\n"
-            f"Result: {shown}\n"
-            "Tell Daniel what actually happened.")
-        sent = await client.post(f"{base}/broker/messages", headers=headers,
-                                 json={
-            "message_id": str(uuid.uuid4()),
-            "conversation_id": str(uuid.uuid4()),
-            "from": mind_id,
-            "to": mind_id,
-            "content": content,
-            "rolling_summary": "",
-            "metadata": {
-                "request_type": HITL_RESULT_REQUEST_TYPE,
-                "triggered_by": "hive-tools",
-                "expects_reply": False,
-                "hitl_request_id": request_id,
-                "tool_name": tool_name,
-                "success": ok,
-                "http_status": status,
-                "error": error,
-                "result": shown,
-            },
-        })
-        sent.raise_for_status()
-    log.info("HITL result for %s sent to %s (%s)", request_id, caller_mind,
-             mind_id)
-    return True
+async def close_waiting_requests() -> int:
+    """At start: every request still waiting belongs to a call this process
+    never held (the one that held it died with the last process), so a yes
+    given now would run nothing. Let each run out."""
+    closed = 0
+    now = _now()
+    for row in await store.waiting_requests(now):
+        closed += await store.run_out(str(row["id"]), now)
+    return closed
 
 
 def hitl_gate(tool_name: str, who=None):
@@ -436,10 +283,6 @@ def hitl_gate(tool_name: str, who=None):
         request: Request,
         caller_mind: str = Depends(who or require_api_token),
     ) -> str:
-        # Internal replay calls bypass the gate entirely
-        if caller_mind == "internal":
-            return caller_mind
-
         body_bytes = await request.body()
         return await _check_hitl(
             tool_name,
@@ -447,6 +290,7 @@ def hitl_gate(tool_name: str, who=None):
             tool_method=request.method,
             tool_path=str(request.url.path),
             tool_body=body_bytes.decode("utf-8", errors="replace"),
+            gone=request.is_disconnected,
         )
 
     return _check
@@ -553,54 +397,6 @@ def effective_status(row: dict[str, Any], now: int) -> str:
     return str(row["status"])
 
 
-async def get_hitl_status(request_id: str,
-                          caller: str | None = None) -> dict[str, Any] | None:
-    """Get the current status of a HITL request, accounting for expiry.
-
-    The outcome is the tool's whole answer - a page's text, a sent message's
-    id - so it goes to the mind that asked and nobody else: given a `caller`
-    that is not the request's, the status is reported without it.
-    """
-    row = await store.request(request_id)
-
-    if row is None:
-        return None
-
-    now = int(time.time())
-    status = effective_status(row, now)
-
-    answer: dict[str, Any] = {
-        "hitl_request_id": row["id"],
-        "status": status,
-        "tool_name": row["tool_name"],
-        "caller_mind": row["caller_mind"],
-        "decided_at": row["decided_at"],
-    }
-    if status == "approved" and (caller is None
-                                 or caller == row["caller_mind"]):
-        # None while the replay is still running, and for a request approved
-        # before outcomes were recorded: approved is not the same as done.
-        answer["outcome"] = None
-        if row.get("outcome_at") is not None:
-            stored = await store.request_outcome(request_id)
-            if stored is not None:
-                answer["outcome"] = outcome_view(stored)
-    return answer
-
-
-def outcome_view(stored: dict[str, Any]) -> dict[str, Any]:
-    """A stored outcome as `GET /hitl/{id}` reports it."""
-    status = stored["outcome_status"]
-    result = _parsed(stored["outcome_body"] or "")
-    return {
-        "success": bool(stored["outcome_ok"]),
-        "http_status": status,
-        "result": result,
-        "error": None if stored["outcome_ok"] else _error_in(status, result),
-        "at": stored["outcome_at"],
-    }
-
-
 async def respond_to_hitl(
     request_id: str, action: str, decided_by: str | None = None
 ) -> dict[str, Any] | None:
@@ -616,10 +412,12 @@ async def respond_to_hitl(
     The decision and the sudo grant it may earn are **one** unit of work.
     Separately committed they leave an end state nothing can recover from: a
     grant that fails after the decision lands leaves the request saying
-    approved, the call it authorised never replayed (the route fires the
-    replay after this returns, so an exception loses it), and the request
-    un-decidable for ever because the decision is guarded on `pending`. The
-    page would show one approval and the operator would have no way back.
+    approved with no grant, and un-decidable for ever because the decision is
+    guarded on `pending`.
+
+    Nothing runs here. The call that asked is being held open on this
+    request (`_held`); the decision wakes it, and it carries on to the tool
+    as the mind's own call. Nothing is saved to be replayed later.
     """
     try:
         new_status = ACTIONS[action]
@@ -630,13 +428,13 @@ async def respond_to_hitl(
             "unrecognised used to be taken as a denial, so the past-tense "
             "spelling of approve denied the request and answered 200.") \
             from None
-    now = int(time.time())
+    now = _now()
 
     if new_status == "approved":
         # Asked again at the decision, not only when the call was made: a
-        # request raised before a mind's owner changed, or before this check
-        # existed, must not replay one person's integrations for another's
-        # mind. Such a request is denied, never run.
+        # request raised before a mind's owner changed must not run one
+        # person's integrations for another's mind. Such a request is
+        # denied, never run.
         from auth_api import owner_refusal
 
         pending = await store.request(request_id)
@@ -660,16 +458,7 @@ async def respond_to_hitl(
                         "current_status": existing["status"]}
             return {"error": "already_resolved", "current_status": "expired"}
 
-        # Replay data returned to the caller — fired as a background task by
-        # the route handler, after this unit has committed.
-        replay: dict[str, str] | None = None
         if new_status == "approved":
-            r_method = row.get("tool_method")
-            r_path = row.get("tool_path")
-            r_body = row.get("tool_body")
-            if r_method and r_path and r_body is not None:
-                replay = {"method": r_method, "path": r_path, "body": r_body}
-
             setting = await store.setting(row["tool_name"])
             if setting and setting["mode"] == "sudo":
                 timeout_minutes = int(setting["sudo_timeout_minutes"])
@@ -685,8 +474,11 @@ async def respond_to_hitl(
         "decided_at": now,
         "decided_by": decided_by,
     }
-    if replay:
-        result["_replay"] = replay
+    # The call that asked is held open on this request: wake it to read the
+    # decision. Only after the decision has committed.
+    wake = _WAKE.get(request_id)
+    if wake is not None:
+        wake.set()
     return result
 
 
@@ -705,8 +497,8 @@ def approval_url(request_id: str) -> str:
 async def review_of(request_id: str, now: int) -> dict[str, Any] | None:
     """Everything an approval page shows of one request, or None.
 
-    The content is what the tools hold and will replay: the method, path and
-    body of the saved call, as stored.
+    The content is the call being held for the person's yes: the method, path
+    and body of the call, as stored.
     """
     row = await store.request_payload(request_id)
     if row is None:

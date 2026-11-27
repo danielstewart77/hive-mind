@@ -54,7 +54,7 @@ def hitl_off(client: TestClient):
     Production seeds these off, since the console's login is already the
     human in the loop. Asserting it here would only restate the seed test;
     what matters is that a changed default never silently turns these tests
-    into assertions about a 202 approval envelope.
+    into assertions about an approval refusal.
     """
     for tool in (
         "training_curate",
@@ -270,7 +270,7 @@ def test_timeout_is_reported_as_gateway_timeout(client, auth_headers, fake_cli):
 
 
 def test_mutating_endpoints_are_hitl_gated(client, auth_headers, app, fake_cli):
-    """With the gate on, a curate request waits for approval instead of running."""
+    """With the gate on, a curate request is held for approval instead of running (refused here, the wait being zero)."""
     db.execute(
         "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
         "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
@@ -280,7 +280,7 @@ def test_mutating_endpoints_are_hitl_gated(client, auth_headers, app, fake_cli):
     db.commit()
     with _patch_run(fake_cli, {"kept": 1}):
         response = client.post("/training/curate", headers=auth_headers, json={})
-    assert response.status_code == 202
+    assert response.status_code == 408
     assert fake_cli["calls"] == []
 
 

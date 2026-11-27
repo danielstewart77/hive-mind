@@ -1,21 +1,19 @@
 """Schema request endpoints — HITL-gated additions to the lucent KG schema.
 
-Mind submits a proposed new node type or edge type via this surface; Daniel
-approves or denies via the Telegram inline keyboard (the existing HITL
-pattern shared with gmail / calendar / docker). On approval, hive-tools
-forwards the approved schema to lucent's bearer-gated admin endpoint
+Mind submits a proposed new node type or edge type via this surface; the call
+is held open while the owner or an administrator approves or denies it on the
+hive site (the HITL pattern shared with gmail / calendar / docker). On
+approval, hive-tools forwards the approved schema to lucent's bearer-gated admin endpoint
 (`/graph/schema/types` or `/graph/schema/edges`), which writes it into
 lucent's allow-list tables.
 
 Flow:
-  1. mind → POST /schema/request-new-type → hitl_gate fires →
-     hitl_requests row created → notify_daniel sends Telegram → 202 pending
-  2. mind polls GET /hitl/{request_id} → 202 until decided
-  3. Daniel taps "Approve" → callback hits hive-tools /hitl/{id}/respond →
-     respond_to_hitl marks approved → triggers internal replay
-  4. Replay POSTs same body with `Authorization: Internal <secret>` →
-     hitl_gate sees caller=internal, bypasses → handler executes →
-     calls lucent admin endpoint → returns success
+  1. mind → POST /schema/request-new-type → hitl_gate records the request,
+     notifies the owner, and holds this call open.
+  2. A person approves on the hive site → the gate releases the same call →
+     the handler runs and forwards to lucent's admin endpoint → the mind gets
+     that result as the reply to its call. A denial, or no answer in time,
+     answers the same call with a plain refusal.
 """
 
 from __future__ import annotations
@@ -79,8 +77,7 @@ def _lucent_admin_call(path: str, body: dict[str, Any], key: str) -> dict[str, A
     The tools hold no credential of their own, so this carries the key of the
     mind that asked and nothing else. The memory store accepts these routes
     only for an administrator's own person key, so a mind's key is refused
-    there. A replay of an approved call arrives with the tools' internal
-    secret and no mind's key at all; then nothing is sent.
+    there. A call with no mind's key sends nothing.
     """
     lucent_url = os.environ.get("LUCENT_URL", "http://hive-lucent:8424")
     if not key:
@@ -121,9 +118,9 @@ async def request_new_type(
 ) -> Any:
     """Submit a proposed schema addition. HITL-gated.
 
-    First call: HITL gate intercepts → returns 202 with hitl_request_id.
-    After Daniel approves via Telegram: replay arrives with caller=internal
-    → gate bypasses → this body runs → forwards to lucent admin endpoint.
+    The gate holds the call open until a person decides. Approved: this body
+    runs and forwards to lucent's admin endpoint, and its result is the reply.
+    Denied or timed out: the call is refused before it gets here.
     """
     if body.kind == "node":
         if body.node_class not in ("first-class", "second-class"):

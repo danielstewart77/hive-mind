@@ -102,50 +102,50 @@ def test_failed_container_start_restores_files_and_restarts_exact_original(proje
     assert mind_rename.load(project, 'op-a')['stage'] == 'rolled_back'
 
 
-def test_rename_waits_for_approval_then_replays_the_selected_project_and_requires_idle_gate(project, monkeypatch):
-    """P2: real API/replay cannot bypass approval or the safe-turn boundary."""
-    import httpx
-    import hitl
-    from tests.scratch import generate_person_key
-    from tests.scratch import generate_token
-    from fastapi.testclient import TestClient
-    from server import create_app
-    from tests.scratch import run
+def test_rename_is_held_for_approval_then_runs_as_the_same_call_and_requires_idle_gate(project, monkeypatch, db_conn):
+    """P2: the held call cannot bypass approval or the safe-turn boundary.
+    The authorize call stays open until a person approves it; the same call
+    then runs and moves the rename to `authorized`, and the idle gate still
+    refuses a continue."""
+    import asyncio
+    import time
+    from tests.scratch import generate_person_key, generate_token, run
     from tools import mind_rename
 
     monkeypatch.setenv('HIVE_RENAME_PROJECT_DIR', str(project))
-    # Only the external notification transport is substituted. Replay enters
-    # the actual authorization route and writes the real filesystem journal.
-    monkeypatch.setattr(hitl, '_COMMS_TRANSPORT', httpx.MockTransport(
-        lambda request: httpx.Response(200, json=[])))
-    app = create_app()
-    monkeypatch.setattr(hitl, '_REPLAY_TRANSPORT', httpx.ASGITransport(app=app))
-    with TestClient(app) as client:
-        caller = {'Authorization': 'Bearer ' + run(generate_token('ada'))}
-        approved_by = {'Authorization': 'Bearer ' + run(generate_person_key('daniel', admin=True))}
+    monkeypatch.setenv('HITL_WAIT_SECONDS', '300')
+
+    async def scenario():
+        from tests.held import an_app, bearer, the_waiting_request
+        _, client = await an_app()
+        caller = bearer(await generate_token('ada'))
+        approved_by = bearer(await generate_person_key('daniel', admin=True))
         params = {'path': str(project)}
-        reserved = client.post('/docker/mind-renames/reserve', params=params,
+        reserved = await client.post('/docker/mind-renames/reserve', params=params,
             headers=caller, json={'operation_id': 'op-approved', 'mind_id': 'uuid-kept',
                                  'old': 'original', 'new': 'renamed'})
         assert reserved.status_code == 200
-        asked = client.post('/docker/mind-renames/op-approved/authorize',
-                            params=params, headers=caller)
-        assert asked.status_code == 202
+        held = asyncio.create_task(client.post(
+            '/docker/mind-renames/op-approved/authorize', params=params, headers=caller))
+        request_id = await the_waiting_request()
+        await asyncio.sleep(0.05)
+        assert not held.done()
         assert mind_rename.load(project, 'op-approved')['stage'] == 'reserved'
-        request_id = asked.json()['hitl_request_id']
-        decided = client.post(f'/hitl/{request_id}/respond',
-                              json={'action': 'approve'}, headers=approved_by)
+        decided = await client.post(f'/hitl/{request_id}/respond',
+                                    json={'action': 'approve'}, headers=approved_by)
         assert decided.status_code == 200
-        run(hitl.settle_replays(timeout=10))
-        outcome = client.get(f'/hitl/{request_id}', headers=caller).json()['outcome']
-        assert outcome['success'], outcome
+        released = await asyncio.wait_for(held, 5)
+        assert released.status_code == 200
+        assert released.json()['stage'] == 'authorized'
         assert mind_rename.load(project, 'op-approved')['stage'] == 'authorized'
-        blocked = client.post('/docker/mind-renames/op-approved/continue',
-                              params=params, headers=caller)
+        blocked = await client.post('/docker/mind-renames/op-approved/continue',
+                                    params=params, headers=caller)
         assert blocked.status_code == 409
         assert mind_rename.load(project, 'op-approved')['stage'] == 'authorized'
-        assert (project / 'minds/original/data/conversation.json').read_bytes() == b'original is user-authored content\x00'
-        assert not (project / 'minds/renamed').exists()
+
+    run(scenario())
+    assert (project / 'minds/original/data/conversation.json').read_bytes() == b'original is user-authored content\x00'
+    assert not (project / 'minds/renamed').exists()
 
 
 def test_a_renamed_mind_takes_its_key_folder_with_it_and_mounts_it_by_its_new_name(project, tmp_path):

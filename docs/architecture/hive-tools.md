@@ -37,7 +37,7 @@ HIVE_TOOLS_TOKEN=$(/opt/venv/bin/python3 -m keyring get hive-mind "HIVE_TOOLS_TO
 | `POST /gmail/reply` | Reply to email |
 | `GET /docker/status?path=<host-path>` | Compose service status |
 | `POST /docker/restart` | Restart a service |
-| `GET /hitl/{id}` | Check HITL approval status |
+| `GET /hitl/{id}` | The record of an approval request (who asked, which tool, when, status, who decided); the call itself is answered on the connection that made it |
 | `POST /hitl/{id}/respond` | Approve or deny with a person's own key (the owner of the mind that asked, or an administrator); a mind's key gets 403. `GET /hitl/{id}/review` and `GET /hitl/waiting` take a person's key too |
 
 hive-tools serves no OpenAPI schema (`/openapi.json` is disabled); the routers under `tools/` in the hive-tools repo are the reference.

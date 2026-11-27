@@ -80,9 +80,8 @@ def _proxy() -> str:
 
 
 def _calling_key(request: Request) -> str:
-    """The calling mind's own key, which is its proxy key. A replay of an
-    approved call carries no mind's key (it arrives under the tools' internal
-    secret), and then there is nothing to send: refused, never a key of the
+    """The calling mind's own key, which is its proxy key. A call
+    with no mind's key has nothing to send: refused, never a key of the
     tools' own."""
     header = request.headers.get("Authorization", "")
     key = header[7:].strip() if header.startswith("Bearer ") else ""

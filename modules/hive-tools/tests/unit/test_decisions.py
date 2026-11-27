@@ -78,28 +78,35 @@ async def test_the_three_reasons_a_decision_loses_are_told_apart(
         "error": "already_resolved", "current_status": "expired"}
 
 
-async def test_an_approved_decision_hands_back_the_call_to_replay(
+async def test_a_decision_wakes_the_call_held_on_that_request(
         db_conn: RawSQL) -> None:
-    """The replay is the whole point of capturing the call. Returned with the
-    decision rather than re-read, so the loser of an arbitration does not run
-    a second statement - and if it comes back empty, no approved call is ever
-    re-executed and nothing anywhere says so."""
-    _pending(db_conn, "live", body='{"path": "/opt/thing"}')
+    """The decision is what releases the held call: it sets the signal the
+    hold is waiting on, once the decision has committed."""
+    import asyncio
+    import hitl
 
-    answer = await respond_to_hitl("live", "approve")
+    _pending(db_conn, "held")
+    signal = hitl._WAKE["held"] = asyncio.Event()
+    try:
+        await respond_to_hitl("held", "approve")
+        assert signal.is_set()
+    finally:
+        hitl._WAKE.pop("held", None)
 
-    assert answer is not None
-    assert answer["_replay"] == {"method": "POST", "path": "/docker/up",
-                                 "body": '{"path": "/opt/thing"}'}
 
-
-async def test_a_denied_decision_hands_back_nothing_to_replay(
+async def test_a_decision_that_loses_does_not_wake_the_held_call(
         db_conn: RawSQL) -> None:
-    """A denial is a refusal to run the call, so there is nothing to run."""
-    _pending(db_conn, "refused")
-    answer = await respond_to_hitl("refused", "deny")
-    assert answer is not None
-    assert "_replay" not in answer
+    import asyncio
+    import hitl
+
+    _pending(db_conn, "settled-already")
+    await respond_to_hitl("settled-already", "deny")
+    signal = hitl._WAKE["settled-already"] = asyncio.Event()
+    try:
+        await respond_to_hitl("settled-already", "approve")
+        assert not signal.is_set()
+    finally:
+        hitl._WAKE.pop("settled-already", None)
 
 
 async def test_a_sudo_grant_lasts_the_minutes_it_was_configured_for(
