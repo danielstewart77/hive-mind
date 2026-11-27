@@ -50,7 +50,7 @@ def console(monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("HIVE_SITE_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("KEY_MIGRATION_TOKEN", OPERATOR)
+    monkeypatch.setenv("HIVE_OPERATOR_KEY", OPERATOR)
     yield seen, answers
     server.shutdown()
 
@@ -88,12 +88,12 @@ def test_a_successful_retirement_prints_the_going_back_warning(console, capsys):
 
 def test_without_the_operators_credential_nothing_is_sent(console, monkeypatch, capsys):
     seen, answers = console
-    monkeypatch.delenv("KEY_MIGRATION_TOKEN")
+    monkeypatch.delenv("HIVE_OPERATOR_KEY")
 
     assert tool.main(["report"]) == 1
 
     assert seen == []
-    assert "KEY_MIGRATION_TOKEN" in json.loads(capsys.readouterr().out)["error"]
+    assert "HIVE_OPERATOR_KEY" in json.loads(capsys.readouterr().out)["error"]
 
 
 def test_an_undo_asks_the_undo_route_and_a_tools_credential_the_tools_credential_route(console, capsys):
