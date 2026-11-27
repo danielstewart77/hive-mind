@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
+from hive_site import testing
 from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -96,11 +97,6 @@ class _Recorder:
                         "ok": False, "upserted": True, "code": "missing_reference",
                         "detail": "the node landed and the CREATED_BY edge did not",
                     }, status_code=409)
-            if request.method == "DELETE" and path.startswith("credentials/"):
-                # As the real services answer a request to remove a row.
-                removing = request.query_params.get("remove") == "true"
-                return JSONResponse({"holder": path.split("/")[-1],
-                                     **({"removed": True} if removing else {"revoked": True})})
             if self.listing and request.method == "GET":
                 return JSONResponse([])
             if self.hitl:
@@ -167,9 +163,6 @@ def client(tmp_path, monkeypatch):
         for variable in ("GATEWAY_API_URL", "LUCENT_API_URL", "INFERENCE_PROXY_URL",
                          "HIVE_TOOLS_URL"):
             monkeypatch.setenv(variable, server.url)
-        monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "stand-in-gateway-admin")
-        monkeypatch.setenv("TOOLS_ADMIN_BEARER_TOKEN", "stand-in-tools-admin")
-        monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", "stand-in-memory-admin")
         # The proxy's is not in the environment: it is read from the env file.
         monkeypatch.delenv("PROXY_CREDENTIAL_ADMIN_KEY", raising=False)
         monkeypatch.setenv("HIVE_TOOLS_TOKEN", "stand-in-tools-token")
@@ -410,7 +403,6 @@ def test_a_new_minds_container_sees_only_its_own_folder_and_the_published_code(
 def test_a_mind_made_holding_the_operator_role_is_made_with_the_folder_writable_and_the_credential(
     client
 ):
-    from hive_site import testing
     import roles_data
     import store
 
@@ -720,7 +712,6 @@ def _everything_a_creation_writes(client, tmp_path):
 
 
 @pytest.mark.parametrize("refused,step", [
-    (("PUT", "/credentials/atlas"), "Issuing its credentials"),
     (("POST", "/graph/upsert"), "Its node in the graph"),
     (("POST", "/broker/minds"), "Registering it with the gateway"),
 ])
@@ -740,13 +731,10 @@ def test_a_creation_that_fails_at_a_step_says_not_made_names_the_step_and_leaves
     assert step in detail
     assert _everything_a_creation_writes(client, tmp_path) == before
     sent = client.services.received
-    if refused != ("PUT", "/credentials/atlas"):
-        # The rows it made are removed, not merely revoked, on the gateway and
-        # the memory store; the proxy is sent nothing, its key is the person's.
-        removed = [r for r in sent
-                   if (r["method"], r["path"]) == ("DELETE", "/credentials/atlas")]
-        assert len(removed) == 3
-        assert all(r["query"] == {"remove": ["true"]} for r in removed)
+    # The one row it made is removed, not merely revoked, so the pasted key
+    # is free for another mind.
+    rows = testing.run(holder_credentials._record_rows())
+    assert "atlas" not in [row["holder"] for row in rows]
     if refused == ("POST", "/graph/upsert"):
         # The gateway had the mind by then, and no longer does.
         assert client.services.registered == []
@@ -760,9 +748,6 @@ def test_a_creation_that_fails_at_a_step_says_not_made_names_the_step_and_leaves
         assert len(wrote) == 1 and len(deleted) == 1
         assert deleted[0]["bearer"] == wrote[0]["bearer"] != ""
         assert deleted[0]["json"]["name"] == wrote[0]["json"]["name"]
-        order = [(r["method"], r["path"]) for r in sent]
-        assert order.index(("DELETE", "/graph/nodes")) < order.index(
-            ("DELETE", "/credentials/atlas"))
 
 
 def test_a_creation_that_cannot_be_listed_in_the_stack_says_not_made_and_leaves_nothing(

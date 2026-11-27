@@ -7,7 +7,6 @@ Mind decided about itself look identical once they are both sitting in
 so it is asserted on the wire rather than trusted.
 """
 
-import asyncio
 import os
 import pathlib
 import re
@@ -19,7 +18,10 @@ from fastapi import HTTPException
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import holder_credentials
+import mind_runtime
 import mind_soul
+from hive_site import testing
 
 
 class _Client:
@@ -59,13 +61,20 @@ def _response(status: int, json_body=None, text: str = "") -> httpx.Response:
 
 
 @pytest.fixture(autouse=True)
-def soul_token(monkeypatch):
-    monkeypatch.setenv("LUCENT_SOUL_BEARER_TOKEN", "soul-token")
+def lucent_url(monkeypatch):
     monkeypatch.setenv("LUCENT_API_URL", "http://lucent:8424")
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    """On the suite's loop, which the person's key is read through."""
+    async def signed_in():
+        token = mind_runtime._PERSON.set("daniel")
+        try:
+            return await coro
+        finally:
+            mind_runtime._PERSON.reset(token)
+
+    return testing.run(signed_in())
 
 
 def test_an_edit_from_here_is_attributed_to_the_console(monkeypatch):
@@ -91,7 +100,9 @@ def test_an_edit_from_here_is_attributed_to_the_console(monkeypatch):
         assert kwargs["json"]["actor"] == "console"
         assert kwargs["json"]["name"] == "Skippy"
         assert kwargs["json"]["reason"] == "Trimmed a line that stopped being true."
-        assert kwargs["headers"]["Authorization"] == "Bearer soul-token"
+        # The signed-in person's own key, the one the record holds for them.
+        daniel = await holder_credentials.user_key("daniel")
+        assert kwargs["headers"]["Authorization"] == f"Bearer {daniel}"
 
     _run(scenario())
 
@@ -192,15 +203,20 @@ def test_history_reports_who_changed_what(monkeypatch):
     _run(scenario())
 
 
-def test_no_soul_token_locks_the_page_rather_than_failing_obscurely(monkeypatch):
-    """503 with a sentence naming the variable, not a 500 from a bad header."""
-    monkeypatch.delenv("LUCENT_SOUL_BEARER_TOKEN", raising=False)
+def test_nobody_signed_in_is_refused_and_nothing_reaches_lucent(monkeypatch):
+    """403 with a sentence, and no request: never another credential."""
+    async def scenario():
+        client = _Client([_response(200, {"ok": True})])
+        monkeypatch.setattr(httpx, "AsyncClient", client)
+        mind_runtime._PERSON.set(None)
 
-    with pytest.raises(HTTPException) as caught:
-        mind_soul.soul_headers()
+        with pytest.raises(HTTPException) as caught:
+            await mind_soul.push_soul("skippy", ["x"], "why")
 
-    assert caught.value.status_code == 503
-    assert "LUCENT_SOUL_BEARER_TOKEN" in caught.value.detail
+        assert caught.value.status_code == 403
+        assert client.calls == []
+
+    testing.run(scenario())
 
 
 def test_a_refusal_from_lucent_is_surfaced_rather_than_swallowed(monkeypatch):
