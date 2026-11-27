@@ -2783,16 +2783,25 @@ async def api_chief_of_staff(
     return await chief_of_staff.get_tree(window_days=days)
 
 
+async def _graph_for_person(limit: int) -> dict:
+    """The graph, asked of the memory store with the signed-in person's own key.
+    Off the event loop: the fetch is a blocking call."""
+    headers = await _person_headers()
+    token = headers["Authorization"].removeprefix("Bearer ")
+    return await asyncio.to_thread(
+        get_graph_data, _lucent_base_url(), limit=limit, bearer_token=token)
+
+
 @app.get("/graph/data")
 async def graph_data(limit: int = 400, user: dict = Depends(require_auth)):
     del user
-    return get_graph_data(_lucent_base_url(), limit=limit, bearer_token=_lucent_bearer_token())
+    return await _graph_for_person(limit)
 
 
 @app.get("/graph/public-data")
 async def graph_public_data(limit: int = 400, user: dict = Depends(require_auth)):
     del user
-    data = get_graph_data(_lucent_base_url(), limit=limit, bearer_token=_lucent_bearer_token())
+    data = await _graph_for_person(limit)
     public_nodes = [n for n in data.get("nodes", []) if n.get("type") != "Person"]
     public_ids = {n["id"] for n in public_nodes}
     public_edges = [

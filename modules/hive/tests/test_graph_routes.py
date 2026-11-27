@@ -34,6 +34,11 @@ def client(tmp_path, monkeypatch):
     user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
     client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
+
+    async def _own_key():
+        return {"Authorization": "Bearer daniels-own-key"}
+
+    monkeypatch.setattr(main_mod, "_person_headers", _own_key)
     return client
 
 
@@ -56,7 +61,7 @@ def test_graph_data_forwards_limit_param(client):
     mock_fn.assert_called_once_with(
         main_mod._lucent_base_url(),
         limit=50,
-        bearer_token=main_mod._lucent_bearer_token(),
+        bearer_token="daniels-own-key",
     )
 
 
@@ -67,7 +72,7 @@ def test_graph_data_default_limit(client):
     mock_fn.assert_called_once_with(
         main_mod._lucent_base_url(),
         limit=400,
-        bearer_token=main_mod._lucent_bearer_token(),
+        bearer_token="daniels-own-key",
     )
 
 

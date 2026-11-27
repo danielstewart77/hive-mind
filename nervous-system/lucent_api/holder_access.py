@@ -84,7 +84,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from hive_data import access, core
 
@@ -335,6 +335,23 @@ async def resolve_caller(token: str) -> Caller:
     return found or Caller()
 
 
+#: The one read a signed-in person's own key may make of the graph: the picture
+#: the hive site draws for them. Nothing else of the graph or of memory.
+PERSON_GRAPH_READ = ("GET", "/graph/data")
+
+
+async def _person_graph_caller(token: str) -> Caller | None:
+    """The caller for a person's own key on the graph picture: their own graph,
+    or every graph for an administrator. None for any other key."""
+    key = await access.key_for(token)
+    if key is None or key.role != access.USER_KEY:
+        return None
+    if await access.live_person(key.username) is None:
+        return None
+    return Caller(holder=key.username, username=key.username, role=PERSON,
+                  is_admin=await access.person_is_administrator(key.username))
+
+
 async def _store_configured() -> bool:
     """Whether the one record holds any live key at all.
 
@@ -346,7 +363,8 @@ async def _store_configured() -> bool:
     return bool(await core.list_live_credentials())
 
 
-async def require_holder(authorization: str = Header(default="")) -> Caller:
+async def require_holder(authorization: str = Header(default=""),
+                         request: Request = None) -> Caller:  # type: ignore[assignment]
     """The FastAPI dependency every memory and graph route is gated by.
 
     Returns the caller rather than None, because which mind is asking is the
@@ -365,6 +383,9 @@ async def require_holder(authorization: str = Header(default="")) -> Caller:
     if not token:
         raise HTTPException(401, "Missing or invalid Authorization header")
     caller = await resolve_caller(token)
+    if (not caller.recognised and request is not None
+            and (request.method, request.url.path) == PERSON_GRAPH_READ):
+        caller = await _person_graph_caller(token) or caller
     if not caller.recognised:
         raise HTTPException(401, "Invalid token")
     return caller

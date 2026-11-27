@@ -740,3 +740,24 @@ async def test_an_upserts_node_half_landing_without_its_edge_says_so(
     assert node in detail and "MEMBER_OF" in detail, detail
     # The node half really did land, which is the fact the refusal reports.
     assert await _row(inspector, node, hive.mine) is not None
+
+
+# ---- the hive site's graph picture, asked with a person's own key ---------
+
+
+@pytest.mark.asyncio
+async def test_a_persons_own_key_draws_their_graph_and_opens_nothing_else(hive) -> None:
+    from lucent_api.tests.conftest import an_administrator
+
+    person, key = await an_administrator(admin=False, username=hive.mine)
+    await _seed(hive, hive.name("mine"), hive.mine)
+    await _seed(hive, hive.name("theirs"), hive.theirs)
+
+    drawn = await hive.client.get("/graph/data", headers=hive.h(key))
+    refused = await hive.client.post(
+        "/graph/query", headers=hive.h(key), json={"names": [hive.name("mine")]})
+
+    labels = {n["label"] for n in drawn.json()["nodes"]}
+    assert drawn.status_code == 200
+    assert hive.name("mine") in labels and hive.name("theirs") not in labels
+    assert refused.status_code == 401
