@@ -76,10 +76,13 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
         ("PUT", "/broker/minds/{mind_id}/owner"),
         ("PUT", "/broker/minds/{name}"),
         ("DELETE", "/broker/minds/{name}"),
-        ("POST", "/secrets/scopes"),
-        ("DELETE", "/secrets/scopes"),
     ):
         assert session_access.TABLE.rules[spec].kind == user_access.ADMIN, spec
+
+
+def test_secret_scopes_take_a_persons_key_and_nothing_else():
+    for spec in (("POST", "/secrets/scopes"), ("DELETE", "/secrets/scopes")):
+        assert session_access.TABLE.rules[spec].kind == user_access.CHANGE, spec
 
 
 def test_registering_a_mind_is_machinery_rather_than_admin_only():

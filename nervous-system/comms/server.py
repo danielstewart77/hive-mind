@@ -3141,17 +3141,38 @@ async def secrets_get(key: str, request: Request):
     return {"key": key, "value": value}
 
 
+async def _person_may_scope(request: Request, mind_name: str):
+    """None when the caller is a person who may change this mind, else the
+    refusal. A mind's key, a service and an unknown mind are all refused in
+    the same words."""
+    caller = _caller(request)
+    if caller.role != user_access.USER_KEY:
+        return JSONResponse({"error": "Mind not found"}, status_code=404)
+    target = await core.get_mind_by_id_or_name(str(mind_name or "").strip())
+    if target is None or not await user_access.caller_may_change(caller, dict(target)):
+        return JSONResponse({"error": "Mind not found"}, status_code=404)
+    return None
+
+
 @app.post("/secrets/scopes")
-async def secrets_grant_scopes(body: SecretScopeRequest):
-    """Grant a mind access to one or more secret keys. Admin-only."""
+async def secrets_grant_scopes(body: SecretScopeRequest, request: Request):
+    """Grant a mind access to one or more secret keys, with a person's own key:
+    an administrator's, or the key of the person who owns that mind."""
+    refused = await _person_may_scope(request, body.mind_name)
+    if refused is not None:
+        return refused
     for key in body.secret_keys:
         await grant_secret_scope(body.mind_name, key)
     return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
 
 
 @app.delete("/secrets/scopes")
-async def secrets_revoke_scopes(body: SecretScopeRequest):
-    """Revoke a mind's access to one or more secret keys. Admin-only."""
+async def secrets_revoke_scopes(body: SecretScopeRequest, request: Request):
+    """Revoke a mind's access to one or more secret keys, with a person's own
+    key: an administrator's, or the key of the person who owns that mind."""
+    refused = await _person_may_scope(request, body.mind_name)
+    if refused is not None:
+        return refused
     for key in body.secret_keys:
         await revoke_secret_scope(body.mind_name, key)
     return {"ok": True, "mind_name": body.mind_name, "revoked": body.secret_keys}

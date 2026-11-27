@@ -189,12 +189,6 @@ TABLE.add(
 # Each of these takes only the admin token today and continues to.
 TABLE.add(
     Rule(ADMIN),
-    # Minting a phrase is the one call that sees it in the clear, and
-    # clearing a claim takes a bot off the person holding it. The console
-    # presents the admin token for both and scopes the operator to minds they
-    # own on its own side, exactly as it does for a surface token.
-    "POST /secrets/scopes",
-    "DELETE /secrets/scopes",
     # Minting and revoking a user's credential. Admin, obviously: the route
     # that issues credentials cannot answer to one it issued.
 )
@@ -222,6 +216,12 @@ TABLE.add(
     "DELETE /broker/minds/{mind_id}/surface-claim",
 )
 TABLE.add(Rule(ADMIN, person=True, mind_param="name"), "PUT /broker/minds/{name}")
+
+# --- A secret scope for a mind: a person's own key, and only a person's ---
+# The mind is named in the body, so the gate cannot read it; the handler holds
+# the caller to a person (a mind's key is refused: a mind never widens its own
+# secrets) who is an administrator or owns that mind (`caller_may_change`).
+TABLE.add(Rule(CHANGE), "POST /secrets/scopes", "DELETE /secrets/scopes")
 
 # --- A change to one mind, asked with a person's key or a mind's key -------
 # Neither the admin credential nor any service holder reaches these; the
