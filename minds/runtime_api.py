@@ -646,6 +646,8 @@ def install_session_guard(app: FastAPI, *, mind_dir: Path) -> None:
     `/runtime`, `/skills`, `/files` and `/models` keep their admin guard.
     """
 
+    bind_mind_dir(mind_dir)
+
     @app.middleware("http")
     async def _guard_session_routes(request: Request, call_next):
         # `scope["path"]` and not `request.url.path`: Starlette builds that
@@ -701,7 +703,7 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
     mind's own key is accepted too, for the console. Nothing hive-wide is: a
     hive administrator key would open every person's conversations to
     whatever answers at this mind's registered address (feature 834,
-    requirement 17). Configuration writes keep `authorize_admin`.
+    requirement 17). Configuration routes use `authorize_admin`, which admits the same two.
     """
     own = _own_key()
     if own and any(tokens_match(t, own) for t in presented_bearers(request)):
@@ -709,151 +711,73 @@ def authorize_gateway(request, mind_dir: Path) -> JSONResponse | None:
     return authorize_session(request, mind_dir)
 
 
-#: How long a mind waits on the gateway's answer about its owner's key.
-OWNER_KEY_CHECK_TIMEOUT_S = 5
+# The directory this mind's session credential lives in, set once by the
+# server that mounts the routes (`install_session_guard`,
+# `install_runtime_routes`). The configuration guard needs it to recognise the
+# gateway's credential; every route it guards is mounted by the same process.
+_mind_dir: Path | None = None
 
 
-#: A value the gateway said is not the owner's is not asked about again for
-#: this long, and only this many questions go to the gateway in a window: an
-#: unauthenticated caller can present any string, and each one would otherwise
-#: be a request this mind makes to the gateway with its own key.
-OWNER_KEY_REFUSAL_TTL_S = 30.0
-OWNER_KEY_REFUSALS_KEPT = 256
-OWNER_KEY_ASKS_PER_WINDOW = 30
-OWNER_KEY_ASK_WINDOW_S = 60.0
-_refused_owner_keys: dict[str, float] = {}
-_owner_key_asks: list[float] = []
-
-
-def _clock() -> float:
-    import time
-    return time.monotonic()
-
-
-def _may_ask_the_gateway(own: str, presented: str) -> bool | None:
-    """True when the gateway may be asked; False when this value was refused
-    a moment ago (answer no without asking); None when the budget is spent."""
-    import hashlib
-
-    now = _clock()
-    digest = hashlib.sha256(f"{own}\n{presented}".encode()).hexdigest()
-    until = _refused_owner_keys.get(digest)
-    if until is not None:
-        if until > now:
-            return False
-        del _refused_owner_keys[digest]
-    _owner_key_asks[:] = [t for t in _owner_key_asks if now - t < OWNER_KEY_ASK_WINDOW_S]
-    if len(_owner_key_asks) >= OWNER_KEY_ASKS_PER_WINDOW:
-        return None
-    _owner_key_asks.append(now)
-    return True
-
-
-def _remember_refusal(own: str, presented: str) -> None:
-    import hashlib
-
-    now = _clock()
-    for digest in [d for d, t in _refused_owner_keys.items() if t <= now]:
-        del _refused_owner_keys[digest]
-    while len(_refused_owner_keys) >= OWNER_KEY_REFUSALS_KEPT:
-        _refused_owner_keys.pop(next(iter(_refused_owner_keys)))
-    _refused_owner_keys[hashlib.sha256(f"{own}\n{presented}".encode()).hexdigest()] = (
-        now + OWNER_KEY_REFUSAL_TTL_S)
-
-
-async def owner_key_check(presented: str) -> bool | None:
-    """Ask the gateway whether `presented` is the key of the user who owns this mind, or of an operator mind of the same owner (requirement 20).
-
-    The mind's own question about its own owner, authenticated by the mind's
-    own key: the gateway answers yes or no and nothing else (feature 834,
-    requirement 19), so this mind learns nothing about the key it was handed.
-    None when the gateway could not be asked (no address, no answer, a refusal
-    of this mind's own key): the caller must not read that as a no.
-    """
-    import aiohttp
-
-    comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
-    own = _own_key()
-    if not comms_url or not own:
-        return None
-    allowed = _may_ask_the_gateway(own, presented)
-    if allowed is False:
-        return False
-    if allowed is None:
-        return None
-    try:
-        async with aiohttp.ClientSession() as http:
-            async with http.post(
-                f"{comms_url}/broker/owner-key-check",
-                json={"key": presented},
-                headers={"Authorization": f"Bearer {own}"},
-                timeout=aiohttp.ClientTimeout(total=OWNER_KEY_CHECK_TIMEOUT_S),
-                allow_redirects=False,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                answer = await resp.json()
-    except Exception:  # noqa: BLE001 - an unanswered question is not a no
-        return None
-    if not isinstance(answer, dict):
-        return None
-    if answer.get("owned") is True:
-        return True
-    _remember_refusal(own, presented)
-    return False
+def bind_mind_dir(mind_dir: Path) -> None:
+    global _mind_dir
+    _mind_dir = Path(mind_dir)
 
 
 async def authorize_models(request, mind_dir: Path) -> JSONResponse | None:
-    """Guard `GET /models`: what `authorize_gateway` admits, and the key of the
-    user who owns this mind, which the console presents when a signed-in owner
-    opens the model picker (requirement 19). Asked of the gateway as in
-    `authorize_admin`; a gateway that cannot be asked is 503."""
-    denied = authorize_gateway(request, mind_dir)
-    if denied is None:
-        return None
-    header = request.headers.get("Authorization", "")
-    presented = header[7:].strip() if header.startswith("Bearer ") else ""
-    if not presented or not _own_key():
-        return denied
-    # A read the gateway polls: a gateway that cannot be asked leaves the
-    # refusal it had, never a different status.
-    owned = await owner_key_check(presented)
-    return None if owned else denied
+    """Guard `GET /models`: this mind's session credential (the gateway) or its
+    own key. No person's key and no other mind's key is asked about anywhere
+    (feature 834, requirement 23)."""
+    return authorize_gateway(request, mind_dir)
 
 
 async def authorize_admin(request: Request) -> JSONResponse | None:
-    """Guard a config-write route. None means the caller may proceed.
+    """Guard a configuration route (settings, files, skills, tokens, host
+    status, symbols). None means the caller may proceed.
 
-    Accepts this mind's own key, and the key of the user who owns this mind
-    (feature 834, requirement 19) - a person's key, held like a mind's, which
-    the console presents for a change a signed-in person makes. Whether a
-    presented value is the owner's is asked of the gateway, which answers only
-    this mind's question about its own owner. Not the session credential,
-    which every chat turn carries, and no hive-wide administrator key
-    (requirement 17). A mind started with no key refuses with 503 rather than
-    opens; a wrong key is 401; a gateway that cannot be asked about a key that
-    is not this mind's own is 503, never a guess.
+    Accepts exactly two callers (feature 834, requirements 23, 25 and 26): the
+    gateway, shown by the credential it presents to this mind on every call
+    (the session credential), and this mind itself with its own key. It
+    accepts no person's key and no other mind's key and asks the gateway about
+    nothing: the console and operator minds send their changes to the gateway,
+    which decides who may change this mind and forwards the change here.
+
+    This reverses the earlier rule that the session credential was not
+    accepted on these routes. The reason: that credential is held only by the
+    gateway and this mind and opens no other mind, so delivery through the
+    gateway needs nothing else, and the owner's key sent straight to every
+    mind (which every sibling of the same owner would also accept) is gone.
+
+    A mind with no key of its own still takes a delivery that carries the
+    gateway's valid credential, which is not open; every other caller gets 503
+    from such a mind, never a way in. A mind that cannot establish the
+    gateway's credential refuses with a plain message; a wrong value is 401.
     """
-    expected = _own_key()
-    if not expected:
+    header = request.headers.get("Authorization", "")
+    presented = header[7:].strip() if header.startswith("Bearer ") else ""
+    own = _own_key()
+    if presented and own and tokens_match(presented, own):
+        return None
+    unavailable = None
+    expected = ""
+    if _mind_dir is not None:
+        try:
+            expected = session_token(_mind_dir)
+        except SessionTokenUnavailable as exc:
+            unavailable = exc
+    if presented and expected and tokens_match(presented, expected):
+        return None
+    if unavailable is not None:
+        log.error("Refusing a configuration request: %s", unavailable)
+        return JSONResponse(
+            {"error": "this mind cannot establish the gateway's credential, "
+                      f"so it takes no change: {unavailable}"},
+            status_code=503,
+        )
+    if not own:
         return JSONResponse(
             {"error": "this mind holds no key, so its settings cannot be changed"},
             status_code=503,
         )
-    header = request.headers.get("Authorization", "")
-    presented = header[7:] if header.startswith("Bearer ") else ""
-    if tokens_match(presented, expected):
-        return None
-    if not presented.strip():
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    owned = await owner_key_check(presented)
-    if owned is None:
-        return JSONResponse(
-            {"error": "this mind could not ask the gateway whether that is its owner's key"},
-            status_code=503,
-        )
-    if owned:
-        return None
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
@@ -1025,6 +949,7 @@ async def _harness_offers(path: Path, harness: str, model: str) -> bool:
 
 def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> None:
     """Mount GET/PATCH /runtime on a mind's FastAPI app."""
+    bind_mind_dir(Path(path).parent)
 
     @app.get("/runtime")
     async def get_runtime(req: Request) -> Any:

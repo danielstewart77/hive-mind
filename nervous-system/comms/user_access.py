@@ -213,9 +213,8 @@ PERSON = "person"
 #: A person's own key, kept by the console and shown to nobody (feature 834,
 #: requirement 19). It names the person as holder and username and opens
 #: nothing at this gateway: `resolve_caller` gives it no standing on any route,
-#: so a copy that leaks from a mind it was presented to cannot read a
-#: conversation. Its one use is the answer to a mind's question "is this key
-#: held by my owner?" (`holds_user_key_of`).
+#: so a copy that leaks cannot read a conversation. Its one use is the change
+#: route that forwards a change to a mind (`caller_may_change`).
 USER_KEY = "user"
 ROLES = (MIND, SERVICE, PERSON, USER_KEY)
 
@@ -537,30 +536,6 @@ async def owner_of_mind(mind_id: str) -> str | None:
     return normalize_username(row["owner"]) or None
 
 
-async def holds_user_key_of(mind_holder: str, presented: str) -> bool:
-    """Whether `presented` is the key of the person who owns this mind. (The route
-    asks the wider `key_opens_settings_of`, which adds a same-owner operator
-    mind's key.)
-
-    The one question a mind may ask about a key it was handed, and only about
-    its own owner as this registry records it: a yes or a no, never whose key
-    it is or what it opens. A user's key is refused for every mind its user
-    does not own, and no value that is not a user key (a mind's, a service's,
-    a revoked one) is ever a yes. Read per call: replacing a user's key lands
-    on the next request.
-    """
-    owner = await owner_of_mind(mind_holder)
-    if not owner or not presented:
-        return False
-    found = await credential_for_token(presented)
-    return bool(
-        found
-        and found.role == USER_KEY
-        and found.holder == owner
-        and found.username == owner
-    )
-
-
 #: The role slug the hive records for an operator mind (the same slug the
 #: console's role pages and `GET /roles/operator/holders` use).
 OPERATOR_ROLE = "operator"
@@ -663,23 +638,6 @@ async def caller_may_change(caller: Caller, target: dict) -> bool:
             return True
         return await operator_may_change(holder, str(target.get("mind_id") or ""))
     return False
-
-
-async def key_opens_settings_of(mind_holder: str, presented: str) -> bool:
-    """Whether `presented` may change this mind's settings besides its own key.
-
-    Yes for its owner's person key (requirement 19), and for the live key of an
-    operator mind owned by the same person (requirement 20). A yes or a no,
-    never whose key it was.
-    """
-    if not presented:
-        return False
-    if await holds_user_key_of(mind_holder, presented):
-        return True
-    found = await credential_for_token(presented)
-    if not found or found.role != MIND:
-        return False
-    return await operator_may_change(found.holder, mind_holder)
 
 
 async def owns_mind(caller: Caller, mind_id: str) -> bool:

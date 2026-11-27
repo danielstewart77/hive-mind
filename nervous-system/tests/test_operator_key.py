@@ -93,11 +93,6 @@ def _address(client, name):
     return next(r["gateway_url"] for r in rows if r["name"] == name)
 
 
-def _asked(client, as_key, about):
-    return client.post("/broker/owner-key-check", json={"key": about},
-                       headers={"Authorization": f"Bearer {as_key}"}).json()
-
-
 def test_an_ordinary_mind_cannot_move_its_own_address(world) -> None:
     refused = _register(world.client, KEYS["alpha"], A, "alpha", NEW)
     assert refused.status_code == 403
@@ -129,23 +124,10 @@ def test_an_operator_mind_cannot_rename_the_mind_it_moves(world) -> None:
     assert _register(world.client, KEYS["ops"], A, "renamed", NEW).status_code == 403
 
 
-def test_an_operators_key_is_accepted_for_a_same_owner_mind_only(world) -> None:
-    world.make_operator()
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": True}
-    assert _asked(world.client, KEYS["other"], KEYS["ops"]) == {"owned": False}
-
-
-def test_an_ordinary_minds_key_is_not_accepted_for_another_mind(world) -> None:
-    assert _asked(world.client, KEYS["alpha"], KEYS["beta"]) == {"owned": False}
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": False}
-
-
 def test_a_mind_that_loses_the_role_is_refused_on_the_next_request(world) -> None:
     world.make_operator()
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": True}
     assert _register(world.client, KEYS["ops"], A, "alpha", NEW).status_code == 200
     world.lose_role()
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": False}
     assert _register(world.client, KEYS["ops"], A, "alpha", OLD).status_code == 403
     assert _address(world.client, "alpha") == NEW
 
@@ -154,16 +136,13 @@ def test_a_cut_off_operator_key_is_refused(world) -> None:
     world.make_operator()
     assert world.client.delete(
         "/credentials/ops", headers={"Authorization": f"Bearer {ADMIN}"}).status_code == 200
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": False}
+    assert _register(world.client, KEYS["ops"], A, "alpha", OLD).status_code == 401
 
 
 def test_an_operator_does_not_open_an_ownerless_mind_and_a_non_mind_key_is_no_operator(world) -> None:
     world.make_operator()
-    assert _asked(world.client, KEYS["orphan"], KEYS["ops"]) == {"owned": False}
     assert _register(world.client, KEYS["ops"], "55555555-5555-4555-8555-555555555555",
                      "orphan", NEW).status_code == 403
-    # a user-kind credential is never read as the operator mind's key
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops-person"]) == {"owned": False}
 
 
 def test_an_operator_registers_a_same_owner_mind_at_its_address_but_cannot_rename_it(world) -> None:
@@ -230,4 +209,3 @@ def test_an_unreadable_roles_table_makes_an_operator_an_ordinary_mind(world, mon
     refused = _register(world.client, KEYS["ops"], A, "alpha", OLD)
     assert refused.status_code == 403
     assert _address(world.client, "alpha") == NEW
-    assert _asked(world.client, KEYS["alpha"], KEYS["ops"]) == {"owned": False}

@@ -296,10 +296,7 @@ class TestAMindThatHoldsNoAdminToken:
     def test_it_refuses_any_other_key_and_saves_nothing(self, dsh_file, monkeypatch):
         client = _admin_less(dsh_file, monkeypatch, COMMS_BEARER_TOKEN="this-minds-own-key")  # secret-guard: allow
 
-        async def _not_the_owners(presented):
-            return False
 
-        monkeypatch.setattr(runtime_api, "owner_key_check", _not_the_owners)
         refused = client.patch(
             "/runtime/settings",
             json={"settings": {"rotation_threshold_percent": 30}},

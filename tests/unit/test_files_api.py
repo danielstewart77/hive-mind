@@ -238,12 +238,7 @@ def test_a_path_outside_the_tree_reads_nothing_and_writes_nothing(mind):
 # 8. Saving requires the admin credential; without it the save is refused
 #    and the file is left alone.
 def test_every_files_route_requires_the_admin_bearer(mind, monkeypatch):
-    # A key that is not this mind's own is put to the gateway (is it my
-    # owner's?); this test is about the refusal, so the answer is no.
-    async def _not_the_owners(presented):
-        return False
 
-    monkeypatch.setattr(runtime_api, "owner_key_check", _not_the_owners)
     client, home, _ = mind
     (home / "hooks" / "prose_reminder.sh").write_text("original\n")
 

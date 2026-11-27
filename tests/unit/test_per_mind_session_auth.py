@@ -329,24 +329,63 @@ class TestTheGuardOnRealRoutes:
 
 
 # ---------------------------------------------------------------------------
-# R10 — the session credential does not unlock the config surface
+# Feature 834, requirements 23, 25, 26 (B6): the configuration surface takes
+# the gateway's credential and the mind's own key, and no one else's
 # ---------------------------------------------------------------------------
-class TestTheConfigSurfaceIsSeparate:
-    def test_a_session_token_is_refused_by_the_admin_guard(self, mind_dir):
-        token = runtime_api.session_token(mind_dir)
-        headers = {"Authorization": f"Bearer {token}"}
-        async def not_the_owners(presented):
-            return False
+class TestTheConfigSurfaceTakesTheGatewayAndTheMindOnly:
+    @pytest.fixture(autouse=True)
+    def bound(self, mind_dir):
+        runtime_api.bind_mind_dir(mind_dir)
+        yield
+        runtime_api._mind_dir = None
 
-        with patch.dict(os.environ, {"MIND_KEY": "the-mind-key"}), \
-                patch.object(runtime_api, "owner_key_check", not_the_owners):
-            denied = asyncio.run(runtime_api.authorize_admin(_request(headers)))
-        assert denied is not None
-        assert denied.status_code == 401
+    @staticmethod
+    def _ask(bearer, **env):
+        headers = {"Authorization": f"Bearer {bearer}"} if bearer is not None else {}
+        with patch.dict(os.environ, env, clear=False):
+            for gone in ("MIND_KEY", "COMMS_BEARER_TOKEN"):
+                if gone not in env:
+                    os.environ.pop(gone, None)
+            return asyncio.run(runtime_api.authorize_admin(_request(headers)))
+
+    def test_the_gateways_credential_is_taken(self, mind_dir):
+        token = runtime_api.session_token(mind_dir)
+        assert self._ask(token, MIND_KEY="the-mind-key") is None
+
+    def test_the_minds_own_key_is_taken(self):
+        assert self._ask("the-mind-key", MIND_KEY="the-mind-key") is None
+
+    def test_a_key_that_is_neither_is_refused_and_the_gateway_is_never_asked(self, monkeypatch):
+        # Any value a person's key, an operator's key or a stranger's could
+        # be: the mind has no way to ask anyone, so it is a plain 401.
+        monkeypatch.setenv("COMMS_URL", "http://127.0.0.1:9")
+        for presented in ("a-persons-key", "an-operator-minds-key", "x", ""):
+            denied = self._ask(presented, MIND_KEY="the-mind-key")
+            assert denied is not None and denied.status_code == 401, presented
+        assert self._ask(None, MIND_KEY="the-mind-key").status_code == 401
+
+    def test_a_keyless_mind_takes_the_gateways_delivery_and_refuses_everyone_else(self, mind_dir):
+        token = runtime_api.session_token(mind_dir)
+        assert self._ask(token) is None
+        denied = self._ask("a-persons-key")
+        assert denied is not None and denied.status_code == 503
+
+    def test_a_mind_that_cannot_establish_the_gateways_credential_refuses_plainly(
+        self, tmp_path
+    ):
+        runtime_api.bind_mind_dir(tmp_path / "missing" / "dir")
+        runtime_api._token_cache.clear()
+        denied = self._ask("a-persons-key", MIND_KEY="the-mind-key")
+        assert denied is not None and denied.status_code == 503
+        assert b"cannot establish" in denied.body
+        # Its own key still speaks for the mind itself.
+        assert self._ask("the-mind-key", MIND_KEY="the-mind-key") is None
+
+    def test_the_owner_key_question_is_gone_from_the_mind(self):
+        assert not hasattr(runtime_api, "owner_key_check")
 
     def test_the_admin_guard_still_refuses_when_nothing_is_configured(self):
-        with patch.dict(os.environ, {}, clear=True):
-            denied = asyncio.run(runtime_api.authorize_admin(_request()))
+        denied = self._ask(None)
         assert denied is not None
         assert denied.status_code == 503
 
@@ -509,10 +548,6 @@ class TestTheDeployedAppIsGuarded:
         monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "an-admin-token")
         from minds import mind_server, runtime_api
 
-        async def not_the_owners(presented):
-            return False
-
-        monkeypatch.setattr(runtime_api, "owner_key_check", not_the_owners)
         client = TestClient(mind_server.app)
         assert client.get("/runtime").status_code == 401
         # The session credential does not open it, which is what tells the

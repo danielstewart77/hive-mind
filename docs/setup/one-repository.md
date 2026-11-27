@@ -436,19 +436,23 @@ changes to the mind it owns." Built as feature 834 requirement 19.
 - With the authentication service as the sign-in, the hive site writes that
   service's answer about who is in `admins` into the hive database on each
   request before serving it, so the gateway can read it there.
-- When a signed-in person changes a mind the console already lets them change,
-  the console presents their key to that mind. A mind accepts its own key (as
-  before) and the key of its owner: it asks the gateway "is this key held by a
-  user who owns me?" (`POST /broker/owner-key-check`, authenticated by the
-  mind's own key, answered yes or no, owner as on the mind's registry row).
-  A user's key is refused by every mind that user does not own, on this host or
-  another machine, in-repo or edge. There is no administrator key.
+- A person's change to a mind goes to the gateway, not to the mind: the hive
+  site sends it with that person's own key to
+  `/broker/minds/{mind}/forward/{path}`, the gateway decides (the mind's owner,
+  an administrator, an operator mind of the same owner, the mind itself) and
+  delivers it with the credential it presents to that mind on every call. A
+  mind's own server accepts that credential and its own key, nothing else: a
+  person's key or another mind's key sent straight to it is a plain 401 and the
+  mind asks nobody (the old owner-key question route, `POST
+  /broker/owner-key-check`, is gone). A mind that cannot establish that
+  credential refuses with a plain 503; a mind with no key of its own still takes
+  the gateway's delivery and refuses every other caller.
 - So a change to a mind on another machine works without the console ever
-  holding that mind's key. It does need that machine to be able to reach the
-  gateway (a mind that cannot ask answers 503, never open), and the mind to
-  run this release. A person whose key is replaced
-  (`POST /api/account/key/replace`, the signed-in person's own) has the old
-  key refused by every mind at its next request.
+  holding that mind's key, provided the gateway can reach the mind's registered
+  address and the mind runs this release (an older mind answers its owner "could
+  not ask the gateway"; update it first). A person whose key is replaced
+  (`POST /api/account/key/replace`, the signed-in person's own) has the old key
+  refused by the gateway at its next request.
 - Retirement: a mind on another machine counts as moved when its pasted key
   (pasting it on the mind's page registers it at the gateway, the memory store
   and the tools; the console never stores it) is registered at all three. The
@@ -470,9 +474,8 @@ settings.
   from the roles tables at every request (no cache). Its key is an ordinary
   mind key, held, revoked and cut off like any other. Remove the role and its
   key is an ordinary mind's key on its next request.
-- The question a mind puts to the gateway ("is this key one I should accept?",
-  `POST /broker/owner-key-check`) now answers yes for the owner's key and for
-  the live key of an operator mind owned by the same person as the asking mind.
+- The gateway lets an operator mind change a mind owned by the same person as
+  itself (the forward route; a mind's own server no longer sees that key).
   Decision (Daniel did not say; the smallest safe reading): an operator mind
   reaches only minds owned by the same person as itself, as the registry
   records, never another person's mind and never an ownerless one.
