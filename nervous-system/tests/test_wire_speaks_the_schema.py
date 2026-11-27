@@ -5,6 +5,7 @@ routes that read them are checked against what the real session manager
 stored or answered, on the scratch database.
 """
 
+from comms_broker_pg import mind_key  # noqa: E402
 import importlib
 
 import pytest
@@ -26,7 +27,7 @@ PANE = ("terminal", "terminal-sess-1")
 
 @pytest.fixture()
 def client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    mind_key(GRILL_ADMIN)
 
     from comms import server as server_module
 

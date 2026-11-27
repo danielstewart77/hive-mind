@@ -8,6 +8,7 @@ request. Driven through the real gateway application over real rows.
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import asyncio
 import importlib
 
@@ -55,7 +56,7 @@ async def _seed() -> None:
 
 @pytest.fixture
 def world(monkeypatch, broker_db):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    admin_person_key(ADMIN)
     from comms import server
 
     importlib.reload(server)

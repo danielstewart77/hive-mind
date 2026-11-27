@@ -124,26 +124,27 @@ def test_the_three_calls_a_mind_makes_about_its_own_conversation_are_machinery()
         assert session_access.TABLE.rules[spec].kind == user_access.MACHINE, spec
 
 
-def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
+def test_a_route_added_with_no_classification_is_refused_to_everyone(
     broker_db, monkeypatch
 ):
     """Deny-by-default, driven rather than asserted about: a route the table
-    has never heard of is added to a live app and answers 401 to a credential
-    that is not the admin token."""
+    has never heard of is added to a live app and answers 401 to every credential,
+    an administrator's own key included: no route is open to an administrator
+    unless the table says it takes a person's key."""
     import asyncio
     from contextlib import asynccontextmanager
 
     import hive_data
     from fastapi.testclient import TestClient
 
-    from comms_broker_pg import put_credential_row
+    from comms_broker_pg import admin_person_key, put_credential_row
 
     asyncio.run(put_credential_row(
         "arnold", "sloan", user_access.MIND, user_access.digest(SLOAN_TOKEN)
     ))
 
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    admin_person_key(ADMIN_TOKEN)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
     @asynccontextmanager
@@ -174,13 +175,13 @@ def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
             "/sessions/some-route-nobody-classified",
             headers={"Authorization": "Bearer " + SLOAN_TOKEN},
         )
-        served = client.get(
+        also_refused = client.get(
             "/sessions/some-route-nobody-classified",
             headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
 
     assert refused.status_code == 401
-    assert served.status_code == 200
+    assert also_refused.status_code == 401
 
 
 def test_every_conversation_route_is_classified_as_somebodys_conversation():

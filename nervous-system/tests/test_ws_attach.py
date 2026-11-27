@@ -6,6 +6,7 @@ directions.
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key, mind_key  # noqa: E402
 import asyncio
 import json
 import threading
@@ -25,6 +26,7 @@ from comms_pg_fixture import comms_db, execute, fetch, scratch_dsn  # noqa: F401
 #: because a gateway that cannot establish who is calling must refuse rather
 #: than answer the LAN.
 GRILL_ADMIN = "admin-credential-for-tests"  # secret-guard: allow
+MIND_KEY = "ada-mind-key-for-tests"  # secret-guard: allow
 
 
 def _run(coro):
@@ -123,7 +125,8 @@ class _FakeReleaseResponse:
 
 @pytest.fixture
 def app_client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    admin_person_key(GRILL_ADMIN)
+    mind_key(MIND_KEY)
 
     import importlib
 
@@ -179,6 +182,7 @@ class TestWsAttach:
         response = client.post(
             "/sessions/sess-attach/harness-state",
             json={"harness_sid": "codex-thread-callback"},
+            headers={"Authorization": f"Bearer {MIND_KEY}"},
         )
 
         assert response.status_code == 200

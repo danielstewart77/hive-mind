@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from comms_broker_pg import service_key  # noqa: E402
 import hashlib
 import hmac
 
@@ -192,7 +193,7 @@ def test_build_broker_message_id_falls_back_to_uuid_when_missing() -> None:
 
 
 def _boot_client(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    service_key(GRILL_ADMIN)
     import importlib
 
     from comms import server as server_module

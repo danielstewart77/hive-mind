@@ -2,6 +2,7 @@
 """A saved rotation preference reaches the next safe conversation boundary."""
 from __future__ import annotations
 
+from comms_broker_pg import service_key  # noqa: E402
 import asyncio
 import json
 import logging
@@ -167,7 +168,7 @@ def _rotation_system(tmp_path: Path, monkeypatch, *, hold_first: bool = False):
 
     from comms import server as server_module
 
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    service_key(GRILL_ADMIN)
     monkeypatch.setenv("MIND_KEY", MIND_ADMIN)
     for key in (
         "INFERENCE_PROXY_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",

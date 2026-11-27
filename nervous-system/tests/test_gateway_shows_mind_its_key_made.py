@@ -9,6 +9,7 @@ server on the loopback which records what it was shown.
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import asyncio
 import importlib
 import json
@@ -51,7 +52,6 @@ def world(monkeypatch, broker_db):
     _Mind.seen = []
     server = HTTPServer(("127.0.0.1", 0), _Mind)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
     from comms import server as gateway
 
     importlib.reload(gateway)
@@ -60,6 +60,7 @@ def world(monkeypatch, broker_db):
                                    user_access.digest(PERSON)))
     asyncio.run(execute(
         "INSERT INTO core.users (username, password_hash, created_at) VALUES ('daniel', 'x', 0)"))
+    admin_person_key(ADMIN)
     with TestClient(gateway.app) as client:
         yield type("World", (), dict(
             client=client, seen=_Mind.seen, url=f"http://127.0.0.1:{server.server_port}"))

@@ -96,7 +96,6 @@ async def _seed(url: str) -> None:
 @pytest.fixture
 def world(monkeypatch, broker_db, mind_server):
     url, seen = mind_server
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
     from comms import server
 
     importlib.reload(server)

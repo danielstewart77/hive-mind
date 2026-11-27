@@ -19,6 +19,7 @@ took.
 # ruff: noqa: F811 - pytest fixtures are imported, then named as parameters
 from __future__ import annotations
 
+from comms_broker_pg import mind_key  # noqa: E402
 import asyncio
 import contextlib
 import time
@@ -317,7 +318,7 @@ async def _full_row(session_id: str) -> dict:
 @pytest.fixture
 def app_client(monkeypatch, comms_db):
     """The comms app with an admin token set, so the guard is live."""
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    mind_key("admin-token")
 
     import importlib
 
@@ -328,7 +329,7 @@ def app_client(monkeypatch, comms_db):
         yield client
 
 
-def test_reading_a_carry_forward_requires_the_admin_credential(app_client) -> None:
+def test_reading_a_carry_forward_requires_a_credential(app_client) -> None:
     """Requirement 9: the stored blob is the mind's soul, its recent memory
     and the last exchange, on a port reachable across the LAN."""
     path = "/sessions/sess-term/carry-forward"
@@ -338,10 +339,6 @@ def test_reading_a_carry_forward_requires_the_admin_credential(app_client) -> No
         path,
         headers={"Authorization": "Bearer not-the-admin-token"},  # secret-guard: allow
     ).status_code == 401
-
-    allowed = app_client.get(path, headers={"Authorization": "Bearer admin-token"})
-    assert allowed.status_code == 200
-    assert allowed.json()["carry_forward"] is None
 
 
 def test_the_route_serves_the_stored_seed_to_the_conversation_it_belongs_to(

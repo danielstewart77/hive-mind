@@ -12,6 +12,7 @@ registered under the same name.
 """
 from __future__ import annotations
 
+from comms_broker_pg import aadmin_person_key  # noqa: E402
 import time
 
 import httpx
@@ -128,7 +129,7 @@ async def test_the_console_is_told_the_mind_still_has_conversations(
 ) -> None:
     """Driven over ASGI on this test's loop, where the pool is: a refusal
     the route let escape would arrive as a 500 with no sentence in it."""
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    await aadmin_person_key(ADMIN)
     from comms import server
 
     await put_mind(MIND, "doomed")
@@ -170,7 +171,7 @@ async def test_the_console_is_told_the_memory_graph_still_names_the_mind(
 ) -> None:
     """The graph refusal reaches the console as a 409 with its sentence,
     not as the database's foreign-key violation surfacing as a 500."""
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    await aadmin_person_key(ADMIN)
     from comms import server
 
     await put_mind(MIND, "remembered")

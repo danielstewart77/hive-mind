@@ -12,6 +12,7 @@ which is what these tests read back.
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key, mind_key  # noqa: E402
 import asyncio
 import importlib
 import json
@@ -84,6 +85,8 @@ _OPEN: list[SessionManager] = []
 #: because a gateway that cannot establish who is calling must refuse rather
 #: than answer the LAN.
 GRILL_ADMIN = "admin-bearer"  # secret-guard: allow
+MIND_KEY = "ada-harness-mind-key-for-tests"  # secret-guard: allow
+MIND_AUTH = {"Authorization": f"Bearer {MIND_KEY}"}
 
 
 def _run(coro):
@@ -410,7 +413,8 @@ def test_the_migration_fills_rows_from_before_the_column_from_the_broker():
 
 @pytest.fixture
 def app_client(monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
+    mind_key(MIND_KEY, holder=MIND_NAME)
 
     from comms import server as server_module
 
@@ -863,7 +867,7 @@ def test_the_summary_is_the_one_the_hooks_wrote_under_the_conversation_id(app_cl
         assert client.post(f"/sessions/{key}/rotation-memory", json={
             "mind_id": MIND, "client_ref": "123",
             "body": json.dumps({"carry_forward": text}),
-        }).status_code == 200
+        }, headers=MIND_AUTH).status_code == 200
         time.sleep(1.1)  # created_at is whole seconds
     mind = FakeMind()
     with mind.wired(), _soul():
@@ -1225,7 +1229,7 @@ def test_a_claude_conversations_summary_filed_under_its_conversation_id_is_hande
     assert client.post("/sessions/conv-1/rotation-memory", json={
         "mind_id": MIND, "client_ref": "123",
         "body": json.dumps({"carry_forward": "filed under the claude conversation id"}),
-    }).status_code == 200
+    }, headers=MIND_AUTH).status_code == 200
     mind = FakeMind()
     with mind.wired(), _soul():
         body = _command(client, "/harness codex gpt-5.6-terra")

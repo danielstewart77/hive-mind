@@ -38,7 +38,6 @@ from comms_broker_pg import (  # noqa: F401 - fixtures
 # Invented values, never real credentials. Named once so the guard has one
 # line to look at and the tests read as behaviour rather than as strings.
 SHARED = "shared-token-for-tests"  # secret-guard: allow
-ADMIN_TOKEN = "admin-token-for-tests"  # secret-guard: allow
 SLOAN_TOKEN = "sloan-token-for-tests"  # secret-guard: allow
 # A mind's own credential. The machinery routes answer to this rather than
 # to the one shared value every mind used to hold.
@@ -67,7 +66,6 @@ def clean_env(monkeypatch):
     several of these tests; an ambient one would mask them."""
     for name in (
         "COMMS_BEARER_TOKEN",
-        "COMMS_ADMIN_BEARER_TOKEN",
         "COMMS_PRIMARY_USER",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -229,21 +227,11 @@ async def test_no_service_token_configured_does_not_open_the_gateway(db, monkeyp
     route to every caller. Unsetting it is also the obvious way an operator
     retires it."""
     monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
-    monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
 
     for presented in (SHARED, UNISSUED, ""):
         caller = await ua.resolve_caller(presented)
         assert caller.recognised is False
         assert caller.sees_everything() is False
-
-
-async def test_the_admin_token_reaches_everything(db, monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
-
-    caller = await ua.resolve_caller(ADMIN_TOKEN)
-
-    assert caller.is_admin is True
-    assert caller.sees_everything() is True
 
 
 async def test_an_unknown_value_is_not_recognised(db):
@@ -492,7 +480,6 @@ def broker_path(broker_db):
 @pytest.fixture()
 def gated(broker_path, monkeypatch):
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
     app, table = _gated_app(
         broker_path, {"d-session": DANIEL_MIND, "s-session": SLOAN_MIND}
@@ -564,7 +551,6 @@ def test_an_unconfigured_gateway_does_not_serve_open(broker_path, monkeypatch):
     it. A gateway that cannot establish who is calling refuses, while the
     holder table still decides for everyone holding a real credential."""
     monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
-    monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
     monkeypatch.delenv("COMMS_PRIMARY_USER", raising=False)
     app, _ = _gated_app(
         broker_path, {"d-session": DANIEL_MIND, "s-session": SLOAN_MIND}
@@ -575,14 +561,8 @@ def test_an_unconfigured_gateway_does_not_serve_open(broker_path, monkeypatch):
     assert _get(app, "/sessions/s-session", token=SLOAN_TOKEN).status_code == 200
 
 
-def test_the_admin_token_reaches_every_users_conversation(gated):
-    assert _get(gated, "/sessions/d-session", token=ADMIN_TOKEN).status_code == 200
-    assert _get(gated, "/sessions/s-session", token=ADMIN_TOKEN).status_code == 200
-
-
 def test_an_admin_only_route_refuses_a_user_credential(gated):
     assert _get(gated, "/sessions/live", token=SLOAN_TOKEN).status_code == 401
-    assert _get(gated, "/sessions/live", token=ADMIN_TOKEN).status_code == 200
 
 
 def test_the_machinery_routes_serve_a_minds_own_credential(gated):
@@ -789,7 +769,6 @@ def test_a_database_that_does_not_answer_is_503_not_500_or_401(
     request and websocket handshake answered 500 while it did."""
     import hive_data
 
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     app, _ = _gated_app(broker_path, {})
     real_resolve = ua.resolve_caller
 

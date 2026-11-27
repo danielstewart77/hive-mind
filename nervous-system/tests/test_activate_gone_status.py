@@ -12,6 +12,7 @@ nothing and replies that would not send.
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import asyncio
 import importlib
 import time
@@ -93,7 +94,7 @@ def test_both_types_stay_value_errors_for_callers_that_catch_one():
 
 @pytest.fixture()
 def client(comms_db, monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    admin_person_key(GRILL_ADMIN)
 
     from comms import server as server_module
 

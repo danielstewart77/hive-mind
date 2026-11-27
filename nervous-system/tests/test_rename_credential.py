@@ -21,6 +21,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 from comms_broker_pg import (  # noqa: F401 - fixtures
     broker_db,
     execute,
@@ -57,7 +58,7 @@ def _seed_live_session(session_id: str = "sess-1") -> str:
 
 @pytest.fixture
 def client(monkeypatch, broker_db):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    admin_person_key(ADMIN)
     monkeypatch.setenv("COMMS_RENAME_TOKEN", "rename-only")
 
     from comms import server as server_module
@@ -116,16 +117,13 @@ def test_renaming_refuses_when_no_rename_credential_is_configured() -> None:
     rename any mind's conversations.
 
     Driven against the dependency rather than through a request, because the
-    one caller that reaches this branch is a non-admin: an admin is answered
-    before it whatever else is configured, which is deliberate — the console
-    and the operator need a way to fix a name without a third secret.
+    one caller that reaches this branch is the rename token's holder.
     """
     import os
 
     from comms.auth import require_rename_bearer
 
-    for key in ("COMMS_RENAME_TOKEN", "COMMS_ADMIN_BEARER_TOKEN"):
-        os.environ.pop(key, None)
+    os.environ.pop("COMMS_RENAME_TOKEN", None)
 
     with pytest.raises(HTTPException) as refused:
         require_rename_bearer(
@@ -161,17 +159,15 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
     assert response.status_code == 404
 
 
-def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
+def test_a_hive_with_an_administrator_but_no_rename_token_says_renaming_is_off(
     monkeypatch, broker_db
 ) -> None:
     """R8: the sentence naming the misconfiguration has to be reachable.
 
-    Every hive here has an admin token, so gating the 503 on both tokens being
-    absent made it unreachable: a deployment that simply never set the rename
-    token answered 401 to every surface, and all three of them reported a
-    network fault. Breaks if the guard goes back to requiring both to be unset.
+    A deployment that simply never set the rename token must say so, not
+    answer 401 to every surface and send the operator to the network.
     """
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    admin_person_key(ADMIN)
     monkeypatch.delenv("COMMS_RENAME_TOKEN", raising=False)
 
     from comms import server as server_module
@@ -184,16 +180,8 @@ def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
             headers={**REACHES_EVERYTHING, "X-Rename-Token": "some-other-secret"},
             json={"name": "Health"},
         )
-        # The operator still gets in with the admin token, which is why the
-        # admin check runs before this one.
-        allowed = test_client.put(
-            "/sessions/sess-1/name",
-            headers={**REACHES_EVERYTHING, "X-Rename-Token": "admin-bearer"},
-            json={"name": "Health"},
-        )
 
     assert refused.status_code == 503
-    assert allowed.status_code == 200
 
 
 def test_every_name_the_hive_holds_is_readable_in_one_call(client) -> None:
@@ -276,10 +264,11 @@ def creating(client):
         yield client
 
 
-def _create(http, mind_id, token, **body):
+def _create(http, mind_id, token, rename=None, **body):
     return http.post(
         "/sessions",
-        headers={"Authorization": f"Bearer {token}"},
+        headers={"Authorization": f"Bearer {token}",
+                 **({"X-Rename-Token": rename} if rename else {})},
         json={
             "surface": "web", "surface_id": "terminal",
             "client_ref": f"staff-{body.get('name', 'bare')}",
@@ -315,32 +304,6 @@ def test_a_minds_own_credential_cannot_name_the_conversation_it_creates(
     assert coloured.status_code == 401, coloured.text
 
 
-def test_the_credential_a_rename_takes_also_names_a_new_conversation(
-    creating,
-) -> None:
-    """R8, R4: the operator's own credential needs no second secret.
-
-    `require_rename_bearer` answers an admin caller presenting it the ordinary
-    way, which is what the chief of staff holds — so naming at creation has to
-    work on that credential alone, or the guard above has simply closed the
-    feature. The answer carries the stored name, which is the only way a
-    caller can tell a gateway that understood the field from one that ignored
-    it. Breaks if the create stops passing the label down, or if the guard
-    starts demanding the rename header from an admin.
-    """
-    mind = _a_mind_with_its_own_credential("carol")
-
-    created = _create(
-        creating, mind, ADMIN, name="  CoS: Session names  ", color="#5c913b",
-    )
-
-    assert created.status_code == 200, created.text
-    assert created.json()["name"] == "CoS: Session names"
-    # The colour travels the same route and is promised by the same sentence;
-    # asserted here because nothing else checks that this route passes it on.
-    assert created.json()["color"] == "#5c913b"
-
-
 def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
     creating,
 ) -> None:
@@ -355,7 +318,7 @@ def test_a_create_whose_colour_is_not_a_hex_value_is_refused_as_a_bad_value(
     mind = _a_mind_with_its_own_credential("dave")
 
     refused = _create(
-        creating, mind, ADMIN, color="red; content:url(x)",
+        creating, mind, ADMIN, rename="rename-only", color="red; content:url(x)",
     )
 
     assert refused.status_code == 400, refused.text

@@ -9,6 +9,7 @@ only kind the old rule ever moved.
 # ruff: noqa: F811 - pytest fixtures are imported, then named as parameters
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import asyncio
 import uuid
 from contextlib import contextmanager
@@ -155,7 +156,7 @@ def test_a_minds_own_credential_reads_its_own_grants_and_no_other_minds(comms_db
         return mine, other
 
     mine, other = _run(setup())
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
     from comms import server as server_module
     importlib.reload(server_module)
     with TestClient(server_module.app, headers={"Authorization": "Bearer mind-secret"}) as client:
