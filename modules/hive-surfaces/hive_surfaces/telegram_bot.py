@@ -38,7 +38,7 @@ from hive_surfaces.gateway_client import (
 )
 from hive_surfaces import own_key
 from hive_surfaces import (
-    effort_picker, harness_picker, hitl, model_picker, rename_prompt, session_picker,
+    effort_picker, harness_picker, model_picker, rename_prompt, session_picker,
     surface_claim, voice_routing,
 )
 from hive_surfaces.skills import get_skills
@@ -2295,57 +2295,6 @@ COMMANDS: tuple[tuple[str, str, object], ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# Held decisions
-# ---------------------------------------------------------------------------
-async def handle_hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Report an approve or deny tap to whoever is holding the decision.
-
-    The buttons were posted by hive-tools against a token it minted, so this
-    reports and relays rather than deciding: the message ends up saying what
-    hive-tools said, including its status when the call failed, because the
-    operator's next question is always whether the thing actually happened.
-    """
-    query = update.callback_query
-
-    if not await _is_allowed_user(query.from_user.id):
-        await query.answer("Not authorized.")
-        return
-
-    parsed = hitl.parse_callback(query.data or "")
-    if parsed is None:
-        await query.answer("Unknown action.")
-        return
-    action, token = parsed
-
-    await query.answer()
-
-    # The question stays on screen under the outcome; only the buttons go, so
-    # a second tap cannot report a decision twice.
-    original = query.message.text or ""
-    body = original.split("\n\n", 1)[-1] if "\n\n" in original else original
-    with contextlib.suppress(Exception):
-        await query.edit_message_text(f"Working\u2026\n\n{body}", reply_markup=None)
-
-    url, payload, headers = hitl.respond_request(token, action)
-    try:
-        async with http.post(url, json=payload, headers=headers) as resp:
-            label = hitl.outcome_label(action, resp.status, await resp.text())
-    except Exception as exc:  # noqa: BLE001
-        log_event(
-            log, "surface.hitl.unreachable", level=logging.WARNING, surface="telegram",
-            error=str(exc), error_type=type(exc).__name__,
-        )
-        label = f"Could not reach the approval service: {type(exc).__name__}"
-
-    log_event(
-        log, "surface.hitl.answered", surface="telegram",
-        user_id=query.from_user.id, client_ref=query.message.chat_id,
-    )
-    with contextlib.suppress(Exception):
-        await query.edit_message_text(f"{label}\n\n{body}", reply_markup=None)
-
-
-# ---------------------------------------------------------------------------
 # The extension seam
 # ---------------------------------------------------------------------------
 # A mind may carry a command no other mind has. It does not get its own bot to
@@ -2451,13 +2400,9 @@ def _build_application(token: str):
     _TABLE_SEALED = True
     for name, _description, handler in all_commands():
         app.add_handler(CommandHandler(name, with_typing(handler)))
-    # Both patterned, and the held decision first. A handler registered with
-    # no pattern takes every callback the chat produces — which is how the
-    # picker ends up answering a button it knows nothing about, and how an
-    # approval tap gets read as a request to switch conversations.
-    app.add_handler(CallbackQueryHandler(
-        with_typing(handle_hitl_callback), pattern=hitl.CALLBACK_PATTERN,
-    ))
+    # Patterned: a handler registered with no pattern takes every callback
+    # the chat produces. Approvals have no button here: they are decided on
+    # the hive site.
     app.add_handler(CallbackQueryHandler(
         with_typing(on_session_button), pattern=session_picker.CALLBACK_PATTERN,
     ))

@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hitl
-from auth_api import generate_approver_token
+from tests.scratch import generate_person_key
 from tests.scratch import generate_token
 from tests.scratch import run
 
@@ -105,8 +105,8 @@ def _label_created(label_id: str) -> Answer:
 
 
 def _approver() -> dict[str, str]:
-    """The credential the surface bots send when Daniel taps Approve."""
-    return {"Authorization": f"Bearer {run(generate_approver_token())}"}
+    """Daniel, signed in on the hive site, deciding with his own key."""
+    return {"Authorization": f"Bearer {run(generate_person_key('daniel', admin=True))}"}
 
 
 def _approve(client: TestClient, request_id: str) -> None:
@@ -304,14 +304,14 @@ def test_a_mind_approving_its_own_gated_request_is_refused_and_it_stays_pending(
     run(hitl.settle_replays(timeout=10))
 
     assert refused.status_code == 403
-    assert "A mind cannot decide its own gate" in refused.json()["detail"]
+    assert "A mind cannot decide a gate" in refused.json()["detail"]
     status = client.get(f"/hitl/{request_id}", headers=ada)
     assert status.status_code == 202
     assert status.json()["status"] == "pending"
     assert replayed == []
 
 
-def test_the_approver_credential_approves_a_gated_request_and_it_is_replayed(
+def test_a_persons_own_key_approves_a_gated_request_and_it_is_replayed(
         client: TestClient, ada: dict[str, str], comms: list[httpx.Request],
         monkeypatch: pytest.MonkeyPatch) -> None:
     label_id = f"Label_{uuid.uuid4().hex[:8]}"
@@ -332,12 +332,12 @@ def test_the_approver_credential_approves_a_gated_request_and_it_is_replayed(
     assert outcome["result"]["id"] == label_id
 
 
-def test_the_approver_credential_cannot_make_a_gated_call_of_its_own(
+def test_a_persons_key_cannot_make_a_gated_call_of_its_own(
         client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     replayed = _tool_answers(monkeypatch, _label_created("Label_never"))
 
     asked = client.post("/gmail/labels", json=LABEL, headers=_approver())
 
-    assert asked.status_code == 403
+    assert asked.status_code == 401
     assert "hitl_request_id" not in asked.json()
     assert replayed == []

@@ -237,3 +237,31 @@ async def generate_token(name: str) -> str:
         role="mind", token_sha=access.digest(raw), created_at=time.time(),
         revoked_at=None)
     return raw
+
+
+async def generate_person_key(username: str, *, admin: bool = False) -> str:
+    """A person's own key in the one record of keys; an administrator when
+    `admin`. Returns the key."""
+    import secrets
+    import time
+
+    from hive_data import access, core
+
+    name = username.strip().lower()
+    now = int(time.time())
+    user = next((u for u in await core.list_users()
+                 if str(u["username"]).lower() == name), None)
+    if user is None:
+        await core.create_user(username=name, password_hash="x",
+                               created_at=now)
+        user = next(u for u in await core.list_users()
+                    if str(u["username"]).lower() == name)
+    if admin:
+        await core.create_group(name=access.ADMINS_GROUP, created_at=now)
+        await core.add_group_member(group_name=access.ADMINS_GROUP,
+                                    user_id=user["id"])
+    raw = secrets.token_urlsafe(32)
+    await core.upsert_credential(
+        holder=name, username=name, role=access.USER_KEY,
+        token_sha=access.digest(raw), created_at=time.time(), revoked_at=None)
+    return raw

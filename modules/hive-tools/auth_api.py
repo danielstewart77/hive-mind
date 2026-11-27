@@ -8,36 +8,23 @@ and hold no administrator credential.
 
 from __future__ import annotations
 
-import hashlib
-import secrets
-import time
-
 from fastapi import HTTPException, Request
 from hive_data import access
 
 import store
 
 
-#: The holder of the one credential that may decide an approval over the API.
-#: Not a mind: the surface bots hold it, and send it when the operator taps
-#: Approve or Deny. Minted like any other token, under this name, and it is
-#: the name that gives it the power - so it does nothing else (see
-#: `require_api_token`), and a mind's token, which may make gated calls,
-#: never decides one.
-APPROVER_HOLDER = "hitl-approver"
-
 #: What a mind is told when it tries to decide a gate.
-#: The sentence that matters first: the surface bot shows the first 120
-#: characters of a refusal, and "still pending" is what the operator needs.
+#: The sentence that matters first: the person needs to know the request is
+#: still pending.
 MIND_CANNOT_DECIDE = (
-    "A mind cannot decide its own gate; the request is still pending. "
-    "The token sent is {holder}'s, and a mind's token may make gated calls "
-    "but never approve or deny one. Decide on the approval page, or from a "
-    "bot holding the approver credential.")
-
+    "A mind cannot decide a gate; the request is still pending. "
+    "The key sent is {holder}'s, and a mind's key may make gated calls "
+    "but never approve or deny one. A person decides, on the hive site, "
+    "signed in as themselves.")
 
 #: Holders no mind may be named after: the tools keep these for their own use.
-RESERVED_HOLDERS = frozenset({APPROVER_HOLDER, "internal", "skippy", "shared-token-retired"})
+RESERVED_HOLDERS = frozenset({"internal", "skippy", "shared-token-retired"})
 
 
 def bearer_value(auth_header: str) -> str:
@@ -67,22 +54,6 @@ async def require_admin_bearer(request: Request) -> str:
     return admin.username
 
 
-async def generate_approver_token() -> str:
-    """Mint the approver credential: a token held by `APPROVER_HOLDER`.
-
-    The one credential still kept in `tools.api_tokens`; approvals move to the
-    hive site and it goes with them (story 908)."""
-    raw = secrets.token_urlsafe(32)
-    await store.create_token(
-        APPROVER_HOLDER, hashlib.sha256(raw.encode()).hexdigest(), int(time.time()))
-    return raw
-
-
-async def _validate_approver(raw_token: str) -> bool:
-    row = await store.live_token(hashlib.sha256(raw_token.encode()).hexdigest())
-    return row is not None and str(row["name"]) == APPROVER_HOLDER
-
-
 async def validate_token(raw_token: str) -> str | None:
     """The holder (a mind) a presented key belongs to, read from the one
     record of keys on this request, or None for an unknown or cut-off key."""
@@ -99,9 +70,8 @@ async def require_api_token(request: Request) -> str:
     Returns the caller mind name on success, raises 401 on failure.
     Accepts 'Internal <INTERNAL_SECRET>' for HITL replay calls.
 
-    The approver credential is refused here with 403. It exists to decide
-    approvals and for nothing else: a credential that could also make gated
-    calls could ask for something and then approve its own request.
+    A person's own key is refused here (validate_token answers None for it):
+    a person decides approvals and makes no gated call as a mind.
     """
     from config import INTERNAL_SECRET
 
@@ -115,11 +85,6 @@ async def require_api_token(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
     raw = bearer_value(auth_header)
-    if await _validate_approver(raw):
-        raise HTTPException(
-            status_code=403,
-            detail="The approver credential decides approvals "
-                   "(POST /hitl/{id}/respond) and does nothing else.")
     name = await validate_token(raw)
     if name is None:
         raise HTTPException(status_code=401, detail="Invalid or revoked token")
@@ -173,15 +138,15 @@ async def _refuse_a_mind_of_someone_else(holder: str) -> None:
         raise HTTPException(status_code=403, detail=refused)
 
 
-async def require_approver(request: Request) -> str:
-    """FastAPI dependency for deciding an approval over the API.
+async def require_person(request: Request) -> str:
+    """FastAPI dependency for everything an approval asks of a person.
 
-    Only the approver credential passes. A mind's token - any mind's, the
-    operator mind's included - is refused with 403 before anything is
-    decided, so the request stays pending; so is hive-tools' own internal
-    replay secret, which replays a decision and never makes one. The other
-    way to decide is Daniel's sign-in on the approval page, which does not
-    come through here.
+    Only a person's own key passes, and the answer is that person's
+    username. A mind's key - any mind's, the operator mind's included - is
+    refused with 403 before anything is read or decided, so the request stays
+    pending; so is hive-tools' own internal replay secret, which replays a
+    decision and never makes one. Nothing else (no bot credential, no
+    service value) is a way to decide.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -192,11 +157,21 @@ async def require_approver(request: Request) -> str:
                        "never makes one; the request is still pending.")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
-    raw = bearer_value(auth_header)
-    if await _validate_approver(raw):
-        return APPROVER_HOLDER
-    name = await validate_token(raw)
-    if name is None:
-        raise HTTPException(status_code=401, detail="Invalid or revoked token")
-    raise HTTPException(status_code=403,
-                        detail=MIND_CANNOT_DECIDE.format(holder=name))
+    key = await access.key_for(bearer_value(auth_header))
+    if key is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked key")
+    if key.role != access.USER_KEY:
+        raise HTTPException(status_code=403,
+                            detail=MIND_CANNOT_DECIDE.format(holder=key.holder))
+    if await access.live_person(key.username) is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked key")
+    return key.username
+
+
+async def may_decide(person: str, caller_mind: str) -> bool:
+    """Whether `person` may decide a request `caller_mind` asked for: the
+    owner of that mind, or any administrator. Read on the call."""
+    owner = await store.mind_owner(caller_mind)
+    if owner and owner == person.strip().lower():
+        return True
+    return await access.person_is_administrator(person)

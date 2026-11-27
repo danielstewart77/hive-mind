@@ -34,26 +34,14 @@ default. That seed is insert-if-absent: it runs for every gated tool on
 every start, so a replacing write would re-arm every gate the operator had
 turned off on each deploy.
 
-Only two things decide a request: the operator's sign-in on the approval page
-(`/hitl-ui`), and the **approver credential** on `POST /hitl/{id}/respond` —
-an API token whose holder is `hitl-approver`, held by the surface bot that
-receives hive-tools' Telegram buttons and sent as `HIVE_TOOLS_APPROVER_TOKEN`.
-A mind's token — any mind's, the operator mind's included — is refused with a
-403 before anything is decided, so the request stays pending: a mind that could
-answer its own gate would have no gate. The approver credential is refused on
-every other route, so it cannot make a gated call and then approve it. Mint it
-the way every token is minted, under that holder:
-
-```bash
-docker exec hive-tools python -c "import asyncio, store, auth_api
-async def main():
-    await store.open(); print(await auth_api.generate_approver_token()); await store.close()
-asyncio.run(main())"
-```
-
-Give it only to a bot that does not share a process with a mind: a mind's
-harness inherits its process's environment, and a mind holding the approver
-credential can decide its own gate.
+A request is decided on the hive site, by a person signed in as themselves:
+the hive site sends that person's own key to `POST /hitl/{id}/respond`, and the
+tools accept it only from the owner of the mind that asked or an administrator,
+recording that person's name on the request. A mind's key is refused with a 403
+before anything is decided, so the request stays pending. `GET /hitl/{id}/review`
+(the whole saved call, for a person who may decide it) and `GET /hitl/waiting`
+(what waits for the caller) take a person's key too. The notice carries
+`HIVE_SITE_PUBLIC_URL/approvals/{id}`; there is no button and no approver credential.
 
 A decision is one guarded statement, so two people reaching the queue at the
 same moment produce one decision and the loser is told which of three

@@ -95,7 +95,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "tool_name", "caller_mind", "params_json", "status",
         "created_at", "expires_at", "decided_at", "tool_method", "tool_path",
         "tool_body", "outcome_ok", "outcome_status", "outcome_body",
-        "outcome_at"),
+        "outcome_at", "decided_by"),
     "tools.sudo_grants": (
         "id", "tool_name", "caller_mind", "granted_at", "expires_at"),
     "tools.tool_hitl_settings": ("tool_name", "mode", "sudo_timeout_minutes"),

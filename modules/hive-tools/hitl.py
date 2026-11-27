@@ -584,7 +584,7 @@ def outcome_view(stored: dict[str, Any]) -> dict[str, Any]:
 
 
 async def respond_to_hitl(
-    request_id: str, action: str
+    request_id: str, action: str, decided_by: str | None = None
 ) -> dict[str, Any] | None:
     """Approve or deny a HITL request.
 
@@ -627,7 +627,8 @@ async def respond_to_hitl(
             new_status = "denied"
 
     async with store.transaction():
-        row = await store.decide_request(request_id, new_status, now, now)
+        row = await store.decide_request(request_id, new_status, now, now,
+                                         decided_by)
 
         if row is None:
             # Nothing was decided. Say which of the three reasons it was,
@@ -664,10 +665,51 @@ async def respond_to_hitl(
         "tool_name": row["tool_name"],
         "caller_mind": row["caller_mind"],
         "decided_at": now,
+        "decided_by": decided_by,
     }
     if replay:
         result["_replay"] = replay
     return result
+
+
+def approval_url(request_id: str) -> str:
+    """Where a person decides `request_id`: a page on the hive site.
+
+    The link carries the request's identifier and nothing else; holding it
+    decides nothing and shows nothing, the page asks who is signed in. With
+    no public address of the site configured it is the path, and the notice
+    says it is on the hive site.
+    """
+    base = (os.environ.get("HIVE_SITE_PUBLIC_URL", "").strip().rstrip("/"))
+    return f"{base}/approvals/{request_id}"
+
+
+async def review_of(request_id: str, now: int) -> dict[str, Any] | None:
+    """Everything an approval page shows of one request, or None.
+
+    The content is what the tools hold and will replay: the method, path and
+    body of the saved call, as stored.
+    """
+    row = await store.request_payload(request_id)
+    if row is None:
+        return None
+    full = await store.request(request_id)
+    assert full is not None
+    status = effective_status(full, now)
+    return {
+        "hitl_request_id": request_id,
+        "caller_mind": full["caller_mind"],
+        "tool_name": full["tool_name"],
+        "status": status,
+        "created_at": full["created_at"],
+        "expires_at": full["expires_at"],
+        "decided_at": full["decided_at"],
+        "decided_by": full.get("decided_by"),
+        "params": row["params_json"],
+        "method": row["tool_method"],
+        "path": row["tool_path"],
+        "body": row["tool_body"],
+    }
 
 
 def notify_daniel(
@@ -699,19 +741,13 @@ def notify_daniel(
         icon = _TOOL_ICONS.get(prefix, "🔧")
         label = tool_name.replace(f"{prefix}_", "").replace("_", " ").title()
 
-        text = f"{icon} *{label}*\nRequested by: {caller_mind}"
+        # No buttons: a decision is made on the hive site, signed in as the
+        # person, so the notice says where.
+        text = (f"{icon} {label}\nRequested by: {caller_mind}\n"
+                f"Approve or deny it on the hive site, signed in: "
+                f"{approval_url(request_id)}")
 
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": {
-                "inline_keyboard": [
-                    [{"text": "✅ Approve", "callback_data": f"hitl_approve_{request_id}"}],
-                    [{"text": "❌ Deny",    "callback_data": f"hitl_deny_{request_id}"}],
-                ]
-            },
-        }
+        payload = {"chat_id": chat_id, "text": text}
 
         httpx.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",

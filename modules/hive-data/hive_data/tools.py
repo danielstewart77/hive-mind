@@ -122,6 +122,17 @@ async def recent_requests(*, limit: int = QUEUE_LIMIT,
         "ORDER BY created_at DESC, id DESC LIMIT $1", limit)
 
 
+async def waiting_requests(now: int, *, limit: int = QUEUE_LIMIT,
+                           unit: Unit | None = None) -> list[Row]:
+    """Requests still waiting on a person at `now`, newest first, without the
+    captured call."""
+    return await _fetch(
+        unit,
+        f"SELECT {select_list(REQUESTS)} FROM {qualified(REQUESTS)} "
+        "WHERE status = $1 AND expires_at >= $2 "
+        "ORDER BY created_at DESC, id DESC LIMIT $3", PENDING, now, limit)
+
+
 async def pending_request(request_id: str, now: int, *,
                           unit: Unit | None = None) -> Row | None:
     """A request still waiting on a person at `now`, or None.
@@ -139,7 +150,8 @@ async def pending_request(request_id: str, now: int, *,
 
 
 async def decide_request(request_id: str, status: str, decided_at: int,
-                         now: int, *, unit: Unit | None = None) -> Row:
+                         now: int, *, decided_by: str | None = None,
+                         unit: Unit | None = None) -> Row:
     """Approve or deny a request, if it is still there to be decided.
 
     The guard is in the statement. A request that has already been decided,
@@ -158,7 +170,8 @@ async def decide_request(request_id: str, status: str, decided_at: int,
             "pending stamps `decided_at`, reports a row changed, and leaves "
             "the request decidable again, so a caller would be told it won "
             "an arbitration that is still open.")
-    values = {"status": status, "decided_at": decided_at}
+    values = {"status": status, "decided_at": decided_at,
+              "decided_by": decided_by}
     clause, extra_args = _sql.where(
         REQUESTS, {"status": PENDING}, start=len(values) + 2)
     sql, args = _sql.update(

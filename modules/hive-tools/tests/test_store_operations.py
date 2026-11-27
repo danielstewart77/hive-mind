@@ -97,7 +97,7 @@ def test_the_queue_lists_newest_first_without_the_captured_bodies() -> None:
     # private - the captured body, which is what holds the credentials, and
     # the body the replayed tool answered with.
     assert columns == ["caller_mind", "created_at", "decided_at",
-                       "expires_at", "id", "outcome_at", "outcome_ok",
+                       "decided_by", "expires_at", "id", "outcome_at", "outcome_ok",
                        "outcome_status", "status", "tool_method",
                        "tool_name", "tool_path"]
     # Newest first, and the tie-break is the id so the same list comes back

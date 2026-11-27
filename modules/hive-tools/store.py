@@ -279,7 +279,7 @@ async def recent_requests(limit: int = QUEUE_LIMIT) -> list[Row]:
 
 
 async def decide_request(request_id: str, status: str, decided_at: int,
-                         now: int) -> Row | None:
+                         now: int, decided_by: str | None = None) -> Row | None:
     """Decide a request still waiting at `now`, and hand back the call.
 
     The guard is in the statement. A request already decided, or past its
@@ -288,8 +288,18 @@ async def decide_request(request_id: str, status: str, decided_at: int,
     lost.
     """
     written = await tools.decide_request(request_id, status, decided_at, now,
-                                         unit=_live())
+                                         decided_by=decided_by, unit=_live())
     return written["row"] if written["rows"] else None
+
+
+async def waiting_requests(now: int) -> list[Row]:
+    """Requests still waiting on a person at `now`, without their captured call."""
+    return await tools.waiting_requests(now, unit=_live())
+
+
+async def request_payload(request_id: str) -> Row | None:
+    """A request with the call it captured: what an approval page shows."""
+    return await tools.request_payload(request_id, unit=_live())
 
 
 async def record_outcome(request_id: str, ok: bool, status: int | None,

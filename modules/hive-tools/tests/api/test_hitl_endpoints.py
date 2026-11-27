@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from auth_api import generate_approver_token
+from tests.scratch import generate_person_key
 from tests.scratch import generate_token
 from tests.scratch import db, run
 
@@ -47,7 +47,7 @@ def auth_header(client: TestClient) -> dict[str, str]:
 
 @pytest.fixture()
 def approver_header(client: TestClient) -> dict[str, str]:
-    raw = run(generate_approver_token())
+    raw = run(generate_person_key('daniel', admin=True))
     return {"Authorization": f"Bearer {raw}"}
 
 

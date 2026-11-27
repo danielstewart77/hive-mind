@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -9,13 +10,15 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import auth_api
-from auth_api import require_api_token, require_approver
+from auth_api import may_decide, require_api_token, require_person
 import store
 from hitl import (
     HITLPendingException,
     UncapturableCall,
     UnknownAction,
+    approval_url,
     get_hitl_status,
+    review_of,
     respond_to_hitl,
     schedule_replay,
     seed_default_hitl_settings,
@@ -103,6 +106,41 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    # ---- Approving: a person's own key, on the hive site's behalf ----
+    # `waiting` is registered before `/hitl/{request_id}` so it is not read
+    # as a request's identifier.
+    @app.get("/hitl/waiting")
+    async def hitl_waiting(person: str = Depends(require_person)) -> Any:
+        """Requests waiting on this person: those of their own minds, or all
+        of them for an administrator. Without the content of the calls."""
+        now = int(time.time())
+        rows = []
+        for row in await store.waiting_requests(now):
+            if await may_decide(person, str(row["caller_mind"])):
+                rows.append({
+                    "hitl_request_id": row["id"],
+                    "caller_mind": row["caller_mind"],
+                    "tool_name": row["tool_name"],
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                })
+        return {"waiting": rows}
+
+    @app.get("/hitl/{request_id}/review")
+    async def hitl_review(request_id: str,
+                          person: str = Depends(require_person)) -> Any:
+        """One request, in full, for a person who may decide it; anyone else
+        is refused and told nothing of it."""
+        review = await review_of(request_id, int(time.time()))
+        if review is None:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        if not await may_decide(person, str(review["caller_mind"])):
+            return JSONResponse(
+                {"detail": "You may not decide this request: only the owner "
+                           "of the mind that asked, or an administrator, may."},
+                status_code=403)
+        return review
+
     # ---- HITL polling endpoints ----
     @app.get("/hitl/{request_id}")
     async def hitl_status(
@@ -129,12 +167,19 @@ def create_app() -> FastAPI:
     async def hitl_respond(
         request_id: str,
         body: HITLRespondRequest,
-        # The approver credential only: a mind's token is refused before
-        # anything is decided, so a mind cannot approve the call it asked for.
-        caller: str = Depends(require_approver),
+        # A person's own key only: a mind's key is refused before anything is
+        # decided, so a mind cannot approve the call it asked for.
+        caller: str = Depends(require_person),
     ) -> Any:
+        asked = await store.request(request_id)
+        if asked is not None and not await may_decide(
+                caller, str(asked["caller_mind"])):
+            return JSONResponse(
+                {"detail": "You may not decide this request: only the owner "
+                           "of the mind that asked, or an administrator, may."},
+                status_code=403)
         try:
-            result = await respond_to_hitl(request_id, body.action)
+            result = await respond_to_hitl(request_id, body.action, caller)
         except UnknownAction as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         if result is None:
@@ -159,7 +204,11 @@ def create_app() -> FastAPI:
     @app.exception_handler(HITLPendingException)
     async def hitl_pending_handler(request: Request, exc: HITLPendingException) -> JSONResponse:
         return JSONResponse(
-            {"hitl_request_id": exc.request_id, "status": "pending"},
+            {"hitl_request_id": exc.request_id, "status": "pending",
+             "approve_at": approval_url(exc.request_id),
+             "message": ("This waits on a person's yes. Tell them to approve "
+                         "or deny it here, signed in to the hive site: "
+                         + approval_url(exc.request_id))},
             status_code=202,
         )
 

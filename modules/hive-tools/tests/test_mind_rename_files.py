@@ -106,7 +106,7 @@ def test_rename_waits_for_approval_then_replays_the_selected_project_and_require
     """P2: real API/replay cannot bypass approval or the safe-turn boundary."""
     import httpx
     import hitl
-    from auth_api import generate_approver_token
+    from tests.scratch import generate_person_key
     from tests.scratch import generate_token
     from fastapi.testclient import TestClient
     from server import create_app
@@ -122,7 +122,7 @@ def test_rename_waits_for_approval_then_replays_the_selected_project_and_require
     monkeypatch.setattr(hitl, '_REPLAY_TRANSPORT', httpx.ASGITransport(app=app))
     with TestClient(app) as client:
         caller = {'Authorization': 'Bearer ' + run(generate_token('ada'))}
-        approved_by = {'Authorization': 'Bearer ' + run(generate_approver_token())}
+        approved_by = {'Authorization': 'Bearer ' + run(generate_person_key('daniel', admin=True))}
         params = {'path': str(project)}
         reserved = client.post('/docker/mind-renames/reserve', params=params,
             headers=caller, json={'operation_id': 'op-approved', 'mind_id': 'uuid-kept',

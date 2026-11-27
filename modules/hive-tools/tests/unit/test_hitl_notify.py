@@ -39,34 +39,17 @@ def test_notify_daniel_sends_telegram_message() -> None:
 
 
 @pytest.mark.usefixtures("_telegram_env")
-def test_notify_daniel_includes_inline_keyboard() -> None:
-    """The Telegram payload includes reply_markup with an inline_keyboard.
-
-    The current layout is two rows of one button each (Approve, Deny stacked).
-    """
-    with patch("httpx.post") as mock_post:
-        notify_daniel("gmail_send", "ada", "{}", "req-002")
-
-        payload = mock_post.call_args[1]["json"]
-        assert "reply_markup" in payload
-        assert "inline_keyboard" in payload["reply_markup"]
-        keyboard = payload["reply_markup"]["inline_keyboard"]
-        assert len(keyboard) == 2  # two rows: approve, deny
-        assert len(keyboard[0]) == 1  # one button per row
-        assert "Approve" in keyboard[0][0]["text"]
-        assert "Deny" in keyboard[1][0]["text"]
-
-
-@pytest.mark.usefixtures("_telegram_env")
-def test_notify_daniel_button_callback_data_format() -> None:
-    """callback_data follows the pattern hitl_approve_{id} / hitl_deny_{id}."""
+def test_notify_daniel_carries_the_link_and_no_button(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The notice says where to approve (the hive site page for the request)
+    and carries no Approve or Deny button."""
+    monkeypatch.setenv("HIVE_SITE_PUBLIC_URL", "https://hive.example/")
     with patch("httpx.post") as mock_post:
         notify_daniel("docker_ops", "bilby", "{}", "req-abc-123")
 
         payload = mock_post.call_args[1]["json"]
-        keyboard = payload["reply_markup"]["inline_keyboard"]
-        assert keyboard[0][0]["callback_data"] == "hitl_approve_req-abc-123"
-        assert keyboard[1][0]["callback_data"] == "hitl_deny_req-abc-123"
+        assert "https://hive.example/approvals/req-abc-123" in payload["text"]
+        assert "reply_markup" not in payload
 
 
 def test_notify_daniel_missing_credentials_fails_gracefully(
