@@ -342,6 +342,9 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     # Where each mind's key folder is on this host, for the compose file of a
     # mind the console makes: outside the checkout, one folder per mind.
     values["HOST_KEY_DIR"] = str(home.keys)
+    # The code a mind without the operator role sees: the installer's own clean
+    # clone, never the install folder that holds this file (requirement 33).
+    values["HOST_CODE_DIR"] = str(home.repo("hive-mind"))
     values["TERMINAL_LABELS_TOKEN"] = values["COMMS_RENAME_TOKEN"]
     return values
 

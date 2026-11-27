@@ -322,6 +322,86 @@ hold, a mind at a time.
   replicas: two of them would not exclude one another and two operations on one
   key could interleave. This is how the console is deployed today.
 
+## Part 6. What a mind may mount (requirement 33)
+
+A mind that does not hold the operator role can read its own mind folder, its
+own key folder and a clean copy of the code, and nothing else that is a secret:
+not the install's settings file (`.env`, and any `*.env`), not the hive site's,
+the tools' or the authentication service's, not the shared keyring in `data/`,
+not the memory store's or the gateway's data, not another mind's folder, not
+another mind's key folder, not the host's Docker socket or a login on the host.
+It is handed no credential in its environment: its one key is the file named by
+`MIND_KEY_FILE`. An operator mind may be given whatever its operator chooses,
+and is never limited by this.
+
+What produces it: the installer's container for a mind (`HOST_CODE_DIR` in the
+`.env` is its own clean clone, `repos/hive-mind`), the console's container for a
+mind made on the page (its own folder and key folder only), and the tracked
+example every hand-made mind is copied from (`minds/example/container/compose.yaml`:
+the code from `HOST_CODE_DIR` read-only, its own folder, its own key folder, no
+credential line). A mind that works on the hive's own code still has all of it,
+read-only, without the secrets.
+
+**The check.** From a clean checkout, as the operator:
+
+```
+python3 tools/stateless/mind_mounts/mind_mounts.py check --root <install folder>
+```
+
+It reads every mind's container file (`minds/*/container/compose.yaml` and the
+installer's stack file), works out each mount with `${VARIABLES}` filled in from
+the environment and `<root>/.env`, and lists every mind without the operator role
+whose container mounts the install folder or its parent, a settings file, a key
+folder that is not its own, another mind's folder, the Docker socket or a login
+on the host, mounts a `session_token` file, takes an `env_file`, or is handed a
+credential by name (a token, a key, a database address). A place the check cannot
+work out is itself listed, never passed. It names the mind, the file, the line
+and the reason, never a value. A secret that something hides inside the mount (an
+empty file mounted over it with `/dev/null`, or a `tmpfs` on the folder) does not
+count. It exits 1 when a mind without the operator role is listed, 0 when none is,
+2 when it cannot run. Which minds hold the operator role is read from the hive
+database (`HIVE_DATABASE_URL`: `board.mind_roles` joined to the role with slug
+`operator`); `--operators <name or mind id>,...` names them instead; with neither
+it stops rather than guess. `--map HOST=LOCAL` says where a host folder the files
+name is on this machine; `HOST_PROJECT_DIR` is taken as the root and `HOST_DEV_DIR`
+as its parent. `--secret <path>` adds a file of yours to what is guarded.
+`MIND_PROACTIVE_TOKEN` (a mind's own chat bot's credential) is shown under
+`pending`, not failed, because the bots story removes it; `--strict-pending`
+fails on it too.
+
+**The operator step for an existing machine** (Skippy applies it to this host
+inside item 889; nothing here recreates or restarts a mind):
+
+1. Run the check. Its list is the work.
+2. Add `HOST_CODE_DIR` to the machine's `.env`: a clone of hive-mind that holds no
+   `.env`, no keyring and no other minds' state (`scripts/modules.sh` and a plain
+   `git clone` both make one; an installer-made install already has
+   `repos/hive-mind`). Give it an empty `minds/<name>` folder for each mind, for the
+   mind's own folder to be mounted on.
+3. For each mind without the operator role, edit its untracked
+   `minds/<name>/container/compose.yaml`: mount `${HOST_CODE_DIR}` read-only at
+   `/usr/src/app` instead of the checkout root or the development folder; keep
+   `minds/<name>` read-write at `/usr/src/app/minds/<name>`; set `KEY_RING` to
+   `/usr/src/app/minds/<name>/data/keyring`; take out the `HOST_DEV_DIR` mount, the
+   `session_token` mounts, every `*_BEARER_TOKEN`, `HIVE_TOOLS_TOKEN`,
+   `COMMS_ADMIN_BEARER_TOKEN`, `BOARD_PUSH_TOKEN`, `HIVE_DATABASE_URL` and
+   per-service proxy key line (the key folder carries the one key; Part 5
+   moves the mind onto it first, or it will not be able to reach the hive), and any
+   `env_file`.
+4. Run the check again: it must exit 0 for every mind without the operator role.
+5. Recreate each edited mind once, a mind at a time, and check it answers. This is
+   the only point a container changes.
+
+A mind that does not hold the operator role and works on the hive's own code
+(Cypher, today) is covered by step 3: it sees the code through `HOST_CODE_DIR`,
+read-only; its changes go through its own branch checkout under its own folder,
+not through the install's.
+
+Limits: the check reads container files, not running containers, so a container
+started from an older file passes until it is recreated; it does not follow a
+symlink inside a mounted folder it has no access to; and it does not move the
+install's settings file (a later item).
+
 ## The work machine (the other machine)
 
 Written, not performed. There, there is no installer stack from this repository

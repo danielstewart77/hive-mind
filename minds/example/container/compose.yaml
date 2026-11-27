@@ -33,7 +33,9 @@ services:
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=EXAMPLE_TELEGRAM_BOT_TOKEN
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
-      - KEY_RING=/usr/src/app/data/keyring
+      # Its own keyring, in its own folder: the install's shared one holds
+      # other minds' secrets and is not mounted here.
+      - KEY_RING=/usr/src/app/minds/example/data/keyring
       # This mind's own GitHub token, under a name no other mind uses.
       # Every mind here resolves the same keyring file, separated only by
       # key name, so a mind falling back to the default would store its
@@ -55,8 +57,23 @@ services:
       - CODEX_HOME=/usr/src/app/minds/example/.codex
       - DSH_HOME=/usr/src/app/minds/example/.dsh
     volumes:
-      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
+      # A mind that does not hold the operator role (feature 834, requirement
+      # 33) sees the code read-only, its own folder and its own key folder, and
+      # nothing that is a secret: no settings file, no other mind's folder, no
+      # shared keyring, no other key folder, no administrator credential. An
+      # operator mind may be given whatever its operator chooses; this file is
+      # the one for every other mind.
+      #
+      # The code is a clean clone of the repository, never the folder that
+      # holds the settings file: HOST_CODE_DIR, which the installer sets to its
+      # own clone (`repos/hive-mind`) and a hand-kept machine sets to a clone it
+      # keeps beside the install. A mind that works on the hive's own code still
+      # has all of it, without the secrets. The minds folder of that clone needs
+      # an empty `minds/<this mind>` for the next line to land on.
+      # `tools/stateless/mind_mounts/mind_mounts.py check` lists any mind on a
+      # machine whose own copy of this file reaches a secret.
+      - ${HOST_CODE_DIR:?set HOST_CODE_DIR to a clean clone of the repository}:/usr/src/app:ro
+      - ${HOST_PROJECT_DIR:-.}/minds/example:/usr/src/app/minds/example:rw
       - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
       # This mind's own key folder and no other mind's.
       - ${HOST_KEY_DIR:?set HOST_KEY_DIR to a folder outside the checkout}/example:/run/mind-key:ro
