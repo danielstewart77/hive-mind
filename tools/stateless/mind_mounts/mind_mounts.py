@@ -37,9 +37,8 @@ than guess.
 A value is never printed: an environment entry is shown by name only, a mount
 as written in the file.
 
-`pending` holds what the check sees and does not fail on, because removing it
-needs work that belongs to a later story: `MIND_PROACTIVE_TOKEN`, the value a
-mind's own chat bot presents (the bots story removes it).
+`pending` holds what the check sees and does not fail on; nothing is pending
+now (a bot presents its mind's own key, read from the mind's key folder).
 
 Prints one JSON object on stdout. Exit 0 when no mind without the operator role
 is listed; exit 1 when one is; exit 2 (the same JSON shape with `error`) when it
@@ -67,10 +66,7 @@ from typing import Any
 import yaml
 
 #: Named in the output, not failing: removed by a later story.
-PENDING_ENV = {
-    "MIND_PROACTIVE_TOKEN": "the credential a mind's own chat bot presents; "
-                            "the bots story removes it",
-}
+PENDING_ENV: dict[str, str] = {}
 #: Environment names that look like credentials and are not.
 ALLOWED_ENV = {"MIND_KEY_FILE", "KEY_RING", "PYTHON_KEYRING_BACKEND"}
 _CREDENTIAL_NAME = re.compile(

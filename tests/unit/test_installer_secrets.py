@@ -26,15 +26,15 @@ def test_a_second_run_keeps_every_value_including_one_changed_in_the_settings_si
     ctx = steps.Ctx(inst, Shell(inst.home.log))
     steps.render_config(ctx)
     first = secrets_store.parse_env(inst.home.env_file)
-    _rewrite_line(inst.home.env_file, "COMMS_RENAME_TOKEN",
+    _rewrite_line(inst.home.env_file, "SMS_INBOUND_HMAC_SECRET",
                   "rotated-on-the-console")  # secret-guard: allow — invented
 
     steps.render_config(ctx)
     second = secrets_store.parse_env(inst.home.env_file)
 
-    assert second["COMMS_RENAME_TOKEN"] == "rotated-on-the-console"
-    assert {k: v for k, v in second.items() if k != "COMMS_RENAME_TOKEN"} == \
-        {k: v for k, v in first.items() if k != "COMMS_RENAME_TOKEN"}
+    assert second["SMS_INBOUND_HMAC_SECRET"] == "rotated-on-the-console"
+    assert {k: v for k, v in second.items() if k != "SMS_INBOUND_HMAC_SECRET"} == \
+        {k: v for k, v in first.items() if k != "SMS_INBOUND_HMAC_SECRET"}
 
 
 def test_a_token_typed_on_an_earlier_run_does_not_undo_a_rotation_since(tmp_path):

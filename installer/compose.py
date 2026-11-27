@@ -87,16 +87,16 @@ NO_MODULE_HISTORY = f"{APP}/.git/{MODULES}:ro"
 
 #: Secrets the installer always makes.
 BASE_SECRETS = (
-    # The terminal's label token *is* comms' rename token: one value, two names.
-    "COMMS_RENAME_TOKEN", "SMS_INBOUND_HMAC_SECRET",
+    "SMS_INBOUND_HMAC_SECRET",
     "HIVE_SECRET_KEY",
 )
 
 #: Comms holders minted for a service, by the piece that runs them. Role
-#: `service`: each reads the mind registry, which a person holder may not.
+#: `service`: each reads the mind registry, which a person holder may not. The
+#: bots and the voice servers are not here: a bot presents its mind's own key
+#: and a voice server presents the key of whoever calls it.
 COMMS_SERVICE_HOLDERS = {
-    "console": CONSOLE, "terminal": TERMINAL, "voice": "voice-server",
-    "telegram": "telegram-bot", "discord": "discord-bot", "tools": tools.SERVICE,
+    "console": CONSOLE, "terminal": TERMINAL, "tools": tools.SERVICE,
 }
 #: Comms itself reads lucent, as a service holder of its own.
 LUCENT_SERVICE_HOLDERS = {"comms": COMMS, "console": CONSOLE}
@@ -146,13 +146,6 @@ KEY_FILE = "key"
 CONSOLE_KEY_ROOT = "/mind_keys"
 
 
-def proactive_var(mind: str) -> str:
-    """The credential a mind's own bots present to collect its proactive
-    messages. Theirs alone: a bot given the mind's key would hold the mind's
-    inference key."""
-    return "PROACTIVE_TOKEN_" + mind.upper().replace("-", "_")
-
-
 def on_one_key(home: Home, answers: dict) -> bool:
     """Whether the installed mind is run on its one key.
 
@@ -192,10 +185,7 @@ def secret_names(answers: dict, one_key: bool = True) -> list[str]:
     names += [token_var("COMMS", h) for h in holders["comms"]]
     names += [token_var("LUCENT", h) for h in holders["lucent"]]
     mind = answers.get("mind_name")
-    if mind and one_key:
-        # Its bots' own credential; the mind's service values are its one key.
-        names.append(proactive_var(mind))
-    elif mind:
+    if mind and not one_key:
         names += [token_var("COMMS", mind), token_var("LUCENT", mind)]
     return names
 
@@ -330,7 +320,6 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
         # earlier install made is dropped once the file has been made from it.
         if (home.mind_keys(mind) / KEY_FILE).is_file():
             values.pop(mind_key_var(mind), None)
-        values.setdefault(proactive_var(mind), "")
     values.setdefault(EMBEDDING_MODEL_VAR, "")
     values.setdefault(CLASSIFIER_MODEL_VAR, "")
     values.setdefault("HIVE_TOOLS_TOKEN", "")
@@ -344,7 +333,6 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     # The code a mind without the operator role sees: the installer's own clean
     # clone, never the install folder that holds this file (requirement 33).
     values["HOST_CODE_DIR"] = str(home.repo("hive-mind"))
-    values["TERMINAL_LABELS_TOKEN"] = values["COMMS_RENAME_TOKEN"]
     return values
 
 
@@ -432,7 +420,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "context": ns, "dockerfile": "comms/Dockerfile",
         "additional_contexts": {"hive_data": hive_data}}, env={
         "COMMS_PORT": "8424", "COMMS_PROJECT_DIR": "/app", "HIVE_DATABASE_URL": dsn,
-        "COMMS_RENAME_TOKEN": env_ref("COMMS_RENAME_TOKEN"),
         "SMS_INBOUND_HMAC_SECRET": env_ref("SMS_INBOUND_HMAC_SECRET"),
         "LUCENT_URL": LUCENT_URL, "LUCENT_URL_HIVE": LUCENT_URL,
         "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", COMMS)),
@@ -543,7 +530,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         env = {"TERMINAL_HOST": "0.0.0.0", "HIVE_DATABASE_URL": dsn,
                "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"), "GATEWAY_API_URL": COMMS_URL,
                "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", TERMINAL)),
-               "TERMINAL_LABELS_TOKEN": env_ref("TERMINAL_LABELS_TOKEN"),
                "HIVE_KEY_ROOT": CONSOLE_KEY_ROOT, **site_links}
         if voice:
             env["VOICE_API_URL"] = voice
@@ -562,8 +548,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     if plan.mode(answers, "voice") == plan.HERE:
         svc = base(VOICE, image="hive/voice:local", needs=(COMMS,), build={
             **mind_build, "dockerfile": "Dockerfile.voice.kokoro"}, env={
-            "TTS_ENGINE": "kokoro", "WHISPER_MODEL": "small", "COMMS_URL": COMMS_URL,
-            "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", "voice-server"))})
+            "TTS_ENGINE": "kokoro", "WHISPER_MODEL": "small", "COMMS_URL": COMMS_URL})
         svc["working_dir"] = APP
         svc["volumes"] = [bind(repo("hive-mind"), APP, "ro"),
                           {"type": "volume", "source": "hive_voice_cache",
@@ -620,7 +605,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                      "DSH_API_KEY", "MIND_PROXY_KEY"):
             mind_env.pop(name, None)
         mind_env["MIND_KEY_FILE"] = f"{KEY_MOUNT}/{KEY_FILE}"
-        mind_env["MIND_PROACTIVE_TOKEN"] = env_ref(proactive_var(mind))
     if "tools" in pieces:
         mind_env.update({"HIVE_TOOLS_URL": tools.URL})
         if not one_key:
@@ -643,14 +627,18 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                                      ("discord", DISCORD, "surfaces.discord", "DISCORD_BOT_TOKEN")):
         if piece not in pieces:
             continue
-        holder = COMMS_SERVICE_HOLDERS[piece]
+        # The bot serves this one mind and presents that mind's own key: read
+        # from the mind's key folder, mounted read-only into the bot, and from
+        # nowhere else. A mind not yet moved to its key folder has the bot
+        # present the mind's gateway value, as the mind does.
         env = {"MIND_ID": str(answers.get("mind_id") or ""), "COMMS_URL": COMMS_URL,
                "HIVE_MIND_SERVER_URL": COMMS_URL,
-               "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", holder)),
                var: env_ref(var), "PYTHONNOUSERSITE": "1",
-               "MIND_BACKEND_URL": f"http://{mind}:8420",
-               "MIND_PROACTIVE_TOKEN": env_ref(proactive_var(mind) if one_key
-                                               else token_var("COMMS", mind))}
+               "MIND_BACKEND_URL": f"http://{mind}:8420"}
+        if one_key:
+            env["MIND_KEY_FILE"] = f"{KEY_MOUNT}/{KEY_FILE}"
+        else:
+            env["MIND_KEY"] = env_ref(token_var("COMMS", mind))
         if voice:
             env.update({"VOICE_SERVER_URL": voice, "VOICE_SERVER_URL_KOKORO": voice})
         needs = (COMMS, mind) + ((VOICE,) if plan.mode(answers, "voice") == plan.HERE else ())
@@ -658,6 +646,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         svc["working_dir"] = APP
         svc["volumes"] = [bind(repo("hive-mind"), APP, "ro"),
                           bind(mind_dir, app_mind, "ro")]
+        if one_key:
+            svc["volumes"].append(bind(home.mind_keys(mind), KEY_MOUNT, "ro"))
         svc["tmpfs"] = ["/tmp", NO_MODULES, NO_MODULE_HISTORY]
         svc["security_opt"] = ["no-new-privileges:true"]
         svc["command"] = ["/opt/venv/bin/python3", "-m", module]
