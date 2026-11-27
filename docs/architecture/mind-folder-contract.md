@@ -79,7 +79,7 @@ mounted read-only into that mind alone. Its compose fragment names two things:
 ```
 MIND_KEY_FILE=/run/mind-key/key                 # where the mind reads its key
 ${HOST_KEY_DIR}/<name>:/run/mind-key:ro         # a volume: its own folder, and no other
-MIND_PROACTIVE_TOKEN=${PROACTIVE_TOKEN_<NAME>}  # its own bots' credential, never the key
+# its bots mount the same folder (read-only) and present the same key
 ```
 
 The console is the only writer: it holds the key root read-write

@@ -265,11 +265,12 @@ hold, a mind at a time.
 
 ### Limits worth knowing before you move a mind
 
-- **A moved mind's bot needs its own credential.** A mind on its one key no longer
-  accepts the old gateway value from its bot on `/proactive`. Before you retire,
-  give the mind and its bots one shared `MIND_PROACTIVE_TOKEN` (a new value, not
-  the key; fresh installs already do). Without it the bot's polls are refused and
-  the mind's unsolicited messages are never delivered.
+- **A moved mind's bot presents the mind's own key.** The bot mounts the mind's
+  key folder read-only and reads the key from it at each request, for the
+  gateway, the voice servers and its mind's `/proactive` route. It holds no
+  credential of its own (`MIND_PROACTIVE_TOKEN` and the bots' `COMMS_TOKEN_*`
+  lines are read nowhere); a bot of a mind not yet moved is given the mind's
+  gateway value as `MIND_KEY`.
 - **A replacement changes the key everywhere.** A mind has one key. Replacing it
   on the mind's page rewrites its key file and every line of the install's
   `.env` that holds the same value (the installer's `MIND_PROXY_KEY`, and the
@@ -366,9 +367,7 @@ database (`HIVE_DATABASE_URL`: `board.mind_roles` joined to the role with slug
 it stops rather than guess. `--map HOST=LOCAL` says where a host folder the files
 name is on this machine; `HOST_PROJECT_DIR` is taken as the root and `HOST_DEV_DIR`
 as its parent. `--secret <path>` adds a file of yours to what is guarded.
-`MIND_PROACTIVE_TOKEN` (a mind's own chat bot's credential) is shown under
-`pending`, not failed, because the bots story removes it; `--strict-pending`
-fails on it too.
+Nothing is `pending` now: a bot presents its mind's own key.
 
 **The operator step for an existing machine** (Skippy applies it to this host
 inside item 889; nothing here recreates or restarts a mind):
@@ -400,8 +399,7 @@ not through the install's.
 
 Limits: `compose.override.yaml` files, `volumes_from` and `extends` are not merged
 (the last two are listed as findings; an override file is passed to `--compose`
-to be checked). `MIND_PROACTIVE_TOKEN` is the one credential an installer-made
-mind still holds, in `pending`, until the bots story. The check reads container files, not running containers, so a container
+to be checked). The check reads container files, not running containers, so a container
 started from an older file passes until it is recreated; it does not follow a
 symlink inside a mounted folder it has no access to; and it does not move the
 install's settings file (a later item).

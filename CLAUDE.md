@@ -571,11 +571,8 @@ the ids come from picker buttons and rename prompts that deliberately never
 expire. The 409 remains for the rows still marked closed in the store from
 before deletion-on-close.
 
-The route carries `X-Rename-Token` (`COMMS_RENAME_TOKEN`, or the admin token)
-on top of the service bearer, and **refuses when neither is configured**. The
-service token is held by every surface bot and every mind container on the
-hive; reading a name is not worth guarding, changing one is. Reads ride
-`GET /sessions` and `GET /sessions/names` on the service token alone.
+A rename is asked with the key of the person or mind asking (the gate holds it
+to a conversation of a mind that caller may reach); there is no rename token.
 
 ## Gateway API
 
