@@ -1629,8 +1629,9 @@ def _start_report(name: str, start: dict) -> dict:
         "next_step": (
             f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
             if start["started"] else
-            f"{name} is made, and starts once you approve it in Hive Tools. An "
-            "approval left for more than a few minutes lapses: start it again here."
+            f"{name} is made. Starting it waits on an approval in Hive Tools; "
+            "if nobody answers within the wait it is refused, and you can "
+            "start it again here."
             if waiting else
             f"{name} is made but is not running: its container did not start. "
             "Building its image the first time can take longer than the wait "
@@ -5324,6 +5325,16 @@ async def _hive_tools_request(
                 json=json_body,
                 headers=await _hive_tools_headers(),
             )
+        if response.status_code in (403, 408):
+            # A call the tools held for a person's yes and answered no: a
+            # denial, or nobody answering in time. Their words, not a bare
+            # status line, are what the person reads.
+            try:
+                refusal = response.json().get("error")
+            except (ValueError, AttributeError):
+                refusal = None
+            if refusal:
+                raise HTTPException(status_code=response.status_code, detail=str(refusal))
         response.raise_for_status()
         data = response.json() if response.content else {}
     except HTTPException:
@@ -5334,8 +5345,8 @@ async def _hive_tools_request(
 
 
 # ── Approving a tool request, signed in as the person ──────────────────
-# Feature 834, story 908, requirement 38. The tools hold the request and
-# replay it once approved; this site only shows it and carries the person's
+# Feature 834, story 908, requirement 38. The tools hold the mind's call
+# open while the request waits and release it on a yes; this site only shows it and carries the person's
 # own key to the tools. The link carries the request's identifier and
 # nothing else: the page asks who is signed in. What happens after a yes
 # stays in the tools (hitl.respond_to_hitl), not here.
@@ -5637,6 +5648,8 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
             "path": project_path,
             "service": name,
         },
+        # Held by the tools for a person's yes, up to five minutes.
+        timeout=310.0,
     )
     await console_access.record_operation_from(result, user)
     log_event(log, "mind.restart.requested", **_actor_fields(user), mind_name=name)

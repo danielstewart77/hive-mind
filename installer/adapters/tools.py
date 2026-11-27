@@ -18,6 +18,7 @@ SERVICE = "hive-tools"
 URL = f"http://{SERVICE}:{PORT}"
 DOCKER_SOCKET = "/var/run/docker.sock"
 SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD")
+HITL_WAIT_SECONDS = "300"
 
 def build_args(host) -> dict[str, str]:
     return {"UID": str(host.uid), "GID": str(host.gid), "DOCKER_GID": str(host.docker_gid)}
@@ -32,4 +33,7 @@ def environment(env_ref, *, dsn_ref: str, proxy_url: str, key_ref: str,
         "INFERENCE_PROXY_URL": proxy_url,
         "INFERENCE_PROXY_KEY": key_ref,
         "HIVE_TOOLS_DEFAULT_MODEL": model_ref,
+        # How long a gated call is held open for a person's yes before the
+        # mind is told no. Under the console's 310 second wait on these calls.
+        "HITL_WAIT_SECONDS": HITL_WAIT_SECONDS,
     }

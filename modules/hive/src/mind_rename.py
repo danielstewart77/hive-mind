@@ -100,11 +100,18 @@ async def _request(method, url, headers, body=None, params=None, timeout=15):
         raise ValueError('A rename service could not be reached; the operation can be recovered') from None
 
 
+#: The tools hold a call that needs a person's yes open for up to five
+#: minutes (HITL_WAIT_SECONDS), so a call that may be held is waited on a
+#: little longer than that.
+HELD_CALL_TIMEOUT = 310
+
+
 async def _tools(operation, method, suffix=''):
     import main
     base = main._hive_tools_base_url().rstrip('/')
     url = f'{base}/docker/mind-renames/{operation["operation_id"]}{suffix}'
-    return await _request(method, url, await _requester_headers(operation.get('requester')), params={'path': operation['project_path']}, timeout=180)
+    return await _request(method, url, await _requester_headers(operation.get('requester')), params={'path': operation['project_path']},
+                          timeout=HELD_CALL_TIMEOUT if suffix == '/authorize' else 180)
 
 
 async def _requester_headers(username):
@@ -252,7 +259,17 @@ async def advance(operation_id):
             stage = tools['stage']
             if stage == 'reserved':
                 if not operation.get('hitl_request_id'):
-                    result = await _tools(operation, 'POST', '/authorize')
+                    # The tools hold this call open until a person approves it
+                    # (or answer no on denial or no answer in time).
+                    operation.update(status='waiting_approval',
+                                     detail='Approve this Mind’s rename in Hive Tools')
+                    save(operation)
+                    try:
+                        result = await _tools(operation, 'POST', '/authorize')
+                    except RenameServiceError as exc:
+                        if exc.status in (403, 408):
+                            return await _recover(operation, 'The rename was not approved')
+                        raise
                     if result.get('hitl_request_id'):
                         operation.update(hitl_request_id=result['hitl_request_id'], status='waiting_approval',
                                          detail='Approve this Mind’s rename in Hive Tools')

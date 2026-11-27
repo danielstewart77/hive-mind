@@ -215,7 +215,7 @@ SERVICES: dict[str, Service] = {
 }
 
 #: Holder names the tools never register a value under (the approver, the
-#: internal replay secret, the shared service token's holder). Checked here
+#: tools' own name, the shared service token's holder). Checked here
 #: before any service is written, so a refused name leaves nothing behind on
 #: the gateway or the memory store; the tools refuse them again on their own.
 TOOLS_RESERVED_HOLDERS = frozenset({"hitl-approver", "internal", "skippy"})

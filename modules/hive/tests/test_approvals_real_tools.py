@@ -12,6 +12,7 @@ import os
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,9 @@ def real_tools(scratch_database, monkeypatch):
         "HIVE_DATABASE_URL": scratch_database.dsn,
         "HIVE_SITE_PUBLIC_URL": "https://site.test",
         "COMMS_URL": "http://127.0.0.1:9",
+        # A held call waits this long for a person; long enough for a test to
+        # decide it, short enough that a test that forgets to would not hang.
+        "HITL_WAIT_SECONDS": "60",
     }
     process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1",
@@ -83,17 +87,39 @@ def _mind_with_a_key(name: str, owner: str) -> str:
 
 @pytest.fixture
 def asked(builtin_console, real_tools):
-    """Ada, daniel's mind, asks for a gated call and waits on a person."""
+    """Ada, daniel's mind, makes a gated call and waits on a person: the call
+    stays open in a thread of its own, as a mind's would, and the test decides
+    it through the site. Yields the held call's eventual reply as well."""
     import holder_credentials
 
     admin = builtin_console.admin()
     # The site makes daniel's key on its first need, as it does at runtime.
-    testing.run(holder_credentials.user_key(SEED_USERNAME))
+    daniel_key = testing.run(holder_credentials.user_key(SEED_USERNAME))
     ada = _mind_with_a_key("ada", SEED_USERNAME)
-    raised = httpx.post(f"{real_tools}/gmail/labels", json=LABEL,
-                        headers={"Authorization": f"Bearer {ada}"})
-    assert raised.status_code == 202, raised.text
-    return admin, builtin_console, raised.json()["hitl_request_id"], real_tools, ada
+    reply: dict = {}
+
+    def ask() -> None:
+        try:
+            reply["response"] = httpx.post(
+                f"{real_tools}/gmail/labels", json=LABEL,
+                headers={"Authorization": f"Bearer {ada}"}, timeout=90)
+        except httpx.HTTPError as exc:  # pragma: no cover - shown by the assert
+            reply["error"] = exc
+
+    caller = threading.Thread(target=ask, daemon=True)
+    caller.start()
+    deadline = time.monotonic() + 30
+    request_id = None
+    while request_id is None:
+        waiting = httpx.get(f"{real_tools}/hitl/waiting",
+                            headers={"Authorization": f"Bearer {daniel_key}"}).json()
+        if waiting.get("waiting"):
+            request_id = waiting["waiting"][0]["hitl_request_id"]
+        assert time.monotonic() < deadline, "the call never came to wait on a person"
+        time.sleep(0.1)
+    assert caller.is_alive(), "the call must stay open while it waits"
+    yield admin, builtin_console, request_id, real_tools, ada, reply, caller
+    caller.join(timeout=70)
 
 
 def _status(url: str, request_id: str, mind_key: str) -> dict:
@@ -102,7 +128,7 @@ def _status(url: str, request_id: str, mind_key: str) -> dict:
 
 
 def test_an_administrator_signed_in_on_the_site_decides_with_their_own_key_and_the_tools_record_who(asked):
-    admin, _, request_id, url, ada = asked
+    admin, _, request_id, url, ada, reply, caller = asked
 
     page = admin.get(f"/approvals/{request_id}")
     decided = admin.post(f"/approvals/{request_id}/decision", data={"action": "deny"})
@@ -110,10 +136,15 @@ def test_an_administrator_signed_in_on_the_site_decides_with_their_own_key_and_t
     assert page.status_code == 200 and "ada asks to use gmail_create_label" in page.text
     assert decided.status_code == 200 and "Denied" in decided.text and "by daniel" in decided.text
     assert _status(url, request_id, ada)["status"] == "denied"
+    # The mind's own call, which stayed open, is answered with the no.
+    caller.join(timeout=20)
+    refusal = reply["response"]
+    assert refusal.status_code == 403 and refusal.json()["approved"] is False
+    assert "denied" in refusal.json()["error"]
 
 
 def test_a_person_who_is_not_the_owner_or_an_administrator_is_refused_by_the_tools_and_the_request_stays_pending(asked):
-    admin, console, request_id, url, ada = asked
+    admin, console, request_id, url, ada, reply, caller = asked
     import holder_credentials
 
     mallory = console.settled_user(admin, "mallory", "mallory-password")
@@ -125,10 +156,12 @@ def test_a_person_who_is_not_the_owner_or_an_administrator_is_refused_by_the_too
     assert "may not decide" in page.text and "gmail_create_label" not in page.text
     assert "may not decide" in decided.text
     assert _status(url, request_id, ada)["status"] == "pending"
+    assert caller.is_alive(), "a refused person leaves the mind's call held"
+    admin.post(f"/approvals/{request_id}/decision", data={"action": "deny"})
 
 
 def test_a_decision_posted_signed_out_signs_in_and_lands_on_the_request_page_not_on_the_decision(asked, builtin_console):
-    _, _, request_id, _, ada = asked
+    admin, _, request_id, _, ada, reply, caller = asked
     anonymous = builtin_console.client()
 
     response = anonymous.post(f"/approvals/{request_id}/decision", data={"action": "approve"},
@@ -136,6 +169,7 @@ def test_a_decision_posted_signed_out_signs_in_and_lands_on_the_request_page_not
 
     assert response.status_code == 303
     assert response.headers["location"] == f"/login?next=/approvals/{request_id}"
+    admin.post(f"/approvals/{request_id}/decision", data={"action": "deny"})
 
 
 def test_the_training_page_reaches_the_real_tools_with_the_signed_in_persons_own_key_and_an_unsigned_one_is_refused(builtin_console, real_tools):
@@ -150,3 +184,20 @@ def test_the_training_page_reaches_the_real_tools_with_the_signed_in_persons_own
     assert ok.status_code == 200 and ok.json() == {"in_flight": False}
     assert plain.status_code in (401, 303)
     assert "daniel-key" not in plain.text
+
+
+def test_an_administrator_approving_on_the_site_releases_the_minds_open_call_and_it_gets_the_tools_answer(asked):
+    """Across the wire: the approval the person gives on the site is what
+    releases the mind's own call. The tool then runs (no Gmail here, so its own
+    answer is that it is not authenticated) and that answer is the reply to the
+    call that was held."""
+    admin, _, request_id, url, ada, reply, caller = asked
+
+    decided = admin.post(f"/approvals/{request_id}/decision", data={"action": "approve"})
+    caller.join(timeout=20)
+
+    assert decided.status_code == 200 and "Approved" in decided.text and "by daniel" in decided.text
+    released = reply["response"]
+    assert released.status_code == 200
+    assert released.json() == {"error": "Gmail not authenticated"}
+    assert _status(url, request_id, ada)["status"] == "approved"
