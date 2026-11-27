@@ -58,7 +58,7 @@ async def requester_of(request_id: str) -> str | None:
 async def a_minds_key(presented: str) -> str | None:
     """The name of the mind whose own key this is, or None.
 
-    What a mind draws on the canvas, and publishes design pages, with: its own
+    What a mind draws on the canvas with: its own
     key, recognised from the one record of keys on this request. A person's
     key, a replaced one and a cut-off one are nobody's here. No token of this
     site's own stands for a mind."""
@@ -164,7 +164,16 @@ TABLE = RouteTable(
     bearers={
         # A mind's own key, recognised from the one record.
         CANVAS: BearerToken(lambda: "", recognise=a_minds_key),
-        DESIGN: BearerToken(lambda: "", recognise=a_minds_key),
+        # Design pages are published only by an operator-role mind, the same
+        # role the roles page's operator bearer takes. History does not name
+        # which minds held the old design token (the console's compose only
+        # read it; each mind's env carried it by hand), so the role that
+        # already means "the mind that changes the hive for its owner" is used
+        # and no new role has to be created. Any other mind's key is refused.
+        DESIGN: BearerToken(
+            lambda: "", recognise=_holding(OPERATOR_ROLE),
+        ),
+
         # A mind's own key, recognised from the one record, plus its role.
         BOARD: BearerToken(
             lambda: "", recognise=_holding(BOARD_PUSH_ROLE),

@@ -39,3 +39,17 @@ def a_person_with_a_key(key: str, username: str = "daniel", admin: bool = True) 
 
     run(make())
     return username
+
+
+def give_role(name: str, slug: str) -> None:
+    """The mind `name` holds the role `slug`, made on the roles page if new."""
+    from hive_data import roles
+
+    async def make():
+        role = await roles.role_by_slug(slug)
+        if role is None:
+            await roles.create_role(slug.replace("-", " ").title(), slug=slug)
+            role = await roles.role_by_slug(slug)
+        await roles.set_mind_roles(f"id-{name}", [role["id"]])
+
+    run(make())

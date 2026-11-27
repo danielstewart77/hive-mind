@@ -103,6 +103,33 @@ def test_the_owner_and_an_administrator_decide_and_their_name_is_recorded(
     assert (seen["status"], seen["decided_by"]) == ("approved", who)
 
 
+def test_the_owner_of_the_mind_decides_when_the_owner_is_no_longer_an_administrator(
+        client: TestClient, asked) -> None:
+    """The request was asked while daniel was an administrator; he is then
+    taken out of the administrators, so only his owning ada lets him decide
+    (erin, an administrator, is not the owner and is not the one deciding).
+    Deleting the owner branch of `may_decide` turns this 200 into a 403."""
+    from hive_data import access, core
+
+    keys, request_id, replayed = asked
+    daniel = next(u for u in run(core.list_users()) if str(u["username"]) == "daniel")
+    run(core.remove_group_member(group_name=access.ADMINS_GROUP, user_id=daniel["id"]))
+    assert run(access.person_is_administrator("daniel")) is False
+
+    decided = client.post(f"/hitl/{request_id}/respond",
+                          json={"action": "approve"}, headers=_bearer(keys["daniel"]))
+    run(hitl.settle_replays(timeout=10))
+
+    # The decision is his to make and is recorded as his. Approving is the
+    # separate rule that a non-administrator's mind never runs these
+    # integrations, so it lands denied and nothing is replayed.
+    assert decided.status_code == 200
+    assert decided.json()["decided_by"] == "daniel"
+    assert replayed == []
+    seen = client.get(f"/hitl/{request_id}/review", headers=_bearer(keys["daniel"])).json()
+    assert (seen["status"], seen["decided_by"]) == ("denied", "daniel")
+
+
 @pytest.mark.parametrize("who", ["mallory", "sam", "ada"])
 def test_another_person_or_a_minds_key_is_refused_and_sees_nothing(
         client: TestClient, asked, who: str) -> None:

@@ -357,9 +357,10 @@ async def notify_caller(request_id: str, tool_name: str, caller_mind: str,
     the broker's registry first. It is sent with the key of the person who
     decided the request, as that person (an owner of the mind or an
     administrator, who may write to it): the tools hold no gateway key of
-    their own. Without that key (a replay cut off at shutdown, which kept
-    none) nothing is sent and the stored outcome is the record. Returns
-    whether it was sent.
+    their own. Without that key nothing is sent and the stored outcome is
+    the record; a replay cut off at shutdown is told with the key
+    `settle_replays` still holds in memory for it. Returns whether it was
+    sent.
     """
     comms = _comms(person_key)
     if comms is None:

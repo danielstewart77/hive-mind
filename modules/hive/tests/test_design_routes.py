@@ -35,9 +35,9 @@ async def _direct_for_tests(url):
 def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     # A mind publishes with its own key, recognised from the one record.
-    from .mind_key_support import a_mind_with_a_key
+    from .mind_key_support import a_mind_with_a_key, give_role
 
-    a_mind_with_a_key(PUSH_TOKEN, "publisher")
+    give_role(a_mind_with_a_key(PUSH_TOKEN, "publisher"), "operator")
     # The house tokens are removed, not left to the invoking shell. Every
     # mind in the hive holds both, so a fallback to either is the whole
     # threat this credential exists to close — and on Daniel's own machine
@@ -140,6 +140,21 @@ def test_the_mind_bearer_is_accepted(mind):
 
     assert response.status_code == 200
     assert response.json() == {"sessions": []}
+
+
+def test_a_mind_without_the_operator_role_is_refused_every_design_route(
+    tmp_path, monkeypatch
+):
+    from .mind_key_support import a_mind_with_a_key, give_role
+
+    _env(tmp_path, monkeypatch)
+    a_mind_with_a_key("an-ordinary-minds-key", "ordinary")
+    give_role("ordinary", "board-push")  # another role is not the operator's
+    client = TestClient(main_mod.app)
+    client.headers.update({"Authorization": "Bearer an-ordinary-minds-key"})
+    for route in _design_routes():
+        response = _exercise(client, route)
+        assert response.status_code == 401, f"{route.path} answered {response.status_code}"
 
 
 def test_daniels_browser_login_is_accepted(daniel):

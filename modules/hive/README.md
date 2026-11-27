@@ -266,8 +266,8 @@ three — which is why page three is published before page two even though
 Daniel reads them the other way round. Anything else leaves the page
 unresolved, and an unresolved page cannot be accepted.
 
-A mind publishes design pages, and draws on the canvas, with its own key
-(`MIND_KEY`), recognised from the one record of keys in the hive database. A
+A mind draws on the canvas with its own key (`MIND_KEY`), and publishes
+design pages with it only while it holds the `operator` role; recognised from the one record of keys in the hive database. A
 person's key presented by a mind is refused, and a key cut off or replaced
 stops working on the next request. There is no design or canvas token.
 Daniel's own browser login is accepted on the same routes, reads included — a
