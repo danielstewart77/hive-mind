@@ -25,7 +25,7 @@ import store
 from tests.held import LABEL, Clock, an_app, bearer, the_waiting_request
 from tests.scratch import RawSQL, generate_person_key, generate_token
 
-WAIT = 2 * 60
+WAIT = 110
 
 
 def _gmail_that_creates_label_nine() -> MagicMock:

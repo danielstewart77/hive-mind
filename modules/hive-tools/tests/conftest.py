@@ -46,7 +46,7 @@ def _on_the_scratch_database(scratch_database, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _a_gated_call_is_not_held_unless_the_test_holds_it(monkeypatch):
-    """A gated call is held open for a person's yes, two minutes by default.
+    """A gated call is held open for a person's yes, 110 seconds by default.
     A test that makes one without meaning to hold it would sit there; with the
     wait at zero it is refused at once, and the tests that mean to hold a call
     set their own wait."""

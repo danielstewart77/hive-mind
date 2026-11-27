@@ -18,7 +18,7 @@ SERVICE = "hive-tools"
 URL = f"http://{SERVICE}:{PORT}"
 DOCKER_SOCKET = "/var/run/docker.sock"
 SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD")
-HITL_WAIT_SECONDS = "120"
+HITL_WAIT_SECONDS = "110"
 
 def build_args(host) -> dict[str, str]:
     return {"UID": str(host.uid), "GID": str(host.gid), "DOCKER_GID": str(host.docker_gid)}

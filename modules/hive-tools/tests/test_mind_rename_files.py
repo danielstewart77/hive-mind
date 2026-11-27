@@ -113,7 +113,7 @@ def test_rename_is_held_for_approval_then_runs_as_the_same_call_and_requires_idl
     from tools import mind_rename
 
     monkeypatch.setenv('HIVE_RENAME_PROJECT_DIR', str(project))
-    monkeypatch.setenv('HITL_WAIT_SECONDS', '120')
+    monkeypatch.setenv('HITL_WAIT_SECONDS', '110')
 
     async def scenario():
         from tests.held import an_app, bearer, the_waiting_request

@@ -5648,7 +5648,7 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
             "path": project_path,
             "service": name,
         },
-        # Held by the tools for a person's yes, up to two minutes.
+        # Held by the tools for a person's yes, up to 110 seconds.
         timeout=310.0,
     )
     await console_access.record_operation_from(result, user)
