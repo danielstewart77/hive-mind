@@ -27,6 +27,7 @@ first operation against an unopened package is an error that says so.
 
 from __future__ import annotations
 
+from . import access
 from . import board
 from . import core
 from .config import Settings, from_environment
