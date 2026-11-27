@@ -915,3 +915,37 @@ def test_a_whole_list_replace_of_a_role_waits_for_whoever_holds_that_roles_lock(
     assert replaced.status_code == 200, replaced.text
     assert landed_at >= released_at[0]
     assert _roles_in_the_listing(operator, _ROLES_GOOD)["contended"]["skills"] == ["b"]
+
+
+def test_a_mind_without_a_board_role_is_refused_and_a_person_s_key_is_no_mind_s(
+        builtin_console):
+    """B15. A mind's own key opens the board only with a board role: a mind
+    holding the operator role alone is refused the board, a key nobody holds is
+    refused, and a person's key presented by a mind is refused. The planner role
+    does everything but delete."""
+    import hashlib
+    import time
+
+    from hive_data import core
+
+    _a_mind_holding("operator", "an-operator-key", name="only-operator")
+    _a_mind_holding("board-planner", "a-planner-key", name="planner")
+    run(core.upsert_credential(
+        holder="daniel", username="daniel", role="user",
+        token_sha=hashlib.sha256(b"a-persons-key").hexdigest(), created_at=time.time()))
+    client = builtin_console.client()
+
+    for key in ("an-operator-key", "a-persons-key", "nobody-holds-this"):
+        refused = client.get("/api/kanban/data", headers={"Authorization": f"Bearer {key}"})
+        assert refused.status_code == 401, (key, refused.text)
+
+    planner = {"Authorization": "Bearer a-planner-key"}
+    made = client.post("/api/kanban/epics", json={"title": "By a planner"}, headers=planner)
+    assert made.status_code == 200, made.text
+    gone = client.delete(f"/api/kanban/epics/{made.json()['id']}", headers=planner)
+    assert gone.status_code == 401, gone.text
+
+    # Cutting the key off once takes effect on the next request.
+    run(core.revoke_credential("planner", time.time()))
+    cut = client.get("/api/kanban/data", headers=planner)
+    assert cut.status_code == 401, cut.text
