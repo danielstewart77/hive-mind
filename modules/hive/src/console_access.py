@@ -199,6 +199,16 @@ TABLE.add(Rule(BEARER, bearer=CANVAS), "POST /canvas/push")
 
 TABLE.add(Rule(SELF), "GET /password", "POST /password")
 
+# Approving: any signed-in person reaches these; the handler decides who may
+# see or decide a request (the owner of the mind that asked, or an
+# administrator) and refuses anyone else without showing its content.
+TABLE.add(
+    Rule(USER),
+    "GET /approvals",
+    "GET /approvals/{request_id}",
+    "POST /approvals/{request_id}/decision",
+)
+
 # Shells and listings: any signed-in user, each listing filtered to what the
 # user owns by the handler (route_access.visible_minds / visible_sessions).
 TABLE.add(

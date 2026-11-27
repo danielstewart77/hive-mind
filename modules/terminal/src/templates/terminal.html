@@ -388,6 +388,29 @@
         const fitAddon = new window.FitAddon.FitAddon();
         term.loadAddon(fitAddon);
 
+        // A request waiting on a person's yes comes with a link to the hive
+        // site's approval page; make it open there. Only that page's path is
+        // matched, and the link carries nothing but the request's identifier.
+        term.registerLinkProvider({
+            provideLinks: function (y, callback) {
+                const line = term.buffer.active.getLine(y - 1);
+                if (!line) { callback(undefined); return; }
+                const text = line.translateToString(true);
+                const found = [];
+                const pattern = /(?:https?:\/\/[^\s"')]+)?\/approvals\/[0-9a-fA-F-]{8,}/g;
+                let m;
+                while ((m = pattern.exec(text)) !== null) {
+                    const uri = m[0];
+                    found.push({
+                        range: { start: { x: m.index + 1, y: y }, end: { x: m.index + uri.length + 1, y: y } },
+                        text: uri,
+                        activate: function () { window.open(uri, "_blank", "noopener"); },
+                    });
+                }
+                callback(found.length ? found : undefined);
+            },
+        });
+
         // window's "resize" event alone misses layout changes that don't
         // resize the window itself -- a foldable unfolding, an on-screen
         // keyboard opening, or this tile's own container changing shape

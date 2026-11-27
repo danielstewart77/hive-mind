@@ -55,7 +55,7 @@ window.addEventListener("DOMContentLoaded", function () {
     function showStart(data) {
         const box = document.getElementById("mind-start"), again = document.getElementById("mind-start-again");
         if (data.started) box.innerHTML = '<div><p class="command-label">Its container is started</p></div>';
-        else if (data.start_operation) box.innerHTML = '<div class="notice"><span>Its container is not started yet: the start is waiting on your approval in Hive Tools.' + (data.start_error ? " " + h.escapeHtml(data.start_error) : "") + '</span></div>';
+        else if (data.start_operation) box.innerHTML = '<div class="notice"><span>Its container is not started yet: the start is waiting on your approval on the Approvals page.' + (data.start_error ? " " + h.escapeHtml(data.start_error) : "") + '</span></div>';
         else box.innerHTML = '<div class="error-state">Its container did not start: ' + h.escapeHtml(data.start_error || "no reason was given") + '</div>';
         again.hidden = !!data.started;
         document.getElementById("mind-next-step").textContent = data.next_step || "";

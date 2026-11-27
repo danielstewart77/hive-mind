@@ -1,0 +1,34 @@
+{% extends "layout.html" %}
+{% block title %}Approval · Hive{% endblock %}
+{% block content %}
+<main class="page approval-page">
+  <nav class="item-back-nav"><a href="/approvals">Waiting for you</a></nav>
+  <div class="surface" style="padding:1rem;display:grid;gap:.75rem;max-width:900px">
+  {% if notice %}<div class="notice" role="status"><span>{{ notice }}</span></div>{% endif %}
+  {% if state == "refused" %}
+    <h1>You may not decide this</h1>
+    <p>Only the owner of the mind that asked, or an administrator, may see or decide this request.</p>
+  {% elif state == "missing" %}
+    <h1>No such request</h1>
+    <p>There is no request with this identifier.</p>
+  {% else %}
+    <h1>{{ item.caller_mind }} asks to use {{ item.tool_name }}</h1>
+    <p>Asked {{ item.asked_at }}.</p>
+    <h2>What it will do</h2>
+    <pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ item.method or "" }} {{ item.path or "" }}
+{{ item.body if item.body is not none else item.params }}</pre>
+    {% if state == "pending" %}
+      <form method="post" action="/approvals/{{ request_id }}/decision" style="display:flex;gap:.75rem">
+        <button class="button button-primary" type="submit" name="action" value="approve">Approve</button>
+        <button class="button" type="submit" name="action" value="deny">Deny</button>
+      </form>
+      <p>Expires {{ item.expires }}.</p>
+    {% elif state == "approved" or state == "denied" %}
+      <p><strong>{{ state | capitalize }}</strong>{% if item.decided_by %} by {{ item.decided_by }}{% endif %} at {{ item.decided_when }}.</p>
+    {% elif state == "expired" %}
+      <p><strong>Expired</strong> at {{ item.expires }}; it was not decided and will not run.</p>
+    {% endif %}
+  {% endif %}
+  </div>
+</main>
+{% endblock %}

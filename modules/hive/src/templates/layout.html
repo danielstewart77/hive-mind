@@ -55,6 +55,7 @@
             {% if current_user.is_admin %}
             {% if feature_enabled['roles'] %}<a href="/roles" class="console-nav-link {% if path.startswith('/roles') %}is-active{% endif %}"><i data-lucide="badge-check"></i><span>Roles</span></a>{% endif %}
             {% if feature_enabled['bots'] %}<a href="/bots" class="console-nav-link {% if path.startswith('/bots') %}is-active{% endif %}"><i data-lucide="bot"></i><span>Bots</span></a>{% endif %}
+            <a href="/approvals" class="console-nav-link {% if path.startswith('/approvals') %}is-active{% endif %}"><i data-lucide="check-circle"></i><span>Approvals</span></a>
             {% if feature_enabled['activity'] %}<a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>{% endif %}
             {% if feature_enabled['dashboard'] %}<a href="/dashboard" class="console-nav-link {% if path == '/dashboard' %}is-active{% endif %}"><i data-lucide="radio-tower"></i><span>Dashboard</span></a>{% endif %}
 

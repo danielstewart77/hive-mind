@@ -14,7 +14,7 @@
             <div class="field"><label for="mind-rename-name">New name</label><input id="mind-rename-name" name="name" required minlength="2" maxlength="32" pattern="[a-z][a-z0-9-]{1,31}" autocomplete="off"><small>2–32 lowercase letters, digits or hyphens.</small></div>
             <div class="form-actions"><button class="button" id="mind-rename-submit" type="submit">Rename Mind</button><button class="button button-quiet" id="mind-rename-cancel" type="button" hidden>Cancel rename</button><button class="button button-quiet" id="mind-rename-recover" type="button" hidden>Retry recovery</button></div>
             <p id="mind-rename-status" role="status" aria-live="polite"></p>
-            <a id="mind-rename-approval" href="{{ hive_tools_url }}" target="_blank" rel="noopener" hidden>Open Hive Tools to approve</a>
+            <a id="mind-rename-approval" href="/approvals" hidden>Approve it on the approvals page</a>
         </form>
     </section>
     <div class="overview-stack" id="mind-content">

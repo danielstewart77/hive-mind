@@ -6,30 +6,27 @@ Any mutating, destructive, or high-blast-radius action requires explicit human a
 
 ## Where it lives
 
-HITL is entirely owned by the external `hive-tools` service, not this repo. `hive-tools` gates a tool call, persists the pending request (DB-backed, not in-memory — survives a restart), and sends its own Telegram notification with inline Approve/Deny buttons directly (it holds its own `TELEGRAM_BOT_TOKEN`). This repo's only role is the callback side: the Telegram surface's `handle_hitl_callback` (in `hive-surfaces`) receives the button tap and forwards it.
+The request is held by the `hive-tools` service: it gates a tool call, persists the pending request (database-backed, survives a restart), and tells the mind and the person where to approve. A person decides on a page of the hive site, `/approvals/{request id}`, signed in as themselves. What approving does afterwards (`hitl.respond_to_hitl` hands back the saved call and the tools replay it) is in the tools, in one place.
 
 ## Flow
 
 ```
 A mind calls a HITL-gated hive-tools endpoint
-  → hive-tools persists the request, returns 202-style "pending"
-  → hive-tools sends its own Telegram message: inline Approve/Deny buttons
-  → Daniel taps a button
-  → Telegram delivers the callback to this repo's bot
-  → hive_surfaces.telegram_bot::handle_hitl_callback POSTs
-    {hive_tools_url}/hitl/{token}/respond under HIVE_TOOLS_APPROVER_TOKEN
-  → hive-tools resolves the request and the original tool call proceeds or is cancelled
+  → hive-tools persists the request, answers "pending" with the link
+  → the notice (and the conversation, wherever it is shown) carries the link to the hive site
+  → the person opens it, signs in (sent back to the same request), sees which mind asked,
+    which tool, exactly what it will do, when, and Approve and Deny
+  → the hive site sends the decision to hive-tools with that person's own key
+  → hive-tools records the person's name, then runs the saved call
 ```
 
 ## Who can decide
 
-Only the operator: signed in on hive-tools' approval page (`/hitl-ui`), or
-through the bot that receives hive-tools' buttons, which sends hive-tools'
-approver credential (holder `hitl-approver`) as `HIVE_TOOLS_APPROVER_TOKEN`.
-A mind's token — any mind's — is refused with 403 and the request stays
-pending, so a mind polls and waits; it never answers its own gate. In this
-stack only `telegram-bot` holds the credential, read from an `env_file`
-outside the repo, because every mind container mounts the repo.
+The person who owns the mind that asked, and any administrator. Anyone else
+signed in is told they may not and sees none of the content. A mind's key is
+refused with 403 and the request stays pending. There is no Approve or Deny
+button in Telegram or Discord and no approver credential. The link carries only
+the request's identifier. `/approvals` lists what waits for the signed-in person.
 
 ## Polling
 
@@ -46,7 +43,5 @@ A caller (or this repo's own retry logic) can also check status directly:
 
 ## Implementation Files
 
-- `hive_surfaces.telegram_bot::handle_hitl_callback` — inline keyboard callback handler, POSTs to hive-tools' respond endpoint
-- hive-tools' own `hitl.py` and `server.py` (`GET /hitl/{id}`, `POST /hitl/{id}/respond`) — request persistence, expiry, and the outbound Telegram notification; see [docs/architecture/hive-tools.md](../docs/architecture/hive-tools.md)
-
-There is no gateway-side HITL endpoint — `hive-comms` has no `/hitl/*` routes at all.
+- hive-tools' `hitl.py` and `server.py` (`GET /hitl/{id}`, `GET /hitl/{id}/review`, `GET /hitl/waiting`, `POST /hitl/{id}/respond`) and `auth_api.require_person`
+- the hive site's `/approvals` pages in `modules/hive/src/main.py` and `templates/approval.html`; see [docs/architecture/hive-tools.md](../docs/architecture/hive-tools.md)

@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -5309,6 +5310,94 @@ async def _hive_tools_request(
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=f"Hive Tools request failed: {exc}") from exc
     return data if isinstance(data, dict) else {}
+
+
+# ── Approving a tool request, signed in as the person ──────────────────
+# Feature 834, story 908, requirement 38. The tools hold the request and
+# replay it once approved; this site only shows it and carries the person's
+# own key to the tools. The link carries the request's identifier and
+# nothing else: the page asks who is signed in. What happens after a yes
+# stays in the tools (hitl.respond_to_hitl), not here.
+
+
+async def _tools_as_person(method: str, path: str, json_body: dict | None = None):
+    """One call to the tools with the signed-in person's own key."""
+    headers = await _person_headers()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await client.request(
+                method, f"{_hive_tools_base_url().rstrip('/')}{path}",
+                json=json_body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"The tools could not be reached: {exc}") from exc
+
+
+def _when(epoch) -> str:
+    if epoch is None:
+        return ""
+    return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+async def _approval_page(request: Request, request_id: str, *, notice: str = ""):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    # Nothing is fetched until a person is signed in; the tools then say
+    # whether this person may see it, and send nothing of it if not.
+    response = await _tools_as_person(
+        "GET", f"/hitl/{urllib.parse.quote(request_id, safe='')}/review")
+    if response.status_code == 404:
+        return await _render_template(request, "approval.html", state="missing",
+                                      request_id=request_id, notice=notice)
+    if response.status_code in (401, 403):
+        return await _render_template(
+            request, "approval.html", state="refused", request_id=request_id,
+            notice=notice)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="The tools could not show this request.")
+    item = response.json()
+    item["asked_at"] = _when(item.get("created_at"))
+    item["decided_when"] = _when(item.get("decided_at"))
+    item["expires"] = _when(item.get("expires_at"))
+    return await _render_template(request, "approval.html", state=item["status"],
+                                  item=item, request_id=request_id, notice=notice)
+
+
+@app.get("/approvals", response_class=HTMLResponse)
+async def approvals_page(request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    response = await _tools_as_person("GET", "/hitl/waiting")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="The tools could not list what is waiting.")
+    waiting = response.json().get("waiting", [])
+    for row in waiting:
+        row["asked_at"] = _when(row.get("created_at"))
+    return await _render_template(request, "approvals.html", waiting=waiting)
+
+
+@app.get("/approvals/{request_id}", response_class=HTMLResponse)
+async def approval_page(request: Request, request_id: str):
+    return await _approval_page(request, request_id)
+
+
+@app.post("/approvals/{request_id}/decision", response_class=HTMLResponse)
+async def approval_decision(request: Request, request_id: str, action: str = Form("")):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    if action not in ("approve", "deny"):
+        return await _approval_page(request, request_id, notice="Choose approve or deny.")
+    response = await _tools_as_person(
+        "POST", f"/hitl/{urllib.parse.quote(request_id, safe='')}/respond",
+        {"action": action})
+    notice = ""
+    if response.status_code == 409:
+        notice = "This request was already decided or has expired; nothing was changed."
+    elif response.status_code >= 400 and response.status_code not in (403, 404):
+        notice = f"The tools refused the decision ({response.status_code})."
+    return await _approval_page(request, request_id, notice=notice)
 
 
 # Curate and export walk the whole corpus; on a corpus of ~9k turns curation

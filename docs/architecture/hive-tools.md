@@ -38,7 +38,7 @@ HIVE_TOOLS_TOKEN=$(/opt/venv/bin/python3 -m keyring get hive-mind "HIVE_TOOLS_TO
 | `GET /docker/status?path=<host-path>` | Compose service status |
 | `POST /docker/restart` | Restart a service |
 | `GET /hitl/{id}` | Check HITL approval status |
-| `POST /hitl/{id}/respond` | Approve or deny — approver credential only (holder `hitl-approver`, held by the Telegram surface as `HIVE_TOOLS_APPROVER_TOKEN`); a mind's token gets 403 |
+| `POST /hitl/{id}/respond` | Approve or deny with a person's own key (the owner of the mind that asked, or an administrator); a mind's key gets 403. `GET /hitl/{id}/review` and `GET /hitl/waiting` take a person's key too |
 
 hive-tools serves no OpenAPI schema (`/openapi.json` is disabled); the routers under `tools/` in the hive-tools repo are the reference.
 
