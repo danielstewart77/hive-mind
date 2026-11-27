@@ -31,25 +31,20 @@ def _bearer(key: str) -> dict[str, str]:
 
 @pytest.fixture()
 def asked(client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    """Ada, owned by sam, asks for a gated call; returns who holds what."""
-    import auth_api
+    """Ada, owned by daniel (an administrator), asks for a gated call; returns
+    who holds what. The rule that refuses a mind of a non-administrator is the
+    real one here, not replaced: it is why the mind is daniel's."""
     from hive_data import core
 
-    # The separate rule that refuses a mind of a non-administrator outright
-    # (the tools' integrations are the administrator's) is not what is under
-    # test: sam owns ada here so the owner's own right to decide is.
-    async def no_refusal(holder: str) -> None:
-        return None
-
-    monkeypatch.setattr(auth_api, "owner_refusal", no_refusal)
     now = time.time()
     run(core.upsert_mind(mind_id="m-ada", name="ada", gateway_url="http://x",
                          model="m", harness="h", registered_at=now,
-                         last_seen=now, owner="sam"))
+                         last_seen=now, owner="daniel"))
     keys = {
         "ada": run(generate_token("ada")),
         "sam": run(generate_person_key("sam")),
         "daniel": run(generate_person_key("daniel", admin=True)),
+        "erin": run(generate_person_key("erin", admin=True)),
         "mallory": run(generate_person_key("mallory")),
     }
     replayed: list[httpx.Request] = []
@@ -68,7 +63,31 @@ def asked(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     return keys, sent.json()["hitl_request_id"], replayed
 
 
-@pytest.mark.parametrize("who", ["sam", "daniel"])
+def test_a_mind_of_a_person_who_is_not_an_administrator_is_refused_before_any_approval_is_raised(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real refusal rule, unreplaced: sam is no administrator, so these
+    integrations are not his and his mind's call is refused outright, never
+    sent to anyone to approve. Removing the rule turns this 403 into a 202."""
+    from hive_data import core
+
+    now = time.time()
+    run(core.upsert_mind(mind_id="m-bo", name="bo", gateway_url="http://x",
+                         model="m", harness="h", registered_at=now,
+                         last_seen=now, owner="sam"))
+    run(generate_person_key("sam"))
+    bo = run(generate_token("bo"))
+
+    refused = client.post("/gmail/labels", json=LABEL, headers=_bearer(bo))
+
+    assert refused.status_code == 403
+    assert "belongs to sam" in refused.json()["detail"]
+    assert "hitl_request_id" not in refused.json()
+    daniel = run(generate_person_key("daniel", admin=True))
+    waiting = client.get("/hitl/waiting", headers=_bearer(daniel)).json()["waiting"]
+    assert waiting == []
+
+
+@pytest.mark.parametrize("who", ["daniel", "erin"])
 def test_the_owner_and_an_administrator_decide_and_their_name_is_recorded(
         client: TestClient, asked, who: str) -> None:
     keys, request_id, replayed = asked
@@ -84,7 +103,7 @@ def test_the_owner_and_an_administrator_decide_and_their_name_is_recorded(
     assert (seen["status"], seen["decided_by"]) == ("approved", who)
 
 
-@pytest.mark.parametrize("who", ["mallory", "ada"])
+@pytest.mark.parametrize("who", ["mallory", "sam", "ada"])
 def test_another_person_or_a_minds_key_is_refused_and_sees_nothing(
         client: TestClient, asked, who: str) -> None:
     keys, request_id, replayed = asked
@@ -110,6 +129,7 @@ def test_the_waiting_list_holds_only_what_the_person_may_decide(
         got = client.get("/hitl/waiting", headers=_bearer(keys[who])).json()
         return [row["hitl_request_id"] for row in got["waiting"]]
 
-    assert waiting("sam") == [request_id]
     assert waiting("daniel") == [request_id]
+    assert waiting("erin") == [request_id]
+    assert waiting("sam") == []
     assert waiting("mallory") == []

@@ -172,11 +172,19 @@ async def create_user(username: str, password_hash: str, is_admin: int,
 
 
 async def admin_usernames() -> set[str]:
-    """Who signs in here as an admin: the person whose integrations - the
-    Google account, the LinkedIn token, the phone - this hive-tools holds."""
-    return {str(row["username"]).strip().lower()
-            for row in await tools.users(unit=_live())
-            if row["is_admin"] and not row.get("disabled_at")}
+    """Who is an administrator: the people in the `admins` group whose account
+    is not disabled, read from the hive's one record of people now. The
+    person whose integrations - the Google account, the LinkedIn token, the
+    phone - this hive-tools holds. (It once read this service's own login
+    table, which has no rows since the tools lost their own sign-in; every
+    mind of a named owner was then refused.)"""
+    out: set[str] = set()
+    for row in await core.list_users(unit=_live()):
+        if row["disabled_at"] is not None:
+            continue
+        if "admins" in await core.groups_of(row["id"], unit=_live()):
+            out.add(str(row["username"]).strip().lower())
+    return out
 
 
 async def mind_owner(name: str) -> str | None:
