@@ -232,3 +232,27 @@ def test_a_traversal_that_would_land_on_an_allowed_route_is_still_refused(world)
     for tail in ("runtime/%2e%2e/runtime", "runtime/", "runtime//settings"):
         assert _change(world, KEYS["daniel"], tail=tail, method="GET").status_code == 404
     assert world.seen == []
+
+
+def _as(world, key, method, path, **kw):
+    return world.client.request(method, path, headers={"Authorization": f"Bearer {key}"}, **kw)
+
+
+def test_a_persons_key_lists_and_changes_only_their_own_minds_and_an_administrators_key_all(world) -> None:
+    """B12 (story 905): a person's key who is not an administrator reaches
+    their own minds and is refused another person's; an administrator's key
+    reaches every mind; the gateway's own credential is not a person."""
+    def names(key):
+        return {m["name"] for m in _as(world, key, "GET", "/broker/minds").json()}
+
+    assert names(KEYS["daniel"]) == {"alpha", "beta", "ops"}
+    assert names(KEYS["sloan"]) == {"other"}
+    assert names(KEYS["root"]) == {"alpha", "beta", "ops", "other"}
+    # A change to a mind row: the owner's key, an administrator's key; not a stranger's.
+    assert _as(world, KEYS["daniel"], "PUT", "/broker/minds/other", json={"voice": "v"}).status_code == 401
+    assert _as(world, KEYS["sloan"], "PUT", "/broker/minds/other", json={"voice": "v"}).status_code == 200
+    assert _as(world, KEYS["root"], "PUT", "/broker/minds/alpha", json={"voice": "v"}).status_code == 200
+    # Moving a mind between people and reading every conversation's text: administrators only.
+    assert _as(world, KEYS["daniel"], "PUT", "/broker/minds/alpha/owner", json={"owner": "sloan"}).status_code == 401
+    assert _as(world, KEYS["daniel"], "GET", "/sessions/live/text?session_id=x").status_code == 401
+    assert _as(world, KEYS["root"], "GET", "/sessions/live/text?session_id=x").status_code == 200
