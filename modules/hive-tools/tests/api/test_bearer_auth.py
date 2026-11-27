@@ -76,6 +76,22 @@ def test_endpoint_with_valid_token_returns_200(client: TestClient) -> None:
 # owner is not the person whose accounts these are is refused outright, never
 # routed to him for approval.
 # ---------------------------------------------------------------------------
+async def _an_administrator(username: str) -> None:
+    """The person whose accounts these are: in the hive's `admins` group, as the
+    hive site records people (the tools keep no list of their own)."""
+    import time as _time
+
+    from hive_data import access, core
+
+    if any(str(u["username"]) == username for u in await core.list_users()):
+        return
+    now = int(_time.time())
+    await core.create_user(username=username, password_hash="x", created_at=now)
+    user = next(u for u in await core.list_users() if str(u["username"]) == username)
+    await core.create_group(name=access.ADMINS_GROUP, created_at=now)
+    await core.add_group_member(group_name=access.ADMINS_GROUP, user_id=user["id"])
+
+
 def _a_mind(name: str, owner: str) -> str:
     import time as _time
 
@@ -88,8 +104,7 @@ def _a_mind(name: str, owner: str) -> str:
             mind_id=f"{name}-id", name=name, gateway_url=f"http://{name}:8420",
             model="sonnet", harness="claude_cli", registered_at=now,
             last_seen=now, owner=owner)
-        if await store.user_by_username("daniel") is None:
-            await store.create_user("daniel", "x", 1, int(now))
+        await _an_administrator("daniel")
 
     run(seed())
     return run(generate_token(name))
@@ -128,10 +143,11 @@ def test_a_mind_registered_under_another_case_or_spacing_is_still_its_owners(
 def test_a_disabled_admins_minds_are_not_let_through(client: TestClient) -> None:
     import time as _time
 
-    from hive_data import tools as _tools
+    from hive_data import core as _core
 
     raw = _a_mind("bob", owner="daniel")
-    run(_tools.disable_user("daniel", int(_time.time())))
+    daniel = next(u for u in run(_core.list_users()) if u["username"] == "daniel")
+    run(_core.update_user(daniel["id"], disabled_at=int(_time.time())))
 
     resp = client.get("/protected", headers={"Authorization": f"Bearer {raw}"})
 
