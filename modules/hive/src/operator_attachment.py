@@ -4,10 +4,11 @@ Every mind this console makes has the install's folder of generated skills
 attached read-only (`configuration_data.workflow_skills_volume`), because it
 otherwise sees only its own folder and a copy of the published code. The one
 that holds the operator role is the one that writes those skills, so for it
-the folder is attached writable, and it is handed the two values it reaches
-the console's Roles routes with: the operator's credential, as a reference to
-a variable of the stack's `.env` and never as a value, and the console's
-address. Taking the role away puts it all back.
+the folder is attached writable, and it is handed the console's address. It
+reaches the console's Roles routes with its own key, which the console
+recognises as the operator's from the role it holds; no other credential is
+given. The retired ROLES_PUSH_TOKEN line is taken out of a fragment that still
+carries it. Taking the role away puts it all back.
 
 A container's attachments are fixed when it is made, so this changes the
 mind's compose fragment and the caller recreates the container from it, the
@@ -40,8 +41,8 @@ import mind_mounts
 #: The slug of the role whose holder writes the generated skills.
 OPERATOR_ROLE_SLUG = "operator"
 
-#: The credential the operator changes roles with, and where the console is,
-#: as the fragment spells them. The first is a reference, never a literal.
+#: The retired credential line (removed wherever found), and where the console
+#: is, as the fragment spells them.
 CREDENTIAL_VARIABLE = "ROLES_PUSH_TOKEN"
 CREDENTIAL_LINE = f"{CREDENTIAL_VARIABLE}=${{{CREDENTIAL_VARIABLE}}}"
 CONSOLE_VARIABLE = "HIVE_SITE_URL"
@@ -253,13 +254,7 @@ def _wanted(volumes: list[str], environment: list[str], operator: bool) -> tuple
     for item in environment:
         key = item.split("=", 1)[0]
         if key == CREDENTIAL_VARIABLE:
-            if operator and item != CREDENTIAL_LINE:
-                raise AttachmentRefused(
-                    f"this mind already sets {CREDENTIAL_VARIABLE} to something other than a "
-                    "reference to the stack's variable — set it by hand")
-            if operator:
-                new_environment.append(item)
-            continue  # taken with the role, whatever it held
+            continue  # the retired roles token: the mind's own key is used now
         if key == CONSOLE_VARIABLE and item == CONSOLE_LINE and not operator:
             continue
         if key == CONSOLE_VARIABLE and operator and item != CONSOLE_LINE:
@@ -268,7 +263,7 @@ def _wanted(volumes: list[str], environment: list[str], operator: bool) -> tuple
                 "console's address — set it by hand")
         new_environment.append(item)
     if operator:
-        for line_ in (CREDENTIAL_LINE, CONSOLE_LINE):
+        for line_ in (CONSOLE_LINE,):
             if line_ not in new_environment:
                 new_environment.append(line_)
     return new_volumes, new_environment

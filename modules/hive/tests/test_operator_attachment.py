@@ -119,9 +119,7 @@ def test_the_operator_role_makes_the_folder_writable_and_hands_over_the_credenti
     assert f"{HOST}:{FOLDER}:rw" in _volumes(path)
     assert f"{HOST}:{FOLDER}:ro" not in _volumes(path)
     environment = _environment(path)
-    assert CREDENTIAL in environment and CONSOLE in environment
-    # The credential is a reference to the stack's variable, never a value.
-    assert [e for e in environment if e.startswith("ROLES_PUSH_TOKEN=")] == [CREDENTIAL]
+    assert CONSOLE in environment and not any(e.startswith("ROLES_PUSH_TOKEN") for e in environment)
 
     taken = operator_attachment.reconcile("atlas", False)
 
@@ -185,8 +183,6 @@ REFUSED = {
         "      - ${HOST_PROJECT_DIR:-.}/minds/atlas/container:/usr/src/app/minds/atlas/container:ro\n"
         "      - &skills ${HOST_PROJECT_DIR:-.}/install/workflow-skills:"
         "/usr/src/app/install/workflow-skills:ro\n"),
-    "a literal credential": CLEAN.replace(
-        "      - MIND_NAME=atlas\n", "      - MIND_NAME=atlas\n      - ROLES_PUSH_TOKEN=abc123\n"),
 }
 
 
@@ -290,7 +286,7 @@ def test_giving_the_operator_role_keeps_a_console_address_line_that_already_carr
 
     assert answer["changed"] is True
     environment = _environment(path)
-    assert environment.count(CONSOLE) == 1 and CREDENTIAL in environment
+    assert environment.count(CONSOLE) == 1 and not any(e.startswith("ROLES_PUSH_TOKEN") for e in environment)
     assert "  # where the console is" in _written(path)
 
 
@@ -317,7 +313,7 @@ def test_a_fragment_with_no_such_list_is_given_one_for_the_operator_and_loses_it
 
     assert promoted["changed"] is True
     assert f"{HOST}:{FOLDER}:rw" in _volumes(path)
-    assert CREDENTIAL in _environment(path) and CONSOLE in _environment(path)
+    assert CONSOLE in _environment(path)
     written = path.read_bytes().decode()
     # Every line this edit added ends as the file's own lines do.
     assert written.count("\r\n") == written.count("\n") * (1 if newline == "\r\n" else 0)
@@ -369,7 +365,7 @@ def test_giving_a_console_made_mind_the_operator_role_re_makes_it_with_the_folde
     assert response.status_code == 200, response.text
     body = response.json()
     assert f"{HOST}:{FOLDER}:rw" in _volumes(console.fragment)
-    assert CREDENTIAL in _environment(console.fragment)
+    assert CONSOLE in _environment(console.fragment)
     assert body["attachments"]["changed"] is True and body["attachments"]["recreated"] is True
     assert "being re-made" in body["attachments"]["detail"]
     method, path = main_mod._hive_tools_request.await_args.args[:2]

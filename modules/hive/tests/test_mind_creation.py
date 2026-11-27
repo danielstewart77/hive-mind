@@ -425,7 +425,7 @@ def test_a_mind_made_holding_the_operator_role_is_made_with_the_folder_writable_
     folder = "${HOST_PROJECT_DIR:-.}/install/workflow-skills:/usr/src/app/install/workflow-skills"
     assert f"{folder}:rw" in service["volumes"]
     assert f"{folder}:ro" not in service["volumes"]
-    assert "ROLES_PUSH_TOKEN=${ROLES_PUSH_TOKEN}" in service["environment"]
+    assert not any(e.startswith("ROLES_PUSH_TOKEN") for e in service["environment"])
     assert "HIVE_SITE_URL=http://hive-site:8710" in service["environment"]
 
 

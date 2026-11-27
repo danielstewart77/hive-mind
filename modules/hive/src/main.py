@@ -869,7 +869,6 @@ async def kanban_backlog_page(request: Request):
 
 #: What each bearer the board routes admit is called in the handler's user.
 _BEARER_USERS = {
-    console_access.CUTOVER: "cutover-check",
     console_access.BOARD: "board-bearer",
     console_access.BOARD_PLANNER: "board-planner-bearer",
     console_access.ROLES: "roles-bearer",
@@ -890,7 +889,9 @@ async def require_admin_or_route_bearer(request: Request) -> dict:
     """
     via = route_access.bearer_of(request)
     if via in _BEARER_USERS:
-        return {"username": _BEARER_USERS[via], "via": "bearer"}
+        # The mind whose own key it was, recognised from the one record.
+        who = route_access.identity_of(request) or _BEARER_USERS[via]
+        return {"username": who, "via": "bearer"}
     return await require_auth(request)
 
 

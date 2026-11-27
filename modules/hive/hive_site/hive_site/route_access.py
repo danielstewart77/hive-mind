@@ -90,6 +90,8 @@ LOGIN_PATH = "/login"
 RECHECK_SECONDS = 30.0
 # Where the middleware records the bearer it verified for a request.
 _BEARER_STATE_KEY = "hive_verified_bearer"
+# ...and whom a recognised key turned out to belong to, when the bearer says.
+_IDENTITY_STATE_KEY = "hive_verified_bearer_identity"
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,11 @@ class BearerToken:
     token: Callable[[], str]
     unset_status: int = 401
     unset_message: str = "Authentication required"
+    # Where the credential is a mind's own key, recognised from the one record
+    # of keys rather than compared with a value set in the environment: given
+    # the presented value, the name of whoever it belongs to when it is
+    # recognised for this bearer, otherwise None. When set, `token` is unused.
+    recognise: Callable[[str], Awaitable[str | None]] | None = None
 
 
 @dataclass
@@ -310,6 +317,12 @@ def bearer_of(conn: HTTPConnection) -> str | None:
     return (conn.scope.get("state") or {}).get(_BEARER_STATE_KEY)
 
 
+def identity_of(conn: HTTPConnection) -> str | None:
+    """Whom the verified bearer belongs to (a mind's name), when its bearer
+    recognises keys; None for a bearer compared with a value."""
+    return (conn.scope.get("state") or {}).get(_IDENTITY_STATE_KEY)
+
+
 def _authorization_headers(scope) -> list[bytes]:
     return [value for name, value in scope.get("headers") or [] if name.lower() == b"authorization"]
 
@@ -413,11 +426,14 @@ class AccessMiddleware:
             return
         presented = _presented_bearer(authorization[0]) if authorization else None
         if rule.bearers and presented is not None:
-            admitted, refusal = self._verify_bearer(rule.bearers, presented)
+            admitted, refusal, identity = await self._verify_bearer(
+                rule.bearers, presented)
             if refusal is not None:
                 await self._refuse(scope, receive, send, refusal, is_socket)
                 return
             scope.setdefault("state", {})[_BEARER_STATE_KEY] = admitted
+            if identity:
+                scope["state"][_IDENTITY_STATE_KEY] = identity
             await self.app(scope, receive, send)
             return
         if rule.kind == BEARER:
@@ -434,9 +450,9 @@ class AccessMiddleware:
             return
         await self._run_watched(scope, receive, send, rule, params, is_socket)
 
-    def _verify_bearer(
+    async def _verify_bearer(
         self, names: tuple[str, ...], presented: bytes
-    ) -> tuple[str | None, Response | None]:
+    ) -> tuple[str | None, Response | None, str | None]:
         """Which of the rule's bearers this value is, or why it is refused.
 
         Every name is compared, in constant time and to the end, so the
@@ -450,9 +466,17 @@ class AccessMiddleware:
         this route and a wrong value is a refusal, not a misconfiguration.
         """
         admitted: str | None = None
+        identity: str | None = None
         unset: BearerToken | None = None
         for name in names:
             bearer = self.table.bearers[name]
+            if bearer.recognise is not None:
+                if admitted is None:
+                    who = await bearer.recognise(
+                        presented.decode("utf-8", "replace"))
+                    if who:
+                        admitted, identity = name, who
+                continue
             expected = bearer.token() or ""
             if not expected:
                 if unset is None:
@@ -463,14 +487,15 @@ class AccessMiddleware:
             ) and admitted is None:
                 admitted = name
         if admitted is not None:
-            return admitted, None
+            return admitted, None, identity
         if unset is not None and all(
-            not (self.table.bearers[name].token() or "") for name in names
+            self.table.bearers[name].recognise is None
+            and not (self.table.bearers[name].token() or "") for name in names
         ):
             return None, JSONResponse(
                 {"detail": unset.unset_message}, unset.unset_status
-            )
-        return None, JSONResponse({"detail": "Authentication required"}, 401)
+            ), None
+        return None, JSONResponse({"detail": "Authentication required"}, 401), None
 
     async def _refuse(self, scope, receive, send, refusal: Response, is_socket: bool) -> None:
         if is_socket:

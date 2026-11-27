@@ -29,6 +29,35 @@ _OWN_AND_OTHER = {
     "request_id": ("op-sloan", "op-aiden"),
 }
 
+def _a_mind_holding(role_slug, key, name=None):
+    """A mind recorded with `key` as its own key in the one record of keys
+    (the hive database), holding the role `role_slug`. The boundary stood in
+    for is only the hive's own database: recognition is the real one."""
+    import hashlib
+    import time
+
+    from hive_data import core, roles
+
+    name = name or f"mind-{role_slug}"
+    mind_id = f"id-{name}"
+
+    async def _make():
+        await core.upsert_mind(mind_id=mind_id, name=name, gateway_url="http://x:1",
+                               model="m", harness="dsh", registered_at=1.0,
+                               last_seen=1.0, owner="daniel")
+        await core.upsert_credential(
+            holder=name, username="daniel", role="mind",
+            token_sha=hashlib.sha256(key.encode()).hexdigest(), created_at=time.time())
+        role = await roles.role_by_slug(role_slug)
+        if role is None:
+            role = await roles.create_role(role_slug.replace("-", " ").title(), slug=role_slug)
+            role = await roles.role_by_slug(role_slug)
+        await roles.set_mind_roles(mind_id, [role["id"]])
+
+    run(_make())
+    return name
+
+
 def _socket(client, path):
     """A websocket from this client. Its cookies are passed by hand: they
     are Secure, and the test client's jar withholds Secure cookies from a
@@ -353,73 +382,6 @@ def test_the_canvas_review_tells_the_mind_to_fetch_the_snapshot_with_its_bearer(
     assert "Authorization: Bearer $CANVAS_PUSH_TOKEN" in content
 
 
-def test_the_cutover_check_reaches_the_board_and_the_memory_pages_with_its_own_bearer(
-        builtin_console, monkeypatch):
-    """The one-database check runs outside a browser, so it has no session to
-    present — and an unchecked app is reported as unchecked rather than
-    counted as working. The three reads it makes take a bearer this install
-    issued for the purpose; nothing else does, and a wrong one is refused."""
-    monkeypatch.setenv("HIVE_SITE_ADMIN_TOKEN", "a-cutover-token")
-    anonymous = builtin_console.client()
-
-    for path in ("/api/kanban/data", "/api/memory/tables",
-                 "/api/memory/rows?table=memories"):
-        with_token = anonymous.get(
-            path, headers={"Authorization": "Bearer a-cutover-token"})
-        assert with_token.status_code != 401, (path, with_token.text)
-        assert REFUSED not in with_token.headers, (path, with_token.text)
-
-        wrong = anonymous.get(
-            path, headers={"Authorization": "Bearer not-the-token"})
-        assert wrong.status_code == 401, (path, wrong.text)
-
-        without = anonymous.get(path, follow_redirects=False)
-        assert without.status_code in (303, 401), (path, without.text)
-
-    # The bearer admits those reads and nothing else: it is not a way into
-    # the console at large.
-    elsewhere = anonymous.get(
-        "/api/admin/users",
-        headers={"Authorization": "Bearer a-cutover-token"})
-    assert elsewhere.status_code in (401, 403), elsewhere.text
-
-
-def test_an_install_that_issued_no_cutover_token_admits_no_bearer(
-        builtin_console, monkeypatch):
-    """Where every install that is not mid-cutover sits: the routes answer to
-    a session and to nothing else, so an unset token is not an open door."""
-    monkeypatch.delenv("HIVE_SITE_ADMIN_TOKEN", raising=False)
-    anonymous = builtin_console.client()
-
-    refused = anonymous.get(
-        "/api/kanban/data", headers={"Authorization": "Bearer anything"})
-    assert refused.status_code == 401, refused.text
-
-
-def test_the_cutover_bearer_is_attached_to_those_three_routes_and_no_others():
-    """Read off the table itself, because a bearer in the wrong rule is a
-    sessionless way into whatever that rule covers.
-
-    `Rule(OWNER, param="name")` carries about twenty-five per-mind routes
-    including the writes to a Mind's hooks, its skills, its soul and its bot
-    token. The cutover check needs three reads; a bearer that reached those
-    writes would be a credential in one `.env` that edits every Mind on the
-    hive without a session. Asserting the three by looping over them cannot
-    see that, which is why this asserts the whole set.
-    """
-    carrying = {
-        f"{method} {path}"
-        for (method, path), rule in console_access.TABLE.rules.items()
-        if console_access.CUTOVER in rule.bearers
-    }
-
-    assert carrying == {
-        "GET /api/kanban/data",
-        "GET /api/memory/tables",
-        "GET /api/memory/rows",
-    }
-
-
 def test_the_board_bearer_is_attached_to_the_board_and_no_others():
     """Read off the table itself, for the reason the cutover test gives: a
     bearer in the wrong rule is a sessionless way into whatever that rule
@@ -475,7 +437,7 @@ def test_a_mind_reads_and_writes_the_board_with_the_board_bearer_and_no_session(
     relations. A wrong value is refused on each, so the token is the guard
     and not merely the thing that happened to be in the header.
     """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    _a_mind_holding("board-push", "a-board-token")
     mind = builtin_console.client()
     good = {"Authorization": "Bearer a-board-token"}
     wrong = {"Authorization": "Bearer not-the-token"}
@@ -522,7 +484,7 @@ def test_a_mind_deletes_a_row_and_what_is_under_it_with_the_board_bearer(
     board (Daniel, 2026-11-19), so the delete answers the board bearer with
     no session, takes the row and everything under it, and says what went.
     """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    _a_mind_holding("board-push", "a-board-token")
     mind = builtin_console.client()
     good = {"Authorization": "Bearer a-board-token"}
 
@@ -551,8 +513,8 @@ def test_a_planning_mind_reads_and_writes_the_board_with_the_planner_bearer(
     under it and updates a row with no session, and what it wrote is what the
     board then says.
     """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
-    monkeypatch.setenv("BOARD_PLANNER_TOKEN", "a-planner-token")
+    _a_mind_holding("board-push", "a-board-token")
+    _a_mind_holding("board-planner", "a-planner-token")
     mind = builtin_console.client()
     planner = {"Authorization": "Bearer a-planner-token"}
 
@@ -579,8 +541,8 @@ def test_the_planner_bearer_is_refused_the_delete_and_the_row_stays(
     delete is refused, the row it named is still on the board, and the same
     delete with the chief of staff's token takes it.
     """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
-    monkeypatch.setenv("BOARD_PLANNER_TOKEN", "a-planner-token")
+    _a_mind_holding("board-push", "a-board-token")
+    _a_mind_holding("board-planner", "a-planner-token")
     mind = builtin_console.client()
     planner = {"Authorization": "Bearer a-planner-token"}
     full = {"Authorization": "Bearer a-board-token"}
@@ -605,7 +567,7 @@ def test_the_board_bearer_is_not_a_way_into_the_console(
     the console, so it cannot be used to read the memory store or edit
     another Mind.
     """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    _a_mind_holding("board-push", "a-board-token")
     mind = builtin_console.client()
     good = {"Authorization": "Bearer a-board-token"}
 
@@ -621,7 +583,7 @@ def test_a_delete_asked_to_spare_a_row_with_rows_under_it_removes_nothing(
     under it, and the answer says what that is. The same row with nothing
     under it goes.
     """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    _a_mind_holding("board-push", "a-board-token")
     mind = builtin_console.client()
     good = {"Authorization": "Bearer a-board-token"}
     epic_id = mind.post("/api/kanban/epics", json={"title": "Has one"},
@@ -649,45 +611,11 @@ def test_an_install_that_issued_no_board_token_admits_no_bearer_to_the_board(
         builtin_console, monkeypatch):
     """Where an install with no mind on the backlog sits: an unset token is
     not an open door, and the board answers to a session and nothing else."""
-    monkeypatch.delenv("BOARD_PUSH_TOKEN", raising=False)
-    monkeypatch.delenv("HIVE_SITE_ADMIN_TOKEN", raising=False)
     anonymous = builtin_console.client()
 
     for path in ("/api/kanban/data", "/api/kanban/numbers"):
         refused = anonymous.get(path, headers={"Authorization": "Bearer anything"})
         assert refused.status_code == 401, (path, refused.text)
-
-
-def test_the_board_and_the_cutover_bearer_each_admit_the_one_route_they_share(
-        builtin_console, monkeypatch):
-    """`GET /api/kanban/data` is named by two unrelated credentials, which is
-    the only reason a rule may name more than one.
-
-    Each has to be admitted on its own, and neither may be admitted by the
-    other's value — a route that accepted any configured bearer would make
-    every token on the table a key to every route that names one.
-    """
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
-    monkeypatch.setenv("HIVE_SITE_ADMIN_TOKEN", "a-cutover-token")
-    anonymous = builtin_console.client()
-
-    for token in ("a-board-token", "a-cutover-token"):
-        admitted = anonymous.get("/api/kanban/data",
-                                 headers={"Authorization": f"Bearer {token}"})
-        assert admitted.status_code == 200, (token, admitted.text)
-
-    # The board token reaches the board; it does not become the cutover
-    # check's credential by sharing one route with it.
-    memory = anonymous.get("/api/memory/tables",
-                           headers={"Authorization": "Bearer a-board-token"},
-                           follow_redirects=False)
-    assert memory.status_code in (303, 401, 403), memory.text
-
-    # And the cutover token does not become a board writer by the same share.
-    write = anonymous.post("/api/kanban/epics", json={"title": "no"},
-                           headers={"Authorization": "Bearer a-cutover-token"},
-                           follow_redirects=False)
-    assert write.status_code in (303, 401, 403), write.text
 
 
 # ── the operator's roles bearer (feature 856, story 860) ───────────────
@@ -734,7 +662,7 @@ def test_the_operator_creates_changes_and_deletes_a_role_with_the_roles_bearer_a
     role, change its name, model, skills, tools and hooks, add and remove one
     skill, and delete it — and the listing the page reads shows each, so the
     change is stored and not merely reported."""
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
 
     made = operator.post("/api/roles", headers=_ROLES_GOOD, json={
@@ -796,7 +724,7 @@ def test_the_operator_creates_changes_and_deletes_a_role_with_the_roles_bearer_a
 
 def test_a_skill_added_or_removed_on_a_role_that_does_not_exist_is_a_404(
         builtin_console, monkeypatch):
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
 
     added = operator.post("/api/roles/987654/skills", headers=_ROLES_GOOD,
@@ -811,7 +739,7 @@ def test_the_keep_promote_and_take_routes_admit_the_roles_bearer_and_answer_for_
     """Each is answered by its own handler (a 404 for a role or repo copy that
     is not there), which only happens when the bearer was admitted: a handler
     that still wanted a session would answer 401 to this caller."""
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
 
     kept = operator.post("/api/roles/987654/keep", headers=_ROLES_GOOD)
@@ -830,7 +758,7 @@ def test_a_wrong_or_absent_roles_bearer_changes_no_role_on_any_roles_route(
     """A role changes what every mind holding it may use, so the credential
     is the guard and not merely the thing that happened to be in the header.
     Each route is refused without it and the role is as it was."""
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
     rid = operator.post("/api/roles", headers=_ROLES_GOOD,
                         json={"name": "Held", "skills": ["read"]}).json()["id"]
@@ -864,8 +792,7 @@ def test_an_install_that_issued_no_roles_token_admits_no_bearer_to_the_roles_rou
         builtin_console, monkeypatch):
     """An unset token is not an open door, and an empty one is not matched by
     an empty header value, nor by a house token."""
-    monkeypatch.delenv("ROLES_PUSH_TOKEN", raising=False)
-    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    _a_mind_holding("board-push", "a-board-token")
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "a-house-token")
     anonymous = builtin_console.client()
 
@@ -884,7 +811,7 @@ def test_an_install_that_issued_no_roles_token_admits_no_bearer_to_the_roles_rou
 
 def test_the_roles_bearer_is_not_a_way_into_the_console_or_the_board(
         builtin_console, monkeypatch):
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
 
     for path in ("/api/memory/tables", "/api/kanban/data", "/api/admin/users"):
@@ -895,7 +822,7 @@ def test_the_roles_bearer_is_not_a_way_into_the_console_or_the_board(
 def test_a_signed_in_admin_still_manages_roles_and_a_signed_in_person_still_only_reads_them(
         people, monkeypatch):
     """The bearer is an added door; the session's abilities are as they were."""
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     admin, sloan = people
 
     made = admin.post("/api/roles", json={"name": "By Hand", "skills": ["a"]})
@@ -926,7 +853,7 @@ def test_skills_added_to_one_role_at_once_all_survive(
     released together make that loss all but certain."""
     import threading
 
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
     rid = operator.post("/api/roles", headers=_ROLES_GOOD,
                         json={"name": "Busy"}).json()["id"]
@@ -965,7 +892,7 @@ def test_a_whole_list_replace_of_a_role_waits_for_whoever_holds_that_roles_lock(
     import store
     from hive_site import testing
 
-    monkeypatch.setenv("ROLES_PUSH_TOKEN", "an-operator-token")
+    _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
     rid = operator.post("/api/roles", headers=_ROLES_GOOD,
                         json={"name": "Contended", "skills": ["a"]}).json()["id"]
