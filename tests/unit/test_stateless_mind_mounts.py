@@ -228,3 +228,49 @@ async def test_the_operator_role_is_read_from_the_hive_database(tmp_path, capsys
 
     assert report["operators"] == ["ada"]
     assert {f["mind"] for f in report["findings"]} == {"bea"} and code == 1
+
+
+def _reasons(report: dict) -> str:
+    return " | ".join(r for f in report["findings"] for r in f["reasons"]) + " | " + \
+        " | ".join(f["entry"] for f in report["findings"])
+
+
+def test_each_way_of_reaching_a_secret_is_named_by_the_check(tmp_path, capsys):
+    root = _install(tmp_path, minds=("ada", "bea"))
+    sets = {
+        "another mind's key folder": [f"{root}/keys/bea:/k:ro", *_own(root, "ada")],
+        "the whole key root": [f"{root}/keys:/k:ro", *_own(root, "ada")],
+        "the shared keyring": [f"{root}/data:/d:rw", *_own(root, "ada")],
+        "the Docker socket": ["/var/run/docker.sock:/var/run/docker.sock", *_own(root, "ada")],
+        "a session_token": [f"{root}/minds/ada/session_token:/t:ro", *_own(root, "ada")],
+        "a long-form bind": [{"type": "bind", "source": str(root), "target": "/usr/src/app"}],
+    }
+    for label, volumes in sets.items():
+        _fragment(root, "ada", volumes)
+        code, report = _check(root, "--operators", "nobody", capsys=capsys)
+        assert code == 1 and report["findings"], label
+    # A tmpfs on a folder hides it; the same tmpfs on a parent does not.
+    masks = ["/dev/null:/usr/src/app/.env:ro"]
+    for tmpfs, clean in ((["/usr/src/app/minds/bea", "/usr/src/app/data", "/usr/src/app/keys"], True),
+                         (["/usr"], False)):
+        path = _fragment(root, "ada", [f"{root}:/usr/src/app:ro", *masks, *_own(root, "ada")])
+        doc = yaml.safe_load(path.read_text())
+        doc["services"]["ada"]["tmpfs"] = tmpfs
+        path.write_text(yaml.safe_dump(doc))
+        code, report = _check(root, "--operators", "nobody", capsys=capsys)
+        assert (code == 0) is clean, report["findings"]
+
+
+def test_env_file_and_a_dict_environment_with_a_passed_through_credential_are_named(tmp_path, capsys):
+    root = _install(tmp_path, minds=("ada",))
+    path = _fragment(root, "ada", _own(root, "ada"))
+    doc = yaml.safe_load(path.read_text())
+    doc["services"]["ada"]["env_file"] = [".env"]
+    doc["services"]["ada"]["environment"] = {"MIND_NAME": "ada", "MIND_KEY_FILE": "/run/mind-key/key",
+                                             "GATEWAY_TOKEN": None, "EMPTY_TOKEN": ""}
+    path.write_text(yaml.safe_dump(doc))
+
+    code, report = _check(root, "--operators", "nobody", capsys=capsys)
+
+    entries = {f["entry"] for f in report["findings"]}
+    assert code == 1 and entries == {"env_file", "GATEWAY_TOKEN"}, entries

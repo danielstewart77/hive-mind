@@ -74,7 +74,7 @@ PENDING_ENV = {
 #: Environment names that look like credentials and are not.
 ALLOWED_ENV = {"MIND_KEY_FILE", "KEY_RING", "PYTHON_KEYRING_BACKEND"}
 _CREDENTIAL_NAME = re.compile(
-    r"TOKEN|SECRET|PASSWORD|PASSWD|BEARER|CREDENTIAL|DATABASE_URL|DSN|API_KEY|_KEY$|^KEY$")
+    r"TOKEN|SECRET|PASSWORD|PASSWD|BEARER|CREDENTIAL|DATABASE_URL|DATABASE_URI|DSN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|_PAT$|_KEY$|^KEY$")
 #: Names that carry the word but name a setting, not a secret.
 _NOT_CREDENTIAL_SUFFIX = ("_KEYRING_KEY", "_CONFIGURES_TOOLS")
 _DOCKER_SOCKETS = ("/var/run/docker.sock", "/run/docker.sock")
@@ -190,12 +190,23 @@ def _data_folders(tree: Path) -> list[str]:
     return sorted({os.path.realpath(h) for h in hits if os.path.isdir(h)})
 
 
-def _mind_folders(minds: Path) -> list[str]:
+def _mind_folders(minds: Path) -> list[str]:  # noqa: D103
     if not minds.is_dir():
         return []
     return sorted(os.path.realpath(d) for d in glob.glob(str(minds / "*"))
                   if os.path.isdir(d) and os.path.basename(d) not in _NOT_MINDS
                   and os.path.isfile(os.path.join(d, "runtime.yaml")))
+
+
+def _folder_case(parent: Path, name: str) -> str:
+    """The folder of that name however the compose file capitalises it."""
+    try:
+        for entry in os.listdir(parent):
+            if entry.lower() == name.lower():
+                return entry
+    except OSError:
+        pass
+    return name
 
 
 class Secrets:
@@ -229,14 +240,17 @@ class Secrets:
     def reasons(self, source: str, target: str, masks: list[str], mind: str) -> list[str]:
         """Why a mount of `source` at `target` reaches a secret, given the
         container paths `masks` that hide whatever is under them."""
-        own_folder = os.path.realpath(self.minds_dir / mind)
+        own_folder = os.path.realpath(self.minds_dir / _folder_case(self.minds_dir, mind))
         own_keys = os.path.realpath(self.key_root / mind)
 
         def hidden(inside: str) -> bool:
             if not (_within(inside, source) and target):
                 return False
             seen = os.path.normpath(os.path.join(target, os.path.relpath(inside, source)))
-            return any(_within(seen, m) for m in masks)
+            # A mask hides only what it is laid over: it must lie inside this
+            # mount (a tmpfs on a parent is covered by the bind laid on top).
+            return any(_within(seen, m) and _within(m, os.path.normpath(target))
+                       for m in masks)
 
         why: list[str] = []
         for path, reason in (*self.files, *self.folders):
@@ -310,8 +324,15 @@ def _volumes(service: dict) -> list[tuple[str, str, str]]:
 
 def _tmpfs(service: dict) -> list[str]:
     raw = service.get("tmpfs") or []
-    raw = [raw] if isinstance(raw, str) else raw
-    return [str(t).split(":")[0] for t in raw]
+    raw = [raw] if isinstance(raw, (str, dict)) else raw
+    out = []
+    for t in raw:
+        if isinstance(t, dict):
+            if t.get("target"):
+                out.append(os.path.normpath(str(t["target"])))
+        else:
+            out.append(os.path.normpath(str(t).split(":")[0]))
+    return out
 
 
 def _environment(service: dict) -> list[tuple[str, str, bool]]:
@@ -320,7 +341,8 @@ def _environment(service: dict) -> list[tuple[str, str, bool]]:
     out = []
     if isinstance(env, dict):
         for name, value in env.items():
-            has = value is not None and str(value).strip() != ""
+            # A null value passes the host's own value through: treated as set.
+            has = value is None or str(value).strip() != ""
             out.append((str(name), str(name), has))
         return out
     for item in env:
@@ -341,8 +363,10 @@ def _mind_services(path: Path) -> list[tuple[str, dict, str]]:
     try:
         raw = path.read_text()
         doc = yaml.safe_load(raw) or {}
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise Stop(f"cannot read {path}: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise Stop(f"{path} is not a compose file")
     found = []
     for key, service in (doc.get("services") or {}).items():
         if not isinstance(service, dict):
@@ -456,7 +480,8 @@ def check(root: Path, compose_files: list[Path], env_file: Path | None,
             volumes = _volumes(service)
             # What hides a place in the container: a tmpfs on it, or /dev/null
             # mounted over it.
-            masks = _tmpfs(service) + [t for s_, t, _ in volumes if s_ == "/dev/null" and t]
+            masks = _tmpfs(service) + [os.path.normpath(t) for s_, t, _ in volumes
+                                       if os.path.normpath(s_) == "/dev/null" and t]
             for source, target, text in volumes:
                 if os.path.basename(source.rstrip("/")) == "session_token":
                     add(findings, "mount", text, "mounts a session_token file: not its one key")
@@ -466,10 +491,14 @@ def check(root: Path, compose_files: list[Path], env_file: Path | None,
                     add(findings, "mount", text,
                         f"cannot work out where this points ({exc}); it is not called safe")
                     continue
-                if where == os.path.realpath("/dev/null"):
+                if os.path.normpath(source) == "/dev/null":
                     continue
                 for why in secrets.reasons(where, target, masks, name):
                     add(findings, "mount", text, f"reaches {why}")
+            for follow in ("volumes_from", "extends"):
+                if service.get(follow):
+                    add(findings, "mount", follow,
+                        f"uses {follow}: mounts it brings in are not followed, so it is not called safe")
             if service.get("env_file"):
                 add(findings, "environment", "env_file",
                     "is handed a settings file as its environment")
@@ -481,6 +510,8 @@ def check(root: Path, compose_files: list[Path], env_file: Path | None,
                 elif _CREDENTIAL_NAME.search(var.upper()):
                     add(findings, "environment", text,
                         "is handed a credential that is not its one key file (value not shown)")
+    if not checked and not skipped:
+        raise Stop(f"found no mind container file to check under {root}: wrong --root?")
     return {"ok": not findings, "root": str(root), "checked": sorted(set(checked)),
             "operators": sorted(set(skipped)), "findings": findings, "pending": pending}
 

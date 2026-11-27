@@ -336,7 +336,8 @@ and is never limited by this.
 
 What produces it: the installer's container for a mind (`HOST_CODE_DIR` in the
 `.env` is its own clean clone, `repos/hive-mind`), the console's container for a
-mind made on the page (its own folder and key folder only), and the tracked
+mind made on the page (its own folder and key folder, and still the read-only
+`session_token` file: the check lists it until the one-key story removes it), and the tracked
 example every hand-made mind is copied from (`minds/example/container/compose.yaml`:
 the code from `HOST_CODE_DIR` read-only, its own folder, its own key folder, no
 credential line). A mind that works on the hive's own code still has all of it,
@@ -397,7 +398,10 @@ A mind that does not hold the operator role and works on the hive's own code
 read-only; its changes go through its own branch checkout under its own folder,
 not through the install's.
 
-Limits: the check reads container files, not running containers, so a container
+Limits: `compose.override.yaml` files, `volumes_from` and `extends` are not merged
+(the last two are listed as findings; an override file is passed to `--compose`
+to be checked). `MIND_PROACTIVE_TOKEN` is the one credential an installer-made
+mind still holds, in `pending`, until the bots story. The check reads container files, not running containers, so a container
 started from an older file passes until it is recreated; it does not follow a
 symlink inside a mounted folder it has no access to; and it does not move the
 install's settings file (a later item).
