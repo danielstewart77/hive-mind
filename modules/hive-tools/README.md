@@ -45,14 +45,16 @@ added tool is gated by default, never open by default. That seed is
 insert-if-absent: it runs for every gated tool on every start, so a replacing
 write would re-arm every gate the operator had turned off on each deploy.
 
-`HITL_WAIT_SECONDS` (default 300, five minutes; zero refuses at once; a value
-that is not a whole number falls back to 300) is how long a call is held. Five
-minutes is long enough for a person to be paged, open the hive site and
-decide, and short of the limits a caller commonly has: a shell tool call is
-two minutes by default and ten at most (`BASH_DEFAULT_TIMEOUT_MS`,
-`BASH_MAX_TIMEOUT_MS`), the hive site waits 310 seconds on a gated call, and
-the gateway's 45 second forward does not carry tool calls. A mind whose own
-tool-call limit is shorter than the wait should be given a smaller wait.
+`HITL_WAIT_SECONDS` (default 120, two minutes; zero refuses at once; a value
+that is not a whole number falls back to 120) is how long a call is held. Two
+minutes matches a shell tool's default call limit (`BASH_DEFAULT_TIMEOUT_MS`,
+120 seconds), and the hive site waits 310 seconds on a gated call, so it
+outlasts the wait. The shell's clock starts before the tools receive the call, so with both
+at two minutes the shell cuts the call first, almost every time, and the mind
+sees the shell's cut instead of the refusal (the tools then close the request
+as hung up). A wait a few seconds under the limit (for example 110) always lets
+the mind see the refusal. The gateway's 45 second forward does not carry
+tool calls.
 
 A request is decided on the hive site, by a person signed in as themselves:
 the hive site sends that person's own key to `POST /hitl/{id}/respond`, and the

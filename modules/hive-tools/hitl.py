@@ -18,11 +18,10 @@ from auth_api import require_api_token
 log = logging.getLogger(__name__)
 
 #: How long a call that needs a person's yes is held open, in seconds, when
-#: `HITL_WAIT_SECONDS` names nothing usable. Five minutes: long enough for a
-#: person to be paged, open the hive site and decide; short enough that the
-#: caller's own limits (a shell tool's default is two minutes, its maximum ten)
-#: and the hive site's 310 second gated calls outlast it with room to spare.
-HITL_WAIT_DEFAULT_SECONDS = 300
+#: `HITL_WAIT_SECONDS` names nothing usable. Two minutes, to match a shell
+#: tool's default call limit (Daniel, 27 Nov 2026); the hive site's 310 second
+#: gated calls outlast it with room to spare.
+HITL_WAIT_DEFAULT_SECONDS = 120
 
 #: The setting that overrides it. Zero means do not wait: the request is
 #: recorded for the page and the call is refused at once.
@@ -168,7 +167,7 @@ async def _check_hitl(
 
 def wait_seconds() -> int:
     """How long a call needing a person's yes is held open: the setting
-    `HITL_WAIT_SECONDS`, or five minutes when it is unset or not a whole
+    `HITL_WAIT_SECONDS`, or two minutes when it is unset or not a whole
     number of seconds. Zero means not at all: the request is recorded for the
     page and the call is refused at once. Read on each call, so a changed
     setting needs no code change."""

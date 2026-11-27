@@ -100,7 +100,7 @@ async def _request(method, url, headers, body=None, params=None, timeout=15):
         raise ValueError('A rename service could not be reached; the operation can be recovered') from None
 
 
-#: The tools hold a call that needs a person's yes open for up to five
+#: The tools hold a call that needs a person's yes open for up to two
 #: minutes (HITL_WAIT_SECONDS), so a call that may be held is waited on a
 #: little longer than that.
 HELD_CALL_TIMEOUT = 310

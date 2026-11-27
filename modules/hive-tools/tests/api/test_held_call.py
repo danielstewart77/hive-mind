@@ -25,7 +25,7 @@ import store
 from tests.held import LABEL, Clock, an_app, bearer, the_waiting_request
 from tests.scratch import RawSQL, generate_person_key, generate_token
 
-FIVE_MINUTES = 5 * 60
+WAIT = 2 * 60
 
 
 def _gmail_that_creates_label_nine() -> MagicMock:
@@ -63,7 +63,7 @@ async def _hold_a_label_call(client: httpx.AsyncClient, keys: dict[str, str],
 
 @pytest.fixture()
 def held_for_five_minutes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HITL_WAIT_SECONDS", str(FIVE_MINUTES))
+    monkeypatch.setenv("HITL_WAIT_SECONDS", str(WAIT))
 
 
 async def test_an_approval_releases_the_held_call_and_the_tool_result_is_its_reply(
@@ -129,10 +129,10 @@ async def test_no_answer_in_time_refuses_the_held_call_and_the_tool_does_not_run
     assert reply.status_code == 408
     assert reply.json()["status"] == "expired"
     assert reply.json()["approved"] is False
-    assert f"within {FIVE_MINUTES} seconds" in reply.json()["error"]
+    assert f"within {WAIT} seconds" in reply.json()["error"]
     assert "timed out" in reply.json()["error"]
-    # The five minutes were waited through, on the injected clock.
-    assert clock.t - started >= FIVE_MINUTES
+    # The wait was waited through, on the injected clock.
+    assert clock.t - started >= WAIT
     service.users().labels().create.assert_not_called()
 
 
@@ -291,7 +291,7 @@ async def test_a_wait_of_zero_refuses_at_once_and_still_records_the_request(
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("", FIVE_MINUTES), ("soon", FIVE_MINUTES), ("-4", FIVE_MINUTES),
+    ("", WAIT), ("soon", WAIT), ("-4", WAIT),
     ("90", 90), ("0", 0)])
 def test_the_wait_is_a_setting_with_five_minutes_when_it_is_missing_or_unusable(
         monkeypatch: pytest.MonkeyPatch, raw: str, expected: int) -> None:
