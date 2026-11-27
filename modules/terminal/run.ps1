@@ -52,11 +52,6 @@ if (-not (Test-Path $python)) {
 $mindPort = if ($mind['MIND_PORT']) { $mind['MIND_PORT'] } else { '8431' }
 $env:GATEWAY_API_URL = "http://127.0.0.1:$mindPort"
 
-# The image sends this as `Authorization: Bearer` on both its HTTP calls
-# and its WebSocket attach, which is exactly what guards every route on
-# the mind.
-$env:COMMS_BEARER_TOKEN = $mind['MIND_API_TOKEN']
-
 # What the mind proves itself with when it renames a conversation from
 # Telegram, and deliberately a *different* secret from the one above.
 # That one opens every route on the mind, including the attach that types

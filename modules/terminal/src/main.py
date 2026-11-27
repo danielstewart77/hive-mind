@@ -42,6 +42,7 @@ from fastapi.templating import Jinja2Templates
 
 import auth
 import route_access
+import person_key
 import terminal_access
 import store
 from auth import (
@@ -104,11 +105,17 @@ def _gateway_base_url() -> str:
     return os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424"
 
 
-def _gateway_headers() -> dict:
-    token = os.getenv("COMMS_BEARER_TOKEN", "")
-    if token:
-        return {"Authorization": f"Bearer {token}"}
-    return {}
+def _person_headers(user: dict | None) -> dict:
+    """The signed-in person's own key as the gateway's bearer, read from the
+    key folder the hive site writes. A person with no key yet gets a plain
+    409 (never 401, which signs people out). A caller that is a service and
+    not a person (the label writer) has no key to send and sends none."""
+    if not user or user.get("service"):
+        return {}
+    key = person_key.read_person_key(str(user.get("username") or ""))
+    if not key:
+        raise HTTPException(status_code=409, detail=person_key.NO_KEY_SENTENCE)
+    return {"Authorization": f"Bearer {key}"}
 
 
 def _voice_api_url() -> str:
@@ -144,27 +151,30 @@ def _login_redirect_for(request: Request) -> RedirectResponse:
     return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
 
 
-def _gateway_json_sync(path: str, params: dict | None = None) -> dict | list:
+def _gateway_json_sync(path: str, params: dict | None = None,
+                       auth_headers: dict | None = None) -> dict | list:
     query = f"?{urllib.parse.urlencode(params)}" if params else ""
     url = f"{_gateway_base_url().rstrip('/')}{path}{query}"
-    headers = {"Accept": "application/json", **_gateway_headers()}
+    headers = {"Accept": "application/json", **(auth_headers or {})}
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-async def _gateway_json(path: str, params: dict | None = None) -> dict | list:
+async def _gateway_json(path: str, params: dict | None = None,
+                        user: dict | None = None) -> dict | list:
+    auth_headers = _person_headers(user)
     try:
-        return await asyncio.to_thread(_gateway_json_sync, path, params)
+        return await asyncio.to_thread(_gateway_json_sync, path, params, auth_headers)
     except urllib.error.HTTPError as exc:
         raise HTTPException(status_code=exc.code, detail=f"Gateway request failed: {path}") from exc
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
 
 
-async def _proxy_session_events(session_id: str):
+async def _proxy_session_events(session_id: str, auth_headers: dict | None = None):
     url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}/events"
-    headers = {"Accept": "text/event-stream", **_gateway_headers()}
+    headers = {"Accept": "text/event-stream", **(auth_headers or {})}
     timeout = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
 
     try:
@@ -463,7 +473,7 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
     non-admin is shown the sessions of their own minds only.
     """
     try:
-        minds = await _gateway_json("/broker/minds")
+        minds = await _gateway_json("/broker/minds", user=user)
         if not isinstance(minds, list):
             minds = []
     except Exception:
@@ -471,7 +481,7 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
     mind_names = {m.get("id"): m.get("name", "mind") for m in minds if isinstance(m, dict)}
 
     try:
-        sessions = await _gateway_json("/sessions")
+        sessions = await _gateway_json("/sessions", user=user)
         if not isinstance(sessions, list):
             sessions = []
     except Exception:
@@ -527,10 +537,11 @@ async def api_terminal_create_session(request: Request, user: dict = Depends(req
                 detail="That mind is not yours.",
                 headers={route_access.REFUSAL_HEADER: route_access.OWNER},
             )
-    return await _create_gateway_session(mind_id)
+    return await _create_gateway_session(mind_id, user)
 
 
-async def _create_gateway_session(mind_id: str) -> dict:
+async def _create_gateway_session(mind_id: str, user: dict | None = None) -> dict:
+    auth_headers = _person_headers(user)
     # client_ref is the primary key of the gateway's active_sessions binding
     # table, so it has to be unique per terminal tile. A shared constant makes
     # every open tile overwrite the same row: rotation arms the wrong session
@@ -553,7 +564,7 @@ async def _create_gateway_session(mind_id: str) -> dict:
         }).encode()
         req = urllib.request.Request(
             url, data=data,
-            headers={"Content-Type": "application/json", **_gateway_headers()},
+            headers={"Content-Type": "application/json", **auth_headers},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -571,14 +582,14 @@ async def _create_gateway_session(mind_id: str) -> dict:
 @app.get("/api/minds")
 async def api_minds(user: dict = Depends(require_auth)):
     """The minds this user may open a session on: all of them to an admin."""
-    minds = await _gateway_json("/broker/minds")
+    minds = await _gateway_json("/broker/minds", user=user)
     minds = [m for m in minds if isinstance(m, dict)] if isinstance(minds, list) else []
     return JSONResponse(
         route_access.visible_minds(user, minds), headers={"Cache-Control": "no-store"}
     )
 
 
-def _rename_headers() -> dict:
+def _rename_headers(user: dict | None = None) -> dict:
     """The gateway headers plus the one credential that may change a name.
 
     Two credentials on one request, deliberately. The service token gets past
@@ -588,7 +599,7 @@ def _rename_headers() -> dict:
     why the capability was never guarded by the key that opens everything.
     """
     token = os.getenv("TERMINAL_LABELS_TOKEN", "")
-    headers = dict(_gateway_headers())
+    headers = dict(_person_headers(user))
     if token:
         headers["X-Rename-Token"] = token
     return headers
@@ -631,12 +642,12 @@ async def api_terminal_labels(user: dict = Depends(require_auth_or_label_writer)
     A non-admin gets the names of their own minds' sessions; the label writer
     and an admin get every name.
     """
-    names = await _gateway_json("/sessions/names")
+    names = await _gateway_json("/sessions/names", user=user)
     if not isinstance(names, dict):
         names = {}
     if not (user.get("service") or user.get("is_admin")):
         minds, sessions = await asyncio.gather(
-            _gateway_json("/broker/minds"), _gateway_json("/sessions")
+            _gateway_json("/broker/minds", user=user), _gateway_json("/sessions", user=user)
         )
         minds = [m for m in minds if isinstance(m, dict)] if isinstance(minds, list) else []
         sessions = sessions if isinstance(sessions, list) else []
@@ -672,7 +683,6 @@ async def api_terminal_label_put(
     conversation has rotated away and the name landed nowhere — reported as a
     refusal rather than the 200 that used to be indistinguishable from success.
     """
-    del user
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="expected an object")
@@ -684,11 +694,13 @@ async def api_terminal_label_put(
     if not payload:
         raise HTTPException(status_code=400, detail="nothing to set")
 
+    rename_headers = _rename_headers(user)
+
     def _do_put():
         request_ = urllib.request.Request(
             f"{_gateway_base_url().rstrip('/')}/sessions/{urllib.parse.quote(session_id)}/name",
             data=json.dumps(payload).encode("utf-8"),
-            headers={**_rename_headers(), "Content-Type": "application/json"},
+            headers={**rename_headers, "Content-Type": "application/json"},
             method="PUT",
         )
         with urllib.request.urlopen(request_, timeout=15) as resp:
@@ -784,12 +796,18 @@ async def ws_terminal_attach(websocket: WebSocket, session_id: str):
     socket is open, so a disable, a reset or an owner moved closes it.
     """
     await websocket.accept()
+    user = await auth.get_current_user_from_request(websocket)
+    try:
+        auth_headers = _person_headers(user)
+    except HTTPException as exc:
+        await websocket.close(code=1008, reason=str(exc.detail))
+        return
     cols = websocket.query_params.get("cols") or "80"
     rows = websocket.query_params.get("rows") or "24"
     try:
         async with websockets.connect(
             _gateway_ws_url(session_id, cols=cols, rows=rows),
-            additional_headers=_gateway_headers(),
+            additional_headers=auth_headers,
         ) as mind_ws:
             await _pump_terminal_ws(websocket, mind_ws)
             code = _relayable_close_code(mind_ws.close_code)
@@ -806,9 +824,8 @@ async def ws_terminal_attach(websocket: WebSocket, session_id: str):
 async def api_console_stream(session_id: str, user: dict = Depends(require_auth)):
     """The session's events. The route table decides this stream again every
     30 seconds while it is open, and ends it once the answer changes."""
-    del user
     return StreamingResponse(
-        _proxy_session_events(session_id),
+        _proxy_session_events(session_id, _person_headers(user)),
         media_type="text/event-stream",
         headers={
             # SSE must never be buffered by intermediaries — a buffered
@@ -820,14 +837,15 @@ async def api_console_stream(session_id: str, user: dict = Depends(require_auth)
     )
 
 
-async def _drain_gateway_message(session_id: str, text: str) -> None:
+async def _drain_gateway_message(session_id: str, text: str,
+                                 auth_headers: dict | None = None) -> None:
     url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}/message"
 
     def _do_post():
         data = json.dumps({"content": text}).encode()
         req = urllib.request.Request(
             url, data=data,
-            headers={"Content-Type": "application/json", **_gateway_headers()},
+            headers={"Content-Type": "application/json", **(auth_headers or {})},
         )
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
@@ -845,23 +863,24 @@ async def _drain_gateway_message(session_id: str, text: str) -> None:
 async def api_console_send_message(
     session_id: str, request: Request, user: dict = Depends(require_auth)
 ):
-    del user
+    auth_headers = _person_headers(user)
     body = await request.json()
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
-    asyncio.create_task(_drain_gateway_message(session_id, text))
+    asyncio.create_task(_drain_gateway_message(session_id, text, auth_headers))
     return {"status": "sent"}
 
 
 async def _gateway_session_action(
-    session_id: str, action: str, body: dict | None = None
+    session_id: str, action: str, body: dict | None = None, user: dict | None = None
 ) -> dict:
+    auth_headers = _person_headers(user)
     data = json.dumps(body).encode() if body is not None else None
 
     def _do_post():
         url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}/{action}"
-        headers = _gateway_headers()
+        headers = dict(auth_headers)
         if data is not None:
             headers = {"Content-Type": "application/json", **headers}
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -880,19 +899,18 @@ async def _gateway_session_action(
 async def api_terminal_session_suspend(
     session_id: str, user: dict = Depends(require_auth)
 ):
-    del user
-    return await _gateway_session_action(session_id, "suspend")
+    return await _gateway_session_action(session_id, "suspend", user=user)
 
 
 @app.post("/api/terminal/sessions/{session_id}/resume")
 async def api_terminal_session_resume(
     session_id: str, user: dict = Depends(require_auth)
 ):
-    del user
     return await _gateway_session_action(
         session_id,
         "resume",
         {"client_type": "web", "client_ref": f"terminal-{uuid.uuid4()}"},
+        user=user,
     )
 
 
@@ -912,11 +930,11 @@ async def api_terminal_session_end(
     session id, and a row nobody can reach again is a name nobody can
     delete again.
     """
-    del user
+    auth_headers = _person_headers(user)
 
     def _do_delete():
         url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
-        req = urllib.request.Request(url, headers=_gateway_headers(), method="DELETE")
+        req = urllib.request.Request(url, headers=auth_headers, method="DELETE")
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8") or "{}")
 

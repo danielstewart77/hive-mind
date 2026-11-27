@@ -293,3 +293,14 @@ def pytest_pyfunc_call(pyfuncitem):
     }
     accounts.run(func(**kwargs))
     return True
+
+
+@pytest.fixture(autouse=True)
+def _everyone_has_a_key(tmp_path, monkeypatch):
+    """The terminal site sends the signed-in person's own key to the gateway,
+    read from the key folder, so each person these suites sign in as has a
+    key file in a scratch key folder."""
+    import person_key_support
+
+    for name in (SEED_USERNAME, "daniel", "sloan", "aiden", "browser-test"):
+        person_key_support.give_key(tmp_path, monkeypatch, name)

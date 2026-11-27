@@ -65,7 +65,7 @@ network (to reach `hive-comms`, the voice server and the hive's Postgres).
 so a change to it reaches this site by a rebuild; route changes need a
 container restart.
 
-`.env` keys: `COMMS_BEARER_TOKEN`; (`hive_site` and `hive_data` are build
+`.env` keys: (`hive_site` and `hive_data` are build
 contexts taken from `../hive/hive_site` and `../hive-data` inside the hive-mind
 checkout; `HIVE_DATA_DIR` and `HIVE_SITE_DIR` are no longer read);
 `HIVE_DATABASE_URL` (required); `HIVE_SECRET_KEY` only if

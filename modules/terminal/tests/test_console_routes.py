@@ -99,7 +99,7 @@ def test_login_sets_cookie_and_redirects(tmp_path, monkeypatch):
 def test_console_stream_proxies_sse(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
 
-    async def fake_proxy(session_id):
+    async def fake_proxy(session_id, *a, **kw):
         yield "data: {\"type\":\"assistant\",\"content\":\"hello\"}\n\n"
 
     with patch("main._proxy_session_events", side_effect=fake_proxy):
@@ -147,7 +147,7 @@ def test_console_stream_sets_anti_buffering_headers(tmp_path, monkeypatch):
     buffered SSE arrives in delayed bursts and loses events on idle cuts."""
     client = _authed_client(tmp_path, monkeypatch)
 
-    async def fake_proxy(session_id):
+    async def fake_proxy(session_id, *a, **kw):
         yield "data: {\"type\":\"ping\"}\n\n"
 
     with patch("main._proxy_session_events", side_effect=fake_proxy):
