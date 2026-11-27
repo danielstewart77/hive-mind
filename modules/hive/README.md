@@ -107,8 +107,8 @@ afterward), and `HIVE_SECRET_KEY` signs session cookies — left unset, a
 random key is generated once and kept in the store, which the terminal site
 shares. With `AUTH_SERVICE_URL` set (or the backend named `auth-service` in
 `HIVE_AUTH_BACKEND`) the console signs in through auth-service instead, as site `hive`
-(`AUTH_SERVICE_SITE`), managing users over its admin API with
-`AUTH_SERVICE_ADMIN_TOKEN`; a `hive_session` cookie is then no session, and
+(`AUTH_SERVICE_SITE`), managing users over its admin API with the signed-in
+administrator's own session (no admin token); a `hive_session` cookie is then no session, and
 an unreachable auth-service is "sign-in service unavailable", never a fall
 back to the built-in accounts.
 

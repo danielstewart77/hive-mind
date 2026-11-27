@@ -20,8 +20,8 @@ One interface, two backings, chosen by configuration:
 - `auth-service` — the sparktobloom sign-in (`AUTH_SERVICE_URL`). The
   session is auth-service's own `auth_session` token, verified on every
   request with `/verify?site=hive` and never cached, so a disable lands on
-  the very next request. Admin operations go to its `/admin` API behind
-  `AUTH_SERVICE_ADMIN_TOKEN`. When it cannot be reached the console says
+  the very next request. Admin operations go to its `/admin` API with the
+  signed-in administrator's own session. When it cannot be reached the console says
   "sign-in service unavailable"; it never falls back to the built-in store.
 
 `HIVE_AUTH_BACKEND` names the backing; left unset, auth-service is used
@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import os
@@ -598,15 +599,22 @@ def _is_duplicate(exc: BaseException) -> bool:
 # ── auth-service ────────────────────────────────────────────────────────
 
 
+#: The auth-service session of the person whose request is being served, set by
+#: `require_auth`. An administrator's change to people is made with it: the
+#: authentication service lets a signed-in member of `admins` through, so the
+#: hive site holds no key that stands for an administrator.
+_acting_token: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "hive_acting_auth_token", default="")
+
+
 class AuthServiceStore:
     """The sparktobloom sign-in, spoken to over its HTTP contract."""
 
     cookie_name = AUTH_SERVICE_COOKIE_NAME
 
-    def __init__(self, url: str, admin_token: str, site: str = "hive",
+    def __init__(self, url: str, site: str = "hive",
                  timeout: float = 5.0):
         self._url = url.rstrip("/")
-        self._admin_token = admin_token
         self._site = site
         self._timeout = timeout
         #: One client per event loop, not one per store and not one per call.
@@ -641,11 +649,11 @@ class AuthServiceStore:
             raise ServiceUnavailable()
         headers = {}
         if admin:
-            if not self._admin_token:
-                raise ServiceUnavailable(
-                    "Sign-in service unavailable: no admin token is configured."
-                )
-            headers["Authorization"] = f"Bearer {self._admin_token}"
+            acting = _acting_token.get()
+            if not acting:
+                raise SignInRefused(
+                    "Sign in with your password to manage people.")
+            headers["Authorization"] = f"Bearer {acting}"
         elif bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         try:
@@ -654,8 +662,12 @@ class AuthServiceStore:
             )
         except httpx.HTTPError as exc:
             raise ServiceUnavailable() from exc
-        if response.status_code >= 500 or (admin and response.status_code == 401):
+        if response.status_code >= 500:
             raise ServiceUnavailable()
+        if admin and response.status_code == 401:
+            raise SignInRefused("Sign in again to manage people.")
+        if admin and response.status_code == 403:
+            raise NotGranted("Only an administrator can manage people.")
         return response
 
     @staticmethod
@@ -729,44 +741,25 @@ class AuthServiceStore:
         if token:
             await self._call("POST", "/logout", bearer=token)
 
-    async def _raw_user(self, username: str) -> dict | None:
-        response = await self._call(
-            "GET", f"/admin/users/{normalize_username(username)}", admin=True
-        )
-        if response.status_code != 200:
-            return None
-        return response.json()
-
     async def sso_version(self, username: str) -> int:
         del username
         return 0
 
     async def sso_user(self, username: str, version: int) -> dict | None:
-        """The account behind a Microsoft session, read afresh from the
-        admin API on every request so a disable lands at once. An account
-        not granted the hive is no session here, as with /verify — which
-        counts every admin as granted, so this does too."""
-        del version
-        row = await self._raw_user(username)
-        if not row or row.get("disabled"):
-            return None
-        view = self._admin_view(row)
-        sites = {str(s).lower() for s in row.get("sites") or []}
-        if self._site.lower() not in sites and not view["is_admin"]:
-            return None
-        return dict(view, must_change=False)
+        """STOPPED (story 909): a Microsoft session is no auth-service session
+        and carries no person's key, and the hive site holds no key of its own
+        to read the account with. On this backing a Microsoft session is no
+        session."""
+        del username, version
+        return None
 
     async def find_user(
         self, *, email: str | None = None, domain_account: str | None = None
     ) -> dict | None:
-        """The account with this email. auth-service holds no domain
-        accounts, so a domain account matches nobody."""
-        wanted = (email or "").strip().lower()
-        if domain_account or not wanted:
-            return None
-        for row in (await self._admin("GET", "/admin/users")).json():
-            if str(row.get("email") or "").strip().lower() == wanted:
-                return self._admin_view(row)
+        """STOPPED (story 909): finding a person by email for a first Microsoft
+        sign-in needs an administrator's own key and nobody is signed in yet.
+        This backing finds nobody."""
+        del email, domain_account
         return None
 
     async def change_password(self, token: str, current: str, new: str) -> str:
@@ -886,7 +879,7 @@ class AuthServiceStore:
 
 # ── which store ─────────────────────────────────────────────────────────
 
-_auth_service_stores: dict[tuple[str, str, str], AuthServiceStore] = {}
+_auth_service_stores: dict[tuple[str, str], AuthServiceStore] = {}
 
 
 def backend_name() -> str:
@@ -902,7 +895,6 @@ def get_store() -> Store:
         return BuiltinStore()
     key = (
         os.getenv("AUTH_SERVICE_URL", "").strip(),
-        os.getenv("AUTH_SERVICE_ADMIN_TOKEN", ""),
         os.getenv("AUTH_SERVICE_SITE", "hive").strip() or "hive",
     )
     store = _auth_service_stores.get(key)
@@ -1057,6 +1049,9 @@ async def require_auth(request: Request) -> dict[str, Any]:
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
+    store = get_store()
+    if isinstance(store, AuthServiceStore):
+        _acting_token.set(session_token(request, store))
     return user
 
 

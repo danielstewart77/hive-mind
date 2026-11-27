@@ -6,7 +6,6 @@ import accounts
 import pytest
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from multiuser_support import (
-    AUTH_SERVICE_ADMIN_TOKEN,
     SEED_PASSWORD,
     SEED_USERNAME,
     AuthServiceProcess,
@@ -22,11 +21,10 @@ SHIPPED_SECRET = "change-this-in-production"  # secret-guard: allow
 def _use_auth_service(monkeypatch, url):
     monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
     monkeypatch.setenv("AUTH_SERVICE_URL", url)
-    monkeypatch.setenv("AUTH_SERVICE_ADMIN_TOKEN", AUTH_SERVICE_ADMIN_TOKEN)
 
 
 def _no_auth_service(monkeypatch):
-    for name in ("HIVE_AUTH_BACKEND", "AUTH_SERVICE_URL", "AUTH_SERVICE_ADMIN_TOKEN"):
+    for name in ("HIVE_AUTH_BACKEND", "AUTH_SERVICE_URL"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -46,7 +44,6 @@ def test_the_console_signs_in_against_hive_db_unless_auth_service_is_configured(
         service.admin("PUT", f"/admin/users/{SEED_USERNAME}/sites/hive")
         # AUTH_SERVICE_URL alone selects it: no backend named.
         monkeypatch.setenv("AUTH_SERVICE_URL", service.url)
-        monkeypatch.setenv("AUTH_SERVICE_ADMIN_TOKEN", AUTH_SERVICE_ADMIN_TOKEN)
 
         _, refused = console.sign_in("local-only", "local-only-pass")
         assert refused.status_code == 401
@@ -121,7 +118,7 @@ def test_the_sign_in_client_is_one_per_event_loop() -> None:
     first reuse, and rebuilt per call it costs a TLS handshake on `/verify`,
     which runs on every single request the console serves.
     """
-    store = auth.AuthServiceStore("http://auth-service.invalid", "a-token")
+    store = auth.AuthServiceStore("http://auth-service.invalid")
 
     async def twice() -> tuple[object, object]:
         return store._loop_client(), store._loop_client()
