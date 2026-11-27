@@ -613,8 +613,7 @@ async def move_mind(name: str) -> dict[str, Any]:
                 pass
             return {
                 "mind": holder,
-                "services": [{"service": s.key, "label": s.label, "status": "moved"} for s in services]
-
+                "services": [{"service": s.key, "label": s.label, "status": "moved"} for s in services],
                 "stored": f"{target.file}:{target.env_key}",
                 "compose": compose,
                 "restart_target": target.restart_target,
