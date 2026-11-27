@@ -34,7 +34,10 @@ async def _direct_for_tests(url):
 
 def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("DESIGN_PUSH_TOKEN", PUSH_TOKEN)
+    # A mind publishes with its own key, recognised from the one record.
+    from .mind_key_support import a_mind_with_a_key
+
+    a_mind_with_a_key(PUSH_TOKEN, "publisher")
     # The house tokens are removed, not left to the invoking shell. Every
     # mind in the hive holds both, so a fallback to either is the whole
     # threat this credential exists to close — and on Daniel's own machine
@@ -145,15 +148,19 @@ def test_daniels_browser_login_is_accepted(daniel):
     assert response.status_code == 200
 
 
-def test_the_push_routes_refuse_when_no_token_is_configured(tmp_path, monkeypatch):
+def test_the_design_routes_refuse_the_old_push_setting_and_a_persons_key(tmp_path, monkeypatch):
+    """No setting of this site stands for a mind: a value in
+    DESIGN_PUSH_TOKEN opens nothing, and a person's own key is not a mind's."""
+    from .mind_key_support import a_person_with_a_key
+
     _env(tmp_path, monkeypatch)
-    monkeypatch.delenv("DESIGN_PUSH_TOKEN", raising=False)
-    client = TestClient(main_mod.app)
-    client.headers.update({"Authorization": "Bearer anything"})
+    monkeypatch.setenv("DESIGN_PUSH_TOKEN", "a-setting-value")
+    a_person_with_a_key("a-persons-own-key", "sloan")
 
-    response = client.get(f"{main_mod.DESIGN_PREFIX}/sessions")
-
-    assert response.status_code == 503
+    for bearer in ("a-setting-value", "a-persons-own-key"):
+        client = TestClient(main_mod.app)
+        client.headers.update({"Authorization": f"Bearer {bearer}"})
+        assert client.get(f"{main_mod.DESIGN_PREFIX}/sessions").status_code == 401, bearer
 
 
 def test_a_session_created_by_the_mind_is_listed_for_daniel(mind, tmp_path, monkeypatch):

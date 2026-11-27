@@ -425,7 +425,8 @@ def _login_redirect_for(request: Request) -> RedirectResponse:
     path = request.url.path
     # A decision is posted, and a sign-in lands on a page by GET: after signing
     # in the person is put on the request they were deciding, not on a path
-    # that answers a GET with 405.
+    # that answers a GET with 405. (The route table sends a signed-out post
+    # here first; this is the same rule for a post that gets past it.)
     decision = re.fullmatch(r"(/approvals/[^/]+)/decision", path)
     if decision:
         path = decision.group(1)

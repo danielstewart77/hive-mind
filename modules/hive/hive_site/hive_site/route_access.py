@@ -108,6 +108,11 @@ class Rule:
     bearer: str | tuple[str, ...] | None = None
     # A `user` rule only for these parameter values; any other is `admin`.
     only_when: tuple[tuple[str, frozenset[str]], ...] = ()
+    # For a form a person posts: the page (a path, with the route's own path
+    # parameters) to land on after signing in. A signed-out post is then sent
+    # to sign-in as a page would be, and comes back to this page by GET, never
+    # to the posted path, which answers a GET with 405.
+    lands_on: str | None = None
 
     @property
     def bearers(self) -> tuple[str, ...]:
@@ -454,7 +459,8 @@ class AccessMiddleware:
             WEBSOCKET if is_socket else scope["method"]
         )
         rule = self.table.rule_for(method, getattr(route, "path", ""))
-        page = not is_socket and _wants_page(route, method)
+        page = not is_socket and (
+            _wants_page(route, method) or (rule.lands_on is not None and method == "POST"))
 
         authorization = _authorization_headers(scope)
         if len(authorization) > 1:
@@ -610,7 +616,8 @@ class AccessMiddleware:
             _ACTING.set(auth.normalize_username(str(user.get("username") or "")) or None)
         if user is None:
             if page:
-                target = urllib.parse.quote(conn.url.path, safe="/")
+                path = rule.lands_on.format(**params) if rule.lands_on else conn.url.path
+                target = urllib.parse.quote(path, safe="/")
                 return RedirectResponse(f"{LOGIN_PATH}?next={target}", 303)
             return JSONResponse({"detail": "Authentication required"}, 401)
         if user.get("must_change") and rule.kind != SELF:

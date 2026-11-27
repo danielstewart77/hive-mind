@@ -248,8 +248,13 @@ def test_the_migration_routes_answer_to_an_admin_or_the_operators_bearer_and_to_
     from starlette.testclient import TestClient
     import main
 
-    monkeypatch.setenv("HIVE_OPERATOR_KEY", "operator-bearer-0123456789")  # secret-guard: allow
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "a-minds-gateway-key-0123456789")  # secret-guard: allow
+    from .mind_key_support import a_mind_with_a_key, a_person_with_a_key
+
+    # The operator's key is an administrator's own, from the one record; a
+    # mind's key and a non-administrator's are not it.
+    a_person_with_a_key("operator-bearer-0123456789", "operator", admin=True)  # secret-guard: allow
+    a_person_with_a_key("a-plain-persons-key-0123456789", "plain", admin=False)  # secret-guard: allow
+    a_mind_with_a_key("a-minds-gateway-key-0123456789", "some-mind")  # secret-guard: allow
     seen = []
 
     async def report():
@@ -265,7 +270,7 @@ def test_the_migration_routes_answer_to_an_admin_or_the_operators_bearer_and_to_
     assert admin.get(path).status_code == 200
     assert sloan.get(path).status_code == 403
     anonymous = TestClient(main.app)
-    for bearer in ("a-minds-gateway-key-0123456789", "wrong", ""):  # secret-guard: allow
+    for bearer in ("a-minds-gateway-key-0123456789", "a-plain-persons-key-0123456789", "wrong", ""):  # secret-guard: allow
         refused = anonymous.get(path, headers={"Authorization": f"Bearer {bearer}"})
         assert refused.status_code in (401, 403), bearer
     assert anonymous.post(path + "/retire", headers={
@@ -370,7 +375,6 @@ def test_a_move_and_an_undo_through_the_routes_clear_the_credential_check_cache_
     cleared = []
     monkeypatch.setattr(credential_registry, "forget_all", lambda: cleared.append(1))
     monkeypatch.delenv("HIVE_OPERATOR_KEY", raising=False)
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", ADA_COMMS)
     admin = builtin_console.admin()
     base = "/api/settings/key-migration/ada"
 

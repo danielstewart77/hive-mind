@@ -13,7 +13,10 @@ from hive_site.testing import run
 
 
 def _client(tmp_path, monkeypatch, token="draw-token"):
-    monkeypatch.setenv("CANVAS_PUSH_TOKEN", token)
+    # A mind draws with its own key, recognised from the one record of keys.
+    from .mind_key_support import a_mind_with_a_key
+
+    a_mind_with_a_key(token)
     # Keep canvas state writes off the real repo data dir.
     monkeypatch.setattr(main_mod, "_canvas_state_path", lambda: tmp_path / "canvas_state.json")
     monkeypatch.setattr(main_mod, "_canvas_elements", [])
@@ -77,22 +80,22 @@ def test_canvas_push_rejects_unknown_type(tmp_path, monkeypatch):
     assert main_mod._canvas_elements == []
 
 
-def test_canvas_push_falls_back_to_comms_token(tmp_path, monkeypatch):
-    monkeypatch.delenv("CANVAS_PUSH_TOKEN", raising=False)
+def test_canvas_push_refuses_the_house_gateway_value_and_a_persons_key(tmp_path, monkeypatch):
+    """No value this site holds stands for a mind: the old gateway value in
+    the environment draws nothing, and neither does a person's own key."""
+    from .mind_key_support import a_person_with_a_key
+
+    client = _client(tmp_path, monkeypatch)
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "house-token")
-    monkeypatch.setattr(main_mod, "_canvas_state_path", lambda: tmp_path / "canvas_state.json")
-    monkeypatch.setattr(main_mod, "_canvas_elements", [])
-    client = TestClient(main_mod.app)
+    monkeypatch.setenv("CANVAS_PUSH_TOKEN", "house-token")
+    a_person_with_a_key("a-persons-own-key", "sloan")
+    body = {"type": "path", "d": "M0,0 L10,10", "color": "#c9a84c", "sw": 2}
 
-    response = client.post(
-        "/canvas/push",
-        json={"type": "path", "d": "M0,0 L10,10", "color": "#c9a84c", "sw": 2},
-        headers={"Authorization": "Bearer house-token"},
-    )
-
-    assert response.status_code == 200
-    assert len(main_mod._canvas_elements) == 1
-    assert main_mod._canvas_elements[0]["d"] == "M0,0 L10,10"
+    for bearer in ("house-token", "a-persons-own-key"):
+        refused = client.post("/canvas/push", json=body,
+                              headers={"Authorization": f"Bearer {bearer}"})
+        assert refused.status_code == 401, bearer
+    assert main_mod._canvas_elements == []
 
 
 # ── Render snapshot ──────────────────────────────────────────────────────────

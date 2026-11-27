@@ -206,6 +206,11 @@ TABLE.add(
     Rule(USER),
     "GET /approvals",
     "GET /approvals/{request_id}",
+)
+# A decision is a form post: signed out, the person is sent to sign in and
+# lands back on the request they were deciding.
+TABLE.add(
+    Rule(USER, lands_on="/approvals/{request_id}"),
     "POST /approvals/{request_id}/decision",
 )
 

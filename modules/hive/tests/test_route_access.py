@@ -284,8 +284,7 @@ def test_a_bearer_route_refuses_a_wrong_or_doubled_authorization_to_a_non_admin_
     people, monkeypatch, method, path, body, authorization
 ):
     _, sloan = people
-    monkeypatch.setenv("CANVAS_PUSH_TOKEN", "the-canvas-token")
-    monkeypatch.setenv("DESIGN_PUSH_TOKEN", "the-design-token")
+    _a_mind_holding("operator", "the-canvas-token", name="a-drawer")
 
     for who, client in (("sloan", sloan), ("anonymous", _anonymous())):
         response = client.request(method, path, json=body, headers=authorization)
@@ -293,8 +292,7 @@ def test_a_bearer_route_refuses_a_wrong_or_doubled_authorization_to_a_non_admin_
 
 
 def test_a_bearer_is_admitted_whatever_the_case_of_its_scheme(people, monkeypatch):
-    monkeypatch.setenv("CANVAS_PUSH_TOKEN", "the-canvas-token")
-    monkeypatch.setenv("DESIGN_PUSH_TOKEN", "the-design-token")
+    _a_mind_holding("operator", "the-canvas-token", name="a-drawer")
     client = _anonymous()
 
     svg = client.get(
@@ -305,7 +303,7 @@ def test_a_bearer_is_admitted_whatever_the_case_of_its_scheme(people, monkeypatc
     assert svg.headers["content-type"].startswith("image/svg+xml")
     listed = client.get(
         "/api/design/sessions",
-        headers={"authorization": "BEARER the-design-token"},  # secret-guard: allow
+        headers={"authorization": "BEARER the-canvas-token"},  # secret-guard: allow
     )
     assert listed.status_code == 200, listed.text
 
@@ -379,7 +377,8 @@ def test_the_canvas_review_tells_the_mind_to_fetch_the_snapshot_with_its_bearer(
     (sent,) = [r for r in fake_comms.received if r["path"] == "/broker/messages"]
     content = json.loads(sent["body"])["content"]
     assert "https://testserver/canvas/render.svg" in content
-    assert "Authorization: Bearer $CANVAS_PUSH_TOKEN" in content
+    assert "Authorization: Bearer $MIND_KEY" in content
+    assert "CANVAS_PUSH_TOKEN" not in content
 
 
 def test_the_board_bearer_is_attached_to_the_board_and_no_others():
