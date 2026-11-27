@@ -11,8 +11,8 @@ install's specifics back. The workflow is Chief of Staff. Its documents are
 in `docs/workflows/chief-of-staff/` in the published code you carry
 (`$HIVE_PROJECT_DIR`, else your working directory; if you cannot find them,
 ask the owner where they are). `roles` below is
-`python3 "$HIVE_PROJECT_DIR/tools/stateless/roles/roles.py"`; its credentials,
-`HIVE_SITE_URL` and `ROLES_PUSH_TOKEN`, are in your environment. Never print
+`python3 "$HIVE_PROJECT_DIR/tools/stateless/roles/roles.py"`; it uses your own key
+(`MIND_KEY`) and `HIVE_SITE_URL`, both in your environment. Never print
 a credential and never put one on a command line. When unsure of a command's
 shape, run it with `--help` and use the shape it shows exactly.
 
