@@ -754,22 +754,14 @@ _LOOKUP_COLUMNS = (
     '"username", "role", "created_at", "revoked_at", "ends_at"')
 
 
-async def _in_unit(unit: Unit | None, work: Any) -> Any:
-    """Run `work(unit)` inside the caller's unit, or in one of its own."""
-    if unit is not None:
-        return await work(unit)
-    from .unit import transaction
-    async with transaction() as own:
-        return await work(own)
-
-
-async def _end_sign_ins_of(unit: Unit, username: str, at: float) -> int:
-    result = await unit.execute(
-        'UPDATE core."credentials" SET "revoked_at" = $2 '
-        'WHERE "username" = $1 AND "ends_at" IS NOT NULL '
-        'AND "revoked_at" IS NULL',
-        username, at)
-    return int(result["rows"])
+#: Ends every sign-in of one person, as one more arm of a statement that does
+#: something else to the record. A data-modifying part of a statement runs
+#: whether or not anything reads it, and with the rest of the statement or not
+#: at all.
+_END_SIGN_INS = (
+    'UPDATE core."credentials" SET "revoked_at" = {at} '
+    'WHERE "username" = {who} AND "ends_at" IS NOT NULL '
+    'AND "revoked_at" IS NULL')
 
 
 async def upsert_credential(
@@ -778,7 +770,8 @@ async def upsert_credential(
     unit: Unit | None = None,
 ) -> Row:
     """Record a holder's long-lived key. A person's own key that is replaced
-    ends that person's sign-ins in the same write (feature 834, requirement 42)."""
+    ends that person's sign-ins in the same statement (feature 834,
+    requirement 42)."""
     values = _sql.passed({
         "holder": holder, "username": username, "role": role,
         "token_sha": token_sha, "created_at": created_at,
@@ -790,33 +783,29 @@ async def upsert_credential(
         "credentials", values,
         on_conflict=f'ON CONFLICT ("holder") DO UPDATE SET {assignments}',
         returning=COLUMNS["credentials"])
-
-    async def write(unit: Unit) -> Row:
-        row = await unit.execute_returning(sql, *args)
-        if role == "user":
-            await _end_sign_ins_of(unit, str(username), now())
-        return row
-
-    return await _in_unit(unit, write)
+    if role == "user":
+        n = len(args)
+        sql = (f'WITH "recorded" AS ({sql}), "ended" AS ('
+               + _END_SIGN_INS.format(at=f"${n + 1}", who=f"${n + 2}")
+               + ' RETURNING 1) SELECT * FROM "recorded"')
+        args = [*args, now(), str(username)]
+    return await _execute_returning(unit, sql, *args)
 
 
 async def revoke_credential(holder: str, revoked_at: float, *,
                             unit: Unit | None = None) -> Row:
-    sql, args = _sql.update(
-        "credentials", {"revoked_at": revoked_at}, {"holder": holder},
-        settable=frozenset({"revoked_at"}))
-
-    async def write(unit: Unit) -> Row:
-        found = await unit.fetch_one(
-            'SELECT "role" FROM core."credentials" WHERE "holder" = $1', holder)
-        result = await unit.execute(sql, *args)
-        if found is None or found["role"] == "user":
-            # Cutting a person's key off cuts their sign-ins off with it,
-            # and a person with no long-lived key still has sign-ins to end.
-            await _end_sign_ins_of(unit, holder, revoked_at)
-        return result
-
-    return await _in_unit(unit, write)
+    """Cut a holder's key off. Cutting off a person's own key (or a person
+    who holds none) cuts their sign-ins off in the same statement."""
+    result = await _fetch_one(
+        unit,
+        'WITH "cut" AS (UPDATE core."credentials" SET "revoked_at" = $2 '
+        'WHERE "holder" = $1 RETURNING 1), "ended" AS ('
+        + _END_SIGN_INS.format(at="$2", who="$1")
+        + ' AND NOT EXISTS (SELECT 1 FROM core."credentials" '
+        'WHERE "holder" = $1 AND "role" <> \'user\') RETURNING 1) '
+        'SELECT count(*) AS "n" FROM "cut"',
+        holder, revoked_at)
+    return written(int(result["n"]))
 
 
 async def record_sign_in(
@@ -834,17 +823,19 @@ async def record_sign_in(
     if not ends_at > created:
         raise ValueError("a sign-in ends after the moment it was made")
 
-    async def write(unit: Unit) -> Row:
-        await _clear_ended(unit, created)
-        return await unit.execute_returning(
-            'INSERT INTO core."credentials" '
-            '("holder", "username", "role", "token_sha", "created_at", "ends_at") '
-            'VALUES ($1, $2, \'user\', $3, $4, $5) '
-            'RETURNING "holder", "username", "role", "created_at", "ends_at"',
-            SIGN_IN_HOLDER_PREFIX + token_sha[:32], username, token_sha,
-            created, ends_at)
-
-    return await _in_unit(unit, write)
+    # One statement: the ended entries are cleared and the new one lands
+    # together, with no unit opened (callers run inside generators).
+    return await _execute_returning(
+        unit,
+        'WITH "cleared" AS (DELETE FROM core."credentials" '
+        'WHERE "ends_at" IS NOT NULL '
+        'AND ("ends_at" <= $6 OR "revoked_at" IS NOT NULL) RETURNING 1) '
+        'INSERT INTO core."credentials" '
+        '("holder", "username", "role", "token_sha", "created_at", "ends_at") '
+        'VALUES ($1, $2, \'user\', $3, $4, $5) '
+        'RETURNING "holder", "username", "role", "created_at", "ends_at"',
+        SIGN_IN_HOLDER_PREFIX + token_sha[:32], username, token_sha,
+        created, ends_at, created)
 
 
 async def end_sign_in(token_sha: str, *, at: float | None = None,
@@ -863,18 +854,9 @@ async def end_sign_ins(username: str, *, at: float | None = None,
                        unit: Unit | None = None) -> Row:
     """End every sign-in of one person: one action."""
     moment = now() if at is None else at
-
-    async def write(unit: Unit) -> Row:
-        return {"rows": await _end_sign_ins_of(unit, username, moment)}
-
-    return await _in_unit(unit, write)
-
-
-async def _clear_ended(unit: Unit, at: float) -> int:
-    result = await unit.execute(
-        'DELETE FROM core."credentials" WHERE "ends_at" IS NOT NULL '
-        'AND ("ends_at" <= $1 OR "revoked_at" IS NOT NULL)', at)
-    return int(result["rows"])
+    return await _execute(
+        unit,
+        _END_SIGN_INS.format(at="$2", who="$1"), username, moment)
 
 
 async def clear_ended_sign_ins(*, at: float | None = None,
@@ -882,11 +864,10 @@ async def clear_ended_sign_ins(*, at: float | None = None,
     """Remove the sign-ins that have ended or run out. Long-lived keys are
     never removed here: a cut-off key stays, so the console can say so."""
     moment = now() if at is None else at
-
-    async def write(unit: Unit) -> Row:
-        return {"rows": await _clear_ended(unit, moment)}
-
-    return await _in_unit(unit, write)
+    return await _execute(
+        unit,
+        'DELETE FROM core."credentials" WHERE "ends_at" IS NOT NULL '
+        'AND ("ends_at" <= $1 OR "revoked_at" IS NOT NULL)', moment)
 
 
 async def get_setting(key: str, *, unit: Unit | None = None) -> Row | None:
