@@ -17,6 +17,7 @@ Auto-detects CUDA; falls back to CPU gracefully.
 """
 
 import asyncio
+import contextvars
 import io
 import json
 import logging
@@ -78,6 +79,18 @@ app = FastAPI(
 )
 install_fastapi_logging(app, log, "voice-server")
 
+
+@app.middleware("http")
+async def _remember_the_callers_key(request, call_next):
+    """Keep the key this request came with, for the listing it may ask."""
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    reset = _CALLER_KEY.set(token)
+    try:
+        return await call_next(request)
+    finally:
+        _CALLER_KEY.reset(reset)
+
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
 
@@ -91,8 +104,11 @@ _KOKORO_SR = 24000  # Kokoro's native output sample rate
 # mind's own runtime.yaml, so a voice set on the console is in effect on the
 # next spoken sentence without restarting this container.
 _COMMS_URL = os.getenv("COMMS_URL", "")
-_COMMS_TOKEN = os.getenv("COMMS_BEARER_TOKEN", "")
-_MIND_VOICES = MindVoiceResolver(_COMMS_URL, _COMMS_TOKEN)
+# The server holds no credential of its own. The listing is asked with the key
+# of the caller of this request (a bot's mind key, a person's key), which the
+# gateway recognises from the one record.
+_CALLER_KEY: contextvars.ContextVar[str] = contextvars.ContextVar("caller_key", default="")
+_MIND_VOICES = MindVoiceResolver(_COMMS_URL, _CALLER_KEY.get)
 
 _whisper = None
 _chatterbox_model = None
