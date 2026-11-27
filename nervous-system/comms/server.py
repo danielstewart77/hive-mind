@@ -26,6 +26,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from comms.config import config
 import comms.broker as broker
 from comms.auth import require_admin_bearer, require_rename_bearer
+
+
+def require_admin_or_person(request: Request) -> None:
+    """The route's class at the gate already decided who may reach it: the admin
+    credential, an administrator's own key, or (on a route that names a mind)
+    that mind's owner's key. This refuses anything else that got this far."""
+    caller = request.scope.get("hive_caller")
+    if caller is not None and (caller.is_admin or caller.person_admin
+                               or caller.role == "user"):
+        return
+    raise HTTPException(401, "Invalid token")
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from comms import surface_claims
 from comms.network_identity import resolve_container_name
@@ -167,7 +178,7 @@ app.add_middleware(
 )
 
 
-@app.post('/broker/minds/{mind_id}/rename/prepare', dependencies=[Depends(require_admin_bearer)])
+@app.post('/broker/minds/{mind_id}/rename/prepare', dependencies=[Depends(require_admin_or_person)])
 async def prepare_mind_rename(mind_id: str, request: Request):
     body = await request.json()
     operation_id = str(body.get('operation_id') or '')
@@ -179,12 +190,12 @@ async def prepare_mind_rename(mind_id: str, request: Request):
         raise HTTPException(409, str(exc)) from exc
 
 
-@app.get('/broker/minds/rename/capabilities', dependencies=[Depends(require_admin_bearer)])
+@app.get('/broker/minds/rename/capabilities', dependencies=[Depends(require_admin_or_person)])
 async def mind_rename_capabilities():
     return {'version': 1}
 
 
-@app.post('/broker/minds/{mind_id}/rename/release', dependencies=[Depends(require_admin_bearer)])
+@app.post('/broker/minds/{mind_id}/rename/release', dependencies=[Depends(require_admin_or_person)])
 async def release_mind_rename(mind_id: str, request: Request):
     body = await request.json()
     try:
@@ -321,6 +332,9 @@ async def _own_mind_keys_or_refuse(request: Request) -> set[str] | None:
     caller = _caller(request)
     if caller.sees_everything():
         return None
+    if caller.role == user_access.USER_KEY:
+        # A person who is not an administrator: the minds they own.
+        return await user_access.visible_minds(caller)
     if caller.role != user_access.MIND:
         raise HTTPException(401, "Invalid token")
     return await user_access.holder_keys(caller)
@@ -430,7 +444,7 @@ install_fastapi_logging(app, log, "hive-comms")
 # rebuild brings the feed, and the service must still start: the feed is
 # looked up when asked for, and an image without it answers 404, which the
 # console shows as a component to update.
-@app.get("/diagnostics/errors", dependencies=[Depends(require_admin_bearer)])
+@app.get("/diagnostics/errors", dependencies=[Depends(require_admin_or_person)])
 async def diagnostic_errors():
     feed = getattr(hive_logging, "recent_errors", None)
     if feed is None:
@@ -975,7 +989,7 @@ async def live_sessions(request: Request):
     }
 
 
-@app.get("/sessions/live/text", dependencies=[Depends(require_admin_bearer)])
+@app.get("/sessions/live/text", dependencies=[Depends(require_admin_or_person)])
 async def live_session_text(session_id: str, since: int = 0):
     """Everything one live conversation has done after `since`.
 
@@ -1159,7 +1173,7 @@ class CredentialRequest(BaseModel):
 
 @app.put(
     "/credentials/{holder}",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def put_holder_credential(holder: str, body: CredentialRequest):
     """Mint or replace one holder's credential.
@@ -1187,7 +1201,7 @@ async def put_holder_credential(holder: str, body: CredentialRequest):
 
 @app.delete(
     "/credentials/{holder}",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def delete_holder_credential(holder: str, remove: bool = False):
     """Revoke one holder's credential, and only that holder's.
@@ -1209,7 +1223,7 @@ async def delete_holder_credential(holder: str, remove: bool = False):
     return {"holder": holder.strip().lower(), "revoked": revoked}
 
 
-@app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
+@app.get("/credentials", dependencies=[Depends(require_admin_or_person)])
 async def list_credentials():
     """Which holders have a credential, whose they answer for, and whether it
     is live. Never the value."""
@@ -2404,9 +2418,26 @@ async def role_holders(slug: str, request: Request):
 
 
 @app.get("/broker/minds")
-async def broker_get_minds():
-    """Return all registered minds from the broker database."""
-    return await broker.get_registered_minds()
+async def broker_get_minds(request: Request):
+    """Return all registered minds from the broker database.
+
+    A person's key who is not an administrator sees the minds they own and
+    no others, decided here and not only by the hive site's own filtering
+    (feature 834, story 905)."""
+    minds = await broker.get_registered_minds()
+    caller = _caller(request)
+    if caller.role == user_access.USER_KEY and not caller.sees_everything():
+        mine = await user_access.visible_minds(caller)
+        primary = bool(caller.username) and caller.username == user_access.primary_user()
+        known = await user_access.all_mind_keys()
+        out = []
+        for m in minds:
+            keys = {str(m.get("id") or ""), user_access.normalize_username(m.get("name"))}
+            if keys & mine or (primary and not (user_access.normalize_username(m.get("owner")))):
+                out.append(m)
+        del known
+        return out
+    return minds
 
 
 async def _refuse_foreign_registration(caller, body) -> None:
@@ -2748,6 +2779,12 @@ async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
     acts for every mind, and the console is how a wedged claim gets fixed.
     """
     caller = _caller(request)
+    if caller.role == user_access.USER_KEY and not caller.sees_everything():
+        # A person who is not an administrator reads the claim of a mind they own.
+        row = await core.get_mind_by_id_or_name(mind_id)
+        if row is None or not await user_access.caller_may_change(caller, dict(row)):
+            raise HTTPException(404, "No such claim")
+        return
     if not await _names_own_mind(caller, mind_id):
         raise HTTPException(404, "No such claim")
 
@@ -2780,7 +2817,7 @@ async def broker_get_surface_claim(
 
 @app.post(
     "/broker/minds/{mind_id}/surface-claim/phrase",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def broker_mint_surface_claim_phrase(mind_id: str, surface: str = "telegram"):
     """Put a fresh pass phrase on offer and hand it back exactly once.
@@ -2808,7 +2845,7 @@ async def broker_mint_surface_claim_phrase(mind_id: str, surface: str = "telegra
 
 @app.post(
     "/broker/minds/{mind_id}/surface-claim/bot",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def broker_record_surface_claim_bot(
     mind_id: str, body: SurfaceClaimBot, surface: str = "telegram"
@@ -2837,7 +2874,7 @@ async def broker_record_surface_claim_bot(
 
 @app.delete(
     "/broker/minds/{mind_id}/surface-claim",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def broker_clear_surface_claim(mind_id: str, surface: str = "telegram"):
     """Release a bot so somebody else can claim it.
@@ -2904,7 +2941,7 @@ async def broker_adopt_surface_claim(
             "claimed_ref": outcome.claimed_ref}
 
 
-@app.put("/broker/minds/{mind_id}/owner", dependencies=[Depends(require_admin_bearer)])
+@app.put("/broker/minds/{mind_id}/owner", dependencies=[Depends(require_admin_or_person)])
 async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
     """Move a mind to another user. Admin-only; the only way an owner changes."""
     try:
@@ -2922,7 +2959,7 @@ async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
     return result
 
 
-@app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
+@app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_or_person)])
 async def broker_update_mind(name: str, body: UpdateMindRequest):
     """Partially update a mind's fields. Admin-only."""
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -2932,7 +2969,7 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
     return result
 
 
-@app.delete("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
+@app.delete("/broker/minds/{name}", dependencies=[Depends(require_admin_or_person)])
 async def broker_delete_mind(name: str):
     """Deregister a mind from the broker database. Admin-only.
 
@@ -2959,6 +2996,12 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
     # and a mind holder may only name itself.
     if not await _names_own_mind(_caller(request), body.from_mind):
         return JSONResponse({"error": "Mind not found"}, status_code=404)
+    person = _caller(request)
+    if person.role == user_access.USER_KEY and not person.sees_everything():
+        # A person who is not an administrator writes only to a mind they own.
+        target = await core.get_mind_by_id_or_name(str(body.to_mind or ""))
+        if target is None or not await user_access.caller_may_change(person, dict(target)):
+            return JSONResponse({"error": "Mind not found"}, status_code=404)
     if not await _mind_exists(body.to_mind):
         return JSONResponse(
             {"error": f"Mind '{body.to_mind}' not found in broker.minds. Register via POST /broker/minds."},
@@ -3013,6 +3056,8 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
 
 async def _sender_owner(caller, from_mind: str) -> str:
     """The person a posted message's request belongs to, or "" for nobody."""
+    if caller.role == user_access.USER_KEY:
+        return user_access.normalize_username(caller.username)
     if caller.sees_everything():
         row = await core.get_mind_by_id_or_name(from_mind)
         owner = str((row or {}).get("owner") or "").strip().lower()

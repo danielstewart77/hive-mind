@@ -185,7 +185,7 @@ def test_a_mind_that_cannot_be_reached_is_said_so_plainly(world, mind_server) ->
 
 def test_a_disabled_person_changes_nothing_and_a_mind_with_an_odd_address_is_not_called(world) -> None:
     asyncio.run(execute("UPDATE core.users SET disabled_at = 1 WHERE username = 'daniel'"))
-    assert _change(world, KEYS["daniel"]).status_code == 403
+    assert _change(world, KEYS["daniel"]).status_code == 401
     asyncio.run(execute("UPDATE core.users SET disabled_at = NULL WHERE username = 'daniel'"))
     for odd in ("http://127.0.0.1:9/latest/#", "http://127.0.0.1:9/?x=", "file:///etc/passwd",
                 "http://u:p@127.0.0.1:9"):

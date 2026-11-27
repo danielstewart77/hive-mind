@@ -141,6 +141,15 @@ class Rule:
     kind: str
     #: For `OWNER`: the path parameter naming the session.
     param: str | None = None
+    #: True when a person's own key is also taken on this route (feature 834,
+    #: story 905: everything a signed-in person does reaches the gateway with
+    #: that person's key). `OWNER` and `SCOPED` routes take it always. On an
+    #: `ADMIN` route it admits only a person who is an administrator.
+    person: bool = False
+    #: For a person-taking `ADMIN` route that the owner of a mind may also
+    #: use: the path parameter naming the mind. A person who is not an
+    #: administrator passes only when they own that mind.
+    mind_param: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -463,6 +472,11 @@ class Caller:
     #: True when the caller reaches every conversation: the admin token, or
     #: the shared token on a hive that has named no primary user.
     unscoped: bool = False
+    #: True when the caller is a person's key and that person is an
+    #: administrator, read from the hive database on this request (feature
+    #: 834, story 905). It reaches what the admin credential reaches on the
+    #: routes that take a person's key, as that person and nobody else.
+    person_admin: bool = False
 
     @property
     def recognised(self) -> bool:
@@ -486,7 +500,7 @@ class Caller:
         )
 
     def sees_everything(self) -> bool:
-        return self.is_admin or self.unscoped
+        return self.is_admin or self.unscoped or self.person_admin
 
 
 def bearer_of(scope: Scope) -> str:
@@ -532,12 +546,24 @@ async def resolve_caller(token: str, *, allow_person_key: bool = False) -> Calle
         return Caller()
     if found.role == USER_KEY:
         if allow_person_key:
-            return Caller(username=found.username, holder=found.holder, role=USER_KEY)
+            return await _person_caller(found)
         # A person's key for their minds' settings opens no route here.
         return Caller()
     return Caller(
         username=found.username, holder=found.holder, role=found.role
     )
+
+
+async def _person_caller(found) -> Caller:
+    """A person's key as a caller: that person, and whether they are an
+    administrator, both read from the hive database on this request. A person
+    whose account is disabled is nobody."""
+    row = await _live_user_row(found.username)
+    if row is not None and row["disabled_at"] is not None:
+        return Caller()
+    admin = await person_is_administrator(found.username)
+    return Caller(username=found.username, holder=found.holder, role=USER_KEY,
+                  person_admin=admin)
 
 
 # ---------------------------------------------------------------------------
@@ -863,8 +889,9 @@ class UserAccess:
             # this must never do, so it refuses rather than passing through.
             await self._refuse(scope, receive, send, 503, b'{"detail":"starting"}')
             return
+        takes_person = (rule.person or rule.kind in (OWNER, SCOPED, CHANGE))
         try:
-            caller = await resolve_caller(bearer_of(scope))
+            caller = await resolve_caller(bearer_of(scope), allow_person_key=takes_person)
         except _STORE_DOWN:
             # A database that did not answer is not a bad credential and not
             # a server bug: every authenticated request and websocket
@@ -872,7 +899,8 @@ class UserAccess:
             await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
             return
         if rule.kind == ADMIN:
-            if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
+            person_ok = caller.role == USER_KEY and rule.person
+            if not person_ok and not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
                 # The same sentence `require_admin_bearer` gives. A 401 here
                 # would send the operator to check a credential when the
                 # problem is one unset variable.
@@ -882,9 +910,11 @@ class UserAccess:
                     b'COMMS_ADMIN_BEARER_TOKEN unset"}',
                 )
                 return
-            if not caller.is_admin:
-                await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
-                return
+            if not caller.is_admin and not (rule.person and caller.person_admin):
+                if not (rule.person and rule.mind_param and caller.role == USER_KEY
+                        and await self._person_owns(caller, params.get(rule.mind_param) or "")):
+                    await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
+                    return
         elif rule.kind == CHANGE:
             # A person's key or a mind's key, and nothing else. The admin
             # credential and every service holder are refused here: no
@@ -903,7 +933,7 @@ class UserAccess:
             # or by mind, so there is no conversation for an owner check to
             # scope — admitting a person's credential here would hand them
             # every conversation on the hive through the back of the house.
-            if not caller.is_machine:
+            if not caller.is_machine and not (rule.person and caller.role == USER_KEY):
                 await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
                 return
         elif not caller.recognised:
@@ -926,6 +956,15 @@ class UserAccess:
                 return
         scope[CALLER_SCOPE_KEY] = caller
         await self._app(scope, receive, send)
+
+    async def _person_owns(self, caller: Caller, mind: str) -> bool:
+        """Whether this person may change the mind named: its owner (an
+        ownerless mind answers to the primary user)."""
+        try:
+            row = await core.get_mind_by_id_or_name(str(mind or "").strip())
+        except _STORE_DOWN:
+            raise
+        return row is not None and await caller_may_change(caller, dict(row))
 
     def _match(self, scope: Scope):
         from starlette.routing import Match  # noqa: PLC0415

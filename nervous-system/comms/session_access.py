@@ -34,10 +34,6 @@ from comms.user_access import (
 )
 
 TABLE = RouteTable()
-TABLE.add(Rule(ADMIN),
-          'POST /broker/minds/{mind_id}/rename/prepare',
-          'POST /broker/minds/{mind_id}/rename/release')
-TABLE.add(Rule(ADMIN), 'GET /broker/minds/rename/capabilities')
 
 # --- No credential ---------------------------------------------------------
 # `/sms/inbound` authenticates the sending device by HMAC over the body and is
@@ -106,7 +102,6 @@ TABLE.add(
 # through here, and the one shared value they all used to present is gone.
 TABLE.add(
     Rule(MACHINE),
-    "GET /health",
     "POST /sessions/context",
     "POST /sessions/{session_id}/context",
     "GET /sessions/late-turns",
@@ -123,7 +118,6 @@ TABLE.add(
     # admin token. `broker_register_mind` refuses a holder that is not the
     # mind being written, so this class admits the machinery and the handler
     # decides which row it may touch.
-    "POST /broker/minds",
     "POST /sessions/fire-rotation",
     "POST /sessions/record-turn",
     "POST /sessions/{session_id}/harness-state",
@@ -139,12 +133,10 @@ TABLE.add(
     "POST /sessions/{session_id}/pty-text",
     "GET /sessions/{session_id}/carry-forward",
     "GET /models",
-    "GET /broker/minds",
     # The chief of staff's own recreate and report delivery read its own
     # mind's live conversations and wake state with its own key. The handlers
     # hold a mind to itself and refuse a service value; the admin credential
     # reads every mind's.
-    "GET /sessions/live",
     "GET /minds/{mind_id}/wake-state",
     # What a mind's roles let it use (feature 10.18), read by its own role
     # guard on every tool call and hook event. A mind's credential reaches
@@ -161,10 +153,8 @@ TABLE.add(
     # these names a conversation: the read returns no phrase and no digest,
     # and the attempt is decided here against this clock rather than the
     # bot's.
-    "GET /broker/minds/{mind_id}/surface-claim",
     "POST /broker/minds/{mind_id}/surface-claim/attempt",
     "POST /broker/minds/{mind_id}/surface-claim/adopt",
-    "POST /broker/messages",
     "GET /broker/messages",
     "GET /broker/conversations/{conversation_id}",
     "GET /secrets/{key}",
@@ -180,31 +170,58 @@ TABLE.add(
     "POST /staff/agents/events",
 )
 
+# --- Machinery routes a signed-in person's key also takes ------------------
+# Feature 834, story 905: what the hive site asks for because a person asked
+# is asked with that person's own key. A person's key reaches these as that
+# person: the handlers hold a person who is not an administrator to the minds
+# they own, and an administrator reaches all.
+TABLE.add(
+    Rule(MACHINE, person=True),
+    "GET /health",
+    "GET /sessions/live",
+    "GET /broker/minds",
+    "POST /broker/minds",
+    "GET /broker/minds/{mind_id}/surface-claim",
+    "POST /broker/messages",
+)
+
 # --- Admin only ------------------------------------------------------------
 # Each of these takes only the admin token today and continues to.
 TABLE.add(
     Rule(ADMIN),
-    "GET /sessions/live/text",
-    "PUT /broker/minds/{mind_id}/owner",
     # Minting a phrase is the one call that sees it in the clear, and
     # clearing a claim takes a bot off the person holding it. The console
     # presents the admin token for both and scopes the operator to minds they
     # own on its own side, exactly as it does for a surface token.
-    "POST /broker/minds/{mind_id}/surface-claim/phrase",
-    "POST /broker/minds/{mind_id}/surface-claim/bot",
-    "DELETE /broker/minds/{mind_id}/surface-claim",
-    "PUT /broker/minds/{name}",
-    "DELETE /broker/minds/{name}",
     "POST /secrets/scopes",
     "DELETE /secrets/scopes",
     # Minting and revoking a user's credential. Admin, obviously: the route
     # that issues credentials cannot answer to one it issued.
+)
+
+# A signed-in person's key stands for that person: an administrator reaches
+# these as the admin credential did; the owner of a mind reaches the ones that
+# name a mind (`mind_param`), and nobody else.
+TABLE.add(
+    Rule(ADMIN, person=True),
+    "GET /sessions/live/text",
+    "PUT /broker/minds/{mind_id}/owner",
+    "DELETE /broker/minds/{name}",
     "PUT /credentials/{holder}",
     "DELETE /credentials/{holder}",
     "GET /credentials",
+    "GET /diagnostics/errors",
+    'POST /broker/minds/{mind_id}/rename/prepare',
+    'POST /broker/minds/{mind_id}/rename/release',
+    'GET /broker/minds/rename/capabilities',
 )
-
-TABLE.add(Rule(ADMIN), "GET /diagnostics/errors")
+TABLE.add(
+    Rule(ADMIN, person=True, mind_param="mind_id"),
+    "POST /broker/minds/{mind_id}/surface-claim/phrase",
+    "POST /broker/minds/{mind_id}/surface-claim/bot",
+    "DELETE /broker/minds/{mind_id}/surface-claim",
+)
+TABLE.add(Rule(ADMIN, person=True, mind_param="name"), "PUT /broker/minds/{name}")
 
 # --- A change to one mind, asked with a person's key or a mind's key -------
 # Neither the admin credential nor any service holder reaches these; the

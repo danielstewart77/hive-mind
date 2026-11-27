@@ -793,7 +793,7 @@ def test_a_database_that_does_not_answer_is_503_not_500_or_401(
     app, _ = _gated_app(broker_path, {})
     real_resolve = ua.resolve_caller
 
-    async def store_down(_bearer):
+    async def store_down(_bearer, **_kw):
         raise hive_data.errors.Unreachable("connection refused")
 
     monkeypatch.setattr(ua, "resolve_caller", store_down)
