@@ -2100,11 +2100,9 @@ async def api_overview(user: dict = Depends(require_auth)):
         ),
         _service_health(
             f"{_lucent_base_url().rstrip('/')}/health",
-            headers={"Authorization": f"Bearer {_lucent_bearer_token()}"}
-            if _lucent_bearer_token()
-            else {},
+            headers={},
             service_name="Lucent",
-            repair_action="Verify LUCENT_BEARER_TOKEN and the Lucent endpoint, then retry.",
+            repair_action="Check the memory store's address, then retry.",
         ),
     )
     registry = _add_session_activity(build_mind_registry(minds), sessions)
@@ -4549,7 +4547,7 @@ async def api_voice_sample(request: Request, user: dict = Depends(require_auth))
             detail="A Mind is required to sample one of its reference clips",
         )
     audio = await mind_runtime.sample_voice(
-        _voice_server_urls()[engine], voice, voice_id
+        _voice_server_urls()[engine], voice, voice_id, await _person_headers_or_none()
     )
     return Response(content=audio, media_type="audio/ogg")
 

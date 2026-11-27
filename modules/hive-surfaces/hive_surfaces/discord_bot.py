@@ -214,6 +214,7 @@ async def _tts(text: str, voice_id: str) -> bytes:
     async with http.post(
         f"{_voice_servers.resolve(voice_id)}/tts",
         json={"text": text, "voice_id": voice_id},
+        headers=own_key.bearer(),
     ) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")

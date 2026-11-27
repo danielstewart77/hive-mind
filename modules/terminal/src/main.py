@@ -362,11 +362,13 @@ async def api_terminal_tts(request: Request, user: dict = Depends(require_auth))
         )
     payload = json.dumps({"text": text, "voice_id": voice_id}).encode()
     url = f"{_voice_api_url()}/tts"
+    # The voice server holds no credential; it asks the gateway as the person.
+    voice_auth = _person_headers(user)
 
     def _do_post():
         req = urllib.request.Request(
             url, data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **voice_auth},
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             return resp.read(), resp.headers.get("content-type", "audio/ogg")
@@ -422,7 +424,7 @@ async def api_terminal_stt(
     branch; the other two decode anyway, because faster-whisper probes the
     container rather than trusting the extension.
     """
-    del user
+    voice_auth = _person_headers(user)
     audio = await file.read()
     if not audio:
         raise HTTPException(status_code=400, detail="audio is required")
@@ -436,7 +438,7 @@ async def api_terminal_stt(
     url = f"{_voice_api_url()}/stt"
 
     def _do_post():
-        req = urllib.request.Request(url, data=payload, headers=headers)
+        req = urllib.request.Request(url, data=payload, headers={**headers, **voice_auth})
         with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8"))
 

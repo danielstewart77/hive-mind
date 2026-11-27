@@ -187,7 +187,7 @@ async def _stt(ogg_bytes: bytes) -> str:
     """
     form = aiohttp.FormData()
     form.add_field("file", ogg_bytes, filename="audio.ogg", content_type="audio/ogg")
-    async with http.post(f"{_voice_server()}/stt", data=form) as resp:
+    async with http.post(f"{_voice_server()}/stt", data=form, headers=own_key.bearer()) as resp:
         if resp.status != 200:
             raise RuntimeError(f"STT error {resp.status}: {await resp.text()}")
         return (await resp.json())["text"]
@@ -211,7 +211,7 @@ def _voice_id() -> str:
 
 async def _tts(text: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes."""
-    async with http.post(f"{_voice_server()}/tts", json={"text": text, "voice_id": _voice_id()}) as resp:
+    async with http.post(f"{_voice_server()}/tts", json={"text": text, "voice_id": _voice_id()}, headers=own_key.bearer()) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()

@@ -538,7 +538,7 @@ _SAMPLE_TIMEOUT = 60.0
 
 
 async def sample_voice(
-    voice_server_url: str, voice: str, voice_id: str = ""
+    voice_server_url: str, voice: str, voice_id: str = "", headers: dict | None = None
 ) -> bytes:
     """A spoken sample of one voice, for the page to play.
 
@@ -564,7 +564,7 @@ async def sample_voice(
         body["voice_id"] = voice_id
     try:
         async with httpx.AsyncClient(timeout=_SAMPLE_TIMEOUT) as client:
-            response = await client.post(f"{url}/voices/sample", json=body)
+            response = await client.post(f"{url}/voices/sample", json=body, headers=headers or {})
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"The voice server is unreachable: {exc}"
