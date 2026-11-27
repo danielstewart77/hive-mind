@@ -68,9 +68,8 @@ TABLE.add(
     "POST /sessions/{session_id}/interrupt",
     "POST /sessions/{session_id}/remote-control",
     "DELETE /sessions/{session_id}/remote-control",
-    # Renaming additionally carries `require_rename_bearer`, a capability
-    # token that names no user. The two compose: the rename token says the
-    # caller may rename something, this says which conversations are theirs.
+    # Renaming is asked with the key of the person or mind asking; this says
+    # which conversations are theirs.
     "PUT /sessions/{session_id}/name",
     # Both websockets. These are the reason the gate is pure ASGI — the HTTP
     # middleware comms used to rely on does not see them at all.

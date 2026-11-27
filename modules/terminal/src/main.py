@@ -590,36 +590,14 @@ async def api_minds(user: dict = Depends(require_auth)):
 
 
 def _rename_headers(user: dict | None = None) -> dict:
-    """The gateway headers plus the one credential that may change a name.
-
-    Two credentials on one request, deliberately. The service token gets past
-    the gateway's global gate; the rename token is what the name route itself
-    demands, and it is the same small secret this site used to check locally —
-    a copy of it escaping is worth exactly one renamed conversation, which is
-    why the capability was never guarded by the key that opens everything.
-    """
-    token = os.getenv("TERMINAL_LABELS_TOKEN", "")
-    headers = dict(_person_headers(user))
-    if token:
-        headers["X-Rename-Token"] = token
-    return headers
+    """The signed-in person's own key, the one credential a rename is asked
+    with. There is no second token for naming."""
+    return dict(_person_headers(user))
 
 
 async def require_auth_or_label_writer(request: Request) -> dict:
-    """A logged-in person, or whoever holds the label token.
-
-    Labels are the operator's, and the mind edits them on their behalf
-    when a rename arrives over Telegram. It has no browser, so it cannot
-    hold a session cookie — and minting it one would mean issuing a login
-    that never expires and belongs to nobody.
-
-    The token (terminal_access.labels_token) is verified by the route
-    table before this runs, and a wrong one refused there — never answered
-    from the cookie beside it, which would let any signed-in user rename any
-    user's conversation. This only reads which of the two admitted the call.
-    """
-    if route_access.bearer_of(request) == terminal_access.LABELS:
-        return {"username": "label-writer", "service": True}
+    """A signed-in person. A mind renames a conversation through the gateway
+    with its own key, not through this site."""
     return await require_auth(request)
 
 
