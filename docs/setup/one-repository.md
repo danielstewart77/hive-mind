@@ -170,7 +170,7 @@ Do these in order, one machine at a time. Steps 1 to 4 change nothing that runs.
     create a mind (loudly, and undoes the creation), because creating one
     registers its key with the tools.
 12. **Tag the packages.** After merge, someone with push rights cuts
-    `hive-data-v0.4.0` and `hive-surfaces-v0.2.0` (tag equals the package's
+    `hive-data-v0.5.0` and `hive-surfaces-v0.2.0` (tag equals the package's
     `pyproject.toml`), copies `docs/setup/workflows/*.yml.txt` to
     `.github/workflows/` (the push token cannot write there), then tags the
     release. The edge minds' pin moves to the surfaces wheel after that.

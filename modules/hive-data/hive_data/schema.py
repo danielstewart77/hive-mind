@@ -29,7 +29,8 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "mind_id", "harness", "model", "surface", "tokens", "observed_at"),
     "conversations": ("id", "created_at"),
     "credentials": (
-        "holder", "username", "role", "token_sha", "created_at", "revoked_at"),
+        "holder", "username", "role", "token_sha", "created_at", "revoked_at",
+        "ends_at"),
     "group_members": ("group_name", "user_id"),
     "groups": ("name", "created_at"),
     "messages": (

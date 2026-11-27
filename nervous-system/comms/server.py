@@ -2008,12 +2008,22 @@ async def ws_attach(ws: WebSocket, session_id: str):
             # and the tile all survive it — so the same watcher that ends the
             # bridge on a close forwards the rotation and keeps going.
             closed = asyncio.ensure_future(_watch_for_close(session_id))
+            # A terminal opened with a sign-in's key is closed when that key
+            # ends (feature 834, requirement 41), not left open on a key every
+            # service now refuses.
+            key_ended = asyncio.ensure_future(
+                user_access.watch_sign_in(_caller(ws)))
             done, _ = await asyncio.wait(
-                {pump, closed}, return_when=asyncio.FIRST_COMPLETED
+                {pump, closed, key_ended}, return_when=asyncio.FIRST_COMPLETED
             )
             if closed not in done:
                 closed.cancel()
-            if closed in done:
+            if key_ended not in done:
+                key_ended.cancel()
+            if key_ended in done and closed not in done and pump not in done:
+                await ws.close(code=user_access.WS_DENY_CODE,
+                               reason="sign-in ended")
+            elif closed in done:
                 close_event = closed.result()
                 if close_event.get("type") == "session_suspended":
                     await ws.close(code=4411, reason="session suspended")

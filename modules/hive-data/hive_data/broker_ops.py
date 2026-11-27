@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import _sql
-from .core import _execute, _fetch, _fetch_one
+from .core import _execute, _fetch, _fetch_one, _in_unit
 from .schema import COLUMNS, select_list
 from .unit import Unit
 
@@ -186,11 +186,23 @@ async def revoke_live_credential(holder: str, revoked_at: float, *,
     would move the revocation time forward and report a row changed, which
     reads as "revoked just now" for a credential that died last month.
     """
-    return await _execute(
-        unit,
-        'UPDATE core."credentials" SET "revoked_at" = $2 '
-        'WHERE "holder" = $1 AND "revoked_at" IS NULL',
-        holder, revoked_at)
+    async def write(unit: Unit) -> Row:
+        found = await unit.fetch_one(
+            'SELECT "role" FROM core."credentials" WHERE "holder" = $1', holder)
+        result = await unit.execute(
+            'UPDATE core."credentials" SET "revoked_at" = $2 '
+            'WHERE "holder" = $1 AND "revoked_at" IS NULL',
+            holder, revoked_at)
+        if found is None or found["role"] == "user":
+            # A person's key cut off ends that person's sign-ins in the same
+            # action; so does cutting off a person who holds no long-lived key.
+            await unit.execute(
+                'UPDATE core."credentials" SET "revoked_at" = $2 '
+                'WHERE "username" = $1 AND "ends_at" IS NOT NULL '
+                'AND "revoked_at" IS NULL', holder, revoked_at)
+        return result
+
+    return await _in_unit(unit, write)
 
 
 async def delete_mind_credential(holder: str, *,
@@ -219,7 +231,7 @@ async def list_credentials(*, unit: Unit | None = None) -> list[Row]:
     return await _fetch(
         unit,
         f'SELECT {select_list("credentials")} FROM core."credentials" '
-        'ORDER BY "username", "holder"')
+        'WHERE "ends_at" IS NULL ORDER BY "username", "holder"')
 
 
 # ---------------------------------------------------------------------------

@@ -96,7 +96,8 @@ CREATE TABLE core.credentials (
     role text NOT NULL,
     token_sha text NOT NULL,
     created_at double precision NOT NULL,
-    revoked_at double precision
+    revoked_at double precision,
+    ends_at double precision
 );
 
 
@@ -543,6 +544,13 @@ ALTER TABLE ONLY core.users
 --
 
 CREATE INDEX core_credentials_username ON core.credentials USING btree (username);
+
+
+--
+-- Name: core_credentials_sign_ins; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX core_credentials_sign_ins ON core.credentials USING btree (username, ends_at) WHERE (ends_at IS NOT NULL);
 
 
 --

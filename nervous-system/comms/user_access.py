@@ -75,12 +75,13 @@ absent on exactly the routes that matter.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 import hive_data
@@ -242,6 +243,9 @@ class Credential:
     holder: str
     username: str
     role: str
+    #: When this key stops working, for a key made at one sign-in; None for a
+    #: long-lived key.
+    ends_at: float | None = None
 
 
 def digest(token: str) -> str:
@@ -409,7 +413,43 @@ async def credential_for_token(token: str) -> Credential | None:
         holder=normalize_holder(row["holder"]),
         username=normalize_username(row["username"]),
         role=str(row["role"] or PERSON),
+        ends_at=row.get("ends_at"),
     )
+
+
+#: How often a connection held open on a sign-in's key asks whether the key
+#: still stands. Under a minute, so a terminal is closed within a minute of
+#: the key ending.
+SIGN_IN_RECHECK_SECONDS = 30.0
+
+
+def sign_in_recheck_seconds() -> float:
+    try:
+        value = float(os.environ.get("COMMS_SIGN_IN_RECHECK_SECONDS", ""))
+    except ValueError:
+        return SIGN_IN_RECHECK_SECONDS
+    return min(value, 60.0) if value > 0 else SIGN_IN_RECHECK_SECONDS
+
+
+async def sign_in_still_stands(key_digest: str) -> bool:
+    """Whether the key with this scramble is still accepted, read now."""
+    try:
+        return await core.credential_for_token(key_digest) is not None
+    except _STORE_DOWN:
+        # The store not answering says nothing about the key: keep the
+        # connection and ask again next time round.
+        return True
+
+
+async def watch_sign_in(caller: "Caller") -> None:
+    """Returns when the sign-in this caller came in with has ended; never for
+    a caller whose key does not end. For a connection that stays open."""
+    if not caller.sign_in_digest:
+        await asyncio.Event().wait()
+    while True:
+        await asyncio.sleep(sign_in_recheck_seconds())
+        if not await sign_in_still_stands(caller.sign_in_digest):
+            return
 
 
 async def user_for_token(token: str) -> str | None:
@@ -477,6 +517,10 @@ class Caller:
     #: 834, story 905). It reaches what the admin credential reaches on the
     #: routes that take a person's key, as that person and nobody else.
     person_admin: bool = False
+    #: The scramble of the key, set only when the caller came in with a
+    #: sign-in's key (one that ends). A connection held open on such a key is
+    #: closed when the key ends (feature 834, requirement 41).
+    sign_in_digest: str = ""
 
     @property
     def recognised(self) -> bool:
@@ -540,7 +584,10 @@ async def resolve_caller(token: str, *, allow_person_key: bool = False) -> Calle
         return Caller()
     if found.role == USER_KEY:
         if allow_person_key:
-            return await _person_caller(found)
+            person = await _person_caller(found)
+            if found.ends_at is not None and person.username:
+                person = replace(person, sign_in_digest=digest(token))
+            return person
         # A person's key for their minds' settings opens no route here.
         return Caller()
     return Caller(

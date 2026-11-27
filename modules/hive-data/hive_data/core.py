@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 import json
 import re
+import time
 
 from . import _sql, pool
 from .errors import UnsettableColumn, ValueRefused
@@ -733,11 +734,51 @@ async def get_credential(holder: str, *,
         holder)
 
 
+def now() -> float:
+    """The moment the record is read at. A function rather than a bare call
+    to `time.time` so a test sets the clock in one place."""
+    return time.time()
+
+
+#: What a sign-in's entry in the record is held under. The record's key is the
+#: holder, and a person signed in on two devices has two entries, so each
+#: sign-in is its own holder, named from the scramble of its key. Whoever reads
+#: a sign-in entry back is told the person's name as the holder (see
+#: `credential_for_token`), so nothing downstream sees this one.
+SIGN_IN_HOLDER_PREFIX = "sign-in-"
+
+#: The columns a key lookup answers with: everything but the scramble, and the
+#: holder as the person for an entry that is one sign-in.
+_LOOKUP_COLUMNS = (
+    'CASE WHEN "ends_at" IS NULL THEN "holder" ELSE "username" END AS "holder", '
+    '"username", "role", "created_at", "revoked_at", "ends_at"')
+
+
+async def _in_unit(unit: Unit | None, work: Any) -> Any:
+    """Run `work(unit)` inside the caller's unit, or in one of its own."""
+    if unit is not None:
+        return await work(unit)
+    from .unit import transaction
+    async with transaction() as own:
+        return await work(own)
+
+
+async def _end_sign_ins_of(unit: Unit, username: str, at: float) -> int:
+    result = await unit.execute(
+        'UPDATE core."credentials" SET "revoked_at" = $2 '
+        'WHERE "username" = $1 AND "ends_at" IS NOT NULL '
+        'AND "revoked_at" IS NULL',
+        username, at)
+    return int(result["rows"])
+
+
 async def upsert_credential(
     *, holder: str, username: str, role: str, token_sha: str,
     created_at: float, revoked_at: float | Any = UNSET,
     unit: Unit | None = None,
 ) -> Row:
+    """Record a holder's long-lived key. A person's own key that is replaced
+    ends that person's sign-ins in the same write (feature 834, requirement 42)."""
     values = _sql.passed({
         "holder": holder, "username": username, "role": role,
         "token_sha": token_sha, "created_at": created_at,
@@ -749,7 +790,14 @@ async def upsert_credential(
         "credentials", values,
         on_conflict=f'ON CONFLICT ("holder") DO UPDATE SET {assignments}',
         returning=COLUMNS["credentials"])
-    return await _execute_returning(unit, sql, *args)
+
+    async def write(unit: Unit) -> Row:
+        row = await unit.execute_returning(sql, *args)
+        if role == "user":
+            await _end_sign_ins_of(unit, str(username), now())
+        return row
+
+    return await _in_unit(unit, write)
 
 
 async def revoke_credential(holder: str, revoked_at: float, *,
@@ -757,7 +805,88 @@ async def revoke_credential(holder: str, revoked_at: float, *,
     sql, args = _sql.update(
         "credentials", {"revoked_at": revoked_at}, {"holder": holder},
         settable=frozenset({"revoked_at"}))
-    return await _execute(unit, sql, *args)
+
+    async def write(unit: Unit) -> Row:
+        found = await unit.fetch_one(
+            'SELECT "role" FROM core."credentials" WHERE "holder" = $1', holder)
+        result = await unit.execute(sql, *args)
+        if found is None or found["role"] == "user":
+            # Cutting a person's key off cuts their sign-ins off with it,
+            # and a person with no long-lived key still has sign-ins to end.
+            await _end_sign_ins_of(unit, holder, revoked_at)
+        return result
+
+    return await _in_unit(unit, write)
+
+
+async def record_sign_in(
+    *, username: str, token_sha: str, ends_at: float,
+    created_at: float | None = None, unit: Unit | None = None,
+) -> Row:
+    """Record one sign-in's key: the person it is for, the moment it ends, and
+    the scramble of it. A person may hold several at once, one for each device
+    signed in. Entries that have ended or run out are cleared in the same
+    write, so the record does not grow for ever; nothing else writes to it
+    while the key is used."""
+    created = now() if created_at is None else created_at
+    if not str(username or "").strip():
+        raise ValueError("a sign-in names the person it is for")
+    if not ends_at > created:
+        raise ValueError("a sign-in ends after the moment it was made")
+
+    async def write(unit: Unit) -> Row:
+        await _clear_ended(unit, created)
+        return await unit.execute_returning(
+            'INSERT INTO core."credentials" '
+            '("holder", "username", "role", "token_sha", "created_at", "ends_at") '
+            'VALUES ($1, $2, \'user\', $3, $4, $5) '
+            'RETURNING "holder", "username", "role", "created_at", "ends_at"',
+            SIGN_IN_HOLDER_PREFIX + token_sha[:32], username, token_sha,
+            created, ends_at)
+
+    return await _in_unit(unit, write)
+
+
+async def end_sign_in(token_sha: str, *, at: float | None = None,
+                      unit: Unit | None = None) -> Row:
+    """End one sign-in, the one whose key this scramble is. Nothing else."""
+    moment = now() if at is None else at
+    return await _execute(
+        unit,
+        'UPDATE core."credentials" SET "revoked_at" = $2 '
+        'WHERE "token_sha" = $1 AND "ends_at" IS NOT NULL '
+        'AND "revoked_at" IS NULL',
+        token_sha, moment)
+
+
+async def end_sign_ins(username: str, *, at: float | None = None,
+                       unit: Unit | None = None) -> Row:
+    """End every sign-in of one person: one action."""
+    moment = now() if at is None else at
+
+    async def write(unit: Unit) -> Row:
+        return {"rows": await _end_sign_ins_of(unit, username, moment)}
+
+    return await _in_unit(unit, write)
+
+
+async def _clear_ended(unit: Unit, at: float) -> int:
+    result = await unit.execute(
+        'DELETE FROM core."credentials" WHERE "ends_at" IS NOT NULL '
+        'AND ("ends_at" <= $1 OR "revoked_at" IS NOT NULL)', at)
+    return int(result["rows"])
+
+
+async def clear_ended_sign_ins(*, at: float | None = None,
+                               unit: Unit | None = None) -> Row:
+    """Remove the sign-ins that have ended or run out. Long-lived keys are
+    never removed here: a cut-off key stays, so the console can say so."""
+    moment = now() if at is None else at
+
+    async def write(unit: Unit) -> Row:
+        return {"rows": await _clear_ended(unit, moment)}
+
+    return await _in_unit(unit, write)
 
 
 async def get_setting(key: str, *, unit: Unit | None = None) -> Row | None:
@@ -1035,31 +1164,37 @@ async def get_overhead(*, mind_id: str, harness: str, model: str,
 # choice but to reach past this module, which makes "no service writes SQL"
 # a slogan.
 
-async def credential_for_token(token_sha: str, *,
+async def credential_for_token(token_sha: str, *, at: float | None = None,
                                unit: Unit | None = None) -> Row | None:
     """The live credential matching this bearer digest, or None.
 
     The per-request authentication read. Revoked credentials are excluded
     here rather than by the caller, because a credential that authenticates
     after it was revoked is the whole failure this column exists to prevent.
+    So is one whose end time has come: a sign-in's entry is refused from its
+    `ends_at` on, read against the clock on this request, with nothing
+    remembered from an earlier yes and nothing written to note a use.
     The digest column is private by declaration, so it is named explicitly:
     the caller already has the digest, and the row it needs back is who the
-    digest belongs to.
+    digest belongs to. For a sign-in the holder is the person.
     """
+    moment = now() if at is None else at
     return await _fetch_one(
         unit,
-        f'SELECT {select_list("credentials", tuple(c for c in COLUMNS["credentials"] if c != "token_sha"))} '
+        f'SELECT {_LOOKUP_COLUMNS} '
         'FROM core."credentials" '
-        'WHERE "token_sha" = $1 AND "revoked_at" IS NULL',
-        token_sha)
+        'WHERE "token_sha" = $1 AND "revoked_at" IS NULL '
+        'AND ("ends_at" IS NULL OR "ends_at" > $2)',
+        token_sha, moment)
 
 
 async def list_live_credentials(*, unit: Unit | None = None) -> list[Row]:
-    """Every credential that has not been revoked."""
+    """Every holder's credential that has not been revoked. A sign-in is not a
+    holder and is not listed."""
     return await _fetch(
         unit,
         f'SELECT {select_list("credentials")} FROM core."credentials" '
-        'WHERE "revoked_at" IS NULL ORDER BY "holder"')
+        'WHERE "revoked_at" IS NULL AND "ends_at" IS NULL ORDER BY "holder"')
 
 
 async def get_mind_by_id_or_name(value: str, *,

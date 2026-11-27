@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hive-data"
-version = "0.4.0"
+version = "0.5.0"
 description = "The one async data-access layer every hive service goes through"
 readme = "README.md"
 requires-python = ">=3.11"
