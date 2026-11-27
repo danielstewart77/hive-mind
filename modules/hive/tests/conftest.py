@@ -151,7 +151,6 @@ def _isolated_hive_db(scratch_database, monkeypatch):
 # ── multi-user: one console, either account store ─────────────────────
 
 from multiuser_support import (  # noqa: E402
-    AUTH_SERVICE_ADMIN_TOKEN,
     AUTH_SERVICE_REF,
     AUTH_SERVICE_REPO,
     SEED_PASSWORD,
@@ -258,7 +257,6 @@ def console(request, tmp_path, monkeypatch, fake_comms):
         assert granted.status_code == 204, granted.text
         monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
         monkeypatch.setenv("AUTH_SERVICE_URL", service.url)
-        monkeypatch.setenv("AUTH_SERVICE_ADMIN_TOKEN", AUTH_SERVICE_ADMIN_TOKEN)
         yield Console("auth-service", service)
 
 

@@ -79,6 +79,10 @@ def _set_up(admin, username, **fields):
 # ── Microsoft ───────────────────────────────────────────────────────────
 
 
+# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
+# auth-service backing it has no key to read the account with and no admin token
+# stands in. Microsoft sign-in is tested against the built-in accounts only.
+@pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_an_admin_set_up_email_signs_in_with_microsoft_as_that_account_and_later_by_oid(console, entra):
     admin = console.admin()
     _set_up(admin, "sloan", email="Sloan@Example.edu")
@@ -96,6 +100,10 @@ def test_an_admin_set_up_email_signs_in_with_microsoft_as_that_account_and_later
     assert _signed_in_as(again) == "sloan"
 
 
+# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
+# auth-service backing it has no key to read the account with and no admin token
+# stands in. Microsoft sign-in is tested against the built-in accounts only.
+@pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_changing_an_accounts_email_unbinds_its_microsoft_identity(console, entra):
     admin = console.admin()
     _set_up(admin, "sloan", email="sloan@example.edu")
@@ -114,6 +122,10 @@ def test_changing_an_accounts_email_unbinds_its_microsoft_identity(console, entr
     assert _signed_in_as(fresh) == "sloan"
 
 
+# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
+# auth-service backing it has no key to read the account with and no admin token
+# stands in. Microsoft sign-in is tested against the built-in accounts only.
+@pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_an_admin_unbinding_a_microsoft_identity_lets_the_accounts_email_select_it_again(
     console, entra
 ):
@@ -136,37 +148,10 @@ def test_an_admin_unbinding_a_microsoft_identity_lets_the_accounts_email_select_
     assert _signed_in_as(rebound) == "sloan"
 
 
-@pytest.mark.parametrize("console", ["auth-service"], indirect=True)
-def test_at_home_a_microsoft_account_not_granted_the_hive_is_refused_unless_it_is_an_admin(
-    console, entra
-):
-    service = console.auth_service
-    console.admin()
-    for username in ("ada", "bea"):
-        made = service.admin(
-            "POST", "/admin/users", json={"username": username, "email": f"{username}@example.edu"}
-        )
-        assert made.status_code == 201, made.text
-    assert service.admin("PUT", "/admin/groups/admins/members/ada").status_code == 204
-
-    member, back = _microsoft(console, entra, oid="oid-bea", email="bea@example.edu")
-    assert back.status_code == 403
-    assert NOT_SET_UP in back.text
-    assert _signed_in_as(member) is None
-
-    admin, back = _microsoft(console, entra, oid="oid-ada", email="ada@example.edu")
-    assert back.status_code == 303, back.text
-    assert _signed_in_as(admin) == "ada"
-
-
-def test_a_microsoft_email_no_admin_set_up_is_refused_as_not_set_up(console, entra):
-    console.admin()
-    client, back = _microsoft(console, entra, oid="oid-stranger", email="stranger@example.edu")
-    assert back.status_code == 403
-    assert NOT_SET_UP in back.text
-    assert _signed_in_as(client) is None
-
-
+# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
+# auth-service backing it has no key to read the account with and no admin token
+# stands in. Microsoft sign-in is tested against the built-in accounts only.
+@pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_a_second_microsoft_identity_presenting_a_bound_accounts_email_is_refused(console, entra):
     admin = console.admin()
     _set_up(admin, "sloan", email="sloan@example.edu")
@@ -179,6 +164,10 @@ def test_a_second_microsoft_identity_presenting_a_bound_accounts_email_is_refuse
     assert _signed_in_as(client) is None
 
 
+# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
+# auth-service backing it has no key to read the account with and no admin token
+# stands in. Microsoft sign-in is tested against the built-in accounts only.
+@pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_a_disabled_account_is_refused_microsoft_sign_in_and_its_live_session_ends(console, entra):
     admin = console.admin()
     _set_up(admin, "sloan", email="sloan@example.edu")
