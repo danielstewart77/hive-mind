@@ -304,7 +304,7 @@ async def credential_for_token(token: str) -> Caller | None:
     person's own key is no memory-store caller (it is accepted only for the
     administrator and soul routes, which read it themselves).
     """
-    key = await access.key_for(token)
+    key = await access.key_for(token, service="memory")
     if key is None or key.role == access.USER_KEY:
         return None
     role = key.role if key.role in ROLES else SERVICE

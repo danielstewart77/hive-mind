@@ -40,8 +40,12 @@ def _norm(value: object) -> str:
     return str(value or "").strip().lower()
 
 
-async def key_for(token: str) -> Key | None:
-    """The live record a presented key matches, or None (unknown or cut off)."""
+async def key_for(token: str, *, service: str = "") -> Key | None:
+    """The live record a presented key matches, or None (unknown or cut off).
+
+    `service` is `memory` or `tools` for the two that still accept a mind's
+    old key for that service until the mind is moved; any other caller gets
+    the one record only."""
     token = (token or "").strip()
     if not token:
         return None
@@ -50,7 +54,8 @@ async def key_for(token: str) -> Key | None:
     if row is None:
         # A mind not yet moved to its one key still presents the memory-store
         # or tools key it had; those rows stay until it is moved (step 20).
-        row = await core.legacy_key_for(sha)
+        row = (await core.legacy_key_for(sha, service=service)
+               if service in ("memory", "tools") else None)
     if row is None:
         return None
     return Key(holder=_norm(row["holder"]), username=_norm(row["username"]),

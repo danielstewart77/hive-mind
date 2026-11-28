@@ -445,10 +445,15 @@ async def test_minds_not_yet_moved_to_one_key_are_still_accepted_by_the_memory_s
         await hive_data.connect()
         try:
             for name in names:
-                for key in (f"gateway-key-{name}", f"memory-key-{name}", f"tools-key-{name}"):
-                    found = await access.key_for(key)
+                for key, service in ((f"gateway-key-{name}", ""),
+                                     (f"memory-key-{name}", "memory"),
+                                     (f"tools-key-{name}", "tools")):
+                    found = await access.key_for(key, service=service)
                     assert found is not None and found.holder == name, (name, key)
-            assert await access.key_for("approver-key") is None
+                # Each old key opens only its own service.
+                assert await access.key_for(f"memory-key-{name}", service="tools") is None
+                assert await access.key_for(f"tools-key-{name}", service="memory") is None
+            assert await access.key_for("approver-key", service="tools") is None
 
             # Moving one mind (a new key in the record) cuts its old
             # memory-store and tools keys off and no other mind's.
@@ -457,18 +462,102 @@ async def test_minds_not_yet_moved_to_one_key_are_still_accepted_by_the_memory_s
                 holder=moved, username="daniel", role="mind",
                 token_sha=access.digest("its-one-key"), created_at=2)
             assert (await access.key_for("its-one-key")).holder == moved
-            assert await access.key_for(f"memory-key-{moved}") is None
-            assert await access.key_for(f"tools-key-{moved}") is None
-            assert (await access.key_for(f"memory-key-{names[1]}")).holder == names[1]
+            assert await access.key_for(f"memory-key-{moved}", service="memory") is None
+            assert await access.key_for(f"tools-key-{moved}", service="tools") is None
+            assert (await access.key_for(f"memory-key-{names[1]}", service="memory")).holder == names[1]
 
             # A mind cut off in the record is refused on its old keys too.
             await core.revoke_credential(names[2], 3.0)
-            assert await access.key_for(f"memory-key-{names[2]}") is None
-            assert await access.key_for(f"tools-key-{names[2]}") is None
+            assert await access.key_for(f"memory-key-{names[2]}", service="memory") is None
+            assert await access.key_for(f"tools-key-{names[2]}", service="tools") is None
 
             # Retirement deletes the old keys and nobody presents them again.
             await core.delete_legacy_keys()
-            assert await access.key_for(f"memory-key-{names[3]}") is None
+            assert await access.key_for(f"memory-key-{names[3]}", service="memory") is None
             assert (await access.key_for(f"gateway-key-{names[3]}")).holder == names[3]
+        finally:
+            await hive_data.close(drain_timeout=5.0)
+
+
+async def _host_with_old_keys_only(dsn, name, owner="daniel"):
+    """A mind with a memory-store key and a tools key and no row in the one
+    record at all."""
+    from hive_data import access
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        await connection.execute(
+            "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+            "registered_at, last_seen, owner) VALUES ($1, $1, 'http://x:8420', 'm', "
+            "'claude', 1, 1, $2)", name, owner)
+        await connection.execute(
+            "INSERT INTO memory.credentials (holder, username, role, token_sha, created_at) "
+            "VALUES ($1, $2, 'mind', $3, 1)", name, owner, access.digest(f"memory-old-{name}"))
+        await connection.execute(
+            "INSERT INTO tools.api_tokens (name, token_hash, created_at) VALUES ($1, $2, 1)",
+            name, access.digest(f"tools-old-{name}"))
+    finally:
+        await connection.close()
+
+
+async def test_a_mind_with_no_row_in_the_record_loses_its_old_keys_when_given_a_key_and_when_deleted(
+        monkeypatch):
+    """A mind carrying only old memory-store and tools keys (no row in the one
+    record) is accepted on them until it is moved. Moving it cuts them off, and
+    deleting a mind removes them, so a new mind that takes the name (maybe for
+    another owner) is not accepted on the old mind's keys."""
+    import hive_data
+    from hive_data import access, broker_ops, core
+
+    async with claimed_database(ADMIN_DSN, "hive_data_other_") as dsn:
+        await migrate.apply(dsn)
+        await _host_with_old_keys_only(dsn, "norow")
+        await _host_with_old_keys_only(dsn, "gone")
+        monkeypatch.setenv(hive_data.config.DSN_VAR, dsn)
+        await hive_data.connect()
+        try:
+            # With no row, the old keys do not open anything: the record is
+            # what a mind is accepted by, and a row is only copied when owner
+            # and name are known; here they are accepted by fallback only for
+            # a mind with a live row.
+            assert await access.key_for("memory-old-norow", service="memory") is None
+
+            # Moving it (a key given, no row before) cuts the old keys off.
+            await core.upsert_credential(
+                holder="norow", username="daniel", role="mind",
+                token_sha=access.digest("norow-one-key"), created_at=2)
+            assert (await access.key_for("norow-one-key")).holder == "norow"
+            assert await access.key_for("memory-old-norow", service="memory") is None
+            assert await access.key_for("tools-old-norow", service="tools") is None
+            connection = await asyncpg.connect(dsn)
+            try:
+                assert await connection.fetchval(
+                    "SELECT revoked_at IS NOT NULL FROM memory.credentials WHERE holder = 'norow'")
+                assert await connection.fetchval(
+                    "SELECT revoked_at IS NOT NULL FROM tools.api_tokens WHERE name = 'norow'")
+            finally:
+                await connection.close()
+
+            # A deleted mind's old keys are removed: a new mind that takes the
+            # name, for another owner and with a row, is not accepted on them.
+            await broker_ops.delete_mind("gone")
+            connection = await asyncpg.connect(dsn)
+            try:
+                assert await connection.fetchval(
+                    "SELECT count(*) FROM memory.credentials WHERE holder = 'gone'") == 0
+                assert await connection.fetchval(
+                    "SELECT count(*) FROM tools.api_tokens WHERE name = 'gone'") == 0
+                await connection.execute(
+                    "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+                    "registered_at, last_seen, owner) VALUES ('gone2', 'gone', 'http://x:8420', "
+                    "'m', 'claude', 1, 1, 'sam')")
+            finally:
+                await connection.close()
+            await core.upsert_credential(
+                holder="gone", username="sam", role="mind",
+                token_sha=access.digest("gone-new-key"), created_at=3)
+            assert (await access.key_for("gone-new-key")).username == "sam"
+            assert await access.key_for("memory-old-gone", service="memory") is None
+            assert await access.key_for("tools-old-gone", service="tools") is None
         finally:
             await hive_data.close(drain_timeout=5.0)

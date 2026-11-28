@@ -795,12 +795,10 @@ async def upsert_credential(
                + ' RETURNING 1) SELECT * FROM "recorded"')
         args = [*args, now(), str(username), holder]
     if role == "mind":
-        before = await _fetch_one(
-            unit, 'SELECT "token_sha" FROM core."credentials" WHERE "holder" = $1',
-            holder)
         result = await _execute_returning(unit, sql, *args)
-        if before is not None and before["token_sha"] != token_sha:
-            await cut_off_legacy_keys(holder, unit=unit)
+        # Whenever a mind is given a key, the old memory-store and tools keys
+        # under its name other than that key stop, row in the record or not.
+        await cut_off_legacy_keys(holder, except_sha=token_sha, unit=unit)
         return result
     return await _execute_returning(unit, sql, *args)
 
@@ -1185,7 +1183,7 @@ async def credential_for_token(token_sha: str, *, at: float | None = None,
 #: Names in the tools' old key table that are not a mind's key: the approver
 #: (approvals moved to the hive site; its row goes in step 21) and the tools'
 #: own internal caller.
-_LEGACY_NOT_A_MIND = ("hitl-approver", "internal")
+_LEGACY_NOT_A_MIND = tuple(sorted(TOOLS_RESERVED_NAMES))
 
 
 async def _legacy_tables(unit: Unit | None) -> tuple[bool, bool]:
@@ -1196,7 +1194,8 @@ async def _legacy_tables(unit: Unit | None) -> tuple[bool, bool]:
     return bool(row and row["m"]), bool(row and row["t"])
 
 
-async def legacy_key_for(token_sha: str, *, unit: Unit | None = None) -> Row | None:
+async def legacy_key_for(token_sha: str, *, service: str,
+                         unit: Unit | None = None) -> Row | None:
     """A mind whose memory-store or tools key is still the one it had before
     its one key (feature 834, step 20 keeps those tables until the mind is
     moved or the old keys are retired).
@@ -1206,7 +1205,10 @@ async def legacy_key_for(token_sha: str, *, unit: Unit | None = None) -> Row | N
     for it) cuts its old rows off, so a moved mind's old value stops working
     at the move; retirement deletes the rows.
     """
+    # Each old key opens only the service it was made for: the memory store's
+    # old key the memory store, the tools' old key the tools.
     has_memory, has_tools = await _legacy_tables(unit)
+    has_memory, has_tools = has_memory and service == "memory", has_tools and service == "tools"
     if has_memory:
         found = await _fetch_one(
             unit,
@@ -1235,21 +1237,42 @@ async def legacy_key_for(token_sha: str, *, unit: Unit | None = None) -> Row | N
     return None
 
 
-async def cut_off_legacy_keys(holder: str, *, unit: Unit | None = None) -> None:
-    """A mind was given a new key: the memory-store and tools values it had
-    before stop being accepted, in the same unit as the new key."""
+async def cut_off_legacy_keys(holder: str, *, except_sha: str = "",
+                              unit: Unit | None = None) -> None:
+    """A mind was given a different key (or a name was freed): the memory-store
+    and tools values held under that name stop being accepted, both in one
+    statement (both or neither), whether or not the mind had a row in the one
+    record."""
     has_memory, has_tools = await _legacy_tables(unit)
     at = now()
+    parts, args = [], [holder, at, except_sha]
     if has_memory:
-        await _execute(
-            unit,
-            'UPDATE memory."credentials" SET "revoked_at" = $2 '
-            'WHERE lower("holder") = $1 AND "revoked_at" IS NULL', holder, at)
+        parts.append(
+            '"m" AS (UPDATE memory."credentials" SET "revoked_at" = $2 '
+            'WHERE lower("holder") = $1 AND "revoked_at" IS NULL '
+            'AND "token_sha" <> $3 RETURNING 1)')
     if has_tools:
-        await _execute(
-            unit,
-            'UPDATE tools."api_tokens" SET "revoked_at" = $2 '
-            'WHERE lower("name") = $1 AND "revoked_at" IS NULL', holder, int(at))
+        parts.append(
+            '"t" AS (UPDATE tools."api_tokens" SET "revoked_at" = $4 '
+            'WHERE lower("name") = $1 AND "revoked_at" IS NULL '
+            'AND "token_hash" <> $3 RETURNING 1)')
+        args.append(int(at))
+    if not parts:
+        return
+    if not has_tools:
+        # $4 is unused; keep the parameter list the statement names.
+        args = args[:3]
+    await _fetch_one(unit, "WITH " + ", ".join(parts) + " SELECT 1 AS \"done\"", *args)
+
+
+async def remove_legacy_keys_of(holder: str, *, unit: Unit | None = None) -> None:
+    """A mind was deleted: the old keys under its name go, so a new mind that
+    takes the name inherits none of them."""
+    has_memory, has_tools = await _legacy_tables(unit)
+    if has_memory:
+        await _execute(unit, 'DELETE FROM memory."credentials" WHERE lower("holder") = $1', holder)
+    if has_tools and holder not in TOOLS_RESERVED_NAMES:
+        await _execute(unit, 'DELETE FROM tools."api_tokens" WHERE lower("name") = $1', holder)
 
 
 async def delete_legacy_keys(*, unit: Unit | None = None) -> None:

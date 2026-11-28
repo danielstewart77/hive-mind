@@ -140,8 +140,14 @@ async def delete_mind(mind_id: str, *, unit: Unit | None = None) -> Row:
     the mind's *name*, not its identity, so nothing cascades to them: a
     caller deleting a mind clears those itself, in the same unit.
     """
-    return await _execute(
+    named = await _fetch_one(
+        unit, 'SELECT lower("name") AS "n" FROM core."minds" WHERE "mind_id" = $1', mind_id)
+    result = await _execute(
         unit, 'DELETE FROM core."minds" WHERE "mind_id" = $1', mind_id)
+    if named is not None:
+        from .core import remove_legacy_keys_of
+        await remove_legacy_keys_of(named["n"], unit=unit)
+    return result
 
 
 async def revoke_all_secret_scopes(mind_name: str, *,

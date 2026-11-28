@@ -214,8 +214,15 @@ they are, so a mind not yet moved to its one key is still accepted by both
 until it is moved (the move cuts its old values off) or the old keys are
 retired (`key_migration.py retire`, which deletes those rows). Step 21 removes
 only the approver's row. Going back to the previous release therefore works for
-every mind not yet moved; steps 20 to 22 never need the item 888 dump to go
-back.
+every mind not yet moved, and steps 20 to 22 need no dump for **mind keys**. That
+claim is for mind keys only: step 22 adds an end time to the record, and an older
+gateway does not read it, so it would read a person's twelve-hour sign-in as a key
+that never ends. Before going back to a release older than this one, end every
+sign-in (`POST /api/sign-ins/end` for each person, or the one-time step) or take
+the item 888 dump's copy of the record. Each old key opens only the service it was
+made for (the memory store's the memory store, the tools' the tools). Moving a
+mind, or giving any key to a mind's name, cuts its old keys off whether or not it
+had a row in the record; deleting a mind removes them.
 
 **The boundary: going back holds only until the old keys are retired.** Moving a
 mind onto its one key (story 884) replaces its old per-service keys at the

@@ -57,7 +57,7 @@ async def require_admin_bearer(request: Request) -> str:
 async def validate_token(raw_token: str) -> str | None:
     """The holder (a mind) a presented key belongs to, read from the one
     record of keys on this request, or None for an unknown or cut-off key."""
-    key = await access.key_for(raw_token)
+    key = await access.key_for(raw_token, service="tools")
     if key is None or key.role == access.USER_KEY:
         # A person's own key is for administrator actions, never a tool call.
         return None
