@@ -77,6 +77,15 @@ def fake_comms_app() -> FastAPI:
     app = FastAPI()
     base = {"url": ""}
     received: list[dict] = []
+    seen: list[dict] = []
+
+    @app.middleware("http")
+    async def _record_every_request(request: Request, call_next):
+        """Every request any service call made to this stand-in, with the
+        credential it carried (the one place the tests look at what went out)."""
+        seen.append({"method": request.method, "path": request.url.path,
+                     "authorization": request.headers.get("authorization", "")})
+        return await call_next(request)
 
     @app.middleware("http")
     async def _forward_route(request: Request, call_next):
@@ -206,6 +215,7 @@ def fake_comms_app() -> FastAPI:
 
     app.state.base = base
     app.state.received = received
+    app.state.seen = seen
     app.state.claims = claims
     app.state.absent = absent
     app.state.tokens = tokens
@@ -221,6 +231,7 @@ class FakeComms(ThreadedServer):
         app.state.base["url"] = self.url
         # Every write it was sent: what the console asked of comms, as it went.
         self.received = app.state.received
+        self.seen = app.state.seen
         self.claims = app.state.claims
         self.absent = app.state.absent
         self.tokens = app.state.tokens

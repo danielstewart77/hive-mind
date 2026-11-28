@@ -21,6 +21,10 @@
         <article class="metric surface"><div class="metric-top"><span class="metric-label">Active sessions</span><span class="metric-icon"><i data-lucide="messages-square"></i></span></div><div class="metric-value" id="metric-sessions">—</div><div class="metric-detail">Open conversations</div></article>
     </section>
 
+    <section class="surface" id="waiting-work" hidden>
+        <div class="surface-header"><div><h2>Waiting for a person</h2><p>Work that was left because the person it needs was not here. It is finished on their next visit, or an administrator's.</p></div></div>
+        <ul class="activity-list" id="waiting-work-list"></ul>
+    </section>
     <div id="overview-error" class="error-state" hidden></div>
     <div class="overview-grid">
         <section class="surface">
@@ -42,6 +46,15 @@
 <script>
 window.addEventListener("DOMContentLoaded", async function () {
     const h = window.HiveConsole;
+    try {
+        const waiting = (await h.requestJson("/api/waiting-work")).waiting || [];
+        if (waiting.length) {
+            document.getElementById("waiting-work").hidden = false;
+            document.getElementById("waiting-work-list").innerHTML = waiting.map(function (w) {
+                return '<li><strong>' + h.escapeHtml(w.what) + '</strong><br><small class="faint">Waiting for ' + h.escapeHtml(w.waits_for || "an administrator") + '</small></li>';
+            }).join("");
+        }
+    } catch (error) { /* the rest of the page does not depend on it */ }
     try {
         const data = h.normalizeOverview(await h.requestJson("/api/overview"));
         document.getElementById("metric-minds").textContent = data.counts.minds;

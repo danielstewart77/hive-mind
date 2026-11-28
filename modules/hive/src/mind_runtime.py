@@ -68,7 +68,8 @@ class PersonScope:
         admin_token = _PERSON_IS_ADMIN.set(admin)
         try:
             await self.app(scope, receive, send)
-            if self.after_click is not None and person and key:
+            if (self.after_click is not None and person and key
+                    and not scope.get("path", "").startswith(("/static/", "/health"))):
                 await self.after_click(person, admin, key)
         finally:
             _PERSON_IS_ADMIN.reset(admin_token)

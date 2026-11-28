@@ -1512,9 +1512,6 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
 # came with that click. The key is handed to the step as an argument and lives
 # in that one running step; when it ends nothing here holds it.
 
-#: Paths that are not a person's click: no work is picked up on them.
-_NOT_A_CLICK = ("/static/", "/health")
-
 _WAITING_BACKGROUND: set = set()
 
 
@@ -1526,7 +1523,12 @@ def _in_the_background(coroutine) -> None:
 
 async def _pick_up_waiting_work(person: str, is_admin: bool, key: str) -> None:
     """After a click of `person` (with `key`), carry on what waits for them, or
-    for anyone when they are an administrator. Never raises into the click."""
+    for anyone when they are an administrator. Never raises into the click.
+
+    The background steps started here act as this person with this key for
+    their own run only (the context they are started in is theirs); nothing is
+    stored."""
+    acting = route_access.begin_acting(person, key)
     try:
         for operation in mind_rename.waiting(person, is_admin):
             mind_rename.kick(operation["operation_id"], key)
@@ -1540,6 +1542,8 @@ async def _pick_up_waiting_work(person: str, is_admin: bool, key: str) -> None:
     except Exception as exc:  # noqa: BLE001 - reported, never fatal to the click
         log_event(log, "waiting_work.pick_up_failed", level=logging.ERROR,
                   component="hive-control-plane", error=str(exc))
+    finally:
+        route_access.end_acting(acting)
 
 
 def _start_design_delivery(person: str, is_admin: bool, key: str | None) -> None:
