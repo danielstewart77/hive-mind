@@ -90,11 +90,12 @@ def asked(builtin_console, real_tools):
     """Ada, daniel's mind, makes a gated call and waits on a person: the call
     stays open in a thread of its own, as a mind's would, and the test decides
     it through the site. Yields the held call's eventual reply as well."""
-    import holder_credentials
+    import auth
 
     admin = builtin_console.admin()
-    # The site makes daniel's key on its first need, as it does at runtime.
-    daniel_key = testing.run(holder_credentials.user_key(SEED_USERNAME))
+    # The key daniel's browser holds from signing in: the tools know it from
+    # the one record, as the site presents it with each click.
+    daniel_key = admin.cookies.get(auth.SESSION_COOKIE_NAME)
     ada = _mind_with_a_key("ada", SEED_USERNAME)
     reply: dict = {}
 
@@ -145,10 +146,7 @@ def test_an_administrator_signed_in_on_the_site_decides_with_their_own_key_and_t
 
 def test_a_person_who_is_not_the_owner_or_an_administrator_is_refused_by_the_tools_and_the_request_stays_pending(asked):
     admin, console, request_id, url, ada, reply, caller = asked
-    import holder_credentials
-
     mallory = console.settled_user(admin, "mallory", "mallory-password")
-    testing.run(holder_credentials.user_key("mallory"))
 
     page = mallory.get(f"/approvals/{request_id}")
     decided = mallory.post(f"/approvals/{request_id}/decision", data={"action": "approve"})
@@ -173,10 +171,7 @@ def test_a_decision_posted_signed_out_signs_in_and_lands_on_the_request_page_not
 
 
 def test_the_training_page_reaches_the_real_tools_with_the_signed_in_persons_own_key_and_an_unsigned_one_is_refused(builtin_console, real_tools):
-    import holder_credentials
-
     admin = builtin_console.admin()
-    testing.run(holder_credentials.user_key(SEED_USERNAME))
 
     ok = admin.get("/api/training/in-flight")
     plain = builtin_console.client().get("/api/training/in-flight", follow_redirects=False)

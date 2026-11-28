@@ -30,14 +30,6 @@ class StubGateway:
 
     def install(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_API_URL", "http://hive-comms:8424")
-        # The boundary replaced is only the key folder: a person's key is
-        # what they are, so each person's stand-in differs.
-        import holder_credentials
-
-        async def _key(username):
-            return f"key-of-{username}"
-
-        monkeypatch.setattr(holder_credentials, "user_key", _key)
         monkeypatch.setattr(design_delivery, "_post_sync", self._post)
         return self
 
@@ -103,7 +95,7 @@ async def test_the_conversation_is_adopted_before_it_is_spoken_to(store, gateway
     record = await _session_with_feedback(store)
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    assert await design_delivery.deliver_notice(notice_id) is True
+    assert await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel") is True
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -121,7 +113,7 @@ async def test_the_message_carries_the_question_daniel_asked(store, gateway):
     record = await _session_with_feedback(store)
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    await design_delivery.deliver_notice(notice_id)
+    await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel")
 
     content = gateway.calls[1]["body"]["content"]
     assert "Does that remove its notices too?" in content
@@ -141,9 +133,9 @@ async def test_an_untouched_item_is_left_out_of_the_message(store):
 async def test_a_delivered_notice_is_not_sent_again(store, gateway):
     record = await _session_with_feedback(store)
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
-    await design_delivery.deliver_notice(notice_id)
+    await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel")
 
-    assert await design_delivery.deliver_notice(notice_id) is False
+    assert await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel") is False
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -156,14 +148,14 @@ async def test_a_failed_send_leaves_the_notice_pending_for_another_try(store, ga
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
     gateway.fail_on = "/message"
 
-    assert await design_delivery.deliver_notice(notice_id) is False
+    assert await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel") is False
 
     still_pending = await store.pending_notices(record["id"])
     assert [notice["id"] for notice in still_pending] == [notice_id]
     assert still_pending[0]["claimed_at"] is None
 
     gateway.fail_on = None
-    assert await design_delivery.deliver_notice(notice_id) is True
+    assert await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel") is True
     assert await store.pending_notices(record["id"]) == []
 
 
@@ -171,7 +163,7 @@ async def test_a_submission_with_nothing_attached_stays_pending(store, gateway):
     record = await _session_with_feedback(store, conversation_id=None)
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    assert await design_delivery.deliver_notice(notice_id) is False
+    assert await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel") is False
 
     assert gateway.calls == []
     assert [n["id"] for n in await store.pending_notices(record["id"])] == [notice_id]
@@ -181,7 +173,7 @@ async def test_pending_work_is_sent_on_startup(store, gateway):
     first = await _session_with_feedback(store, conversation_id="conv-1")
     second = await _session_with_feedback(store, conversation_id="conv-2")
 
-    assert await design_delivery.deliver_pending() == 2
+    assert await design_delivery.deliver_pending("daniel", True, "key-of-daniel") == 2
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -195,12 +187,12 @@ async def test_pending_work_is_sent_on_startup(store, gateway):
 
 async def test_a_notice_owed_while_nothing_was_attached_is_sent_once_it_is(store, gateway):
     record = await _session_with_feedback(store, conversation_id=None)
-    assert await design_delivery.deliver_pending() == 0
+    assert await design_delivery.deliver_pending("daniel", True, "key-of-daniel") == 0
     assert gateway.calls == []
 
     await store.attach_design_session(record["id"], "conv-late", surface="telegram")
 
-    assert await design_delivery.deliver_pending() == 1
+    assert await design_delivery.deliver_pending("daniel", True, "key-of-daniel") == 1
     assert gateway.paths == [
         "/sessions/conv-late/activate",
         "/sessions/conv-late/message",
@@ -221,7 +213,7 @@ async def test_a_cancelled_send_releases_its_notice_rather_than_stranding_it(sto
     module._post_sync = cancelled
     try:
         with pytest.raises(asyncio.CancelledError):
-            await design_delivery.deliver_notice(notice_id)
+            await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel")
     finally:
         module._post_sync = original
 
@@ -308,7 +300,7 @@ async def test_the_accepted_page_is_delivered_into_the_conversation(store, gatew
     )
     notice_id = (await store.pending_notices(accepted["id"]))[0]["id"]
 
-    assert await design_delivery.deliver_notice(notice_id) is True
+    assert await design_delivery.deliver_notice(notice_id, "daniel", "key-of-daniel") is True
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -356,7 +348,7 @@ async def test_the_shutdown_settles_an_in_flight_delivery_before_the_store_goes(
 
     monkeypatch.setattr(module, "send_turn", hangs)
 
-    task = asyncio.ensure_future(module.deliver_notice(notice_id))
+    task = asyncio.ensure_future(module.deliver_notice(notice_id, "daniel", "key-of-daniel"))
     main._DESIGN_DELIVERIES.add(task)
     task.add_done_callback(main._DESIGN_DELIVERIES.discard)
     await sending.wait()
@@ -418,7 +410,7 @@ async def test_a_second_users_design_session_names_them_not_daniel(store, gatewa
         submitted_by="sloan")
     notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    await design_delivery.deliver_notice(notice_id)
+    await design_delivery.deliver_notice(notice_id, "sloan", "key-of-sloan")
 
     content = gateway.calls[1]["body"]["content"]
     assert "Sloan submitted feedback" in content

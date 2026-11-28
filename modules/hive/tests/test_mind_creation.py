@@ -453,12 +453,6 @@ def test_a_mind_made_from_the_console_is_not_locked_and_its_settings_card_reache
     monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
     # The console sends a change for this mind to the gateway, never to the
     # mind, and never with the mind's own key (story 900).
-    import holder_credentials
-
-    async def _a_persons_key(name):
-        return "daniel-person-key"  # secret-guard: allow
-
-    monkeypatch.setattr(holder_credentials, "user_key", _a_persons_key)
     token = mind_runtime._PERSON.set("daniel")
     try:
         url, headers = asyncio.run(mind_runtime.via_gateway(runtime["gateway_url"] + "/runtime"))
@@ -487,12 +481,6 @@ def test_the_console_names_a_mind_by_its_address_only_when_one_mind_claims_it(cl
     ]
     monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=registry))
 
-    import holder_credentials
-
-    async def _a_persons_key(name):
-        return "daniel-person-key"  # secret-guard: allow
-
-    monkeypatch.setattr(holder_credentials, "user_key", _a_persons_key)
     token = mind_runtime._PERSON.set("daniel")
     try:
         for url in ("http://ada:8420/runtime", "http://10.9.0.7:7777/runtime"):

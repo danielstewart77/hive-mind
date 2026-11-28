@@ -52,7 +52,7 @@ async def test_a_replacement_a_cut_off_settles_while_recovery_waits_is_not_re_ap
     # The cut-off cleared it; put the same record back as recovery had already read it.
     holder_credentials.key_journal._write(record)
     async with holder_credentials._ROTATION_LOCK:
-        recovery = asyncio.ensure_future(holder_credentials.recover_replacements())
+        recovery = asyncio.ensure_future(holder_credentials.recover_replacements("daniel", True))
         await asyncio.sleep(0.05)
         holder_credentials.key_journal.finish(record)
 

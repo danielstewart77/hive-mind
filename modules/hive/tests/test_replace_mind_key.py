@@ -271,7 +271,7 @@ async def test_a_console_stopped_between_the_key_file_and_the_env_lines_brings_t
         holder_credentials._write_stored = real
     assert mind_key_files.read("ada") == NEW and OLD in hive.env.read_text()
 
-    handled = await holder_credentials.recover_replacements()
+    handled = await holder_credentials.recover_replacements("daniel", True)
 
     assert handled == [{"mind": "ada", "recovered": True}]
     assert _every_file_holding(tmp_path, OLD) == []
@@ -302,7 +302,7 @@ async def test_recovery_after_a_crash_also_cleans_the_saved_copies_of_the_old_ke
     journal = " ".join(p.read_text() for p in key_journal.JOURNAL_DIR.glob("*.json"))
     assert OLD not in journal and NEW not in journal
 
-    handled = await holder_credentials.recover_replacements()
+    handled = await holder_credentials.recover_replacements("daniel", True)
 
     assert handled == [{"mind": "ada", "recovered": True}]
     assert _every_file_holding(tmp_path, OLD) == []
@@ -367,7 +367,7 @@ async def test_recovery_cleans_the_saved_copies_when_the_console_stopped_while_c
         holder_credentials.scrub_backups = real
     assert OLD in first.read_text() and OLD in second.read_text()
 
-    handled = await holder_credentials.recover_replacements()
+    handled = await holder_credentials.recover_replacements("daniel", True)
 
     assert handled == [{"mind": "ada", "recovered": True}]
     assert _every_file_holding(tmp_path, OLD) == []
@@ -396,7 +396,7 @@ async def test_a_replacement_that_could_not_clean_a_saved_copy_leaves_a_record_s
     journal = " ".join(p.read_text() for p in key_journal.JOURNAL_DIR.glob("*.json"))
     assert OLD not in journal and NEW not in journal
 
-    handled = await holder_credentials.recover_replacements()
+    handled = await holder_credentials.recover_replacements("daniel", True)
 
     assert handled == [{"mind": "ada", "recovered": True}]
     assert OLD not in copy.read_text() and f"OTHER={BOB}" in copy.read_text()

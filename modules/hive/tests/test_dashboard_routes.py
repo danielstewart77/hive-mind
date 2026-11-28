@@ -436,13 +436,7 @@ def test_the_dashboard_reads_the_gateway_with_the_signed_in_persons_key(monkeypa
         seen.append({"path": path, "auth": headers.get("Authorization")})
         return {"sessions": []} if path == "/sessions/live" else {"blocks": []}
 
-    async def key(person):
-        return f"{person}-key-for-tests"
-
-    import holder_credentials
-
     monkeypatch.setattr(main_mod, "_gateway_json_sync", fake_sync)
-    monkeypatch.setattr(holder_credentials, "user_key", key)
     token = main_mod.mind_runtime._PERSON.set("daniel")
     try:
         asyncio.run(main_mod._live_sessions())

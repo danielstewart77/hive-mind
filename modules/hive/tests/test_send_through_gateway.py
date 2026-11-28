@@ -23,17 +23,11 @@ REGISTRY = [{"id": MIND_ID, "name": "alpha", "owner": "daniel", "gateway_url": "
 
 @pytest.fixture
 def world(monkeypatch):
-    import holder_credentials
     import route_access
 
     monkeypatch.setenv("GATEWAY_API_URL", "http://gateway.test:8424")
     monkeypatch.setattr(route_access, "registered_minds", AsyncMock(return_value=REGISTRY))
     keys = {"daniel": "daniel-person-key", "sloan": "sloan-person-key"}  # secret-guard: allow
-
-    async def user_key(name):
-        return keys.get(name)
-
-    monkeypatch.setattr(holder_credentials, "user_key", user_key)
     sent = []
     reply = {"response": httpx.Response(200, json={"configuration": {}}, headers={"x-hive-forwarded": "1"})}
 
@@ -51,11 +45,15 @@ def world(monkeypatch):
     tokens = []
 
     def as_person(name, admin=False):
-        tokens.append((mind_runtime._PERSON.set(name), mind_runtime._PERSON_IS_ADMIN.set(admin)))
+        """The person whose click this is, with the key that came with it (a
+        person with none in `keys` clicked without one)."""
+        tokens.append((mind_runtime._PERSON.set(name), mind_runtime._PERSON_IS_ADMIN.set(admin),
+                       route_access.begin_acting(name, keys.get(name))))
 
     w.as_person = as_person
     yield w
-    for person, admin in reversed(tokens):
+    for person, admin, acting in reversed(tokens):
+        route_access.end_acting(acting)
         mind_runtime._PERSON_IS_ADMIN.reset(admin)
         mind_runtime._PERSON.reset(person)
 
@@ -92,14 +90,14 @@ def test_a_person_who_is_neither_owner_nor_administrator_is_refused_before_anyth
 
 
 def test_with_nobody_signed_in_nothing_is_sent(world):
-    mind_runtime._PERSON.set(None)
+    world.as_person(None)
     with pytest.raises(HTTPException) as refused:
         _send(world)
     assert refused.value.status_code == 403
     assert world.sent == []
 
 
-def test_a_person_whose_key_cannot_be_had_gets_a_sentence_not_a_fallback(world):
+def test_a_click_that_came_with_no_key_gets_a_sentence_not_a_fallback(world):
     world.keys.pop("daniel")
     world.as_person("daniel")
     os.environ["COMMS_ADMIN_BEARER_TOKEN"] = "an-admin-credential"  # secret-guard: allow
@@ -108,7 +106,7 @@ def test_a_person_whose_key_cannot_be_had_gets_a_sentence_not_a_fallback(world):
             _send(world)
     finally:
         del os.environ["COMMS_ADMIN_BEARER_TOKEN"]
-    assert refused.value.status_code == 503
+    assert refused.value.status_code == 403
     assert world.sent == []
 
 

@@ -18,7 +18,6 @@ from fastapi import HTTPException
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import holder_credentials
 import mind_runtime
 import mind_soul
 from hive_site import testing
@@ -100,9 +99,8 @@ def test_an_edit_from_here_is_attributed_to_the_console(monkeypatch):
         assert kwargs["json"]["actor"] == "console"
         assert kwargs["json"]["name"] == "Skippy"
         assert kwargs["json"]["reason"] == "Trimmed a line that stopped being true."
-        # The signed-in person's own key, the one the record holds for them.
-        daniel = await holder_credentials.user_key("daniel")
-        assert kwargs["headers"]["Authorization"] == f"Bearer {daniel}"
+        # The key that came with the person's click (the suite's stand-in click).
+        assert kwargs["headers"]["Authorization"] == "Bearer daniel-key-for-tests"
 
     _run(scenario())
 
