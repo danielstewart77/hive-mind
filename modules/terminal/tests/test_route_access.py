@@ -180,7 +180,7 @@ def test_a_terminal_route_added_with_no_authorization_code_is_refused_to_a_non_a
 
 def test_a_sign_in_key_made_by_the_console_opens_the_owners_terminal_and_no_one_elses(builtin_terminal):
     account_store = builtin_terminal.store()
-    builtin_terminal.create_user("sloan", "sloan-temp-pass")
+    accounts.make_user("sloan", "sloans-own-pass")
     sloan = builtin_terminal.client()
     sloan.cookies.set(
         auth.SESSION_COOKIE_NAME,
