@@ -1,9 +1,8 @@
 """The shared account suite, run through the terminal: both stores.
 
-The `terminal` fixture runs each test twice — once on the built-in hive.db
-store, once signed in through the real auth-service — and the two must
-agree. The console runs the same checks through its own app; this is what
-keeps the two copies of the store honest against each other.
+The `terminal` fixture signs in on the hive's own store. The console runs the
+same checks through its own app; this is what keeps the two copies of the
+store honest against each other.
 """
 
 import re

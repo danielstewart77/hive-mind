@@ -814,6 +814,69 @@ class RetirementRefused(Exception):
         self.blocking = blocking
 
 
+#: Where a person's key file was kept before story 914: a folder of its own
+#: under the key root, one folder per person. Only this one-time step still
+#: names it.
+_OLD_PEOPLE_FOLDER = ".people"
+
+
+def _delete_old_people_folder() -> list[str]:
+    """Delete every file under the old people's folder and the folder itself.
+    The names of the person folders found, never a value. Leaves each mind's
+    own folder alone: only the one folder is walked."""
+    import mind_key_files
+
+    root = mind_key_files.KEY_ROOT / _OLD_PEOPLE_FOLDER
+    gone: list[str] = []
+    try:
+        folders = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return gone
+    for folder in folders:
+        for item in folder.iterdir():
+            if item.is_file() or item.is_symlink():
+                item.unlink()
+        folder.rmdir()
+        gone.append(folder.name)
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+    return gone
+
+
+async def end_old_person_keys() -> dict[str, Any]:
+    """The one-time step of story 914: end every person's key made the old
+    way, and delete the files that held them.
+
+    Every person's long-lived key in the one record (role user, no end time:
+    the sign-ins of story 912 all carry one) is cut off there, and with it
+    that person's sign-ins, so everyone signs in again. The key files the old
+    console kept for people (`.people` under the key root) are deleted. The
+    answer names each person ended; a person already ended is not named
+    again, so running it twice is safe and the second run ends nothing. A
+    mind's key, its record and its folder are never touched: only role-user
+    entries and the one people's folder are.
+
+    Run once, by the operator, after the host is switched to the app's own
+    sign-in (item 842). Nothing here reads or returns a key."""
+    from hive_data import broker_ops, core
+
+    ended: list[str] = []
+    for row in await core.list_live_credentials():
+        if str(row.get("role") or "") != hc.USER_ROLE:
+            continue
+        holder = str(row["holder"])
+        if (await broker_ops.revoke_live_credential(holder, core.now()))["rows"]:
+            ended.append(str(row.get("username") or holder))
+    files = _delete_old_people_folder()
+    return {
+        "ended_people": sorted(ended),
+        "key_files_deleted_for": files,
+        "note": "Everyone signs in again. A mind's key and its folder were not touched.",
+    }
+
+
 async def retire() -> dict[str, Any]:
     """Retire the old per-service mind keys and the shared tools token.
 

@@ -392,6 +392,7 @@ TABLE.add(
     Rule(ADMIN, bearer=KEY_MIGRATION),
     "GET /api/settings/key-migration",
     "POST /api/settings/key-migration/retire",
+    "POST /api/settings/key-migration/end-old-person-keys",
     "POST /api/settings/key-migration/tools-credential/{holder}",
     "POST /api/settings/key-migration/{name}/move",
     "POST /api/settings/key-migration/{name}/undo",

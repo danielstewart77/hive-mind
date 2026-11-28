@@ -6,8 +6,7 @@ and standing rules. Edge Mind deployments use the
 [`hive-edge-minds`](https://github.com/danielstewart77/hive-edge-minds)
 runtime.
 
-Auth lives in the hive itself — accounts and a signing secret, no external
-auth service — so a cloned hive is self-contained. The terminal site shares
+Auth lives in the hive itself — accounts and a signing secret, nothing external — so a cloned hive is self-contained. The terminal site shares
 the same store, secret and cookie domain, so one login covers both.
 
 ## Where the data is

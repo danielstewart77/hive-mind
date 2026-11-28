@@ -78,9 +78,7 @@ def _set_up(admin, username, **fields):
 # ── Microsoft ───────────────────────────────────────────────────────────
 
 
-# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
-# auth-service backing it has no key to read the account with and no admin token
-# stands in. Microsoft sign-in is tested against the built-in accounts only.
+# Microsoft sign-in is tested against the hive's own accounts.
 @pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_an_admin_set_up_email_signs_in_with_microsoft_as_that_account_and_later_by_oid(console, entra):
     admin = console.admin()
@@ -99,9 +97,7 @@ def test_an_admin_set_up_email_signs_in_with_microsoft_as_that_account_and_later
     assert _signed_in_as(again) == "sloan"
 
 
-# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
-# auth-service backing it has no key to read the account with and no admin token
-# stands in. Microsoft sign-in is tested against the built-in accounts only.
+# Microsoft sign-in is tested against the hive's own accounts.
 @pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_changing_an_accounts_email_unbinds_its_microsoft_identity(console, entra):
     admin = console.admin()
@@ -121,9 +117,7 @@ def test_changing_an_accounts_email_unbinds_its_microsoft_identity(console, entr
     assert _signed_in_as(fresh) == "sloan"
 
 
-# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
-# auth-service backing it has no key to read the account with and no admin token
-# stands in. Microsoft sign-in is tested against the built-in accounts only.
+# Microsoft sign-in is tested against the hive's own accounts.
 @pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_an_admin_unbinding_a_microsoft_identity_lets_the_accounts_email_select_it_again(
     console, entra
@@ -147,9 +141,7 @@ def test_an_admin_unbinding_a_microsoft_identity_lets_the_accounts_email_select_
     assert _signed_in_as(rebound) == "sloan"
 
 
-# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
-# auth-service backing it has no key to read the account with and no admin token
-# stands in. Microsoft sign-in is tested against the built-in accounts only.
+# Microsoft sign-in is tested against the hive's own accounts.
 @pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_a_second_microsoft_identity_presenting_a_bound_accounts_email_is_refused(console, entra):
     admin = console.admin()
@@ -163,9 +155,7 @@ def test_a_second_microsoft_identity_presenting_a_bound_accounts_email_is_refuse
     assert _signed_in_as(client) is None
 
 
-# STOPPED (story 909): a Microsoft sign-in has no signed-in person, so on the
-# auth-service backing it has no key to read the account with and no admin token
-# stands in. Microsoft sign-in is tested against the built-in accounts only.
+# Microsoft sign-in is tested against the hive's own accounts.
 @pytest.mark.parametrize("console", ["builtin"], indirect=True)
 def test_a_disabled_account_is_refused_microsoft_sign_in_and_its_live_session_ends(console, entra):
     admin = console.admin()

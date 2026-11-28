@@ -6,6 +6,7 @@
     key_migration.py undo MIND
     key_migration.py tools-credential HOLDER
     key_migration.py retire
+    key_migration.py end-person-keys
 
 Run by the operator, never by a mind. Prints one JSON object on stdout. Exit 0
 on success; exit 1 with `{"error": ..., "kind": ...}` when the console refused
@@ -24,6 +25,11 @@ console recognises it from the hive's record of keys; it has no setting for it.
 What it prints: names, files, variable names and digest prefixes at most, as
 the console gives them. A key never appears in anything this command reads
 from the console, and it does not read one itself.
+
+`end-person-keys` is the one-time step of story 914, run once after the host
+is on the app's own sign-in: it ends every person's key made the old way, deletes
+the files that held them, and names each person it ended (safe to run twice).
+Everyone signs in again afterwards. A mind's key is never touched.
 
 `move` registers the proxy key the mind already holds with the gateway, the
 memory store and the tools as that mind. Its old per-service values stop being
@@ -124,6 +130,7 @@ def run(argv: list[str]) -> dict[str, Any]:
         sub.add_parser(command).add_argument("mind")
     sub.add_parser("tools-credential").add_argument("holder")
     sub.add_parser("retire")
+    sub.add_parser("end-person-keys")
     args = parser.parse_args(argv)
     if args.command == "report":
         return _call("GET", "")
@@ -133,6 +140,8 @@ def run(argv: list[str]) -> dict[str, Any]:
         return _call("POST", f"/{_name(args.mind)}/undo")
     if args.command == "tools-credential":
         return _call("POST", f"/tools-credential/{_name(args.holder)}")
+    if args.command == "end-person-keys":
+        return _call("POST", "/end-old-person-keys")
     result = _call("POST", "/retire")
     if isinstance(result, dict):
         result.setdefault("notice", RETIRE_NOTICE)

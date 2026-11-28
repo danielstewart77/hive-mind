@@ -264,6 +264,21 @@ hold, a mind at a time.
    earlier console kept in the shared `.env` (the file wins either way) once the
    mind's own compose mounts its key folder.
 
+7. **The one-time step that ends every person's old key (story 914).** Before
+   story 913 a person's key was a file under the key root (`.people`) and an
+   entry in the hive's record of keys. Run this once, **after** this machine has
+   been switched to the hive's own sign-in (the old settings `AUTH_SERVICE_URL`,
+   `AUTH_SERVICE_SITE` and `HIVE_AUTH_BACKEND` removed, database step 20 applied,
+   the sites, gateway, memory store and tools restarted together) and every
+   person has an account and password in the hive database:
+   `python3 tools/stateless/key_migration/key_migration.py end-person-keys`.
+   It ends every person's key made the old way in the record, deletes the files
+   under `.people`, and prints each person it ended. It is safe to run twice (the
+   second run ends nobody). A mind's key and its folder are never touched.
+   **Everyone signs in again afterwards**, and no old person's key works.
+   Do not run it on a machine still signing in the old way: it would end keys
+   that machine still uses.
+
 ### Limits worth knowing before you move a mind
 
 - **A moved mind's bot presents the mind's own key.** The bot mounts the mind's
@@ -328,8 +343,8 @@ hold, a mind at a time.
 
 A mind that does not hold the operator role can read its own mind folder, its
 own key folder and a clean copy of the code, and nothing else that is a secret:
-not the install's settings file (`.env`, and any `*.env`), not the hive site's,
-the tools' or the authentication service's, not the shared keyring in `data/`,
+not the install's settings file (`.env`, and any `*.env`), not the hive site's
+or the tools', not the shared keyring in `data/`,
 not the memory store's or the gateway's data, not another mind's folder, not
 another mind's key folder, not the host's Docker socket or a login on the host.
 It is handed no credential in its environment: its one key is the file named by
@@ -435,8 +450,8 @@ changes to the mind it owns." Built as feature 834 requirement 19.
   finishing a cut-short replacement of a mind's key, sending a saved design
   submission) waits, is shown as waiting with who it waits for, and is finished
   on the next click of that person or of any administrator, with that click's
-  key. The old key files (`.people` under the key root) are no longer read or
-  written; removing them is story 914's.
+  key. No code reads or writes a key file for a person any more (story 914);
+  the old ones are ended and deleted by the one-time step in Part 5 (step 7).
 - A person's change to a mind goes to the gateway, not to the mind: the hive
   site sends it with that person's own key to
   `/broker/minds/{mind}/forward/{path}`, the gateway decides (the mind's owner,

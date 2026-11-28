@@ -4281,6 +4281,17 @@ async def api_key_migration_retire(user: dict = Depends(require_admin_or_route_b
     return result
 
 
+@app.post("/api/settings/key-migration/end-old-person-keys")
+async def api_key_migration_end_old_person_keys(user: dict = Depends(require_admin_or_route_bearer)):
+    """The one-time step of story 914: end every person's key made the old way
+    and delete their key files. Safe to run twice."""
+    result = await key_migration.end_old_person_keys()
+    log_event(log, "keys.old_person_keys_ended", **_actor_fields(user),
+              people=len(result["ended_people"]))
+    credential_registry.forget_all()
+    return result
+
+
 @app.post("/api/settings/key-migration/tools-credential/{holder}")
 async def api_key_migration_tools_credential(holder: str, user: dict = Depends(require_admin_or_route_bearer)):
     """Give a surface bot or the console a tools credential of its own."""
@@ -6693,8 +6704,7 @@ async def api_mind_owner_set(name: str, request: Request, user: dict = Depends(r
 # Users and groups (admin)
 # ---------------------------------------------------------------------------
 # Every route here is admin-only in console_access.TABLE. The store does the
-# work — the built-in store or auth-service, whichever this install signs
-# in against — and its refusals (unknown user, duplicate, the last admin) come back as
+# work — the hive's own account store — and its refusals (unknown user, duplicate, the last admin) come back as
 # the status the store named.
 
 

@@ -533,7 +533,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     if "terminal" in pieces:
         env = {"TERMINAL_HOST": "0.0.0.0", "HIVE_DATABASE_URL": dsn,
                "HIVE_SECRET_KEY": env_ref("HIVE_SECRET_KEY"), "GATEWAY_API_URL": COMMS_URL,
-               "HIVE_KEY_ROOT": CONSOLE_KEY_ROOT, **site_links}
+               **site_links}
         if voice:
             env["VOICE_API_URL"] = voice
         svc = base(TERMINAL, image="hive/terminal:local", waits_on_db=True, needs=(COMMS,), build={
@@ -541,9 +541,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             "additional_contexts": {"hive_site": str(repo("hive") / "hive_site"),
                                     "hive_data": hive_data}}, env=env)
         svc["ports"] = [f"0.0.0.0:{TERMINAL_PORT}:{TERMINAL_PORT}"]
-        # The signed-in person's key is read from the key folder, read-only:
-        # the terminal site presents that person's key and holds none of its own.
-        svc["volumes"] = [bind(home.keys, CONSOLE_KEY_ROOT, "ro")]
+        # No key folder: the terminal site presents the key that comes with
+        # each click and holds none of its own.
 
     mind_build = {"context": str(repo("hive-mind")),
                   "additional_contexts": {"hive_surfaces": str(repo("hive-surfaces"))},

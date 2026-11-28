@@ -2137,15 +2137,9 @@ async def unprovision_mind(name: str) -> list[str]:
 # A person's own key (feature 834, requirements 19 and 31)
 # ---------------------------------------------------------------------------
 
-#: A person's key is held like a mind's, but where no mind can read it: a
-#: file in the console's own folder under the key root (`mind_key_files`,
-#: `.people`), which no mind mounts, and a fingerprint in the hive database's
-#: credentials table under the person's username with the role `user`. The
-#: console writes that table itself (`hive_data`, the write the gateway uses):
-#: it holds no administrator credential of the gateway, and the gateway reads
-#: the same row on every request, so a replacement takes effect at once. The
-#: key is random, never typed, never shown.
-USER_KEY_PREFIX = "USER_KEY_"
+#: The role the one record gives a person's own key (a sign-in's entry
+#: carries it too). A person's key is made when they sign in and lives in
+#: their browser; no file holds it.
 USER_ROLE = "user"
 
 

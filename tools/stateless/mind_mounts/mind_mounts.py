@@ -221,7 +221,7 @@ class Secrets:
             self.files += [(f, "an install settings file") for f in _settings_files(tree)]
             self.folders += [(d, "a folder of the install's own state") for d in _data_folders(tree)]
         # A folder that holds the checkout holds its neighbours too: their
-        # settings files count (the hive site's, the authentication service's).
+        # settings files count (the hive site's, the tools').
         for sibling in sorted(glob.glob(str(root.parent / "*")))[:300]:
             if os.path.isdir(sibling) and os.path.realpath(sibling) != str(root) \
                     and not _within(str(root), os.path.realpath(sibling)):
