@@ -264,18 +264,16 @@ def pytest_pyfunc_call(pyfuncitem):
 
 
 @pytest.fixture(autouse=True)
-def _a_person_is_signed_in_for_calls_the_site_makes_for_one(monkeypatch):
-    """Story 905: this site asks the gateway only as a signed-in person, with
-    that person's own key. Tests that are not about whose key it is run as an
-    administrator with a key of their own; the key store is the boundary
-    replaced, the sending is real."""
-    import holder_credentials
+def _a_person_is_signed_in_for_calls_the_site_makes_for_one():
+    """Story 905/913: this site asks the gateway only as a signed-in person,
+    with the key that came with that person's click. Tests that are not about
+    whose key it is run as an administrator who has just clicked with a key
+    of their own; a request through the real app sets both itself."""
     import mind_runtime
+    import route_access
 
-    async def key(person):
-        return f"{person}-key-for-tests"
-
-    monkeypatch.setattr(holder_credentials, "_asking_person_key", key)
     token = mind_runtime._PERSON.set("daniel")
+    acting = route_access.begin_acting("daniel", "daniel-key-for-tests")
     yield
+    route_access.end_acting(acting)
     mind_runtime._PERSON.reset(token)

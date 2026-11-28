@@ -1,15 +1,15 @@
-"""The terminal site calls the gateway as the person who asked, with that
-person's own key from the key folder, never with a shared service token."""
+"""The terminal site calls the gateway as the person who asked, with the
+sign-in key that came with that click and nothing else: not a shared service
+token, not a key read from a file, not one kept from an earlier click."""
 
 import json
+import os
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 import auth
 import main as main_mod
-import person_key
-import person_key_support
 from hive_site import testing as accounts
 
 
@@ -33,38 +33,40 @@ class _Seen:
         return json.dumps({"id": "new-session"}).encode("utf-8")
 
 
-def _client(username="daniel"):
-    user = accounts.make_user(username, "secret-pass", is_admin=True, replace=True)
-    client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
-    return client
+def _sign_in(username="daniel"):
+    """A real sign-in through the site's own sign-in page; returns the client
+    and the key the browser now holds."""
+    accounts.make_user(username, "secret-pass", is_admin=True, replace=True)
+    client = TestClient(main_mod.app, base_url="https://testserver")
+    response = client.post("/login", data={"username": username, "password": "secret-pass",
+                                           "next": "/"}, follow_redirects=False)
+    assert response.status_code == 303, response.text
+    return client, client.cookies.get(auth.SESSION_COOKIE_NAME)
 
 
-def test_gateway_call_carries_the_signed_in_persons_key_not_the_old_token(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+def test_gateway_call_carries_the_key_that_came_with_the_click_not_the_old_token(monkeypatch):
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "retired-shared-token")
-    key = person_key_support.give_key(tmp_path, monkeypatch, "daniel")
+    client, key = _sign_in()
     seen = _Seen()
 
     with patch("main.urllib.request.urlopen", seen):
-        response = _client().post("/api/terminal/sessions", json={"mind_id": "skippy-id"})
+        response = client.post("/api/terminal/sessions", json={"mind_id": "skippy-id"})
 
     assert response.status_code == 200
     assert len(seen.requests) == 1
     assert seen.requests[0].get_header("Authorization") == f"Bearer {key}"
 
 
-def test_a_person_with_no_key_is_told_to_open_the_hive_site_with_a_409(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    empty = tmp_path / "empty-key-folder"
-    empty.mkdir()
-    monkeypatch.setenv("HIVE_KEY_ROOT", str(empty))
+def test_the_next_click_carries_that_clicks_key_and_the_site_remembers_the_first_nowhere(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_KEY_ROOT", str(tmp_path))
+    first, first_key = _sign_in("daniel")
+    second, second_key = _sign_in("sloan")
     seen = _Seen()
 
     with patch("main.urllib.request.urlopen", seen):
-        response = _client().post("/api/terminal/sessions", json={"mind_id": "skippy-id"})
+        first.post("/api/terminal/sessions", json={"mind_id": "skippy-id"})
+        second.post("/api/terminal/sessions", json={"mind_id": "skippy-id"})
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == person_key.NO_KEY_SENTENCE
-    assert "hive site" in response.json()["detail"]
-    assert seen.requests == []
+    assert [r.get_header("Authorization") for r in seen.requests] == [
+        f"Bearer {first_key}", f"Bearer {second_key}"]
+    assert os.listdir(tmp_path) == []  # nothing written where keys used to live
