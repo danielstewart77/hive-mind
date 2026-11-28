@@ -318,3 +318,105 @@ class TestTheLiveSetIsOrdered:
         feed.frame("older")
 
         assert [row["session_id"] for row in feed.live(now=2000.0)] == ["older", "newer"]
+
+
+# --- A mind's own turn: open, in flight, quiet or stalled (feature 916) -----
+
+TOOL_CALL = {
+    "type": "assistant",
+    "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Bash",
+         "input": {"command": "curl -H 'Authorization: Bearer abc123' http://x",
+                   "description": "Run the suite"}}]},
+}
+TOOL_RESULT = {
+    "type": "user",
+    "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": "ok"}]},
+}
+
+
+def _framed(feed, now):
+    feed.begin("s1", mind_id="m1", now=now)
+    feed.frame("s1")
+
+
+class TestAMindsOwnTurn:
+    def test_a_mind_with_a_tool_call_in_flight_reads_working_however_long_it_runs(self, feed):
+        _framed(feed, 1000.0)
+        feed.observe("s1", TOOL_CALL, now=1001.0)
+
+        turn = feed.turn("s1", now=1001.0 + 40 * 60)
+
+        assert turn["reading"] == "working"
+        assert turn["tool"] == "Bash: Run the suite"
+        assert turn["tool_started_at"] == 1001.0
+
+    def test_every_conversation_the_feed_knows_is_answered_for_at_once(self, feed):
+        """What the console asks for: one answer for all of them."""
+        _framed(feed, 1000.0)
+        feed.observe("s1", TOOL_CALL, now=1001.0)
+
+        turns = feed.turns(now=1001.0 + 40 * 60)
+
+        assert [(t["session_id"], t["reading"], t["tool"]) for t in turns] == [
+            ("s1", "working", "Bash: Run the suite")]
+
+    def test_a_mind_between_turns_is_never_read_as_stalled(self, feed):
+        _framed(feed, 1000.0)
+        feed.observe("s1", ASSISTANT_TEXT, now=1001.0)
+        feed.end("s1", now=1002.0)
+
+        turn = feed.turn("s1", now=1002.0 + 60 * 60)
+
+        assert turn == {"session_id": "s1", "open": False}
+
+    def test_an_open_turn_silent_with_nothing_in_flight_reads_quiet_then_stalled(self, feed):
+        _framed(feed, 1000.0)
+        feed.observe("s1", TOOL_CALL, now=1001.0)
+        feed.observe("s1", TOOL_RESULT, now=1010.0)
+
+        read = [feed.turn("s1", now=1010.0 + after)["reading"]
+                for after in (29.9, 30, 119.9, 120, 20 * 60)]
+
+        assert read == ["working", "quiet", "quiet", "stalled", "stalled"]
+
+    def test_one_result_back_does_not_clear_a_second_call_still_out(self, feed):
+        _framed(feed, 1000.0)
+        feed.observe("s1", TOOL_CALL, now=1001.0)
+        feed.observe("s1", TOOL_CALL, now=1001.0)
+        feed.observe("s1", TOOL_RESULT, now=1005.0)
+
+        assert feed.turn("s1", now=1005.0 + 10 * 60)["reading"] == "working"
+
+    def test_a_new_turn_is_not_stalled_by_the_silence_since_the_last_one(self, feed):
+        _framed(feed, 1000.0)
+        feed.observe("s1", ASSISTANT_TEXT, now=1001.0)
+        feed.end("s1", now=1002.0)
+        feed.begin("s1", mind_id="m1", now=1002.0 + 3 * 60 * 60)
+
+        turn = feed.turn("s1", now=1002.0 + 3 * 60 * 60 + 20)
+
+        assert turn["reading"] == "working"
+
+    def test_a_silent_terminal_pane_is_not_read_at_all(self, feed):
+        feed.begin("pane", mind_id="m1", now=1000.0)
+        feed.observe("pane", ASSISTANT_TEXT, now=1001.0)
+
+        assert feed.turn("pane", now=1001.0 + 20)["reading"] == "working"
+        assert feed.turn("pane", now=1001.0 + 45) == {
+            "session_id": "pane", "open": None}
+
+    def test_a_command_is_named_by_its_program_and_never_by_what_precedes_it(self, feed):
+        from comms.dashboard import tool_words
+
+        assert tool_words("Bash", '{"command": "API_TOKEN=abc123 /usr/bin/pytest -k x"}') == "Bash: pytest"
+
+    def test_a_turn_nobody_can_speak_for_is_not_read_at_all(self, feed):
+        feed.begin("pane", mind_id="m1", now=1000.0)
+        feed.observe("pane", ASSISTANT_TEXT, now=1001.0)
+
+        assert feed.turn("pane", now=1001.0 + 10 * 60) == {
+            "session_id": "pane", "open": None}
+        assert feed.turn("never-seen", now=1000.0) == {
+            "session_id": "never-seen", "open": None}

@@ -33,10 +33,14 @@ durable thing; this is what is happening right now.
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 import time
 from collections import deque
 from typing import Any, Optional
+
+from hive_data import staff
 
 #: How long a *framed* conversation stays generating with nothing heard.
 #: The chat path brackets every turn — `user` opens it, `result` closes it —
@@ -166,6 +170,54 @@ def _capped(text: str) -> tuple[str, bool]:
     return raw[-MAX_BLOCK_BYTES:].decode("utf-8", "replace"), True
 
 
+#: A program's name as it may be stored: a plain word, nothing that could be
+#: a value. `TOKEN=abc123 pytest` begins with an assignment, not a program.
+_PROGRAM = re.compile(r"[A-Za-z0-9_.+-]{1,40}")
+
+
+def _program(command: str) -> str:
+    """The program a command line runs, or nothing when that is unclear.
+
+    Leading `NAME=value` words are the environment, and the commonest place
+    on this hive for a secret to sit; they are skipped, never kept. What is
+    left has to look like a program's name to be stored at all.
+    """
+    for word in command.split():
+        if "=" in word:
+            continue
+        name = os.path.basename(word)
+        return name if _PROGRAM.fullmatch(name) else ""
+    return ""
+
+
+def tool_words(name: Any, rendered_input: str = "") -> str:
+    """A few words naming a tool call, safe to store and to draw.
+
+    The tool's name, and for a call that carries them the short description
+    its caller wrote or the program it runs: "Bash: run the suite", "Bash:
+    pytest". Never a command's arguments. A token on a command line is the
+    ordinary shape of this hive's own curl calls, and the one way to be sure
+    none is stored is to store no argument at all.
+    """
+    words = " ".join(str(name or "").split()) or "tool"
+    detail = ""
+    try:
+        given = json.loads(rendered_input) if rendered_input else None
+    except (TypeError, ValueError):
+        given = None
+    if isinstance(given, dict):
+        described = given.get("description")
+        command = given.get("command") or given.get("cmd")
+        if isinstance(command, list):
+            command = command[0] if command else ""
+        if isinstance(described, str) and described.strip():
+            detail = " ".join(described.split())
+        elif isinstance(command, str) and command.strip():
+            detail = _program(command)
+    words = f"{words}: {detail}" if detail else words
+    return "".join(c for c in words if c.isprintable())[:staff.TOOL_WORDS]
+
+
 def _block(kind: str, text: str, *, name=None, agent=None, trimmed: bool = False) -> dict:
     """One block in the shape every reader of this feed expects."""
     return {
@@ -191,6 +243,8 @@ class _Conversation:
         "last_event_at",
         "last_block_at",
         "awaiting_tool",
+        "tools",
+        "turn_at",
         "ended_at",
         "framed",
     )
@@ -212,6 +266,16 @@ class _Conversation:
         #: A tool call has gone out and nothing has come back. The turn is
         #: working, however quiet the transcript is.
         self.awaiting_tool = False
+        #: The tool calls out with nothing back, oldest first: the words
+        #: naming each and when it went out. More than one is ordinary - a
+        #: turn issues several calls at once - and the first result back
+        #: answers one call, not all of them.
+        self.tools: list[tuple[str, float]] = []
+        #: When the turn now open began. Silence is measured from here until
+        #: the turn's first block lands: measured from the last turn's final
+        #: block, every new turn would open hours into a silence and read as
+        #: stalled before its model had answered.
+        self.turn_at = now
         self.ended_at: Optional[float] = None
         #: Whether this conversation's turns arrive bracketed by `user` and
         #: `result`. False for a pty-hosted conversation, whose prose arrives
@@ -282,6 +346,12 @@ class LiveFeed:
                 existing.mind_id = mind_id
             if conversation_id is not None:
                 existing.conversation_id = conversation_id
+            if not existing.generating:
+                # A new turn. Whatever the last one left unanswered - a call
+                # cut off by an interrupt - is not in flight in this one.
+                existing.tools = []
+                existing.awaiting_tool = False
+                existing.turn_at = moment
             existing.generating = True
             existing.ended_at = None
             existing.last_event_at = moment
@@ -339,10 +409,15 @@ class LiveFeed:
                 # event to frame the turn. Without this an unframed
                 # conversation expires at 90s in the middle of a ten-minute
                 # build and the console drops the column.
-                if kind == "tool_use":
+                if kind == "tool_use" and not block.get("agent"):
+                    conversation.tools.append(
+                        (tool_words(block.get("name"), block.get("text") or ""),
+                         moment))
                     conversation.awaiting_tool = True
-                elif kind == "tool_result":
-                    conversation.awaiting_tool = False
+                elif kind == "tool_result" and not block.get("agent"):
+                    if conversation.tools:
+                        conversation.tools.pop(0)
+                    conversation.awaiting_tool = bool(conversation.tools)
                 while len(conversation.blocks) > self._buffer_blocks:
                     dropped = conversation.blocks.popleft()
                     conversation.first_available_seq = dropped["seq"] + 1
@@ -368,6 +443,8 @@ class LiveFeed:
                 return
             conversation.generating = False
             conversation.ended_at = moment
+            conversation.tools = []
+            conversation.awaiting_tool = False
 
     def forget(self, session_id: str) -> None:
         """Drop a conversation entirely — it was closed, not merely quiet."""
@@ -458,6 +535,71 @@ class LiveFeed:
                 "started_at": conversation.started_at,
                 "last_block_at": conversation.last_block_at,
             }
+
+    def turn(self, session_id: str, now: Optional[float] = None) -> dict:
+        """Whether this mind's own turn is open, and what it has in flight.
+
+        `open` is True, False or None, and None is an answer: a conversation
+        the feed has never seen (every one of them, just after this process
+        restarts) and a terminal pane gone silent, which never says its turn
+        ended, are both turns nobody can speak for. Only an open turn is
+        given a `reading`, so a mind between turns and a mind nobody can
+        speak for are never called stalled.
+
+        A framed turn stays open until it says it ended, past the ceiling
+        `_generating` applies: that ceiling exists to free a dashboard
+        column, and a chat turn fifteen minutes silent with no end is the
+        hung turn this exists to show, not one to stop showing.
+
+        Thinking in progress cannot be seen from here - the harness writes a
+        thinking block only once it is complete - so silence is read by the
+        rule for a source that cannot see it: quiet first, stalled later.
+        """
+        moment = time.time() if now is None else now
+        with self._lock:
+            conversation = self._conversations.get(session_id)
+            if conversation is None:
+                return {"session_id": session_id, "open": None}
+            if not conversation.generating:
+                return {"session_id": session_id, "open": False}
+            if not conversation.framed and not self._generating(conversation, moment):
+                return {"session_id": session_id, "open": None}
+            heard_at = max(conversation.last_block_at or 0.0,
+                           conversation.turn_at)
+            tools = list(conversation.tools)
+            framed = conversation.framed
+        facts = {"tool": bool(tools), "heard_at": heard_at,
+                 "sees_thinking": False}
+        words = tools[0][0] if tools else ""
+        if len(tools) > 1:
+            words = f"{len(tools)} tools, {words}"[:staff.TOOL_WORDS]
+        read = staff.reading(now=moment, **facts)
+        turns = staff.turns(**facts)
+        if not framed:
+            # A pane never says its turn ended, so its silence may simply be
+            # that: past the point where silence would be shown, nobody can
+            # speak for it. It is working while it produces or has a call
+            # out, and otherwise not read at all.
+            if read != staff.WORKING:
+                return {"session_id": session_id, "open": None}
+            turns = {"quiet_at": None, "stalled_at": None}
+        return {
+            "session_id": session_id,
+            "open": True,
+            "reading": read,
+            "tool": words,
+            "tool_started_at": tools[0][1] if tools else None,
+            "heard_at": heard_at,
+            **turns,
+            "now": moment,
+        }
+
+    def turns(self, now: Optional[float] = None) -> list[dict]:
+        """`turn` for every conversation the feed can speak for at all."""
+        moment = time.time() if now is None else now
+        with self._lock:
+            known = list(self._conversations)
+        return [self.turn(session_id, now=moment) for session_id in known]
 
     def live(self, now: Optional[float] = None) -> list[dict]:
         """Every conversation still generating, oldest first.

@@ -180,6 +180,7 @@ TABLE.add(
     "GET /minds/{mind_id}/wake-state",
     "GET /sessions/live",
     "GET /sessions/live/text",
+    "GET /sessions/turns",
     "PUT /broker/minds/{mind_id}/owner",
     # Minting a phrase is the one call that sees it in the clear, and
     # clearing a claim takes a bot off the person holding it. The console
