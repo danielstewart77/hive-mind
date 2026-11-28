@@ -422,19 +422,21 @@ Daniel, 2026-11-25: "We should have a key for a user, just as we do for minds.
 So if the user owns the mind, the user's key should be accepted when making
 changes to the mind it owns." Built as feature 834 requirement 19.
 
-- A person has one key. It is a file in the hive site's own key folder (`.people`
-  under the key root, 0600, never mounted into a mind) and a fingerprint row in
-  the hive database's credentials table under their username with kind `user`,
-  written by the hive site itself (the gateway reads the same row on every
-  request; the hive site holds no gateway administrator credential). Made at
-  random on first need, shown and typed nowhere, replaced on the hive site (Your
-  key under Account settings; an administrator can replace anyone's on Users and
-  groups). A key still held as `USER_KEY_<NAME>` in the install's settings file
-  is moved at console start and its line, and the console's saved copies of it,
-  removed. It opens no route at the gateway.
-- With the authentication service as the sign-in, the hive site writes that
-  service's answer about who is in `admins` into the hive database on each
-  request before serving it, so the gateway can read it there.
+- A person's key is made when they sign in (story 912) and lives only in their
+  own browser, for twelve hours; its one-way scramble is a row in the hive
+  database's record of keys. The hive site and the terminal site take the key
+  that arrives with each click, use it for that request to the gateway, the
+  memory store and the tools, and keep nothing: no file, nothing in memory
+  after the request, nothing across a restart (story 913). Signing out, or the
+  twelve hours passing, ends it everywhere at once; "Sign out everywhere" under
+  Account settings ends every sign-in of the person's (an administrator can do
+  it for anyone on Users and groups). Work that needs a person who is not there
+  (finishing a started rename, taking back a mind whose creation was cut short,
+  finishing a cut-short replacement of a mind's key, sending a saved design
+  submission) waits, is shown as waiting with who it waits for, and is finished
+  on the next click of that person or of any administrator, with that click's
+  key. The old key files (`.people` under the key root) are no longer read or
+  written; removing them is story 914's.
 - A person's change to a mind goes to the gateway, not to the mind: the hive
   site sends it with that person's own key to
   `/broker/minds/{mind}/forward/{path}`, the gateway decides (the mind's owner,
