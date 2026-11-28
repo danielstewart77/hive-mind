@@ -590,8 +590,14 @@ async def logout(request: Request):
     account_store = auth.get_store()
     token = auth.session_token(request, account_store)
     if token:
-        with suppress(auth.ServiceUnavailable):
+        try:
             await account_store.sign_out(token)
+        except auth.ServiceUnavailable:
+            # Not signed out: say so, and keep the cookie so the person can
+            # try again rather than believe a live key has ended.
+            raise HTTPException(
+                status_code=503,
+                detail="Could not sign you out just now; try again.")
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
     log_event(log, "auth.logout", **_actor_fields(user))

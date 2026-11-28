@@ -183,3 +183,39 @@ async def test_a_cut_short_key_replacement_waits_for_who_started_it_or_an_admini
     assert await holder_credentials.recover_replacements("aiden", False) == []
     assert holder_credentials.key_journal.is_open(started)
     assert hive is not None
+
+
+@pytest.mark.parametrize("ending_click", ["logout", "end_everywhere"])
+def test_a_click_that_ends_the_key_does_not_pick_up_waiting_work_and_the_rename_is_finished_on_the_next_sign_in(
+        rename_setup, monkeypatch, ending_click):
+    admin, owner, console, ident, operation_id, recording, state = _started_by_the_owner(
+        rename_setup, monkeypatch)
+
+    if ending_click == "logout":
+        owner.post("/logout", follow_redirects=False)
+    else:
+        assert owner.post("/api/sign-ins/end").status_code == 200
+    time.sleep(1)  # a pickup with the dead key would have run by now
+
+    assert recording.seen == []
+    assert mind_rename.latest(ident)["status"] not in ("recovery_required", "success")
+    assert [w["operation_id"] for w in mind_rename.waiting("mind-owner", False)] == [operation_id]
+
+    again, _ = console.sign_in("mind-owner", "test-password-123")
+    again.get("/overview")
+    _wait_for(lambda: mind_rename.latest(ident)["status"] == "success", "the rename was not finished")
+
+
+def test_signing_out_when_the_record_cannot_be_written_says_so_and_keeps_the_cookie(
+        rename_setup, monkeypatch):
+    admin, owner, console, ident, operation_id, recording, state = _started_by_the_owner(
+        rename_setup, monkeypatch)
+
+    async def down(self, token):
+        raise auth.ServiceUnavailable("the record is down")
+
+    monkeypatch.setattr(auth.BuiltinStore, "sign_out", down)
+    answer = owner.post("/logout", follow_redirects=False)
+
+    assert answer.status_code == 503
+    assert "set-cookie" not in {k.lower() for k in answer.headers} or "max-age=0" not in answer.headers.get("set-cookie", "").lower()

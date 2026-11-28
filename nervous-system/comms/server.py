@@ -6,6 +6,7 @@ All Claude CLI interaction flows through here.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -25,6 +26,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from comms.config import config
 import comms.broker as broker
+
+
+def refuse_sign_in_key(request: Request) -> None:
+    """A sign-in's key ends, so it may not make a key that does not (feature
+    834, requirement 41). The credential-writing routes take an
+    administrator's long-lived key or the admin token, never a sign-in."""
+    caller = request.scope.get("hive_caller")
+    if caller is not None and caller.sign_in_digest:
+        raise HTTPException(
+            403, "A sign-in key cannot make or cut off keys; use an "
+                 "administrator's long-lived key")
 
 
 def require_admin_or_person(request: Request) -> None:
@@ -1181,7 +1193,7 @@ class CredentialRequest(BaseModel):
 
 @app.put(
     "/credentials/{holder}",
-    dependencies=[Depends(require_admin_or_person)],
+    dependencies=[Depends(require_admin_or_person), Depends(refuse_sign_in_key)],
 )
 async def put_holder_credential(holder: str, body: CredentialRequest):
     """Mint or replace one holder's credential.
@@ -1209,7 +1221,7 @@ async def put_holder_credential(holder: str, body: CredentialRequest):
 
 @app.delete(
     "/credentials/{holder}",
-    dependencies=[Depends(require_admin_or_person)],
+    dependencies=[Depends(require_admin_or_person), Depends(refuse_sign_in_key)],
 )
 async def delete_holder_credential(holder: str, remove: bool = False):
     """Revoke one holder's credential, and only that holder's.
@@ -1513,15 +1525,37 @@ async def list_watches(session_id: str, request: Request):
 
 
 @app.get("/sessions/{session_id}/events")
-async def stream_session_events(session_id: str):
+async def stream_session_events(session_id: str, request: Request):
     """Read-only SSE stream for passive session observers."""
     session = await session_mgr.get_session(session_id)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
+    caller = _caller(request)
+
     async def event_stream():
-        async for event in session_mgr.stream_session_events(session_id):
-            yield f"data: {json.dumps(event)}\n\n"
+        # Ends when the sign-in this stream was opened with ends (feature 834,
+        # requirement 41); a stream on a key that never ends is never cut.
+        events = session_mgr.stream_session_events(session_id).__aiter__()
+        ended = asyncio.ensure_future(user_access.watch_sign_in(caller))
+        try:
+            while True:
+                step = asyncio.ensure_future(events.__anext__())
+                await asyncio.wait({step, ended}, return_when=asyncio.FIRST_COMPLETED)
+                if ended.done():
+                    step.cancel()
+                    with contextlib.suppress(BaseException):
+                        await step
+                    return
+                try:
+                    event = step.result()
+                except StopAsyncIteration:
+                    return
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            ended.cancel()
+            with contextlib.suppress(BaseException):
+                await events.aclose()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1826,14 +1860,30 @@ async def ws_stream(ws: WebSocket, session_id: str):
         await ws.close(code=4401)
         return
     await ws.accept()
-    try:
+
+    async def converse() -> None:
         while True:
             data = await ws.receive_json()
             images = data.get("images")
             async for event in session_mgr.send_message(session_id, data["content"], images=images):
                 await ws.send_json(event)
+
+    # A socket opened with a sign-in's key is closed when that key ends
+    # (feature 834, requirement 41), as the terminal is.
+    work = asyncio.ensure_future(converse())
+    key_ended = asyncio.ensure_future(user_access.watch_sign_in(_caller(ws)))
+    try:
+        await asyncio.wait({work, key_ended}, return_when=asyncio.FIRST_COMPLETED)
+        if key_ended.done() and not work.done():
+            work.cancel()
+            await ws.close(code=user_access.WS_DENY_CODE, reason="sign-in ended")
+        elif work.done() and not work.cancelled():
+            work.result()
     except WebSocketDisconnect:
         pass
+    finally:
+        work.cancel()
+        key_ended.cancel()
 
 
 async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> int | None:

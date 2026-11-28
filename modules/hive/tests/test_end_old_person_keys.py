@@ -65,3 +65,23 @@ def test_the_one_time_step_ends_each_old_person_key_deletes_the_files_and_leaves
     assert second["ended_people"] == [] and second["key_files_deleted_for"] == []
     assert _known(MIND_KEY) is not None
     assert (root / "ada" / "key").read_text().strip() == MIND_KEY
+
+
+def test_a_people_folder_that_is_a_link_to_the_mind_folders_is_not_walked_and_a_folder_inside_a_person_folder_does_not_stop_the_step(
+        builtin_console, tmp_path, monkeypatch):
+    root = tmp_path / "keys"
+    (root / "ada").mkdir(parents=True)
+    (root / "ada" / "key").write_text(MIND_KEY + "\n")
+    monkeypatch.setattr(mind_key_files, "KEY_ROOT", root)
+    (root / ".people").symlink_to(root, target_is_directory=True)
+
+    assert key_migration._delete_old_people_folder() == []
+    assert (root / "ada" / "key").read_text().strip() == MIND_KEY
+
+    (root / ".people").unlink()
+    _plant(root, "DAN", OLD_DAN)
+    (root / ".people" / "DAN" / "old").mkdir()
+    (root / ".people" / "DAN" / "old" / "key").write_text("x")
+
+    assert key_migration._delete_old_people_folder() == ["DAN"]
+    assert not (root / ".people").exists()

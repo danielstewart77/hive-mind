@@ -61,3 +61,50 @@ def test_a_terminal_opened_with_a_sign_in_key_is_closed_when_the_key_ends(
             ws.receive_bytes()
 
     assert closed.value.code == user_access.WS_DENY_CODE
+
+
+def test_a_chat_socket_opened_with_a_sign_in_key_is_closed_when_the_key_ends(
+        app_client, monkeypatch):
+    clock = {"t": NOW}
+    client = _open(app_client, monkeypatch, clock)
+    _record_sign_in(NOW + 12 * 3600)
+
+    with client.websocket_connect(
+            "/sessions/sess-attach/stream",
+            headers={"authorization": f"Bearer {KEY}"}) as ws:
+        clock["t"] = NOW + 12 * 3600
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+
+    assert closed.value.code == user_access.WS_DENY_CODE
+
+
+def test_an_events_stream_opened_with_a_sign_in_key_ends_when_the_key_ends(
+        app_client, monkeypatch):
+    clock = {"t": NOW}
+    client = _open(app_client, monkeypatch, clock)
+    _record_sign_in(NOW + 12 * 3600)
+
+    with client.stream("GET", "/sessions/sess-attach/events",
+                       headers={"authorization": f"Bearer {KEY}"}) as response:
+        assert response.status_code == 200
+        clock["t"] = NOW + 12 * 3600
+        # The stream finishes by itself: iterating returns instead of hanging.
+        list(response.iter_lines())
+
+
+def test_a_sign_in_key_cannot_make_or_cut_off_a_credential_but_the_long_lived_key_can(
+        app_client, monkeypatch):
+    clock = {"t": NOW}
+    client = _open(app_client, monkeypatch, clock)
+    _record_sign_in(NOW + 12 * 3600)
+    sign_in = {"authorization": f"Bearer {KEY}"}
+    body = {"username": "root-admin", "token": "a-key-that-never-ends-0123456789",  # secret-guard: allow
+            "role": "user"}
+
+    assert client.put("/credentials/root-admin", json=body, headers=sign_in).status_code == 403
+    assert client.delete("/credentials/root-admin", headers=sign_in).status_code == 403
+    assert client.get("/credentials", headers=sign_in).status_code == 200
+    # The administrator's long-lived key (the client's default) still can.
+    assert client.put("/credentials/other-person",
+                      json={**body, "username": "other-person"}).status_code == 200

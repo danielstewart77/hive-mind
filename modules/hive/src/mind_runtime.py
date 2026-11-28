@@ -48,6 +48,20 @@ class PersonScope:
         self.app = app
         self.after_click = after_click
 
+    @staticmethod
+    async def _key_still_stands(key: str) -> bool:
+        """False when this very click ended the key (sign out, sign out
+        everywhere, a password change): nothing waiting is picked up with a key
+        that is already dead, which would send a rename into recovery."""
+        try:
+            import auth
+
+            # Asked afresh of the record: the per-request answer was made
+            # before the click ended the key.
+            return bool(await auth.get_store().user_for_token(key))
+        except Exception:  # noqa: BLE001 - unsure means do not pick up
+            return False
+
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
@@ -69,7 +83,8 @@ class PersonScope:
         try:
             await self.app(scope, receive, send)
             if (self.after_click is not None and person and key
-                    and not scope.get("path", "").startswith(("/static/", "/health"))):
+                    and not scope.get("path", "").startswith(("/static/", "/health"))
+                    and await self._key_still_stands(key)):
                 await self.after_click(person, admin, key)
         finally:
             _PERSON_IS_ADMIN.reset(admin_token)

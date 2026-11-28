@@ -24,6 +24,7 @@ variables and the first eight hex digits of a digest.
 
 from __future__ import annotations
 
+import shutil
 import asyncio
 import hashlib
 import re
@@ -828,15 +829,15 @@ def _delete_old_people_folder() -> list[str]:
 
     root = mind_key_files.KEY_ROOT / _OLD_PEOPLE_FOLDER
     gone: list[str] = []
+    if root.is_symlink():
+        # A link could point at the mind folders: walk nothing through it.
+        return gone
     try:
         folders = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink())
     except OSError:
         return gone
     for folder in folders:
-        for item in folder.iterdir():
-            if item.is_file() or item.is_symlink():
-                item.unlink()
-        folder.rmdir()
+        shutil.rmtree(folder, ignore_errors=True)
         gone.append(folder.name)
     try:
         root.rmdir()
