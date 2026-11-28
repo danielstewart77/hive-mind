@@ -921,6 +921,10 @@ async def retire() -> dict[str, Any]:
             raise MintRefused(
                 f"the record that retirement happened could not be written "
                 f"({exc.strerror or exc}); nothing was retired") from None
+        # The memory store's and the tools' old keys for every mind are kept
+        # by the schema step until now; retirement deletes them.
+        from hive_data import core as _core
+        await _core.delete_legacy_keys()
         compose_text = _compose_texts()
         for name in sorted(registry):
             for service in (hc.SERVICES["comms"], hc.SERVICES["lucent"]):
@@ -973,7 +977,7 @@ async def retire() -> dict[str, Any]:
         "retired": True,
         "old_lines_removed": removed,
         "old_lines_kept_because_a_compose_file_reads_them": kept,
-        "shared_tools_token": "the tools keep no key list of their own; the old rows were emptied by the schema step",
+        "shared_tools_token": "the tools keep no key list of their own; the old memory-store and tools key rows were deleted now",
         "old_values_still_accepted": still,
         "moved_minds": keys_ok,
         "warning": RETIREMENT_WARNING + " " + REPOINT_NOTE,

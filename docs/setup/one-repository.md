@@ -209,7 +209,13 @@ know (`hive_data/migrate.py`), and nothing checks at start. So going back never
 runs `migrate check` or `apply`, and never undoes a migration. The changed
 database stays as the newer release left it; the previous release keeps working
 against it because every step only adds (a new nullable column or table it does
-not name).
+not name). Step 20 keeps the memory store's and the tools' old key tables as
+they are, so a mind not yet moved to its one key is still accepted by both
+until it is moved (the move cuts its old values off) or the old keys are
+retired (`key_migration.py retire`, which deletes those rows). Step 21 removes
+only the approver's row. Going back to the previous release therefore works for
+every mind not yet moved; steps 20 to 22 never need the item 888 dump to go
+back.
 
 **The boundary: going back holds only until the old keys are retired.** Moving a
 mind onto its one key (story 884) replaces its old per-service keys at the

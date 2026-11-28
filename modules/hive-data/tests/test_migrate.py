@@ -399,3 +399,76 @@ async def test_a_database_that_already_holds_steps_18_and_19_gets_the_key_steps_
             "one_record_of_keys", "approval_decided_by", "sign_in_keys_end"]
         report = await migrate.check(dsn)
         assert report["ok"] and report["pending"] == []
+
+
+async def test_minds_not_yet_moved_to_one_key_are_still_accepted_by_the_memory_store_and_tools_after_steps_20_to_22(
+        monkeypatch):
+    """This host as it is: fifteen minds, each with its own gateway key in the
+    one record and a separate memory-store key and tools key that the record
+    does not hold. Applying 20 to 22 must not stop any of them being accepted
+    (item 841's control mind keeps working untouched), until a mind is moved."""
+    import hive_data
+    from hive_data import access, core
+
+    async with claimed_database(ADMIN_DSN, "hive_data_other_") as dsn:
+        every = migrate.steps()
+        await migrate.apply(dsn, chosen=[s for s in every if s.version <= 19])
+        names = [f"mind{i:02d}" for i in range(15)]
+        connection = await asyncpg.connect(dsn)
+        try:
+            for i, name in enumerate(names):
+                await connection.execute(
+                    "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+                    "registered_at, last_seen, owner) VALUES ($1, $1, 'http://x:8420', 'm', "
+                    "'claude', 1, 1, 'daniel')", name)
+                await connection.execute(
+                    "INSERT INTO core.credentials (holder, username, role, token_sha, created_at) "
+                    "VALUES ($1, 'daniel', 'mind', $2, 1)", name,
+                    access.digest(f"gateway-key-{name}"))
+                await connection.execute(
+                    "INSERT INTO memory.credentials (holder, username, role, token_sha, created_at) "
+                    "VALUES ($1, 'daniel', 'mind', $2, 1)", name,
+                    access.digest(f"memory-key-{name}"))
+                await connection.execute(
+                    "INSERT INTO tools.api_tokens (name, token_hash, created_at) VALUES ($1, $2, 1)",
+                    name, access.digest(f"tools-key-{name}"))
+            await connection.execute(
+                "INSERT INTO tools.api_tokens (name, token_hash, created_at) "
+                "VALUES ('hitl-approver', $1, 1)", access.digest("approver-key"))
+        finally:
+            await connection.close()
+
+        out = await migrate.apply(dsn)
+        assert out["applied"] == [20, 21, 22]
+
+        monkeypatch.setenv(hive_data.config.DSN_VAR, dsn)
+        await hive_data.connect()
+        try:
+            for name in names:
+                for key in (f"gateway-key-{name}", f"memory-key-{name}", f"tools-key-{name}"):
+                    found = await access.key_for(key)
+                    assert found is not None and found.holder == name, (name, key)
+            assert await access.key_for("approver-key") is None
+
+            # Moving one mind (a new key in the record) cuts its old
+            # memory-store and tools keys off and no other mind's.
+            moved = names[0]
+            await core.upsert_credential(
+                holder=moved, username="daniel", role="mind",
+                token_sha=access.digest("its-one-key"), created_at=2)
+            assert (await access.key_for("its-one-key")).holder == moved
+            assert await access.key_for(f"memory-key-{moved}") is None
+            assert await access.key_for(f"tools-key-{moved}") is None
+            assert (await access.key_for(f"memory-key-{names[1]}")).holder == names[1]
+
+            # A mind cut off in the record is refused on its old keys too.
+            await core.revoke_credential(names[2], 3.0)
+            assert await access.key_for(f"memory-key-{names[2]}") is None
+            assert await access.key_for(f"tools-key-{names[2]}") is None
+
+            # Retirement deletes the old keys and nobody presents them again.
+            await core.delete_legacy_keys()
+            assert await access.key_for(f"memory-key-{names[3]}") is None
+            assert (await access.key_for(f"gateway-key-{names[3]}")).holder == names[3]
+        finally:
+            await hive_data.close(drain_timeout=5.0)

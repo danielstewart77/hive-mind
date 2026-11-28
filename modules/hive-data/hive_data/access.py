@@ -45,7 +45,12 @@ async def key_for(token: str) -> Key | None:
     token = (token or "").strip()
     if not token:
         return None
-    row = await core.credential_for_token(digest(token))
+    sha = digest(token)
+    row = await core.credential_for_token(sha)
+    if row is None:
+        # A mind not yet moved to its one key still presents the memory-store
+        # or tools key it had; those rows stay until it is moved (step 20).
+        row = await core.legacy_key_for(sha)
     if row is None:
         return None
     return Key(holder=_norm(row["holder"]), username=_norm(row["username"]),
