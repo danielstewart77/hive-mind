@@ -787,8 +787,13 @@ async def upsert_credential(
         n = len(args)
         sql = (f'WITH "recorded" AS ({sql}), "ended" AS ('
                + _END_SIGN_INS.format(at=f"${n + 1}", who=f"${n + 2}")
+               # Only a replacement: the first long-lived key made for a
+               # person (the site makes it when it first acts for them, until
+               # story 913) is not a replacement and ends nothing. The
+               # statement sees the row as it was before this write.
+               + f' AND EXISTS (SELECT 1 FROM core."credentials" WHERE "holder" = ${n + 3})'
                + ' RETURNING 1) SELECT * FROM "recorded"')
-        args = [*args, now(), str(username)]
+        args = [*args, now(), str(username), holder]
     return await _execute_returning(unit, sql, *args)
 
 
