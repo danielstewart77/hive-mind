@@ -33,21 +33,21 @@ def _base_url() -> str:
 
 
 async def soul_headers() -> dict[str, str]:
-    """The signed-in person's own key. Nobody signed in, or a key that cannot
-    be had, is a sentence and never another credential."""
-    import holder_credentials
+    """The key that came with this click. Nobody signed in, or no key with the
+    request, is a sentence and never another credential."""
     import mind_runtime
+    import route_access
 
     person = mind_runtime._PERSON.get()
     if not person:
         raise HTTPException(
             status_code=403,
             detail="nobody is signed in, so no soul is asked for or changed")
-    key = await holder_credentials.user_key(person)
+    key = route_access.acting_key()
     if not key:
         raise HTTPException(
-            status_code=503,
-            detail="your own key could not be found on this site, so the memory store was not asked")
+            status_code=403,
+            detail="your sign-in key did not come with this request, so the memory store was not asked")
     return {"Authorization": f"Bearer {key}"}
 
 

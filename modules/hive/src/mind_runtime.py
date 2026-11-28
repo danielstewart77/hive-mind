@@ -101,7 +101,7 @@ async def via_gateway(mind_url: str) -> tuple[str, dict[str, str]]:
     or the person's key cannot be had.
     """
     import configuration_data
-    import holder_credentials
+    import route_access
 
     person = _PERSON.get()
     if not person:
@@ -124,11 +124,11 @@ async def via_gateway(mind_url: str) -> tuple[str, dict[str, str]]:
             status_code=403,
             detail="you are neither this mind's owner nor an administrator, so you cannot change it",
         )
-    key = await holder_credentials.user_key(person)
+    key = route_access.acting_key()
     if not key:
         raise HTTPException(
-            status_code=503,
-            detail="your own key could not be found on this console, so nothing was sent to the mind",
+            status_code=403,
+            detail="your sign-in key did not come with this request, so nothing was sent to the mind",
         )
     tail = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
     base = f"{_gateway_base()}/broker/minds/{urllib.parse.quote(mind_id, safe='')}/forward"
@@ -166,7 +166,7 @@ def _gateway_refusal(response: httpx.Response) -> None:
     if status == 401:
         raise HTTPException(
             status_code=502,
-            detail="the gateway did not accept your key; replace it under Account settings, Your key",
+            detail="the gateway did not accept your sign-in; sign in again",
         )
     if status == 403:
         raise HTTPException(status_code=403, detail=words or "the gateway refused this change")

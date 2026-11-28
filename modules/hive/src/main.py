@@ -144,18 +144,16 @@ async def lifespan(app: FastAPI):
     log_event(log, "store.opened", component="hive-control-plane",
               engine="postgres")
     await seed_first_user()
-    mind_rename.recover_pending()
-    recovering = asyncio.create_task(_recover_key_replacements())
-    moving_user_keys = asyncio.create_task(_move_user_keys())
+    # Four pieces of work used to be taken up here, with nobody clicking, and
+    # so with a key kept for the purpose: finishing a started rename, taking
+    # back a creation cut short, finishing a key replacement cut short and
+    # sending a saved design submission. None is done at start now. Each is
+    # left waiting (`waiting_work`) and is finished on the next click of the
+    # person who started it, or of any administrator, with that person's own
+    # sign-in key.
     # The ready-made roles, once per hive (story 10.18.3). A failure is
     # logged and the console still starts: the roles page then says what the
     # repo holds and offers each as "take the repo copy".
-    # A creation this console was stopped in the middle of is taken back
-    # now: the request that would have finished or undone it is gone. Never
-    # fatal — what could not be taken back stays recorded for the next start.
-    # Beside the start, not before it: each step may wait on a service that
-    # is still coming up, and the console must be answering meanwhile.
-    sweeping = asyncio.create_task(_sweep_interrupted_creations())
     try:
         # A task of its own: the store refuses a unit of work opened inside
         # this lifespan's generator, and the seed is one.
@@ -167,13 +165,9 @@ async def lifespan(app: FastAPI):
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
     log_event(log, "service.started", component="hive-control-plane")
-    # Anything a design session was owed when this process last stopped. A
-    # console restarted between a submission being stored and its send is
-    # otherwise a submission nobody is ever told about, and the page shows
-    # it as saved with no error and nothing pending.
-    startup_delivery = asyncio.create_task(design_delivery.deliver_pending())
-    _DESIGN_DELIVERIES.add(startup_delivery)
-    startup_delivery.add_done_callback(_DESIGN_DELIVERIES.discard)
+    # A submission stored and not yet sent when this process stopped stays
+    # stored and shows as waiting; the next click of the person who saved it
+    # (or of an administrator) sends it.
     try:
         yield
     finally:
@@ -181,16 +175,6 @@ async def lifespan(app: FastAPI):
         log_event(log, "service.stopped", component="hive-control-plane")
         # Before the store closes: what it had not taken back stays recorded
         # for the next start.
-        recovering.cancel()
-        sweeping.cancel()
-        try:
-            await recovering
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-        try:
-            await sweeping
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - cancelled, or reported
-            pass
         # The delivery tasks go before the store does, and are waited for.
         # Left to the loop's own cancellation they are cancelled *after* the
         # store is closed, and `deliver_notice`'s own handler — the one that
@@ -242,14 +226,9 @@ app.add_middleware(mind_rename.EditGate)
 app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
 
 
-async def _read_person_key(username: str) -> str | None:
-    import holder_credentials
-    return await holder_credentials.user_key(username)
-
-
-# The registry is read for the signed-in person, with that person's own key:
-# this site holds no gateway key of its own.
-route_access.set_person_key_reader(_read_person_key)
+# The registry is read for the signed-in person, with the key that came with
+# the click (`route_access`): this site holds no key of its own and keeps none
+# for anyone.
 install_fastapi_logging(app, log, "hive-control-plane")
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -447,25 +426,20 @@ async def _person_headers_or_none() -> dict:
 async def _person_headers() -> dict:
     """The signed-in person's own key, as the gateway's bearer.
 
-    Everything this site asks of the gateway is asked because a person asked,
-    so it carries that person's key and nothing else (feature 834, story 905).
-    Refused with a sentence, never 401 (the layout would sign the person out):
-    nobody signed in, or their key cannot be had. There is no fallback to a
-    credential of this site's own, because it holds none.
+    Everything this site asks of the gateway, the memory store and the tools is
+    asked because a person asked, so it carries the key that came with that
+    click (the sign-in cookie, `route_access.acting_key`) and nothing else:
+    not a key read from a file, not one kept from an earlier click, not one of
+    this site's own, because it holds none. Refused with a sentence, and never
+    with 401 for want of one: the middleware has already sent a person whose
+    key has ended to the sign-in page.
     """
-    import holder_credentials
-
-    person = mind_runtime._PERSON.get()
-    if not person:
+    person = route_access.acting_person()
+    key = route_access.acting_key()
+    if not person or not key:
         raise HTTPException(
             status_code=403,
             detail="nobody is signed in, so nothing is asked of the gateway",
-        )
-    key = await holder_credentials.user_key(person)
-    if not key:
-        raise HTTPException(
-            status_code=503,
-            detail="your own key could not be found on this site, so the gateway was not asked",
         )
     return {"Authorization": f"Bearer {key}"}
 
@@ -505,7 +479,7 @@ async def _gateway_request(
         # Never the gateway's 401: this site's own layout would sign the
         # person out over it. It means their key is not accepted.
         status = 502 if response.status_code == 401 else response.status_code
-        detail = ("the gateway did not accept your key; replace it on Your key"
+        detail = ("the gateway did not accept your sign-in; sign in again"
                   if response.status_code == 401 else response.text)
         raise HTTPException(status_code=status, detail=detail)
     if not response.content:

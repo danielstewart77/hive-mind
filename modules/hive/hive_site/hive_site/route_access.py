@@ -216,44 +216,50 @@ def _comms_url() -> str:
     return (os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424").rstrip("/")
 
 
-#: Who the registry is read for. This library holds no key of its own for the
-#: gateway: every read is made for a signed-in person and carries that
-#: person's own key, which the site that mounts this library says how to find
-#: (`set_person_key_reader`). Set for a request by the middleware once it has
-#: resolved the person, and by `acting_as` for work outside a request.
+#: Who the registry is read for, and with which key. This library holds no key
+#: of its own for the gateway and keeps none for anyone: every read is made for
+#: the signed-in person of the request being served and carries the key that
+#: came with that click (the sign-in cookie). Both are set by the middleware
+#: for the length of one request and put back when it ends; nothing is kept
+#: between requests.
 _ACTING: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "route_access_acting", default=None)
-_KEY_READER: Callable[[str], Awaitable[str | None]] | None = None
+_ACTING_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "route_access_acting_key", default=None)
 
 
-def set_person_key_reader(reader: Callable[[str], Awaitable[str | None]] | None) -> None:
-    """How this site finds a signed-in person's own key (a coroutine)."""
-    global _KEY_READER
-    _KEY_READER = reader
+def acting_person() -> str | None:
+    """The person the request being served is for, or None."""
+    return _ACTING.get()
 
 
-@contextlib.contextmanager
-def acting_as(username: str | None):
-    """Read the registry as this person for the work inside."""
-    token = _ACTING.set(str(username or "").strip().lower() or None)
-    try:
-        yield
-    finally:
-        _ACTING.reset(token)
+def acting_key() -> str | None:
+    """The sign-in key that came with the request being served, or None
+    outside one (or when nobody is signed in). Read it where it is used and do
+    not keep it."""
+    return _ACTING_KEY.get()
+
+
+def begin_acting(username: str | None, key: str | None):
+    """Act as this person, with this key, for the work that follows in this
+    request. Returns what `end_acting` needs to put both back."""
+    return (_ACTING.set(str(username or "").strip().lower() or None),
+            _ACTING_KEY.set(key or None))
+
+
+def end_acting(tokens) -> None:
+    _ACTING.reset(tokens[0])
+    _ACTING_KEY.reset(tokens[1])
 
 
 async def _comms_headers() -> dict[str, str]:
-    """The acting person's own key as the gateway's bearer. Nobody acting, or
-    no key to be had: no header, which the gateway refuses, and the caller
+    """The key that came with this request as the gateway's bearer. Nobody
+    acting, or no key: no header, which the gateway refuses, and the caller
     reads that as the registry not being readable."""
-    person = _ACTING.get()
-    if not person or _KEY_READER is None:
+    key = _ACTING_KEY.get()
+    if not _ACTING.get() or not key:
         return {}
-    try:
-        key = await _KEY_READER(person)
-    except Exception:  # noqa: BLE001 - a key that cannot be read is no key
-        return {}
-    return {"Authorization": f"Bearer {key}"} if key else {}
+    return {"Authorization": f"Bearer {key}"}
 
 
 async def _comms_get(path: str) -> object | None:
@@ -450,6 +456,15 @@ class AccessMiddleware:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
+        acting = _ACTING.set(None)
+        acting_key_token = _ACTING_KEY.set(None)
+        try:
+            await self._serve(scope, receive, send)
+        finally:
+            _ACTING_KEY.reset(acting_key_token)
+            _ACTING.reset(acting)
+
+    async def _serve(self, scope, receive, send):
         route, params = self._match(scope)
         if route is None:
             await self.app(scope, receive, send)
@@ -612,8 +627,10 @@ class AccessMiddleware:
             return _unavailable(exc.message, page)
         if user is not None:
             # From here on, in this request, the registry is read as this
-            # person (see `_comms_headers`).
+            # person with the key that came with the click (see
+            # `_comms_headers`); `__call__` puts both back when it ends.
             _ACTING.set(auth.normalize_username(str(user.get("username") or "")) or None)
+            _ACTING_KEY.set(auth.session_token(conn) or None)
         if user is None:
             if page:
                 path = rule.lands_on.format(**params) if rule.lands_on else conn.url.path
