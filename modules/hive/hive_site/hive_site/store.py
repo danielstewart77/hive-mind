@@ -716,16 +716,30 @@ async def update_user(user_id: int, **fields: Any) -> int:
     return int(written["rows"])
 
 
-async def bump_session_version(user_id: int) -> int:
-    """End every session this person holds, by moving the version they carry.
+async def record_sign_in(*, username: str, token_sha: str,
+                         ends_at: float) -> None:
+    """Write the scramble of one sign-in's key, with the moment it ends.
+    One statement; nothing else is ever written for that key."""
+    await core.record_sign_in(username=username, token_sha=token_sha,
+                              ends_at=ends_at, unit=_live())
 
-    An increment rather than a figure the caller computed: a caller that
-    read the version, added one and wrote it back loses the other writer's
-    bump, and the whole point of the column is ending a session that is open
-    right now.
-    """
-    written = await core.bump_session_version(user_id, unit=_live())
-    return int(written["rows"])
+
+async def sign_in_for_digest(token_sha: str) -> Row | None:
+    """The live sign-in this scramble belongs to: `username` and `ends_at`,
+    or None when there is none, it has ended, or its time is up. A person's
+    long-lived key is not a sign-in and is not answered here."""
+    row = await core.credential_for_token(token_sha, unit=_live())
+    return None if row is None or row["ends_at"] is None else row
+
+
+async def end_sign_in(token_sha: str) -> int:
+    """End the one sign-in this scramble belongs to."""
+    return int((await core.end_sign_in(token_sha, unit=_live()))["rows"])
+
+
+async def end_sign_ins(username: str) -> int:
+    """End every sign-in of one person: one statement."""
+    return int((await core.end_sign_ins(username, unit=_live()))["rows"])
 
 
 async def groups_of(user_id: int) -> list[str]:

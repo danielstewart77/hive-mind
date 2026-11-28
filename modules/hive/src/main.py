@@ -139,6 +139,7 @@ async def lifespan(app: FastAPI):
     hive, with nothing reporting that it happened.
     """
     del app
+    auth.refuse_old_settings()
     await store.open()
     log_event(log, "store.opened", component="hive-control-plane",
               engine="postgres")
@@ -542,7 +543,7 @@ async def _lucent_request(
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     # Public routes are not resolved by the route table, so the lookup — a
-    # call to auth-service at home — happens here, off the event loop.
+    # read of the record — happens here, off the event loop.
     user = await get_current_user_from_request(request)
     if not user:
         return _login_redirect_for(request)
@@ -631,7 +632,7 @@ async def _sso_signed_in(request: Request, account_store, user: dict,
     """A console session for an account an outside identity matched."""
     token = await sso.start_session(account_store, user, via)
     response = RedirectResponse(url=_safe_next_path(next_path), status_code=303)
-    auth.set_sso_cookie(request, response, token)
+    set_session_cookie(request, response, token)
     log_event(log, "auth.login.succeeded", **_actor_fields(user), via=via)
     return response
 
@@ -6699,7 +6700,7 @@ async def api_admin_users(user: dict = Depends(require_auth)):
     )
     for row in users:
         row["microsoft_bound"] = row["username"] in bound
-    return {"users": users, "groups": groups, "backend": auth.backend_name()}
+    return {"users": users, "groups": groups, "backend": "builtin"}
 
 
 @app.post("/api/admin/users", status_code=201)
@@ -6760,6 +6761,29 @@ async def api_admin_user_microsoft_unbind(username: str, user: dict = Depends(re
         log, "auth.user.microsoft_unbound", **_actor_fields(user), username=target["username"]
     )
     return Response(status_code=204)
+
+
+@app.post("/api/sign-ins/end")
+async def api_end_my_sign_ins(user: dict = Depends(require_auth)):
+    """A person ends every sign-in of their own, on every device."""
+    ended = await _store_call(auth.get_store().end_all_sign_ins, user["username"])
+    log_event(log, "auth.sign_ins.ended", **_actor_fields(user),
+              username=user["username"], ended=ended)
+    response = JSONResponse({"ended": ended})
+    clear_session_cookie(response)
+    return response
+
+
+@app.post("/api/admin/users/{username}/sign-ins/end")
+async def api_admin_user_end_sign_ins(username: str,
+                                      user: dict = Depends(require_auth)):
+    """An administrator ends every sign-in of anyone."""
+    target = await _store_call(auth.get_store().get_user, username)
+    ended = await _store_call(auth.get_store().end_all_sign_ins,
+                              target["username"])
+    log_event(log, "auth.sign_ins.ended", **_actor_fields(user),
+              username=target["username"], ended=ended)
+    return {"ended": ended}
 
 
 @app.post("/api/admin/users/{username}/reset")

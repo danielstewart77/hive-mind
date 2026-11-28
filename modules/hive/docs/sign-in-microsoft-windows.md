@@ -6,8 +6,8 @@ with its settings present the sign-in page offers "Sign in with Microsoft" or
 404. Either signs in only to an account an admin has already created under
 Settings, Users and groups. Anyone else is told their account has not been
 set up; a disabled account is refused. Either one yields a console session
-and nothing else: never an auth-service `auth_session` another sparktobloom
-site would accept.
+and nothing else: the same twelve-hour sign-in key the password sign-in
+makes, recorded the same way.
 
 An account made only for these methods is created with no temporary password,
 so it has no password to sign in with and nothing to change.
@@ -25,8 +25,7 @@ claim, ignoring case, and binds that account to the token's object id
 the tenant later reports differently does not lock the owner out, and a
 different person who later holds that email address in the tenant is refused
 rather than handed the account. The binding is kept in the console's own store
-(`core.sso_bindings` in the hive's Postgres) on both account stores, because auth-service has
-no field for it.
+(`core.sso_bindings` in the hive's Postgres).
 
 An admin can unbind an account (Settings, Users and groups, "Unbind
 Microsoft"; `DELETE /api/admin/users/<username>/microsoft`), and changing an
@@ -34,10 +33,7 @@ account's email unbinds it, since the binding was made on the old address.
 Either way the account's next Microsoft sign-in selects it by email again. A token that says its email is unverified (`email_verified`
 or `xms_edov` false) matches no account by email.
 
-Works with either account store (the built-in accounts, or auth-service at
-home). At home
-an account signs in only if auth-service grants it the `hive` site, and an
-admin counts as granted, as with `/verify`.
+Works with the hive's own accounts.
 
 ### What IT provides
 
@@ -86,10 +82,6 @@ not name signs nobody in, so a trusted foreign realm cannot reach an account
 by accident. A principal with an instance (`user/admin@REALM`) never signs
 in.
 
-Domain accounts are held only by the console's own account store, so this
-method is available only on an install that signs in against the built-in
-accounts; at
-home, behind auth-service, it stays off whatever is configured.
 
 ### What IT provides
 

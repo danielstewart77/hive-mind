@@ -103,14 +103,21 @@ their accounts from the hive's Postgres at `HIVE_DATABASE_URL`. With no other
 configuration the console signs in against those built-in accounts: on first
 launch against an empty store,
 `HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the first admin (inert
-afterward), and `HIVE_SECRET_KEY` signs session cookies — left unset, a
-random key is generated once and kept in the store, which the terminal site
-shares. With `AUTH_SERVICE_URL` set (or the backend named `auth-service` in
-`HIVE_AUTH_BACKEND`) the console signs in through auth-service instead, as site `hive`
-(`AUTH_SERVICE_SITE`), managing users over its admin API with the signed-in
-administrator's own session (no admin token); a `hive_session` cookie is then no session, and
-an unreachable auth-service is "sign-in service unavailable", never a fall
-back to the built-in accounts.
+afterward), and `HIVE_SECRET_KEY` signs only the short note a Microsoft sign-in in
+progress keeps in the browser (left unset, a random one is generated once and
+kept in the store, which the terminal site shares).
+
+Signing in makes a fresh random key for that sign-in. It goes to the browser
+as the `hive_session` cookie (HttpOnly) and only its one-way scramble is
+written, to the hive's record of keys, with an end twelve hours later. Using
+the site does not lengthen it and there is no idle limit; signing out ends
+that device's key, `POST /api/sign-ins/end` ends all of your own, and an
+administrator can end anyone's (`POST /api/admin/users/{username}/sign-ins/end`).
+Turning an account off, changing a password or resetting one ends all of that
+person's. No other program is involved; the hive does not use the separate
+authentication service, and a site whose settings still name it
+(`AUTH_SERVICE_URL`, `AUTH_SERVICE_SITE`, `HIVE_AUTH_BACKEND`) refuses to
+start and says to remove them.
 
 The session cookie is marked Secure only when the browser came over https —
 the request's own scheme, or `X-Forwarded-Proto` from a TLS-terminating

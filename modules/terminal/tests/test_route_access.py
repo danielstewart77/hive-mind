@@ -178,13 +178,13 @@ def test_a_terminal_route_added_with_no_authorization_code_is_refused_to_a_non_a
             main.app.router.routes.remove(route)
 
 
-def test_a_microsoft_or_windows_session_from_the_console_opens_the_owners_terminal_and_no_one_elses(builtin_terminal):
+def test_a_sign_in_key_made_by_the_console_opens_the_owners_terminal_and_no_one_elses(builtin_terminal):
     account_store = builtin_terminal.store()
     builtin_terminal.create_user("sloan", "sloan-temp-pass")
     sloan = builtin_terminal.client()
     sloan.cookies.set(
-        auth.SSO_COOKIE_NAME,
-        accounts.run(auth.issue_sso_token(account_store, "sloan", "microsoft")))
+        auth.SESSION_COOKIE_NAME,
+        accounts.run(auth.begin_sign_in("sloan")))
 
     with _socket(sloan, "/api/terminal/attach/s-arnold") as ws:
         assert ws.receive_bytes() == b"attached s-arnold"
@@ -290,46 +290,3 @@ def test_a_non_admin_speaks_only_in_the_voices_of_their_own_minds(people, fake_c
     for voice in ("Arnold", "arnold-clip.wav"):
         assert sloan.post("/api/terminal/tts", json={"text": "hi", "voice_id": voice}).status_code == 200
     assert admin.post("/api/terminal/tts", json={"text": "hi", "voice_id": "zack"}).status_code == 200
-
-
-@pytest.mark.parametrize("path", ["/", "/login"])
-def test_a_public_route_asks_the_sign_in_service_without_blocking_the_event_loop(
-    monkeypatch, fake_comms, path
-):
-    """A blocking call to auth-service stalls every terminal the site serves.
-
-    It used to be kept off the loop by hand, with a synchronous `httpx`
-    client pushed through `run_in_threadpool`. The shared store awaits an
-    `httpx.AsyncClient` instead, so what this guards now is that the request
-    is awaited on the loop rather than issued by a blocking client that
-    would hold it — the transport records where it was called from, and a
-    sign-in store put back on a synchronous client fails here.
-    """
-    import asyncio
-
-    import httpx
-
-    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
-    monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
-    monkeypatch.setenv("AUTH_SERVICE_URL", "http://auth-service.invalid")
-    asked_from: list[str] = []
-
-    def answer(request: httpx.Request) -> httpx.Response:
-        try:
-            asyncio.get_running_loop()
-            asked_from.append("the event loop, awaited")
-        except RuntimeError:
-            asked_from.append("a blocking client")
-        return httpx.Response(401, json={"detail": "expired"})
-
-    account_store = auth.get_store()
-    monkeypatch.setattr(
-        account_store, "_loop_client",
-        lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
-    client = _anonymous()
-    client.cookies.set("auth_session", "a-token")
-
-    client.get(path, follow_redirects=False)
-
-    assert asked_from
-    assert set(asked_from) == {"the event loop, awaited"}

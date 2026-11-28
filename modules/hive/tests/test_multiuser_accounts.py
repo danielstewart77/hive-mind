@@ -1,10 +1,9 @@
-"""The shared account suite: every test here runs against both stores.
+"""The shared account suite: the console's own sign-in, end to end.
 
-The `console` fixture runs each test twice — once with the console's own
-hive.db store, once signed in through the real auth-service — and the two
-must agree. Every step goes through the console's own HTTP surface, so what
-is exercised is the store, the route table in front of the routes, and the
-pages, together.
+The `console` fixture is the console signed in through its own sign-in page,
+with nothing else running. Every step goes through the console's own HTTP
+surface, so what is exercised is the store, the route table in front of the
+routes, and the pages, together.
 """
 
 import re

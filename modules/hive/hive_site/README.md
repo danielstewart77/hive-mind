@@ -8,9 +8,8 @@ image from this directory (`modules/hive/hive_site` in hive-mind) as a build con
 - `hive_site.store` — every operation either site performs on the hive's
   database, as one async surface over the hive's Postgres through
   `hive_data`, at `HIVE_DATABASE_URL`. Unset, a site refuses to start.
-- `hive_site.auth` — accounts and sessions on top of it: the `builtin` store
-  and the `auth-service` store, the session cookie, and the request
-  resolution both sites' routes depend on.
+- `hive_site.auth` — accounts and sign-in on top of it: the hive's own account
+  store, the sign-in key and its cookie, and the request resolution both sites' routes depend on.
 
 ## Why the whole store moved and not just its accounts half
 

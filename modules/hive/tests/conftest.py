@@ -151,14 +151,9 @@ def _isolated_hive_db(scratch_database, monkeypatch):
 # ── multi-user: one console, either account store ─────────────────────
 
 from multiuser_support import (  # noqa: E402
-    AUTH_SERVICE_REF,
-    AUTH_SERVICE_REPO,
     SEED_PASSWORD,
     SEED_USERNAME,
-    AuthServiceProcess,
     FakeComms,
-    auth_service_ref_available,
-    export_auth_service,
 )
 
 
@@ -168,24 +163,10 @@ def fake_comms():
         yield server
 
 
-@pytest.fixture(scope="session")
-def auth_service_source(tmp_path_factory):
-    # A missing ref fails rather than skips: a skipped half of the shared
-    # suite reads as green while one store goes untested.
-    if not auth_service_ref_available():
-        pytest.fail(
-            f"auth-service ref {AUTH_SERVICE_REF!r} not found in {AUTH_SERVICE_REPO}; "
-            "set AUTH_SERVICE_REF to the ref the console is built against"
-        )
-    return export_auth_service(tmp_path_factory.mktemp("auth-service"))
-
-
 class Console:
     """The console under test, signed into through its own sign-in page."""
 
-    def __init__(self, backend: str, auth_service=None):
-        self.backend = backend
-        self.auth_service = auth_service
+    backend = "builtin"
 
     def client(self):
         from starlette.testclient import TestClient
@@ -235,29 +216,16 @@ class Console:
         return client
 
 
-@pytest.fixture(params=["builtin", "auth-service"])
-def console(request, tmp_path, monkeypatch, fake_comms):
+@pytest.fixture
+def console(tmp_path, monkeypatch, fake_comms):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     monkeypatch.setenv("HIVE_TOOLS_URL", fake_comms.url)
     monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)
-    auth_module = __import__("auth")
-    auth_module.forget_secret_key()
-    if request.param == "builtin":
-        import auth
-
-        monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
-        monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
-        monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
-        testing.run(auth.seed_first_user())
-        yield Console("builtin")
-        return
-    source = request.getfixturevalue("auth_service_source")
-    with AuthServiceProcess(source, tmp_path / "auth.db") as service:
-        granted = service.admin("PUT", f"/admin/users/{SEED_USERNAME}/sites/hive")
-        assert granted.status_code == 204, granted.text
-        monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
-        monkeypatch.setenv("AUTH_SERVICE_URL", service.url)
-        yield Console("auth-service", service)
+    __import__("auth").forget_secret_key()
+    monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
+    monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
+    testing.run(__import__("auth").seed_first_user())
+    return Console()
 
 
 @pytest.fixture
@@ -268,11 +236,10 @@ def builtin_console(tmp_path, monkeypatch, fake_comms):
     monkeypatch.setenv("HIVE_TOOLS_URL", fake_comms.url)
     monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)
     auth.forget_secret_key()
-    monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
     monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
     monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
     testing.run(auth.seed_first_user())
-    return Console("builtin")
+    return Console()
 
 
 def pytest_pyfunc_call(pyfuncitem):

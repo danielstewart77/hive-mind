@@ -208,6 +208,9 @@ TABLE.add(Rule(BEARER, bearer=CANVAS), "POST /canvas/push")
 
 TABLE.add(Rule(SELF), "GET /password", "POST /password")
 
+# A person ends every sign-in of their own.
+TABLE.add(Rule(USER), "POST /api/sign-ins/end")
+
 # Approving: any signed-in person reaches these; the handler decides who may
 # see or decide a request (the owner of the mind that asked, or an
 # administrator) and refuses anyone else without showing its content.
@@ -538,6 +541,7 @@ TABLE.add(
     "POST /api/admin/users",
     "PATCH /api/admin/users/{username}",
     "POST /api/admin/users/{username}/reset",
+    "POST /api/admin/users/{username}/sign-ins/end",
     "POST /api/admin/users/{username}/key/replace",
     "DELETE /api/admin/users/{username}/microsoft",
     "GET /api/admin/groups",

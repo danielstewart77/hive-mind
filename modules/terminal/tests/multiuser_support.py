@@ -1,42 +1,24 @@
-"""Servers the multi-user tests talk to over real HTTP.
+"""A comms stand-in the multi-user tests talk to over real HTTP.
 
-Two processes stand outside the console and are run here rather than
-impersonated: comms (where a mind's owner is held) and auth-service (one of
-the two account stores). Comms is a small stand-in served by uvicorn, because
-what the console does with its answers is the thing under test and its own
-code is not. auth-service is the real app, exported from its repository at a
-pinned ref (`AUTH_SERVICE_REF`, default `main`) and run in its own process: its modules are named
-`auth`, `config` and `server`, which would collide with the terminal's own on
-one import path.
-
-The console's copy of this file, extended with the two comms routes the
-terminal reaches and the console does not: a session's pty attach and the
-session names.
+Comms (where a mind's owner is held) is a small stand-in served by uvicorn,
+because what the site does with its answers is the thing under test and
+comms' own code is not. Nothing else runs beside the site: the hive signs
+people in itself.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import socket
-import subprocess
-import sys
-import tarfile
 import threading
 import time
-from io import BytesIO
-from pathlib import Path
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
-AUTH_SERVICE_REPO = Path(
-    os.getenv("AUTH_SERVICE_REPO", "/home/daniel/Storage/Dev/auth-service")
-)
-AUTH_SERVICE_REF = os.getenv("AUTH_SERVICE_REF", "main")
 SEED_USERNAME = "daniel"
 SEED_PASSWORD = "daniel-seed-password"  # secret-guard: allow
 
@@ -176,103 +158,3 @@ class FakeComms(ThreadedServer):
         self.received = app.state.received
         # How long a session's event stream stays open.
         self.stream = app.state.stream
-
-
-# ── auth-service ────────────────────────────────────────────────────────
-
-
-def auth_service_ref_available() -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(AUTH_SERVICE_REPO), "rev-parse", "--verify", "--quiet",
-         f"{AUTH_SERVICE_REF}^{{commit}}"],
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
-def export_auth_service(destination: Path) -> Path:
-    """The branch's tree, read out of git without touching that checkout."""
-    archive = subprocess.run(
-        ["git", "-C", str(AUTH_SERVICE_REPO), "archive", "--format=tar", AUTH_SERVICE_REF],
-        capture_output=True,
-        check=True,
-    ).stdout
-    destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=BytesIO(archive)) as tar:
-        tar.extractall(destination, filter="data")
-    return destination
-
-
-class AuthServiceProcess:
-    """The real auth-service on a free port, with its own throwaway db."""
-
-    def __init__(self, source: Path, db_path: Path):
-        self.port = free_port()
-        self.url = f"http://127.0.0.1:{self.port}"
-        self._source = source
-        self._db_path = db_path
-        self._process: subprocess.Popen | None = None
-
-    def __enter__(self):
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "AUTH_DB": str(self._db_path),
-            "AUTH_HOST": "127.0.0.1",
-            "AUTH_PORT": str(self.port),
-            "AUTH_COOKIE_SECURE": "false",
-            "AUTH_COOKIE_DOMAIN": "",
-            "AUTH_SEED_USERNAME": SEED_USERNAME,
-            "AUTH_SEED_PASSWORD": SEED_PASSWORD,
-            "AUTH_RESET_EMAIL": "",
-            "SMTP_HOST": "",
-        }
-        self._process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1",
-             "--port", str(self.port), "--log-level", "warning"],
-            cwd=self._source,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        deadline = time.monotonic() + 20
-        while True:
-            if self._process.poll() is not None:
-                raise RuntimeError(
-                    "auth-service exited: " + self._process.stderr.read().decode()[-2000:]
-                )
-            try:
-                if httpx.get(f"{self.url}/health", timeout=1).status_code == 200:
-                    break
-            except httpx.HTTPError:
-                pass
-            if time.monotonic() > deadline:
-                raise RuntimeError("auth-service did not start")
-            time.sleep(0.1)
-        return self
-
-    def __exit__(self, *exc):
-        if self._process is not None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-
-    def _admin_session(self) -> str:
-        """The seeded administrator's own session: the service has no shared
-        admin token, so setup signs in as the admin like a person does."""
-        if getattr(self, "_session", None) is None:
-            signed = httpx.post(f"{self.url}/login", timeout=10,
-                                json={"username": SEED_USERNAME, "password": SEED_PASSWORD})
-            assert signed.status_code == 200, signed.text
-            self._session = signed.json()["token"]
-        return self._session
-
-    def admin(self, method: str, path: str, **kwargs) -> httpx.Response:
-        return httpx.request(
-            method,
-            f"{self.url}{path}",
-            headers={"Authorization": f"Bearer {self._admin_session()}"},
-            timeout=10,
-            **kwargs,
-        )

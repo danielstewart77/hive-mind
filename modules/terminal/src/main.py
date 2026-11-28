@@ -58,6 +58,7 @@ from config import BASE_DIR
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
+    auth.refuse_old_settings()
     # Opened here rather than on first use, for the reason the console's
     # lifespan gives: a lazy open under two concurrent first requests builds
     # two connection pools and holds double the connections against a
@@ -206,8 +207,7 @@ async def _proxy_session_events(session_id: str, auth_headers: dict | None = Non
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     # Public routes are not resolved by the route table, so the lookup — a
-    # call to auth-service, or a read of this site's own store — happens
-    # here rather than in the middleware.
+    # read of the record of keys — happens here rather than in the middleware.
     user = await get_current_user_from_request(request)
     if not user:
         return _login_redirect_for(request)

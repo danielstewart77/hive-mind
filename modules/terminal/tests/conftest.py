@@ -114,23 +114,18 @@ def page(live_app):
         browser.close()
 
 
-# ── multi-user: the terminal, signed into through either account store ──
+# ── multi-user: the terminal, signed into through the hive's own sign-in ──
 #
 # The same approach as the console's suite: comms is a stand-in on a real
-# port, auth-service is the real app exported at AUTH_SERVICE_REF.
+# port.
 # The terminal has no user-management routes of its own — accounts are made
 # on the console — so what the console's admin pages do is done here through
 # the store both apps share.
 
 from multiuser_support import (  # noqa: E402
-    AUTH_SERVICE_REF,
-    AUTH_SERVICE_REPO,
     SEED_PASSWORD,
     SEED_USERNAME,
-    AuthServiceProcess,
     FakeComms,
-    auth_service_ref_available,
-    export_auth_service,
 )
 
 
@@ -174,24 +169,10 @@ def fake_comms():
         yield server
 
 
-@pytest.fixture(scope="session")
-def auth_service_source(tmp_path_factory):
-    # A missing ref fails rather than skips: a skipped half of the shared
-    # suite reads as green while one store goes untested.
-    if not auth_service_ref_available():
-        pytest.fail(
-            f"auth-service ref {AUTH_SERVICE_REF!r} not found in {AUTH_SERVICE_REPO}; "
-            "set AUTH_SERVICE_REF to the ref the console is built against"
-        )
-    return export_auth_service(tmp_path_factory.mktemp("auth-service"))
-
-
 class Terminal:
     """The terminal site under test, signed into through its own sign-in page."""
 
-    def __init__(self, backend: str, auth_service=None):
-        self.backend = backend
-        self.auth_service = auth_service
+    backend = "builtin"
 
     def client(self):
         from starlette.testclient import TestClient
@@ -217,18 +198,9 @@ class Terminal:
         return auth.get_store()
 
     def as_admin(self, call):
-        """Run a store call as the signed-in administrator: the auth-service
-        store manages people with the acting person's own session, so setup
-        signs in as the seeded admin rather than holding a shared token."""
-        service = self.auth_service
-
-        async def run_it():
-            if service is not None:
-                from hive_site import auth as site_auth
-                site_auth._acting_token.set(service._admin_session())
-            return await call()
-
-        return accounts.run(run_it())
+        """Run a store call, as the console's admin pages do through the
+        store both apps share."""
+        return accounts.run(call())
 
     def create_user(self, username: str, temp_password: str):
         return self.as_admin(
@@ -253,35 +225,24 @@ class Terminal:
         return client
 
 
-@pytest.fixture(params=["builtin", "auth-service"])
-def terminal(request, tmp_path, monkeypatch, fake_comms):
+@pytest.fixture
+def terminal(tmp_path, monkeypatch, fake_comms):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)
-    if request.param == "builtin":
-        monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
-        monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
-        monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
-        accounts.seed_first_user()
-        yield Terminal("builtin")
-        return
-    source = request.getfixturevalue("auth_service_source")
-    with AuthServiceProcess(source, tmp_path / "auth.db") as service:
-        granted = service.admin("PUT", f"/admin/users/{SEED_USERNAME}/sites/hive")
-        assert granted.status_code == 204, granted.text
-        monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
-        monkeypatch.setenv("AUTH_SERVICE_URL", service.url)
-        yield Terminal("auth-service", service)
+    monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
+    monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
+    accounts.seed_first_user()
+    return Terminal()
 
 
 @pytest.fixture
 def builtin_terminal(monkeypatch, fake_comms):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)
-    monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
     monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
     monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
     accounts.seed_first_user()
-    return Terminal("builtin")
+    return Terminal()
 
 
 def pytest_pyfunc_call(pyfuncitem):

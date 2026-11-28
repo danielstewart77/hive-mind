@@ -66,35 +66,27 @@ def test_an_account_made_where_the_console_makes_it_signs_in_here(
     assert _usernames_in_the_database("sloan") == ["sloan"]
 
 
-def test_a_cookie_signed_by_one_site_verifies_on_the_other(
-        builtin_terminal, monkeypatch):
-    """The signing key is the store's, not the process's.
-
-    The terminal used to mint a key of its own into its own file, so each
-    site refused the other's cookie. Here the key is minted, the remembered
-    copy is dropped — which is what the other process looks like — and the
-    cookie must still verify, because the key is read back out of the store
-    rather than invented again.
-    """
-    monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)
-    auth.forget_secret_key()
+def test_a_sign_in_key_made_by_one_site_is_accepted_by_the_other(
+        builtin_terminal):
+    """The key is in the one record, not in a process: the console's sign-in
+    (here, the same sign-in the terminal's own page uses) makes a key the
+    terminal accepts, with no signing key shared between them."""
     user = accounts.make_user("sloan", "sloans-own-pass")
     token = accounts.session_token(user)
 
-    auth.forget_secret_key()
-    payload = accounts.run(auth.read_session_token(token))
+    client = builtin_terminal.client()
+    client.cookies.set(auth.SESSION_COOKIE_NAME, token)
 
-    assert payload is not None
-    assert payload["username"] == "sloan"
+    assert client.get("/terminal", follow_redirects=False).status_code == 200
 
 
 def test_a_password_reset_where_the_console_does_it_ends_the_session_here(
         builtin_terminal):
     """The defect this story exists to close, driven end to end.
 
-    The reset moves `session_version` in the store. A terminal reading that
-    column out of a different file honours the old value, keeps serving the
-    browser, and the operator sees one site signed out and the other not.
+    The reset ends the person's sign-ins in the one record. A terminal that
+    honoured the old key would keep serving the browser while the console
+    turned it away.
     """
     signed_in = builtin_terminal.settled_user("sloan", "sloans-own-pass")
     assert signed_in.get("/terminal", follow_redirects=False).status_code == 200

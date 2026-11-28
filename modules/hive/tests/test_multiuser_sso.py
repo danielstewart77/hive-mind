@@ -2,9 +2,8 @@
 alone and signs in only to an account an admin created.
 
 Microsoft runs against a stand-in Entra tenant over real HTTP (sso_support)
-that signs real id tokens with a key generated per run, on both account
-stores. Windows sign-in is a built-in-store feature (auth-service holds no
-domain accounts); its tests stub where the process stops being ours — the
+that signs real id tokens with a key generated per run. Windows sign-in's
+tests stub where the process stops being ours — the
 GSSAPI accept-context call — and hand back the principal a ticket named.
 """
 
@@ -336,19 +335,6 @@ def test_a_principal_with_an_instance_names_no_domain_account(principal):
     )
     assert sso.domain_account_for(principal, config) is None
     assert sso.domain_account_for("sloan@CORP.EXAMPLE.EDU", config) == "UTSYS\\sloan"
-
-
-def test_windows_sign_in_stays_off_behind_auth_service_whatever_is_configured(
-    windows, monkeypatch
-):
-    console, tickets = windows
-    tickets[b"sloan-ticket"] = "sloan@CORP.EXAMPLE.EDU"
-    monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
-    monkeypatch.setenv("AUTH_SERVICE_URL", "http://127.0.0.1:9")
-
-    client = console.client()
-    assert "Sign in with Windows" not in client.get("/login").text
-    assert _negotiate(client, b"sloan-ticket").status_code == 404
 
 
 def test_a_domain_ticket_for_an_account_nobody_set_up_is_refused_as_not_set_up(windows):

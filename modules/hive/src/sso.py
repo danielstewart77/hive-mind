@@ -2,8 +2,8 @@
 
 Each is switched on by configuration alone and signs in only to an account
 an admin created beforehand; anyone else is told their account has not been
-set up. Either yields a console session (auth.SSO_COOKIE_NAME) and nothing
-else — never an auth-service `auth_session` another site would accept.
+set up. Either yields the same sign-in key the password sign-in makes
+(`auth.begin_sign_in`) and nothing else.
 
 **Microsoft** is OpenID Connect, authorization code with PKCE, against one
 Entra tenant. The tenant is pinned: a token is accepted only when its
@@ -12,15 +12,13 @@ audience, nonce and expiry are this app's. The first sign-in selects the
 account whose email matches the token's (case-insensitively, and only when
 the token does not say the email is unverified) and binds the account to the
 token's `oid`; every later sign-in matches on `oid` alone. The binding lives
-in the console's own db (`sso_bindings`) for both stores, since auth-service
-has no field for it. An admin can unbind an account, and changing an
+in the console's own db (`sso_bindings`). An admin can unbind an account, and changing an
 account's email unbinds it: the binding was made on the old address.
 
 **Windows** is SPNEGO/Kerberos, offered only behind its own link and never
 as a challenge on the plain sign-in page. A ticket's client principal
 `user@REALM` names the account whose domain account is `DOMAIN\\user`.
-Domain accounts are held only by the built-in store, so this method is off
-when the console signs in through auth-service. A browser with no ticket, an
+A browser with no ticket, an
 NTLM token, or a ticket that does not verify lands on the sign-in page with
 the other methods.
 
@@ -130,8 +128,6 @@ def parse_realm_map(raw: str) -> dict[str, str]:
 
 
 def windows_config() -> WindowsConfig | None:
-    if auth.backend_name() != "builtin":
-        return None
     keytab = os.getenv("HIVE_KERBEROS_KEYTAB", "").strip()
     spn = os.getenv("HIVE_KERBEROS_SPN", "").strip()
     if not keytab or not spn or not os.path.isfile(keytab):
@@ -229,10 +225,12 @@ async def match_domain_account(store: auth.Store,
 
 
 async def start_session(store: auth.Store, user: dict, via: str) -> str:
-    """A console session for the account; refuses one the store would not
-    honour on the next request (an account not granted the hive)."""
-    token = await auth.issue_sso_token(store, user["username"], via)
-    if await auth.user_for_sso_token(store, token) is None:
+    """A console session for the account: the one step that makes its key,
+    the same key every sign-in route makes. Refuses one the store would not
+    honour on the next request."""
+    del via
+    token = await auth.begin_sign_in(user["username"])
+    if await store.user_for_token(token) is None:
         raise auth.NotSetUp()
     return token
 

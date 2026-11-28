@@ -1,36 +1,29 @@
-"""Accounts and sessions for the hive console and the terminal site.
+"""Accounts and sign-in for the hive console and the terminal site.
 
-One module installed into both images, not copied into each. It was a copy
-for a year and the copies drifted: the terminal's still opened `hive.db`
-with `sqlite3` by hand and minted its own signing key into that file, so a
-password change made in the console moved `session_version` in one store
-while the terminal read the old value out of the other, and the cookie both
-sites share was honoured by one and refused by the other — which presents as
-being signed out of the terminal and nowhere else.
+One module installed into both images, not copied into each. The two sites
+share one account store and one sign-in.
 
-One interface, two backings, chosen by configuration:
+The hive signs people in itself. Nothing else is involved: no other program,
+no other service.
 
-- `builtin` — the console's own account rows in the hive's Postgres,
-  reached through `store`. No SQL lives here. A cloned hive signs in with no
-  other service. Sessions are signed cookies carrying the
-  user's session version, so a password change, reset or disable ends every
-  other live session at once. A group change does not touch it: membership,
-  and with it admin, is read afresh on every request, so it lands on the
-  member's next request without signing them out.
-- `auth-service` — the sparktobloom sign-in (`AUTH_SERVICE_URL`). The
-  session is auth-service's own `auth_session` token, verified on every
-  request with `/verify?site=hive` and never cached, so a disable lands on
-  the very next request. Admin operations go to its `/admin` API with the
-  signed-in administrator's own session. When it cannot be reached the console says
-  "sign-in service unavailable"; it never falls back to the built-in store.
+A person proves who they are with a password (or, where it is set up,
+Microsoft or Windows sign-in). The site then makes a fresh random key for
+that sign-in and puts it in the browser as an HttpOnly cookie; the cookie
+*is* the sign-in. Only the one-way scramble of the key is written, to the
+hive's one record of keys, under the person's name with an end time twelve
+hours after the sign-in (`core.record_sign_in`). Nothing is written when the
+key is used and there is no limit for sitting idle: the key stops working
+twelve hours after it was made, at the gateway, the memory store, the tools
+and here, because all of them read the same record on the request.
 
-`HIVE_AUTH_BACKEND` names the backing; left unset, auth-service is used
-exactly when `AUTH_SERVICE_URL` is set. One backing is active per install,
-and each reads only its own cookie, so a `hive_session` cookie minted before
-the switch to auth-service is not a session.
+Signing out ends that one key. A person can end every sign-in of their own,
+an administrator can end anyone's, and turning an account off, changing a
+password or resetting one ends all of that person's. A cookie from before this
+scheme is no key the record knows, so its holder signs in again.
 
-Admin is membership of the `admins` group and nothing else. Users are never
-deleted. The last enabled admin cannot be disabled or leave `admins`.
+Admin is membership of the `admins` group and nothing else, read afresh on
+every request. Users are never deleted. The last enabled admin cannot be
+disabled or leave `admins`.
 
 The accounts live in the hive's one Postgres, through `store`, and the
 console and the terminal share them there.
@@ -40,16 +33,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextvars
 import hashlib
 import hmac
 import os
 import secrets
 import time
-import weakref
 from typing import Any, Protocol
 
-import httpx
 from fastapi import HTTPException, Request
 from starlette.requests import HTTPConnection
 
@@ -61,17 +51,16 @@ try:
 except ImportError:  # pragma: no cover - exercised through fallback path
     pass
 
-from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
+from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer  # the Microsoft flow cookie
 
 from . import store as data_store
 
 SESSION_COOKIE_NAME = "hive_session"
-AUTH_SERVICE_COOKIE_NAME = "auth_session"
-# A session begun by Microsoft or Windows sign-in (see sso.py). Its own
-# cookie on either store: it is a console session and nothing else, never an
-# auth-service token another site would accept.
-SSO_COOKIE_NAME = "hive_sso_session"
-SESSION_MAX_AGE = 60 * 60 * 24 * 30
+#: The cookie that carries a person's sign-in key.
+#: How long a sign-in lasts: twelve hours from the moment of signing in.
+SIGN_IN_SECONDS = 12 * 60 * 60
+#: The cookie's own life matches the key's. The record is what decides.
+SESSION_MAX_AGE = SIGN_IN_SECONDS
 ADMINS = "admins"
 # The default this project once shipped. A key equal to it is no key.
 _SHIPPED_SECRET = "change-this-in-production"  # secret-guard: allow
@@ -123,7 +112,7 @@ class WrongPassword(AuthError):
 
 class ServiceUnavailable(AuthError):
     status = 503
-    message = "Sign-in service unavailable."
+    message = "Signing in is not possible just now. Try again in a moment."
 
 
 class NotFound(AuthError):
@@ -182,9 +171,7 @@ class Store(Protocol):
     async def find_user(
         self, *, email: str | None = None, domain_account: str | None = None
     ) -> dict | None: ...
-    async def sso_version(self, username: str) -> int: ...
-    async def sso_user(self, username: str,
-                       version: int) -> dict | None: ...
+    async def end_all_sign_ins(self, username: str) -> int: ...
 
 
 def normalize_username(username: str) -> str:
@@ -311,16 +298,40 @@ def forget_secret_key() -> None:
     _SECRET = None
 
 
-async def _serializer() -> URLSafeTimedSerializer:
-    return URLSafeTimedSerializer(await secret_key(), salt="hive-session")
+def new_key() -> str:
+    """A fresh random key for one sign-in. Never stored: only its scramble."""
+    return secrets.token_urlsafe(32)
 
 
-async def read_session_token(token: str) -> dict[str, Any] | None:
+def key_digest(key: str) -> str:
+    """The one-way scramble the record holds for a key (the same one the
+    gateway, the memory store and the tools look a presented key up by)."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _clock() -> float:
+    from hive_data import core
+
+    return core.now()
+
+
+async def begin_sign_in(username: str) -> str:
+    """Make the key for one sign-in and write its scramble to the record, with
+    its end twelve hours from now. Returns the key, for the browser.
+
+    When the record cannot be written nobody is left holding a key nothing
+    accepts: the sign-in fails, with a plain sentence.
+    """
+    key = new_key()
     try:
-        payload = (await _serializer()).loads(token, max_age=SESSION_MAX_AGE)
-    except (BadSignature, BadTimeSignature):
-        return None
-    return payload if isinstance(payload, dict) else None
+        await data_store.record_sign_in(
+            username=normalize_username(username), token_sha=key_digest(key),
+            ends_at=_clock() + SIGN_IN_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - any failure to write is one sentence
+        raise ServiceUnavailable(
+            "Signing in did not work because the hive could not record your "
+            "sign-in. Nothing was changed; try again in a moment.") from exc
+    return key
 
 
 class BuiltinStore:
@@ -354,13 +365,6 @@ class BuiltinStore:
             raise NotFound("No such user.")
         return row
 
-    async def _token(self, row: dict) -> str:
-        return (await _serializer()).dumps({
-            "user_id": row["id"],
-            "username": row["username"],
-            "v": int(row["session_version"]),
-        })
-
     async def _guard_last_admin(self, row: dict) -> None:
         """Refuse a change that would leave no enabled admin.
 
@@ -390,48 +394,30 @@ class BuiltinStore:
             raise SignInRefused()
         if row["disabled_at"] is not None:
             raise AccountDisabled()
-        return await self._view_of(row), await self._token(row)
+        return await self._view_of(row), await begin_sign_in(row["username"])
 
     async def user_for_token(self, token: str) -> dict | None:
-        payload = await read_session_token(token) if token else None
-        if not payload:
+        """The person a key is for, read from the record on this request: the
+        key must be in it, not ended and not past its time. Nothing is
+        remembered from an earlier yes and nothing is written for a use."""
+        if not token:
             return None
-        row = await data_store.get_user_by_id(
-            int(payload.get("user_id") or 0))
+        sign_in = await data_store.sign_in_for_digest(key_digest(token))
+        if sign_in is None:
+            return None
+        row = await data_store.get_user(normalize_username(sign_in["username"]))
         if row is None or row["disabled_at"] is not None:
-            return None
-        # The cookie names a person as well as a number, and the row has to
-        # be that person. Two sites sharing a signing key but pointed at two
-        # stores — which each site's own `HIVE_DATABASE_URL` permits — number
-        # their accounts independently, and an id looked up alone signed a
-        # non-admin in on the other site as whoever held that id there,
-        # admin included.
-        if normalize_username(str(payload.get("username") or "")) != \
-                normalize_username(str(row["username"])):
-            return None
-        if int(payload.get("v") or 0) != int(row["session_version"]):
             return None
         return await self._view_of(row)
 
     async def sign_out(self, token: str) -> None:
-        # A signed cookie is ended by clearing it; the version is left alone
-        # so the user's other devices stay signed in.
-        del token
+        """End this one key. Other devices stay signed in."""
+        if token:
+            await data_store.end_sign_in(key_digest(token))
 
-    async def sso_version(self, username: str) -> int:
-        return int((await self._row(username))["session_version"])
-
-    async def sso_user(self, username: str, version: int) -> dict | None:
-        """The account behind a Microsoft or Windows session. It carries the
-        session version, so a disable, reset or password change ends it as it
-        ends a password session. Such a session never owes a password change:
-        it was not begun with one."""
-        row = await data_store.get_user(normalize_username(username))
-        if row is None or row["disabled_at"] is not None:
-            return None
-        if int(version) != int(row["session_version"]):
-            return None
-        return dict(await self._view_of(row), must_change=False)
+    async def end_all_sign_ins(self, username: str) -> int:
+        """End every sign-in this person holds, on every device."""
+        return await data_store.end_sign_ins(normalize_username(username))
 
     async def change_password(self, token: str, current: str,
                               new: str) -> str:
@@ -445,8 +431,10 @@ class BuiltinStore:
             _check_new_password(current, new)
             await data_store.update_user(
                 row["id"], password_hash=hash_password(new), must_change=0)
-            await data_store.bump_session_version(row["id"])
-            return await self._token(await self._row(user["username"]))
+            # Every sign-in of this person ends, this device's too; this
+            # device is then given a fresh one so the person is not thrown out.
+            await data_store.end_sign_ins(row["username"])
+            return await begin_sign_in(row["username"])
 
     # -- users -------------------------------------------------------
 
@@ -521,7 +509,7 @@ class BuiltinStore:
                 await self._guard_last_admin(row)
                 await data_store.update_user(row["id"],
                                              disabled_at=int(time.time()))
-                await data_store.bump_session_version(row["id"])
+                await data_store.end_sign_ins(row["username"])
             elif disabled is False:
                 await data_store.update_user(row["id"], disabled_at=None)
             return await self._view_of(await self._row(username))
@@ -535,7 +523,7 @@ class BuiltinStore:
             await data_store.update_user(
                 row["id"], password_hash=hash_password(temp_password),
                 must_change=1)
-            await data_store.bump_session_version(row["id"])
+            await data_store.end_sign_ins(row["username"])
             return await self._view_of(await self._row(username))
 
     # -- groups ------------------------------------------------------
@@ -596,312 +584,35 @@ def _is_duplicate(exc: BaseException) -> bool:
     return isinstance(exc, DataConflict)
 
 
-# ── auth-service ────────────────────────────────────────────────────────
+# ── settings left over from the authentication service ──────────────────
+
+_OLD_SETTINGS = ("AUTH_SERVICE_URL", "AUTH_SERVICE_SITE", "HIVE_AUTH_BACKEND")
+
+OLD_SETTINGS_SENTENCE = (
+    "The hive now signs people in itself and no longer uses a separate "
+    "authentication service: remove {names} from this site's settings and "
+    "start it again.")
 
 
-#: The auth-service session of the person whose request is being served, set by
-#: `require_auth`. An administrator's change to people is made with it: the
-#: authentication service lets a signed-in member of `admins` through, so the
-#: hive site holds no key that stands for an administrator.
-_acting_token: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "hive_acting_auth_token", default="")
+class OldSettings(RuntimeError):
+    """Settings that still name the separate authentication service."""
 
 
-class AuthServiceStore:
-    """The sparktobloom sign-in, spoken to over its HTTP contract."""
-
-    cookie_name = AUTH_SERVICE_COOKIE_NAME
-
-    def __init__(self, url: str, site: str = "hive",
-                 timeout: float = 5.0):
-        self._url = url.rstrip("/")
-        self._site = site
-        self._timeout = timeout
-        #: One client per event loop, not one per store and not one per call.
-        #: An `httpx.AsyncClient` holds a connection pool bound to the loop
-        #: that opened it: shared across loops it raises "event loop is
-        #: closed" on the first reuse, and rebuilt per call it costs a TLS
-        #: handshake on `/verify`, which runs on every single request. A
-        #: server has one loop and so one client; the keys are weak, so a
-        #: loop that goes takes its client with it.
-        self._clients: weakref.WeakKeyDictionary[Any, httpx.AsyncClient] = (
-            weakref.WeakKeyDictionary())
-
-    def _loop_client(self) -> httpx.AsyncClient:
-        loop = asyncio.get_running_loop()
-        client = self._clients.get(loop)
-        if client is None:
-            client = httpx.AsyncClient(timeout=self._timeout)
-            self._clients[loop] = client
-        return client
-
-    async def _call(
-        self,
-        method: str,
-        path: str,
-        *,
-        bearer: str | None = None,
-        admin: bool = False,
-        json_body: dict | None = None,
-        params: dict | None = None,
-    ) -> httpx.Response:
-        if not self._url:
-            raise ServiceUnavailable()
-        headers = {}
-        if admin:
-            acting = _acting_token.get()
-            if not acting:
-                raise SignInRefused(
-                    "Sign in with your password to manage people.")
-            headers["Authorization"] = f"Bearer {acting}"
-        elif bearer:
-            headers["Authorization"] = f"Bearer {bearer}"
-        try:
-            response = await self._loop_client().request(
-                method, f"{self._url}{path}", headers=headers, json=json_body, params=params
-            )
-        except httpx.HTTPError as exc:
-            raise ServiceUnavailable() from exc
-        if response.status_code >= 500:
-            raise ServiceUnavailable()
-        if admin and response.status_code == 401:
-            raise SignInRefused("Sign in again to manage people.")
-        if admin and response.status_code == 403:
-            raise NotGranted("Only an administrator can manage people.")
-        return response
-
-    @staticmethod
-    def _detail(response: httpx.Response) -> str:
-        try:
-            return str(response.json().get("detail") or "")
-        except ValueError:
-            return response.text
-
-    def _admin_view(self, row: dict) -> dict:
-        return _view(
-            user_id=row.get("user_id"),
-            username=row.get("username") or "",
-            email=row.get("email"),
-            domain_account=None,
-            must_change=bool(row.get("must_change")),
-            disabled=bool(row.get("disabled")),
-            groups=list(row.get("groups") or []),
-        )
-
-    async def _admin(self, method: str, path: str,
-                     json_body: dict | None = None) -> httpx.Response:
-        response = await self._call(method, path, admin=True,
-                                    json_body=json_body)
-        if response.status_code == 404:
-            raise NotFound(self._detail(response) or None)
-        if response.status_code == 409:
-            raise Conflict(self._detail(response) or None)
-        if response.status_code >= 400:
-            raise Invalid(self._detail(response) or "Refused by the sign-in service.")
-        return response
-
-    # -- sessions ----------------------------------------------------
-
-    async def sign_in(self, username: str, password: str) -> tuple[dict, str]:
-        response = await self._call(
-            "POST", "/login", json_body={"username": username, "password": password}
-        )
-        if response.status_code == 403:
-            raise AccountDisabled()
-        if response.status_code != 200:
-            raise SignInRefused()
-        token = str(response.json().get("token") or "")
-        verified = await self._call("GET", "/verify", bearer=token, params={"site": self._site})
-        if verified.status_code == 403:
-            raise NotGranted()
-        if verified.status_code != 200:
-            raise SignInRefused()
-        return self._verified_view(verified.json()), token
-
-    def _verified_view(self, row: dict) -> dict:
-        return _view(
-            user_id=row.get("user_id"),
-            username=row.get("username") or "",
-            email=row.get("email"),
-            domain_account=None,
-            must_change=bool(row.get("must_change")),
-            disabled=False,
-            groups=list(row.get("groups") or []),
-        )
-
-    async def user_for_token(self, token: str) -> dict | None:
-        if not token:
-            return None
-        response = await self._call("GET", "/verify", bearer=token, params={"site": self._site})
-        if response.status_code != 200:
-            return None
-        return self._verified_view(response.json())
-
-    async def sign_out(self, token: str) -> None:
-        if token:
-            await self._call("POST", "/logout", bearer=token)
-
-    async def sso_version(self, username: str) -> int:
-        del username
-        return 0
-
-    async def sso_user(self, username: str, version: int) -> dict | None:
-        """STOPPED (story 909): a Microsoft session is no auth-service session
-        and carries no person's key, and the hive site holds no key of its own
-        to read the account with. On this backing a Microsoft session is no
-        session."""
-        del username, version
-        return None
-
-    async def find_user(
-        self, *, email: str | None = None, domain_account: str | None = None
-    ) -> dict | None:
-        """STOPPED (story 909): finding a person by email for a first Microsoft
-        sign-in needs an administrator's own key and nobody is signed in yet.
-        This backing finds nobody."""
-        del email, domain_account
-        return None
-
-    async def change_password(self, token: str, current: str, new: str) -> str:
-        _check_new_password(current, new)
-        response = await self._call(
-            "POST",
-            "/password/change",
-            bearer=token,
-            json_body={"current_password": current, "new_password": new},
-        )
-        if response.status_code == 401:
-            raise SignInRefused("Sign in again to change your password.")
-        if response.status_code == 403:
-            raise WrongPassword()
-        if response.status_code >= 400:
-            raise Invalid(self._detail(response) or None)
-        return token
-
-    # -- users and groups --------------------------------------------
-
-    async def list_users(self) -> list[dict]:
-        return [self._admin_view(r)
-                for r in (await self._admin("GET",
-                                            "/admin/users")).json()]
-
-    async def get_user(self, username: str) -> dict:
-        return self._admin_view(
-            (await self._admin(
-                "GET",
-                f"/admin/users/{normalize_username(username)}")).json()
-        )
-
-    async def create_user(
-        self,
-        username: str,
-        *,
-        email: str | None = None,
-        domain_account: str | None = None,
-        temp_password: str | None = None,
-    ) -> dict:
-        if domain_account:
-            raise Invalid("The sign-in service does not hold domain accounts yet.")
-        name = normalize_username(username)
-        if not name:
-            raise Invalid("A username is required.")
-        body: dict[str, Any] = {"username": name, "sites": [self._site]}
-        if email:
-            body["email"] = email.strip()
-        if temp_password is not None:
-            body["temp_password"] = temp_password
-        # The grant rides in the create, so a user is never left made but
-        # unable to reach the hive; a create that comes back without it is
-        # not complete.
-        created = (await self._admin("POST", "/admin/users", body)).json()
-        if not self._granted(created):
-            raise ServiceUnavailable(
-                "The sign-in service created the user without granting the hive."
-            )
-        return self._admin_view(created)
-
-    def _granted(self, row: object) -> bool:
-        sites = row.get("sites") if isinstance(row, dict) else None
-        return self._site.lower() in {str(s).lower() for s in sites or []}
-
-    async def update_user(
-        self, username: str, *, email: str | None = None,
-        disabled: bool | None = None
-    ) -> dict:
-        body: dict[str, Any] = {}
-        if email is not None:
-            body["email"] = email
-        if disabled is not None:
-            body["disabled"] = disabled
-        return self._admin_view(
-            (await self._admin(
-                "PATCH",
-                f"/admin/users/{normalize_username(username)}",
-                body)).json()
-        )
-
-    async def reset_password(self, username: str, temp_password: str) -> dict:
-        if not temp_password:
-            raise Invalid("A temporary password is required.")
-        return self._admin_view(
-            (await self._admin(
-                "POST",
-                f"/admin/users/{normalize_username(username)}/reset",
-                {"temp_password": temp_password},
-            )).json()
-        )
-
-    async def list_groups(self) -> list[dict]:
-        return [
-            {"name": g.get("name"), "members": sorted(g.get("members") or [])}
-            for g in (await self._admin("GET", "/admin/groups")).json()
-        ]
-
-    async def create_group(self, name: str) -> dict:
-        group = normalize_username(name)
-        if not group:
-            raise Invalid("A group name is required.")
-        await self._admin("POST", "/admin/groups", {"name": group})
-        return {"name": group, "members": []}
-
-    async def add_member(self, group: str, username: str) -> None:
-        await self._admin(
-            "PUT",
-            f"/admin/groups/{normalize_username(group)}/members/{normalize_username(username)}",
-        )
-
-    async def remove_member(self, group: str, username: str) -> None:
-        await self._admin(
-            "DELETE",
-            f"/admin/groups/{normalize_username(group)}/members/{normalize_username(username)}",
-        )
+def refuse_old_settings() -> None:
+    """Stop the site starting half-working. An install whose settings still
+    name the authentication service is told, in one plain sentence, what to
+    change; it is not started."""
+    left = [name for name in _OLD_SETTINGS if os.getenv(name, "").strip()]
+    if left:
+        raise OldSettings(OLD_SETTINGS_SENTENCE.format(names=", ".join(left)))
 
 
 # ── which store ─────────────────────────────────────────────────────────
 
-_auth_service_stores: dict[tuple[str, str], AuthServiceStore] = {}
-
-
-def backend_name() -> str:
-    configured = os.getenv("HIVE_AUTH_BACKEND", "").strip().lower()
-    if configured in {"builtin", "auth-service"}:
-        return configured
-    return "auth-service" if os.getenv("AUTH_SERVICE_URL", "").strip() else "builtin"
-
 
 def get_store() -> Store:
-    """The one store this install signs in against."""
-    if backend_name() == "builtin":
-        return BuiltinStore()
-    key = (
-        os.getenv("AUTH_SERVICE_URL", "").strip(),
-        os.getenv("AUTH_SERVICE_SITE", "hive").strip() or "hive",
-    )
-    store = _auth_service_stores.get(key)
-    if store is None:
-        store = AuthServiceStore(*key)
-        _auth_service_stores[key] = store
-    return store
+    """The one store this install signs in against: the hive's own."""
+    return BuiltinStore()
 
 
 # ── requests ────────────────────────────────────────────────────────────
@@ -912,8 +623,8 @@ def session_token(conn: HTTPConnection, store: Store | None = None) -> str:
 
 
 async def resolve_user(conn: HTTPConnection) -> dict | None:
-    """The signed-in user behind a request, verified once per request: the
-    store's own session, or failing that a Microsoft or Windows one.
+    """The signed-in user behind a request, verified once per request against
+    the record of keys.
 
     Raises ServiceUnavailable when the store cannot answer.
     """
@@ -922,101 +633,15 @@ async def resolve_user(conn: HTTPConnection) -> dict | None:
         return state[_STATE_KEY]
     store = get_store()
     user = await store.user_for_token(session_token(conn, store))
-    if user is None:
-        sso_token = conn.cookies.get(SSO_COOKIE_NAME) or ""
-        user = (await user_for_sso_token(store, sso_token)
-                if sso_token else None)
-    if user is not None and isinstance(store, AuthServiceStore):
-        await mirror_admin_membership(user)
     state[_STATE_KEY] = user
     return user
-
-
-#: What a mirrored person's password hash is. It is no hash of any scheme
-#: `verify_password` knows, so it verifies nothing: the person signs in at the
-#: authentication service, never here.
-_MIRROR_NO_PASSWORD = "!auth-service"
-
-
-async def mirror_admin_membership(user: dict) -> None:
-    """Make the hive database say what the authentication service just said
-    about this person: in the `admins` group or not.
-
-    Feature 834, requirement 32. With the authentication service as the
-    sign-in, who is an administrator lives in its own file, and the gateway
-    reads the hive database only. So each request that service answered for
-    writes its answer here first, before anything done for that person can
-    reach the gateway. A person with no row in `core.users` gets one (the
-    membership table needs it). Nothing is written when the database already
-    agrees, so an ordinary request costs two reads.
-
-    Raises ServiceUnavailable when the answer cannot be recorded: a request
-    the database cannot vouch for is not served, never served with a stale
-    membership."""
-    name = normalize_username(user.get("username"))
-    if not name:
-        return
-    want = ADMINS in {str(g).lower() for g in user.get("groups") or []}
-    try:
-        row = await data_store.get_user(name)
-        if row is None:
-            try:
-                row = await data_store.create_user(
-                    username=name, password_hash=_MIRROR_NO_PASSWORD,
-                    created_at=int(time.time()), email=user.get("email"))
-            except Exception as exc:  # noqa: BLE001 - a concurrent request made it first
-                if not _is_duplicate(exc):
-                    raise
-                row = await data_store.get_user(name)
-            if row is None:
-                # The email is unique too; a clash there must not block the
-                # person: the row is made without it.
-                row = await data_store.create_user(
-                    username=name, password_hash=_MIRROR_NO_PASSWORD,
-                    created_at=int(time.time()))
-        groups = await data_store.groups_of(row["id"])
-        if want and ADMINS not in groups:
-            await data_store.create_group(name=ADMINS, created_at=int(time.time()))
-            await data_store.add_group_member(group_name=ADMINS, user_id=row["id"])
-        elif not want and ADMINS in groups:
-            await data_store.remove_group_member(group_name=ADMINS, user_id=row["id"])
-    except ServiceUnavailable:
-        raise
-    except Exception as exc:  # noqa: BLE001 - one answer for any database failure
-        raise ServiceUnavailable(
-            "The sign-in answered, but who is an administrator could not be "
-            "recorded in the hive database.") from exc
 
 
 # ── Microsoft and Windows sessions ──────────────────────────────────────
 
 
-async def _sso_serializer() -> URLSafeTimedSerializer:
-    return URLSafeTimedSerializer(await secret_key(), salt="hive-sso-session")
-
-
 async def _flow_serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(await secret_key(), salt="hive-sso-flow")
-
-
-async def issue_sso_token(store: Store, username: str, via: str) -> str:
-    return (await _sso_serializer()).dumps({
-        "u": normalize_username(username),
-        "v": await store.sso_version(username),
-        "via": via,
-    })
-
-
-async def user_for_sso_token(store: Store, token: str) -> dict | None:
-    try:
-        payload = (await _sso_serializer()).loads(token,
-                                                  max_age=SESSION_MAX_AGE)
-    except (BadSignature, BadTimeSignature):
-        return None
-    if not isinstance(payload, dict) or not payload.get("u"):
-        return None
-    return await store.sso_user(str(payload["u"]),
-                                int(payload.get("v") or 0))
 
 
 async def sign_flow(flow: dict) -> str:
@@ -1049,9 +674,6 @@ async def require_auth(request: Request) -> dict[str, Any]:
     user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
-    store = get_store()
-    if isinstance(store, AuthServiceStore):
-        _acting_token.set(session_token(request, store))
     return user
 
 
@@ -1092,22 +714,16 @@ def _delete_cookie(response, name: str) -> None:
 
 
 def set_session_cookie(request: HTTPConnection, response, token: str) -> None:
-    """A password session; any Microsoft or Windows session is ended, so the
-    browser holds exactly one identity."""
-    _delete_cookie(response, SSO_COOKIE_NAME)
+    """The browser holds the key, and only here: where scripts and other
+    sites cannot read it."""
     response.set_cookie(get_store().cookie_name, token,
                         **_cookie_kwargs(request))
 
 
-def set_sso_cookie(request: HTTPConnection, response, token: str) -> None:
-    """A Microsoft or Windows session; any password session is ended."""
-    _delete_cookie(response, get_store().cookie_name)
-    response.set_cookie(SSO_COOKIE_NAME, token, **_cookie_kwargs(request))
-
-
 def clear_session_cookie(response) -> None:
     _delete_cookie(response, get_store().cookie_name)
-    _delete_cookie(response, SSO_COOKIE_NAME)
+    # The cookie an older sign-in left behind is cleared along with it.
+    _delete_cookie(response, "hive_sso_session")
 
 
 # ── built-in helpers for seeding, tooling and tests ─────────────────────
@@ -1154,9 +770,9 @@ async def create_user(
 
 
 async def create_session_token(user: dict[str, Any]) -> str:
-    """A built-in session cookie value for an existing account."""
-    store = BuiltinStore()
-    return await store._token(await store._row(user["username"]))
+    """A fresh sign-in key for an existing account, recorded as a real
+    sign-in is. For seeding and tests."""
+    return await begin_sign_in(user["username"])
 
 
 async def seed_first_user() -> None:
@@ -1164,7 +780,7 @@ async def seed_first_user() -> None:
 
     Idempotent: does nothing once any user row exists, so the seed
     credential matters only for the very first launch and is inert
-    afterward. Not used with auth-service, which seeds its own.
+    afterward.
 
     In a task of its own, and that is not a flourish. Both sites call this
     from their lifespan, which is an async generator, and `hive_data`
@@ -1182,8 +798,6 @@ async def seed_first_user() -> None:
 
 
 async def _seed_first_user() -> None:
-    if backend_name() != "builtin":
-        return
     if await data_store.count_users() > 0:
         return
     username = os.getenv("HIVE_SEED_USERNAME", "")
