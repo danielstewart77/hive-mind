@@ -542,7 +542,6 @@ TABLE.add(
     "PATCH /api/admin/users/{username}",
     "POST /api/admin/users/{username}/reset",
     "POST /api/admin/users/{username}/sign-ins/end",
-    "POST /api/admin/users/{username}/key/replace",
     "DELETE /api/admin/users/{username}/microsoft",
     "GET /api/admin/groups",
     "POST /api/admin/groups",
@@ -552,10 +551,9 @@ TABLE.add(
 
 
 TABLE.add(Rule(USER), "GET /api/settings/features", "PUT /api/settings/features")
-# A person replaces their own key, the one this console presents to the minds
-# they own (feature 834, requirement 19). Only their own: the name is the
-# signed-in user's, never taken from the request.
-TABLE.add(Rule(USER), "GET /api/account/key", "POST /api/account/key/replace")
+# Waiting work (feature 834, story 913): the handler lists only what waits for
+# the signed-in person, or all of it for an administrator.
+TABLE.add(Rule(USER), "GET /api/waiting-work")
 TABLE.add(Rule(ADMIN), "GET /hive-errors", "GET /api/hive-errors")
 TABLE.add(Rule(ADMIN), "GET /api/settings/providers", "POST /api/settings/providers",
           "PUT /api/settings/providers/{provider_id}", "DELETE /api/settings/providers/{provider_id}",

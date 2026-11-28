@@ -43,9 +43,13 @@ def _write(record: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def begin(kind: str, mind: str, services: list[str]) -> dict[str, Any]:
+def begin(kind: str, mind: str, services: list[str], started_by: str = "") -> dict[str, Any]:
+    """`started_by` is the name of the person whose click began this: a
+    replacement left unfinished waits for them, or for an administrator. A
+    name, never a key."""
     record = {
         "operation_id": str(uuid.uuid4()), "kind": kind, "mind": mind,
+        "started_by": started_by,
         "planned": services, "switched": [], "status": OPEN,
         "detail": "", "started_at": time.time(),
     }
@@ -73,6 +77,10 @@ def finish(record: dict[str, Any]) -> None:
         _path(record["operation_id"]).unlink()
     except FileNotFoundError:
         pass
+
+
+def waits_for(record: dict[str, Any]) -> str:
+    return str(record.get("started_by") or "")
 
 
 def unfinished() -> list[dict[str, Any]]:

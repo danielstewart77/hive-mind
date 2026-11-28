@@ -42,7 +42,6 @@ from fastapi.templating import Jinja2Templates
 
 import auth
 import route_access
-import person_key
 import terminal_access
 import store
 from auth import (
@@ -95,13 +94,9 @@ app = FastAPI(
 app.add_middleware(route_access.AccessMiddleware, table=terminal_access.TABLE)
 
 
-async def _read_person_key(username: str) -> str | None:
-    return person_key.read_person_key(username)
-
-
-# The registry is read for the signed-in person, with that person's own key:
-# this site holds no gateway key of its own.
-route_access.set_person_key_reader(_read_person_key)
+# The registry is read for the signed-in person, with the key that came with
+# the click (`route_access`): this site holds no key of its own and keeps none
+# for anyone, not in a file and not in memory beyond the request.
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -115,16 +110,22 @@ def _gateway_base_url() -> str:
     return os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424"
 
 
+NO_KEY_SENTENCE = (
+    "Your sign-in key did not come with this request. Sign in again."
+)
+
+
 def _person_headers(user: dict | None) -> dict:
-    """The signed-in person's own key as the gateway's bearer, read from the
-    key folder the hive site writes. A person with no key yet gets a plain
-    409 (never 401, which signs people out). A caller that is a service and
-    not a person (the label writer) has no key to send and sends none."""
+    """The signed-in person's own key as the gateway's bearer: the key that
+    came with this click (the sign-in cookie), used for this request and kept
+    nowhere. Never read from a file. No key with the request is a plain 403
+    (never 401, which would sign the person out in a loop). A caller that is
+    a service and not a person has no key to send and sends none."""
     if not user or user.get("service"):
         return {}
-    key = person_key.read_person_key(str(user.get("username") or ""))
+    key = route_access.acting_key()
     if not key:
-        raise HTTPException(status_code=409, detail=person_key.NO_KEY_SENTENCE)
+        raise HTTPException(status_code=403, detail=NO_KEY_SENTENCE)
     return {"Authorization": f"Bearer {key}"}
 
 

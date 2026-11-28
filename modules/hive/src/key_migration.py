@@ -489,7 +489,7 @@ async def _validated_value(name: str) -> str:
     return checked
 
 
-async def move_mind(name: str) -> dict[str, Any]:
+async def move_mind(name: str, started_by: str = "") -> dict[str, Any]:
     """Register the proxy key a mind already holds as its one key.
 
     Raises `MintRefused` or `KeyHeldByAnother` when nothing changed, and
@@ -543,7 +543,7 @@ async def move_mind(name: str) -> dict[str, Any]:
             if answer is None:
                 raise MintRefused(f"Could not check that key against {service.label}. Nothing was changed.")
         try:
-            record = key_journal.begin("move", holder, [s.key for s in services])
+            record = key_journal.begin("move", holder, [s.key for s in services], started_by)
             record["owner"], record["mind_id"] = owner, mind_id
             record["revoked"] = [k for k, r in rows.items() if hc._is_revoked(r)]
             key_journal.update(record)

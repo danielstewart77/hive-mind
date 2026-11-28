@@ -76,10 +76,13 @@ class Creation:
     """One Mind being made: who it is, and which steps have been taken."""
 
     def __init__(self, name: str, mind_id: str, owner: str,
-                 done: list[str] | None = None) -> None:
+                 done: list[str] | None = None, started_by: str = "") -> None:
         self.name = name
         self.mind_id = mind_id
         self.owner = owner
+        #: The person who pressed the button: the work of taking this back
+        #: waits for them, or for an administrator. A name, never a key.
+        self.started_by = started_by
         self.done: list[str] = list(done or [])
 
     @property
@@ -88,7 +91,8 @@ class Creation:
 
     def _text(self) -> str:
         return json.dumps({"name": self.name, "mind_id": self.mind_id,
-                           "owner": self.owner, "done": self.done}) + "\n"
+                           "owner": self.owner, "started_by": self.started_by,
+                           "done": self.done}) + "\n"
 
     def begin(self) -> None:
         """Open the record, before anything is written for this Mind.
@@ -111,6 +115,12 @@ class Creation:
             # there it would hold the name for good.
             self.path.unlink(missing_ok=True)
             raise
+        _MAKING.add(self.name)
+
+    def release(self) -> None:
+        """The request making this Mind has ended; a record it left open is
+        now one for a click's sweep to take back."""
+        _MAKING.discard(self.name)
 
     def _save(self) -> None:
         scratch = self.path.with_name(self.path.name + ".new")
@@ -139,6 +149,7 @@ class Creation:
     def close(self) -> None:
         """The Mind is made, or wholly taken back: nothing left to record."""
         self.path.unlink(missing_ok=True)
+        _MAKING.discard(self.name)
 
 
 def is_open(name: str) -> bool:
@@ -162,7 +173,8 @@ def pending() -> list[Creation]:
         try:
             raw = json.loads(path.read_text())
             creation = Creation(str(raw["name"]), str(raw["mind_id"]),
-                                str(raw["owner"]), [str(s) for s in raw.get("done") or []])
+                                str(raw["owner"]), [str(s) for s in raw.get("done") or []],
+                                str(raw.get("started_by") or ""))
             if creation.path != path or any(s not in STEP_LABELS for s in creation.done):
                 raise ValueError("not a record of a creation")
             found.append((path.stat().st_mtime, creation))
@@ -275,14 +287,35 @@ def _folder_is_anothers(creation: Creation) -> bool:
     return bool(held) and held != creation.mind_id
 
 
+def waits_for(creation: Creation) -> str:
+    """The person a half-made creation waits for: who started it (an older
+    record, made before that was kept, names its owner)."""
+    return creation.started_by or creation.owner
+
+
+#: Names a request of this console is making right now (set between `begin`
+#: and `close`): a click's sweep leaves them alone.
+_MAKING: set[str] = set()
+_SWEEPING: set[str] = set()
+
+
 async def sweep(
     deregister: Callable[[str, str], Awaitable[Any]],
     name_owner: Callable[[str], Awaitable[str | None]],
+    *,
+    person: str,
+    is_admin: bool,
 ) -> list[dict[str, Any]]:
-    """Take back every creation a stopped console left half made.
+    """Take back the creations a stopped console left half made that wait for
+    this person: the ones they started, or every one when they are an
+    administrator.
 
-    Run once, when this console starts: any record still open then belongs
-    to a request that no longer exists.
+    Run on a click of that person, never at start: taking one back asks the
+    gateway and the memory store, and every such ask is made with the key that
+    came with the click. A record still open when nobody is clicking waits,
+    recorded, for the next click (`waiting_work`). Anything open while a
+    request of this console is still making it is left alone: only a record
+    no request here is working on belongs to a request that no longer exists.
 
     `name_owner` answers, from the gateway, the id of the Mind now registered
     under a name, "" for none, and raises when the gateway cannot say. A
@@ -290,23 +323,34 @@ async def sweep(
     in the minds folder — has the steps known only by name struck, not
     taken back: taking them back would revoke a live Mind's credentials and
     delete its node. A record the gateway cannot be asked about is left for
-    the next start.
+    the next click.
     """
     results = []
     for creation in pending():
-        steps = list(creation.done)
-        try:
-            registered = await name_owner(creation.name)
-        except Exception as exc:  # noqa: BLE001 - reported; tried again next start
-            results.append({"mind_name": creation.name, "mind_id": creation.mind_id,
-                            "steps": steps, "left_behind": [
-                                f"everything: the gateway could not say whose the name is ({exc})"]})
+        if creation.name in _SWEEPING or creation.name in _MAKING:
             continue
-        anothers = (bool(registered) and registered != creation.mind_id) \
-            or await asyncio.to_thread(_folder_is_anothers, creation)
-        leftovers = await unmake(creation, deregister,
-                                 skip=NAME_KEYED if anothers else ())
-        results.append({"mind_name": creation.name, "mind_id": creation.mind_id,
-                        "steps": steps, "left_behind": leftovers,
-                        "name_now_anothers": anothers})
+        if not is_admin and waits_for(creation) != person:
+            continue
+        _SWEEPING.add(creation.name)
+        try:
+            results.append(await _take_back(creation, deregister, name_owner))
+        finally:
+            _SWEEPING.discard(creation.name)
     return results
+
+
+async def _take_back(creation, deregister, name_owner) -> dict[str, Any]:
+    steps = list(creation.done)
+    try:
+        registered = await name_owner(creation.name)
+    except Exception as exc:  # noqa: BLE001 - reported; tried again on the next click
+        return {"mind_name": creation.name, "mind_id": creation.mind_id,
+                "steps": steps, "left_behind": [
+                    f"everything: the gateway could not say whose the name is ({exc})"]}
+    anothers = (bool(registered) and registered != creation.mind_id) \
+        or await asyncio.to_thread(_folder_is_anothers, creation)
+    leftovers = await unmake(creation, deregister,
+                             skip=NAME_KEYED if anothers else ())
+    return {"mind_name": creation.name, "mind_id": creation.mind_id,
+            "steps": steps, "left_behind": leftovers,
+            "name_now_anothers": anothers}

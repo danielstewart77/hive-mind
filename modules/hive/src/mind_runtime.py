@@ -35,29 +35,41 @@ class PersonScope:
     """ASGI middleware (innermost): records who is signed in, for `send`.
 
     Added before the authorisation middleware so it runs inside it, where the
-    request's user is already resolved and cached."""
+    request's user is already resolved and cached.
 
-    def __init__(self, app):
+    `after_click`, when given, is called once the answer to a click has gone
+    out, as `after_click(person, is_admin, key)`, still inside the request:
+    this is where work that was waiting for this person is picked up (story
+    913). The key is the one that came with the click, handed down as an
+    argument for that call alone; it is kept nowhere, and the moment the call
+    ends nothing in this process holds it."""
+
+    def __init__(self, app, after_click=None):
         self.app = app
+        self.after_click = after_click
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        person, admin = None, False
+        person, admin, key = None, False, None
         try:
             import auth
             from starlette.requests import HTTPConnection
 
-            user = await auth.resolve_user(HTTPConnection(scope))
+            conn = HTTPConnection(scope)
+            user = await auth.resolve_user(conn)
             person = str((user or {}).get("username") or "").strip().lower() or None
             admin = bool((user or {}).get("is_admin")) if person else False
+            key = (auth.session_token(conn) or None) if person else None
         except Exception:  # noqa: BLE001 - no person is not a failure of the request
-            person, admin = None, False
+            person, admin, key = None, False, None
         token = _PERSON.set(person)
         admin_token = _PERSON_IS_ADMIN.set(admin)
         try:
             await self.app(scope, receive, send)
+            if self.after_click is not None and person and key:
+                await self.after_click(person, admin, key)
         finally:
             _PERSON_IS_ADMIN.reset(admin_token)
             _PERSON.reset(token)

@@ -221,7 +221,7 @@ app = FastAPI(
 )
 # Authorization lives in one table (console_access.TABLE), enforced in front
 # of every route and websocket; a route the table does not name is admin-only.
-app.add_middleware(mind_runtime.PersonScope)
+app.add_middleware(mind_runtime.PersonScope, after_click=lambda *args: _pick_up_waiting_work(*args))
 app.add_middleware(mind_rename.EditGate)
 app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
 
@@ -1349,7 +1349,8 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     # rest standing, which is how a page came to print "Started" under three
     # refusals for a mind that existed nowhere it could run. See
     # mind_creation.py for the record each step is taken under.
-    creation = mind_creation.Creation(name, mind_id, owner)
+    creation = mind_creation.Creation(
+        name, mind_id, owner, started_by=str(user.get("username") or ""))
     try:
         creation.begin()
     except mind_creation.InProgress as exc:
@@ -1446,7 +1447,10 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
                 await asyncio.to_thread(operator_attachment.reconcile, name, True)
     except Exception as exc:  # noqa: BLE001 - every failure unmakes the mind
         why = str(getattr(exc, "detail", "") or exc) or type(exc).__name__
-        leftovers = await mind_creation.unmake(creation, _deregister_mind)
+        try:
+            leftovers = await mind_creation.unmake(creation, _deregister_mind)
+        finally:
+            creation.release()
         log_event(
             log, "mind.create.failed", **_actor_fields(user), mind_name=name,
             mind_id=mind_id, harness=harness, provider=provider, step=step,
@@ -1497,24 +1501,98 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     }
 
 
-async def _move_user_keys() -> None:
-    """Move every person's key still held in the install's settings file into
-    the key folder (requirement 31). Never fatal."""
+# ---------------------------------------------------------------------------
+# Work that waits for a person (feature 834, story 913)
+# ---------------------------------------------------------------------------
+# Four kinds of work used to be taken up when this site started, with nobody
+# clicking and so with a key kept for the purpose. None is. Each stays on its
+# record, naming the person who started it (a name, never a key), shows as
+# waiting with who it waits for (`/api/waiting-work`), and is carried on by the
+# next click of that person, or of any administrator, with the sign-in key that
+# came with that click. The key is handed to the step as an argument and lives
+# in that one running step; when it ends nothing here holds it.
+
+#: Paths that are not a person's click: no work is picked up on them.
+_NOT_A_CLICK = ("/static/", "/health")
+
+_WAITING_BACKGROUND: set = set()
+
+
+def _in_the_background(coroutine) -> None:
+    task = asyncio.ensure_future(coroutine)
+    _WAITING_BACKGROUND.add(task)
+    task.add_done_callback(_WAITING_BACKGROUND.discard)
+
+
+async def _pick_up_waiting_work(person: str, is_admin: bool, key: str) -> None:
+    """After a click of `person` (with `key`), carry on what waits for them, or
+    for anyone when they are an administrator. Never raises into the click."""
     try:
-        moved = await holder_credentials.move_user_keys()
-        if moved:
-            log_event(log, "user.keys.moved", component="hive-control-plane", count=len(moved))
-    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
-        log_event(log, "user.keys.move_failed", level=logging.ERROR,
+        for operation in mind_rename.waiting(person, is_admin):
+            mind_rename.kick(operation["operation_id"], key)
+        if await design_delivery.waiting(person, is_admin):
+            _start_design_delivery(person, is_admin, key)
+        if any(is_admin or mind_creation.waits_for(c) == person
+               for c in mind_creation.pending() if c.name not in mind_creation._MAKING):
+            _in_the_background(_sweep_interrupted_creations(person, is_admin))
+        if holder_credentials.waiting_replacements(person, is_admin):
+            _in_the_background(_recover_key_replacements(person, is_admin))
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the click
+        log_event(log, "waiting_work.pick_up_failed", level=logging.ERROR,
                   component="hive-control-plane", error=str(exc))
 
 
-async def _recover_key_replacements() -> None:
+def _start_design_delivery(person: str, is_admin: bool, key: str | None) -> None:
+    """Send what is owed to this person, in the background, with the key that
+    came with this click. With no person and no key (a mind's own call) nothing
+    is sent: what is stored waits for a person's next click."""
+    if not person or not key:
+        return
+    task = asyncio.create_task(design_delivery.deliver_pending(person, is_admin, key))
+    _DESIGN_DELIVERIES.add(task)
+    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+
+
+async def _waiting_work_for(person: str, is_admin: bool) -> list[dict]:
+    """Everything waiting for this person, in words: what it is, which mind
+    or page, and who it waits for."""
+    found: list[dict] = []
+    for operation in mind_rename.waiting(person, is_admin):
+        found.append({"kind": "rename", "what": f"Renaming {operation.get('old')} to {operation.get('new')}",
+                      "waits_for": mind_rename.waits_for(operation), "status": operation.get("status")})
+    for creation in mind_creation.pending():
+        if creation.name in mind_creation._MAKING:
+            continue
+        who = mind_creation.waits_for(creation)
+        if is_admin or who == person:
+            found.append({"kind": "creation", "what": f"Taking back the half-made mind {creation.name}",
+                          "waits_for": who, "status": "waiting"})
+    for record in holder_credentials.waiting_replacements(person, is_admin):
+        found.append({"kind": "key_replacement", "what": f"Finishing the replacement of {record.get('mind')}'s key",
+                      "waits_for": key_journal_waits_for(record), "status": "waiting"})
+    for notice in await design_delivery.waiting(person, is_admin):
+        found.append({"kind": "design", "what": f"Sending a saved {notice.get('kind')} of the {notice.get('page')} page",
+                      "waits_for": design_delivery.waits_for(notice), "status": "waiting"})
+    return found
+
+
+def key_journal_waits_for(record: dict) -> str:
+    return holder_credentials.key_journal.waits_for(record)
+
+
+@app.get("/api/waiting-work")
+async def api_waiting_work(user: dict = Depends(require_auth)):
+    """What is waiting for the signed-in person (every person's, for an
+    administrator), and who each piece waits for."""
+    return {"waiting": await _waiting_work_for(
+        str(user["username"]).lower(), bool(user.get("is_admin")))}
+
+
+async def _recover_key_replacements(person: str, is_admin: bool) -> None:
     """Finish or undo a key replacement this console was stopped in the middle
-    of. A task of its own: each service may take seconds to answer, and the
-    console must be answering meanwhile."""
+    of, for the person it waits for."""
     try:
-        for recovered in await holder_credentials.recover_replacements():
+        for recovered in await holder_credentials.recover_replacements(person, is_admin):
             log_event(log, "mind.key.recovered", component="hive-control-plane",
                       level=logging.INFO if recovered["recovered"] else logging.ERROR,
                       mind=recovered["mind"], recovered=recovered["recovered"])
@@ -1523,9 +1601,10 @@ async def _recover_key_replacements() -> None:
                   component="hive-control-plane", error=str(exc))
 
 
-async def _sweep_interrupted_creations() -> None:
+async def _sweep_interrupted_creations(person: str, is_admin: bool) -> None:
     try:
-        for swept in await mind_creation.sweep(_deregister_mind, _gateway_mind_id_named):
+        for swept in await mind_creation.sweep(
+                _deregister_mind, _gateway_mind_id_named, person=person, is_admin=is_admin):
             log_event(log, "mind.create.swept", component="hive-control-plane",
                       level=logging.WARNING, **swept)
     except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
@@ -4099,7 +4178,7 @@ async def api_mind_proxy_key_update(
             raise HTTPException(status_code=404, detail="Mind not found")
         replaced = await holder_credentials.replace_mind_key(
             str(row["name"]), str(row.get("owner") or user["username"]),
-            str(row["mind_id"]), key)
+            str(row["mind_id"]), key, started_by=str(user["username"]))
     except holder_credentials.KeyHeldByAnother as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except holder_credentials.ReplacementFailed as exc:
@@ -4211,44 +4290,11 @@ async def api_key_migration_tools_credential(holder: str, user: dict = Depends(r
     return result
 
 
-@app.get("/api/account/key")
-async def api_my_key_status(user: dict = Depends(require_auth)):
-    """Whether the signed-in person has a key and when it was made. Never the
-    key: nobody is shown it and nobody types it."""
-    return holder_credentials.user_key_status(str(user["username"]))
-
-
-@app.post("/api/account/key/replace")
-async def api_replace_my_key(user: dict = Depends(require_auth)):
-    """Cut off the signed-in person's own key and make a new one. The old key
-    is refused by the gateway at its next request; nothing is shown."""
-    try:
-        await holder_credentials.replace_user_key(str(user["username"]))
-    except (holder_credentials.MintRefused, holder_credentials.MintUncertain) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    log_event(log, "user.key_replaced", **_actor_fields(user))
-    return {"replaced": True, **holder_credentials.user_key_status(str(user["username"]))}
-
-
-@app.post("/api/admin/users/{username}/key/replace")
-async def api_admin_replace_users_key(username: str, user: dict = Depends(require_auth)):
-    """An administrator replaces anyone's key. The person must exist; the
-    value is shown to nobody, the administrator included."""
-    await _store_call(auth.get_store().get_user, username)
-    try:
-        await holder_credentials.replace_user_key(auth.normalize_username(username))
-    except (holder_credentials.MintRefused, holder_credentials.MintUncertain) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    log_event(log, "user.key_replaced_by_admin", **_actor_fields(user),
-              username=auth.normalize_username(username))
-    return {"replaced": True}
-
-
 @app.post("/api/settings/key-migration/{name}/move")
 async def api_key_migration_move(name: str, user: dict = Depends(require_admin_or_route_bearer)):
     """Move one existing mind onto the proxy key it already holds."""
     try:
-        result = await key_migration.move_mind(name)
+        result = await key_migration.move_mind(name, started_by=str(user.get("username") or ""))
     except (holder_credentials.MintRefused, holder_credentials.KeyHeldByAnother,
             holder_credentials.ReplacementFailed, holder_credentials.MintUncertain) as exc:
         raise _migration_error(exc) from None
@@ -5562,7 +5608,8 @@ async def api_mind_rename(mind_id: str, request: Request, user: dict = Depends(r
     if not isinstance(body, dict):
         raise HTTPException(400, 'Request body must be an object')
     try:
-        result = await mind_rename.request_rename(mind_id, body.get('name'), user)
+        result = await mind_rename.request_rename(
+            mind_id, body.get('name'), user, route_access.acting_key())
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
     return JSONResponse(result, status_code=202)
@@ -5579,7 +5626,7 @@ async def api_mind_rename_recover(mind_id: str, user: dict = Depends(require_aut
     operation = mind_rename.latest(mind_id)
     if not operation:
         raise HTTPException(404, 'Rename not found')
-    mind_rename.schedule(operation['operation_id'])
+    mind_rename.kick(operation['operation_id'], route_access.acting_key())
     return mind_rename.public(operation)
 
 
@@ -5589,7 +5636,7 @@ async def api_mind_rename_cancel(mind_id: str, user: dict = Depends(require_auth
     if not operation:
         raise HTTPException(404, 'Rename not found')
     try:
-        return await mind_rename.cancel(operation['operation_id'])
+        return await mind_rename.cancel(operation['operation_id'], route_access.acting_key())
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
 
@@ -6496,9 +6543,9 @@ async def api_design_attach(
     # Anything submitted while nothing was attached is owed to this
     # conversation. Without this, "stored and read when next attached" is a
     # promise nothing keeps: re-attaching delivers none of it.
-    task = asyncio.create_task(design_delivery.deliver_pending())
-    _DESIGN_DELIVERIES.add(task)
-    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+    _start_design_delivery(
+        str(actor.get("username") or "").lower(), bool(actor.get("is_admin")),
+        route_access.acting_key())
     return record
 
 
@@ -6542,9 +6589,9 @@ async def api_design_submit(
     # The handle is kept until it finishes. A bare `create_task` holds no
     # strong reference, and a task collected mid-send loses the submission
     # exactly as silently as no task at all.
-    task = asyncio.create_task(design_delivery.deliver_pending())
-    _DESIGN_DELIVERIES.add(task)
-    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+    _start_design_delivery(
+        str(actor.get("username") or "").lower(), bool(actor.get("is_admin")),
+        route_access.acting_key())
     return record
 
 
@@ -6563,9 +6610,9 @@ async def api_design_accept(
     # Detached and handle-kept, for the reasons the submit route gives: the
     # send adopts the conversation and waits out a whole model turn, and a
     # bare create_task can be collected mid-send.
-    task = asyncio.create_task(design_delivery.deliver_pending())
-    _DESIGN_DELIVERIES.add(task)
-    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+    _start_design_delivery(
+        str(actor.get("username") or "").lower(), bool(actor.get("is_admin")),
+        route_access.acting_key())
     return record
 
 

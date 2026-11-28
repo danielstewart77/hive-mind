@@ -44,7 +44,7 @@
             <section class="surface"><div class="settings-section-copy"><h2>Setup guide</h2><p>Re-run readiness checks or continue an incomplete installation.</p></div><div class="surface-body"><a class="button" href="/setup"><i data-lucide="list-checks"></i>Open setup guide</a></div></section>
         {% elif settings_section == 'access' %}
             <section class="surface"><div class="settings-section-copy"><h2>Your account</h2><p>The account signed in to this console.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Username</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Role</dt><dd>{{ 'Admin' if current_user.is_admin else 'Member' }}</dd></div><div class="detail-item"><dt>Groups</dt><dd>{{ current_user.groups | join(', ') or 'None' }}</dd></div></dl><a class="button" href="/password"><i data-lucide="key-round"></i>Change password</a></div></section>
-            <section class="surface" id="my-key"><div class="settings-section-copy"><h2>Your key</h2><p>The key the hive uses to act as you. It is kept by the hive site where no mind can read it, and is never shown or typed. Replacing it ends the old one at the next request.</p></div><div class="surface-body"><p id="my-key-status" role="status">Checking…</p><button id="my-key-replace" class="button" type="button"><i data-lucide="key-round"></i>Replace my key</button></div></section>
+            <section class="surface" id="my-sign-ins"><div class="settings-section-copy"><h2>Sign out everywhere</h2><p>Your sign-in lives only in your browser, for twelve hours. This ends every sign-in of yours, on every device, at once, and you sign in again here.</p></div><div class="surface-body"><p id="my-sign-ins-status" role="status"></p><button id="my-sign-ins-end" class="button" type="button"><i data-lucide="log-out"></i>Sign out everywhere</button></div></section>
             <section class="surface"><div class="surface-header"><div><h2>Mind sessions</h2><p>Delete abandoned conversation sessions.</p></div><button id="sessions-refresh" class="icon-button" type="button" aria-label="Refresh sessions"><i data-lucide="refresh-cw"></i></button></div><ul class="activity-list" id="settings-sessions"><li class="loading-state">Loading sessions…</li></ul></section>
         {% elif settings_section == 'connections' %}
             <section class="surface"><div class="surface-header"><div><h2>Shared services</h2><p>Connectivity from the Hive application.</p></div><button id="connections-refresh" class="icon-button" type="button" aria-label="Refresh connections"><i data-lucide="refresh-cw"></i></button></div><ul class="service-list" id="settings-connections"><li class="loading-state">Checking connections…</li></ul></section>
@@ -530,19 +530,11 @@ window.addEventListener("DOMContentLoaded", function () {
         catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }
     if (section === "access") {
-        const keyStatus = document.getElementById("my-key-status");
-        async function loadMyKey() {
-            try {
-                const k = await h.requestJson("/api/account/key");
-                keyStatus.textContent = k.has_key ? "You have a key, made " + new Date(k.made_at * 1000).toLocaleString() + "." : "You have no key yet. One is made the first time it is needed.";
-            } catch (error) { keyStatus.textContent = error.message; }
-        }
-        document.getElementById("my-key-replace").addEventListener("click", async function () {
-            if (!window.confirm("Replace your key? The old one stops working at its next use.")) return;
-            try { await h.requestJson("/api/account/key/replace", {method: "POST"}); } catch (error) { window.alert(error.message); }
-            loadMyKey();
+        document.getElementById("my-sign-ins-end").addEventListener("click", async function () {
+            if (!window.confirm("Sign out everywhere? Every sign-in of yours, on every device, ends now.")) return;
+            try { await h.requestJson("/api/sign-ins/end", {method: "POST"}); window.location.assign("/login"); }
+            catch (error) { document.getElementById("my-sign-ins-status").textContent = error.message; }
         });
-        loadMyKey();
     }
     if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
     if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
@@ -741,7 +733,7 @@ window.addEventListener("DOMContentLoaded", function () {
                 return '<tr><td>' + name + '</td><td>' + h.escapeHtml(u.email || "") + '</td><td>' + h.escapeHtml(u.domain_account || "") + '</td><td>' + h.escapeHtml((u.groups || []).join(", ")) + '</td><td>' + status + '</td><td class="row-actions">'
                     + '<button class="button button-quiet" type="button" data-user-toggle="' + name + '" data-disabled="' + (u.disabled ? "1" : "") + '">' + (u.disabled ? "Enable" : "Disable") + '</button>'
                     + '<button class="button button-quiet" type="button" data-user-reset="' + name + '">Reset password</button>'
-                    + '<button class="button button-quiet" type="button" data-user-key="' + name + '">Replace key</button>'
+                    + '<button class="button button-quiet" type="button" data-user-sign-out="' + name + '">Sign out everywhere</button>'
                     + (u.microsoft_bound ? '<button class="button button-quiet" type="button" data-user-unbind="' + name + '">Unbind Microsoft</button>' : '') + '</td></tr>';
             }).join("") || '<tr><td colspan="6" class="empty-state">No users.</td></tr>';
             groupsRows.innerHTML = groups.map(function (g) {
@@ -784,9 +776,9 @@ window.addEventListener("DOMContentLoaded", function () {
                 await act("/api/admin/users/" + encodeURIComponent(unbind.dataset.userUnbind) + "/microsoft", {method: "DELETE"});
                 return;
             }
-            const replaceKey = event.target.closest("[data-user-key]");
-            if (replaceKey) {
-                if (window.confirm("Replace " + replaceKey.dataset.userKey + "'s key? Their old one stops working at its next use.")) await act("/api/admin/users/" + encodeURIComponent(replaceKey.dataset.userKey) + "/key/replace", {method: "POST"});
+            const signOut = event.target.closest("[data-user-sign-out]");
+            if (signOut) {
+                if (window.confirm("Sign " + signOut.dataset.userSignOut + " out everywhere? Every sign-in of theirs ends now.")) await act("/api/admin/users/" + encodeURIComponent(signOut.dataset.userSignOut) + "/sign-ins/end", {method: "POST"});
                 return;
             }
             const reset = event.target.closest("[data-user-reset]");

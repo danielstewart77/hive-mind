@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -106,27 +107,27 @@ async def _request(method, url, headers, body=None, params=None, timeout=15):
 HELD_CALL_TIMEOUT = 310
 
 
-async def _tools(operation, method, suffix=''):
+async def _tools(operation, method, key, suffix=''):
     import main
     base = main._hive_tools_base_url().rstrip('/')
     url = f'{base}/docker/mind-renames/{operation["operation_id"]}{suffix}'
-    return await _request(method, url, await _requester_headers(operation.get('requester')), params={'path': operation['project_path']},
+    return await _request(method, url, _headers(key), params={'path': operation['project_path']},
                           timeout=HELD_CALL_TIMEOUT if suffix == '/authorize' else 180)
 
 
-async def _requester_headers(username):
-    """The gateway's bearer for a rename: the key of the person who asked for
-    it, who is on the operation record. This site holds no key of its own
-    (feature 834, story 905). No key to be had: the step waits as recoverable."""
-    key = await holder_credentials.user_key(str(username or ''))
+def _headers(key):
+    """The bearer for a step of a rename: the sign-in key of the person whose
+    click is making this step, which is passed down and never kept (feature
+    834, story 913). The record of the rename holds the person's name, never
+    a key. No key came with the click: the step waits."""
     if not key:
-        raise ValueError('The key of the person who asked for this rename could not be found')
+        raise ValueError('A rename is only carried on with the key that comes with a person\'s click')
     return {'Authorization': 'Bearer ' + key}
 
 
-async def _broker(operation, action):
+async def _broker(operation, action, key):
     service = holder_credentials.SERVICES['comms']
-    headers = await _requester_headers(operation.get('requester'))
+    headers = _headers(key)
     return await _request('POST', f'{service.url().rstrip("/")}/broker/minds/{operation["mind_id"]}/rename/{action}',
                           headers, {'operation_id': operation['operation_id']})
 
@@ -159,7 +160,7 @@ async def _runtime(operation, name):
         return configuration
 
 
-async def request_rename(mind_id, new, user):
+async def request_rename(mind_id, new, user, key):
     new = str(new or '').strip().lower()
     if not re.fullmatch(r'[a-z][a-z0-9-]{1,31}', new):
         raise ValueError('Name must be 2 to 32 lowercase letters, numbers, or hyphens')
@@ -173,7 +174,7 @@ async def request_rename(mind_id, new, user):
         if existing and existing['status'] not in FINAL:
             if existing['new'] != new:
                 raise ValueError('This Mind already has a pending rename')
-            schedule(existing['operation_id'])
+            kick(existing['operation_id'], key)
             return public(existing)
         if reserved(new) or reserved(row['name']):
             raise ValueError('This name is reserved by another rename')
@@ -194,28 +195,28 @@ async def request_rename(mind_id, new, user):
         # Refuse unsupported gateway versions before touching any live state.
         service = holder_credentials.SERVICES['comms']
         capabilities = await _request('GET', service.url().rstrip('/') + '/broker/minds/rename/capabilities',
-                                      await _requester_headers(user['username']))
+                                      _headers(key))
         if capabilities.get('version') != 1:
             raise ValueError('The gateway needs rename support before this Mind can be renamed')
         import main
         save(operation)
         try:
             await _request('POST', main._hive_tools_base_url().rstrip('/') + '/docker/mind-renames/reserve',
-                           await _requester_headers(user['username']), {key: operation[key] for key in ('operation_id', 'mind_id', 'old', 'new')},
+                           _headers(key), {name: operation[name] for name in ('operation_id', 'mind_id', 'old', 'new')},
                            {'path': operation['project_path']})
         except ValueError:
-            await _recover(operation, 'The rename reservation could not finish')
+            await _recover(operation, 'The rename reservation could not finish', key)
             raise
-        schedule(operation['operation_id'])
+        kick(operation['operation_id'], key)
         return public(operation)
 
 
-async def _recover(operation, detail):
+async def _recover(operation, detail, key):
     operation.update(status='recovering', detail=detail)
     save(operation)
     try:
         try:
-            tools = await _tools(operation, 'GET')
+            tools = await _tools(operation, 'GET', key)
         except RenameServiceError as exc:
             if exc.status == 404 and not operation.get('gate_prepared'):
                 operation.update(status='failed', detail=detail + '. The original Mind was unchanged')
@@ -228,17 +229,17 @@ async def _recover(operation, detail):
             row = await core.get_mind(operation['mind_id'])
             if row['name'] != operation['new']:
                 raise ValueError('The confirmed host rename disagrees with the registry')
-            await _broker(operation, 'release')
+            await _broker(operation, 'release', key)
             operation.update(status='success', detail='Renamed. Everything else was preserved')
         else:
             row = await core.get_mind(operation['mind_id'])
             if row['name'] == operation['new']:
                 async with provider_data._LOCK:
                     await core.rename_mind(operation['mind_id'], operation['new'], operation['old'])
-            await _tools(operation, 'POST', '/rollback')
+            await _tools(operation, 'POST', key, '/rollback')
             if tools['stage'] not in ('reserved', 'authorized', 'cancelled'):
                 await _runtime(operation, operation['old'])
-            await _broker(operation, 'release')
+            await _broker(operation, 'release', key)
             operation.update(status='failed', detail=detail + '. The original Mind was restored')
     except (ValueError, OSError, KeyError):
         operation.update(status='recovery_required', detail='Rename recovery is pending. The Mind remains protected; retry recovery from this page')
@@ -246,16 +247,19 @@ async def _recover(operation, detail):
     return public(operation)
 
 
-async def advance(operation_id):
-    """A resumable step. Host status resolves lost responses and restarts."""
+async def advance(operation_id, key):
+    """One resumable step, with the sign-in key of the person whose click it is
+    (passed down for this step and kept nowhere). Host status resolves lost
+    responses and restarts. A step that cannot finish leaves the rename waiting
+    for the next click of the person who asked for it, or of an administrator."""
     async with _STEP_LOCKS.setdefault(operation_id, asyncio.Lock()):
         operation = load(operation_id)
         if operation['status'] in FINAL:
             return public(operation)
         if operation['status'] in ('recovering', 'recovery_required'):
-            return await _recover(operation, 'The rename could not finish')
+            return await _recover(operation, 'The rename could not finish', key)
         try:
-            tools = await _tools(operation, 'GET')
+            tools = await _tools(operation, 'GET', key)
             stage = tools['stage']
             if stage == 'reserved':
                 if not operation.get('hitl_request_id'):
@@ -265,10 +269,10 @@ async def advance(operation_id):
                                      detail='Approve this Mind’s rename in Hive Tools')
                     save(operation)
                     try:
-                        result = await _tools(operation, 'POST', '/authorize')
+                        result = await _tools(operation, 'POST', key, '/authorize')
                     except RenameServiceError as exc:
                         if exc.status in (403, 408):
-                            return await _recover(operation, 'The rename was not approved')
+                            return await _recover(operation, 'The rename was not approved', key)
                         raise
                     if result.get('hitl_request_id'):
                         operation.update(hitl_request_id=result['hitl_request_id'], status='waiting_approval',
@@ -280,12 +284,12 @@ async def advance(operation_id):
                     stage = result.get('stage', stage)
                 else:
                     import main
-                    result = await _request('GET', main._hive_tools_base_url().rstrip('/') + '/hitl/' + operation['hitl_request_id'], await _requester_headers(operation.get('requester')))
+                    result = await _request('GET', main._hive_tools_base_url().rstrip('/') + '/hitl/' + operation['hitl_request_id'], _headers(key))
                     if result.get('status') in ('denied', 'expired'):
-                        return await _recover(operation, 'The rename was not approved')
+                        return await _recover(operation, 'The rename was not approved', key)
                     return public(operation)
             if stage == 'authorized':
-                prepared = await _broker(operation, 'prepare')
+                prepared = await _broker(operation, 'prepare', key)
                 if prepared.get('status') != 'prepared':
                     operation.update(status='waiting_idle', detail=prepared.get('detail') or 'Waiting for this Mind to become idle')
                     save(operation)
@@ -293,7 +297,7 @@ async def advance(operation_id):
                 operation.update(status='transitioning', detail='Moving this Mind and restarting its runtime')
                 operation['gate_prepared'] = True
                 save(operation)
-                tools = await _tools(operation, 'POST', '/continue')
+                tools = await _tools(operation, 'POST', key, '/continue')
                 stage = tools['stage']
             if stage == 'running':
                 await _runtime(operation, operation['new'])
@@ -303,54 +307,62 @@ async def advance(operation_id):
                     await core.rename_mind(operation['mind_id'], operation['old'], operation['new'])
                 operation.update(status='confirming', detail='Verifying the completed rename')
                 save(operation)
-                await _tools(operation, 'POST', '/confirm')
+                await _tools(operation, 'POST', key, '/confirm')
                 stage = 'committed'
             if stage == 'committed':
                 row = await core.get_mind(operation['mind_id'])
                 if row['name'] != operation['new']:
                     raise ValueError('The renamed runtime disagrees with the registry')
-                await _broker(operation, 'release')
+                await _broker(operation, 'release', key)
                 operation.update(status='success', detail='Renamed. Everything else was preserved')
                 save(operation)
                 return public(operation)
-            return await _recover(operation, 'The host transition was interrupted')
+            return await _recover(operation, 'The host transition was interrupted', key)
         except (ValueError, OSError, KeyError):
-            return await _recover(operation, 'The rename could not finish')
+            return await _recover(operation, 'The rename could not finish', key)
 
 
-def schedule(operation_id):
+def waits_for(operation):
+    """The person a rename waits for: who asked for it (a name on the record,
+    never a key)."""
+    return str(operation.get('requester') or '')
+
+
+def waiting(person, is_admin):
+    """The renames not yet finished that wait for this person: the ones they
+    asked for, or every one for an administrator."""
+    found = []
+    for path in sorted(RENAME_DIR.glob('*.json')):
+        operation = json.loads(path.read_text())
+        if operation['status'] not in FINAL and (is_admin or waits_for(operation) == person):
+            found.append(operation)
+    return found
+
+
+def kick(operation_id, key):
+    """Carry one step of this rename on, in the background, with the key that
+    came with this click. The step holds the key only until it ends; the
+    rename is then waiting for the next click. A step already under way is
+    left to finish."""
     if operation_id in _TASKS and not _TASKS[operation_id].done():
         return
-    async def run():
-        while True:
-            result = await advance(operation_id)
-            if result['status'] in FINAL or result['status'] == 'recovery_required':
-                return
-            await asyncio.sleep(3)
-    task = asyncio.create_task(run())
+    task = asyncio.create_task(advance(operation_id, key))
     _TASKS[operation_id] = task
     task.add_done_callback(lambda done: _TASKS.pop(operation_id, None))
 
 
-async def cancel(operation_id):
+async def cancel(operation_id, key):
     async with _STEP_LOCKS.setdefault(operation_id, asyncio.Lock()):
         operation = load(operation_id)
         if operation['status'] not in ('reserving', 'waiting_approval', 'waiting_idle'):
             raise ValueError('This rename has already progressed; use its recovery status')
-        result = await _recover(operation, 'The rename was cancelled')
+        result = await _recover(operation, 'The rename was cancelled', key)
         if result['status'] == 'failed':
             operation = load(operation_id)
             operation['status'] = 'cancelled'
             save(operation)
             return public(operation)
         return result
-
-
-def recover_pending():
-    for path in RENAME_DIR.glob('*.json'):
-        operation = json.loads(path.read_text())
-        if operation['status'] not in FINAL:
-            schedule(operation['operation_id'])
 
 
 async def stop():

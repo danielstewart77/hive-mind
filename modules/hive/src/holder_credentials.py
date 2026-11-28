@@ -1593,7 +1593,7 @@ def _states_sentence(order: list[Service], state: dict[str, str]) -> str:
 
 
 async def replace_mind_key(
-    name: str, owner: str, mind_id: str, supplied: str,
+    name: str, owner: str, mind_id: str, supplied: str, started_by: str = "",
 ) -> dict[str, Any]:
     """Give a mind a new key on the gateway, the memory store and the tools.
 
@@ -1689,7 +1689,8 @@ async def replace_mind_key(
             # anything has changed.
             services = sorted(services, key=lambda s: not accepted.get(s.key, False))
         try:
-            record = key_journal.begin("replace", holder, [s.key for s in services])
+            record = key_journal.begin("replace", holder, [s.key for s in services],
+                                       started_by)
             record["owner"], record["mind_id"] = owner, mind_id
             # A put replaces the value and clears a revocation, so a mind cut
             # off with Revoke would be live again after a put-back. Remember
@@ -1906,9 +1907,18 @@ def _failure_sentence(exc: BaseException) -> str:
     return text[:300]
 
 
-async def recover_replacements() -> list[dict[str, Any]]:
-    """On console start: bring the services back in step with the stored key
-    for every replacement this console was stopped in the middle of.
+def waiting_replacements(person: str, is_admin: bool) -> list[dict[str, Any]]:
+    """The replacements of a mind's key left unfinished that wait for this
+    person: the ones their click began, or every one for an administrator."""
+    return [r for r in key_journal.unfinished()
+            if is_admin or key_journal.waits_for(r) == person]
+
+
+async def recover_replacements(person: str, is_admin: bool) -> list[dict[str, Any]]:
+    """On a click of the person a cut-short replacement waits for (or of an
+    administrator): bring the services back in step with the stored key for
+    every replacement this console was stopped in the middle of. Never at
+    start, when nobody is there to click.
 
     The journal holds no key, so the one source is the mind's stored line:
     every service is given that value, which finishes a replacement whose file
@@ -1916,7 +1926,7 @@ async def recover_replacements() -> list[dict[str, Any]]:
     not stored here cannot be recovered from here and is marked for attention.
     """
     handled = []
-    for record in key_journal.unfinished():
+    for record in waiting_replacements(person, is_admin):
         holder = record["mind"]
         try:
             async with _ROTATION_LOCK:

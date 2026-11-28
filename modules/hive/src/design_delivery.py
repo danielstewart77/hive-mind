@@ -45,29 +45,24 @@ def gateway_base_url() -> str:
 
 
 class NoSubmitterKey(RuntimeError):
-    """The notice names nobody who submitted it, or that person's key cannot be
-    had. Nothing is sent: this site holds no key of its own to send instead."""
+    """No sign-in key came with the click that is sending this. Nothing is
+    sent: this site keeps no key to send instead."""
 
 
 def submitter_of(notice: dict[str, Any]) -> str:
-    """The person who submitted (or accepted) this page, as the notice kept it."""
+    """The person who submitted (or accepted) this page, as the notice kept it:
+    a name, never a key."""
     try:
         return str(json.loads(notice.get("body") or "{}").get("submitted_by") or "").strip().lower()
     except (ValueError, AttributeError):
         return ""
 
 
-async def _submitter_headers(notice: dict[str, Any]) -> dict[str, str]:
-    """The key of the person who submitted, as the gateway's bearer: the
-    notice goes to the mind as that person's own turn (requirement 39)."""
-    import holder_credentials
-
-    person = submitter_of(notice)
-    if not person:
-        raise NoSubmitterKey("this notice records no person who submitted it")
-    key = await holder_credentials.user_key(person)
+def _bearer(key: str | None) -> dict[str, str]:
+    """The key that came with the click, as the gateway's bearer: the notice
+    goes to the mind as that person's own turn (requirement 39)."""
     if not key:
-        raise NoSubmitterKey(f"{person}'s own key could not be found on this site")
+        raise NoSubmitterKey("no sign-in key came with this click, so nothing was sent")
     return {"Authorization": f"Bearer {key}"}
 
 
@@ -223,8 +218,12 @@ async def send_turn(conversation_id: str, content: str, headers: dict[str, str])
     )
 
 
-async def deliver_notice(notice_id: int) -> bool:
+async def deliver_notice(notice_id: int, person: str, key: str | None) -> bool:
     """Claim one notice, adopt the conversation, send the turn, acknowledge.
+
+    `person` and `key` are the person whose click this is and the sign-in key
+    that came with it, used for this one send and not kept: nothing here
+    stores them, and the notice records only the name of who submitted.
 
     Returns False for a notice that is not deliverable *yet* — nothing is
     attached, or the gateway refused — having put it back for the next
@@ -245,14 +244,17 @@ async def deliver_notice(notice_id: int) -> bool:
         # A session opened before any mind attached names its conversation
         # but no mind; the conversation's own mind is then the owner's.
         # Read for the person who submitted, with their own key.
-        with route_access.acting_as(submitter_of(notice)):
-            person = (
+        acting = route_access.begin_acting(person, key)
+        try:
+            owner = (
                 await route_access.owner_of_mind(str(record.get("mind_id") or ""))
                 if record.get("mind_id")
                 else await route_access.owner_of_session(conversation_id)
             ) or ""
-        content = compose_message(record, notice["page"], notice["kind"], person)
-        headers = await _submitter_headers(notice)
+        finally:
+            route_access.end_acting(acting)
+        content = compose_message(record, notice["page"], notice["kind"], owner)
+        headers = _bearer(key)
         await adopt_conversation(record["id"], conversation_id, headers)
         await send_turn(conversation_id, content, headers)
     except Exception:  # noqa: BLE001 — a failed send is never a lost submission
@@ -279,19 +281,32 @@ async def deliver_notice(notice_id: int) -> bool:
     return True
 
 
-async def deliver_pending() -> int:
-    """Send everything still owed, oldest first.
+def waits_for(notice: dict[str, Any]) -> str:
+    """The person a stored submission waits for: who saved it."""
+    return submitter_of(notice)
 
-    Run on startup as well as after a submission: a console restarted
-    between the queue and the send would otherwise leave a submission
-    stored, unsent, and invisible until Daniel asked why nothing happened.
+
+async def waiting(person: str, is_admin: bool) -> list[dict[str, Any]]:
+    """The stored, unsent submissions waiting for this person: the ones they
+    saved, or all of them for an administrator."""
+    return [n for n in await design_data.pending_notices()
+            if not n.get("claimed_at") and (is_admin or waits_for(n) == person)]
+
+
+async def deliver_pending(person: str, is_admin: bool, key: str | None) -> int:
+    """Send what is owed to this person, oldest first, with the key that came
+    with their click: the submissions they saved, or every one for an
+    administrator.
+
+    Run on the click that stores a submission and on any later click of the
+    person it waits for or of an administrator: a console restarted between
+    the queue and the send leaves the submission stored and shown as waiting,
+    never lost, and never sent with a key kept for the purpose.
     """
     sent = 0
-    for notice in await design_data.pending_notices():
-        if notice.get("claimed_at"):
-            continue
+    for notice in await waiting(person, is_admin):
         try:
-            if await deliver_notice(notice["id"]):
+            if await deliver_notice(notice["id"], person, key):
                 sent += 1
         except asyncio.CancelledError:
             raise
