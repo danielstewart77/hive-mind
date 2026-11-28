@@ -198,6 +198,7 @@ TABLE.add(
 TABLE.add(
     Rule(ADMIN, person=True),
     "GET /sessions/live/text",
+    "GET /sessions/turns",
     "PUT /broker/minds/{mind_id}/owner",
     "DELETE /broker/minds/{name}",
     "PUT /credentials/{holder}",

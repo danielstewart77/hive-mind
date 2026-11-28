@@ -632,6 +632,17 @@ class SubagentEventRequest(BaseModel):
     label: str = ""
     parent_agent_id: str | None = None
     outcome: str | None = None
+    #: What the child has in flight, on a `doing` report: the words naming
+    #: the tool call (empty for none), how many seconds the child's own log
+    #: says it has run, whether it is thinking, and whether this reporter
+    #: can see thinking at all. Ignored on every other state.
+    tool: str = ""
+    tool_running_for: float | None = None
+    thinking: bool = False
+    reports_thinking: bool = False
+    #: Whether this reporter also sees what the child produces between its
+    #: tool calls. One that does not is never read as stalled on silence.
+    reports_output: bool = False
 
 
 class RotationMemoryRequest(BaseModel):
@@ -971,6 +982,19 @@ async def live_sessions(request: Request):
         "idle": [row for row in board.get("idle", [])
                  if user_access.mind_is_named_in(keys, row.get("mind_id"))],
     }
+
+
+@app.get("/sessions/turns", dependencies=[Depends(require_admin_or_person)])
+async def session_turns():
+    """Each mind's own turn: open or not, and what it has in flight.
+
+    What the Chief of Staff page reads to tell a mind running one long
+    command from a mind whose turn has hung. `open` is None for a
+    conversation nobody can speak for, and only an open turn carries a
+    `reading`. Declared before `/sessions/{session_id}` so the literal path
+    wins. Administrator only, by the route table (an administrator's own key).
+    """
+    return {"turns": session_mgr.dashboard.turns()}
 
 
 @app.get("/sessions/live/text", dependencies=[Depends(require_admin_or_person)])
@@ -1716,6 +1740,11 @@ async def record_subagent_event(body: SubagentEventRequest, request: Request):
             session_id=session_id,
             parent_agent_id=(body.parent_agent_id or "").strip() or None,
             outcome=_reportable_outcome(body.outcome),
+            tool=_printable(body.tool),
+            tool_running_for=body.tool_running_for,
+            thinking=body.thinking,
+            reports_thinking=body.reports_thinking,
+            reports_output=body.reports_output,
         )
     except hive_data.errors.ValueRefused as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
