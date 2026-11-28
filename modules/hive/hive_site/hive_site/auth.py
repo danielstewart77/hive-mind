@@ -602,7 +602,10 @@ def refuse_old_settings() -> None:
     """Stop the site starting half-working. An install whose settings still
     name the authentication service is told, in one plain sentence, what to
     change; it is not started."""
-    left = [name for name in _OLD_SETTINGS if os.getenv(name, "").strip()]
+    left = [name for name in _OLD_SETTINGS
+            if os.getenv(name, "").strip()
+            and not (name == "HIVE_AUTH_BACKEND"
+                     and os.getenv(name, "").strip().lower() == "builtin")]
     if left:
         raise OldSettings(OLD_SETTINGS_SENTENCE.format(names=", ".join(left)))
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Clone the modules hive-mind keeps in their own repositories (inference-proxy,
-# auth-service, hive-harness-dsh: the manifest, .gitmodules) and bring each to
+# hive-harness-dsh: the manifest, .gitmodules) and bring each to
 # the exact commit this checkout of hive-mind records for it.
 #
 #   scripts/modules.sh            # from anywhere inside a hive-mind checkout

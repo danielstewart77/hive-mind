@@ -1,4 +1,4 @@
-# hive-mind's manifest: the three repositories that stay outside it, each
+# hive-mind's manifest: the two repositories that stay outside it, each
 # cloned under modules/. A release of hive-mind pins each at the exact commit
 # its tree records (the gitlink); scripts/modules.sh checks that commit out.
 # `branch` is read only when a developer opts in to following a branch tip
@@ -11,7 +11,3 @@
 	path = modules/hive-harness-dsh
 	url = https://github.com/danielstewart77/hive-harness-dsh.git
 	branch = master
-[submodule "modules/auth-service"]
-	path = modules/auth-service
-	url = https://github.com/danielstewart77/auth-service.git
-	branch = main

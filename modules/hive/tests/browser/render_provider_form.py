@@ -15,7 +15,6 @@ from starlette.testclient import TestClient
 async def setup():
     scratch = await testing.ScratchDatabase.create()
     os.environ["HIVE_DATABASE_URL"] = scratch.dsn
-    os.environ["HIVE_AUTH_BACKEND"] = "builtin"
     os.environ["HIVE_SECRET_KEY"] = "disposable-browser-fixture"
     await store.open()
     user = await auth.create_user("browser-fixture", "disposable-only-password", is_admin=True)

@@ -54,13 +54,13 @@ the terminal and the tools are ordinary folders of it, at `modules/hive-data`,
 `modules/hive-surfaces`, `modules/hive`, `modules/terminal` and
 `modules/hive-tools`; the first two are also installable alone at a tag
 (`hive-data-vX.Y.Z`, `hive-surfaces-vX.Y.Z`, see
-[docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Three
+[docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Two
 repositories stay outside it, each independently versioned and listed in
-[`.gitmodules`](.gitmodules): inference-proxy, hive-harness-dsh and
-auth-service (where people sign in to the hive), each under `modules/<name>`.
+[`.gitmodules`](.gitmodules): inference-proxy and
+hive-harness-dsh, each under `modules/<name>`.
 
 A release is a commit of hive-mind named by a tag. It records, in its own
-tree, the exact commit of each of those three. Clone it and bring them in at
+tree, the exact commit of each of those two. Clone it and bring them in at
 those commits:
 
 ```bash

@@ -129,7 +129,6 @@ def postgres_terminal(monkeypatch, fake_comms):
     in the test runs on.
     """
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
-    monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
     monkeypatch.setenv("HIVE_SECRET_KEY", "postgres-half-test-secret")
     monkeypatch.setenv("HIVE_SEED_USERNAME", "daniel")
     monkeypatch.setenv("HIVE_SEED_PASSWORD", "daniels-own-password")
@@ -228,7 +227,6 @@ def test_a_cookie_minted_before_the_store_was_rebuilt_never_signs_in_as_whoever_
     one person must not resolve to a different person merely because the
     number matches — the second can be an admin.
     """
-    monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
     monkeypatch.setenv("HIVE_SECRET_KEY", "one-key-two-stores")
 
     newcomer = accounts.make_user("newjoiner", "newjoiners-pass")

@@ -1,7 +1,7 @@
 # One repository: bringing a machine onto it, checking it, and going back
 
 hive-mind now holds the data package, the chat surfaces, the console, the
-terminal and the tools. Only inference-proxy, auth-service and hive-harness-dsh
+terminal and the tools. Only inference-proxy and hive-harness-dsh
 stay in their own repositories. This page is for whoever runs a machine: a shell,
 Docker and `git` are all it needs. It does not need a roster mind.
 
@@ -53,7 +53,7 @@ curl -fsSL <published address>/install.sh | HIVE_RELEASE=<release-tag> bash
 
 Without `HIVE_RELEASE` a fresh clone is the default branch's tip at that
 moment, which is not a release; name one. The installer clones hive-mind, puts it
-on that release, checks out the three outside repositories at the commits the
+on that release, checks out the two outside repositories at the commits the
 release records, writes `minds/.release-context` (below), and builds every
 service from that one clone. A build needs network access for what it downloads:
 base images, apt, npm, pip from PyPI and the training image's llama.cpp. Those
@@ -143,7 +143,7 @@ Do these in order, one machine at a time. Steps 1 to 4 change nothing that runs.
    It refuses, and changes nothing, if tracked files are modified, the tag
    names a branch or no commit, no remote publishes the commit, or an old clone
    holds unsaved work. Otherwise it checks the tree out detached, brings
-   inference-proxy, auth-service and hive-harness-dsh to the commits the release
+   inference-proxy and hive-harness-dsh to the commits the release
    records, writes `minds/.release-context` (the console builds a new mind from
    exactly this commit), and rebuilds the stack's images. It does not recreate
    anything: bind-mounted source is already the new tree, and a running process
@@ -178,7 +178,7 @@ Do these in order, one machine at a time. Steps 1 to 4 change nothing that runs.
 ## Part 3. Verify
 
 - `scripts/release.sh status` shows the commit and the one it would go back to.
-- `git -C <checkout> rev-parse HEAD` equals the tag's commit; each of the three
+- `git -C <checkout> rev-parse HEAD` equals the tag's commit; each of the two
   modules is detached at the commit `git ls-tree HEAD modules` shows.
 - Run the release record again and compare `identity.hive_mind_commit`.
 - `docker volume ls`: `hive-postgres-data`, `whisper-cache`, `kokoro-cache`,
@@ -199,7 +199,7 @@ scripts/release.sh --state-dir <install>/state --compose <your docker-compose.ym
 ```
 
 `back` is `to` the release recorded as the previous one. It checks the old tree
-out, puts the three outside modules on the commits that tree records, rewrites
+out, puts the two outside modules on the commits that tree records, rewrites
 `minds/.release-context` to that commit, and rebuilds the images from it. Then
 recreate the services (step 10). Running `back` again goes forward again.
 
