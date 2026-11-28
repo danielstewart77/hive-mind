@@ -77,9 +77,9 @@ def _row(client, slug):
 # ── 3. a differing role is shown as differing, and changes only by a choice
 
 def test_a_role_that_differs_from_its_repo_copy_is_marked_differs_with_a_diff(repo, monkeypatch):
-    _write(repo, "developer", name="Developer", model="claude-opus-5-5",
+    _write(repo, "developer", name="Developer", suggested_tier="high",
            tools=["shell", "files"], skills=["code"], hooks=[])
-    testing.run(store.create_role("Developer", slug="developer", model="claude-opus-5-5",
+    testing.run(store.create_role("Developer", slug="developer", suggested_tier="high",
                                   tools=["files"], skills=["code", "simplify"]))
     client = _client(monkeypatch)
 
@@ -91,12 +91,12 @@ def test_a_role_that_differs_from_its_repo_copy_is_marked_differs_with_a_diff(re
 
 
 def test_reading_the_page_and_a_repo_update_leave_a_differing_role_as_it_was(repo, monkeypatch):
-    _write(repo, "developer", name="Developer", model=None, tools=["shell"], skills=["code"], hooks=[])
+    _write(repo, "developer", name="Developer", suggested_tier=None, tools=["shell"], skills=["code"], hooks=[])
     role_id = testing.run(store.create_role("Developer", slug="developer",
                                             tools=["files"], skills=["mine"]))
     client = _client(monkeypatch)
     client.get("/api/roles")
-    _write(repo, "developer", name="Developer", model="claude-fable-5-2",
+    _write(repo, "developer", name="Developer", suggested_tier="extra-high",
            tools=["shell", "web"], skills=["code", "review"], hooks=["time_inject"])
     repo_text = (repo / "developer.yaml").read_text()
 
@@ -106,12 +106,12 @@ def test_reading_the_page_and_a_repo_update_leave_a_differing_role_as_it_was(rep
 
     hive = testing.run(store.role(role_id))
     assert row["state"] == "differs"
-    assert hive["skills"] == ["mine"] and hive["tools"] == ["files"] and hive["model"] is None
+    assert hive["skills"] == ["mine"] and hive["tools"] == ["files"] and hive["suggested_tier"] is None
     assert (repo / "developer.yaml").read_text() == repo_text
 
 
 def test_keep_yours_leaves_both_copies_and_the_role_still_differs(repo, monkeypatch):
-    _write(repo, "planner", name="Planner", model=None, tools=[], skills=["design-spec"], hooks=[])
+    _write(repo, "planner", name="Planner", suggested_tier=None, tools=[], skills=["design-spec"], hooks=[])
     role_id = testing.run(store.create_role("Planner", slug="planner", skills=["brainstorm"]))
     client = _client(monkeypatch)
 
@@ -120,12 +120,12 @@ def test_keep_yours_leaves_both_copies_and_the_role_still_differs(repo, monkeypa
     row = _row(client, "planner")
     assert row["state"] == "differs" and row["kept"] is True
     assert testing.run(store.role(role_id))["skills"] == ["brainstorm"]
-    _write(repo, "planner", name="Planner", model=None, tools=[], skills=["design-spec", "x"], hooks=[])
+    _write(repo, "planner", name="Planner", suggested_tier=None, tools=[], skills=["design-spec", "x"], hooks=[])
     assert _row(client, "planner")["kept"] is False
 
 
 def test_take_the_repo_update_replaces_the_role_with_the_repo_copy(repo, monkeypatch):
-    _write(repo, "planner", name="Planner", model="claude-fable-5-2", tools=["web"],
+    _write(repo, "planner", name="Planner", suggested_tier="extra-high", tools=["web"],
            skills=["design-spec"], hooks=[])
     role_id = testing.run(store.create_role("Planner", slug="planner", skills=["brainstorm"]))
     client = _client(monkeypatch)
@@ -133,7 +133,7 @@ def test_take_the_repo_update_replaces_the_role_with_the_repo_copy(repo, monkeyp
     assert client.post("/api/roles/repo/planner/take").status_code == 200
 
     hive = testing.run(store.role(role_id))
-    assert (hive["skills"], hive["tools"], hive["model"]) == (["design-spec"], ["web"], "claude-fable-5-2")
+    assert (hive["skills"], hive["tools"], hive["suggested_tier"]) == (["design-spec"], ["web"], "extra-high")
     assert _row(client, "planner")["state"] == "tracked"
 
 
@@ -151,7 +151,7 @@ def test_promote_yours_writes_the_role_as_the_repo_copy(repo, monkeypatch):
 
 def test_a_repo_role_this_hive_lacks_is_offered_and_not_added_by_itself(repo, monkeypatch):
     testing.run(roles_data.seed())
-    _write(repo, "optimizer", name="Optimizer", model=None, tools=[], skills=["prune-memory"], hooks=[])
+    _write(repo, "optimizer", name="Optimizer", suggested_tier=None, tools=[], skills=["prune-memory"], hooks=[])
     client = _client(monkeypatch)
 
     row = _row(client, "optimizer")
@@ -162,7 +162,7 @@ def test_a_repo_role_this_hive_lacks_is_offered_and_not_added_by_itself(repo, mo
 
 
 def test_a_fresh_hive_is_seeded_with_every_readable_repo_role_and_general(repo, monkeypatch):
-    _write(repo, "operator", name="Operator", model="claude-opus-5-5", tools=["shell"], skills=[], hooks=[])
+    _write(repo, "operator", name="Operator", suggested_tier="high", tools=["shell"], skills=[], hooks=[])
     (repo / "broken.yaml").write_text("name: [unclosed")
 
     result = testing.run(roles_data.seed())
@@ -456,7 +456,7 @@ def test_reading_the_lists_learns_from_github_that_a_pull_request_merged(repo, m
     ("post", "/api/roles"), ("delete", "/api/roles/{id}"), ("post", "/api/roles/{id}/keep"),
     ("post", "/api/roles/{id}/promote"), ("post", "/api/roles/repo/developer/take")])
 def test_only_an_admin_defines_or_settles_a_role(repo, monkeypatch, method, url):
-    _write(repo, "developer", name="Developer", model=None, tools=[], skills=["x"], hooks=[])
+    _write(repo, "developer", name="Developer", suggested_tier=None, tools=[], skills=["x"], hooks=[])
     role_id = testing.run(store.create_role("Developer", slug="developer", skills=["code"]))
     client = _client(monkeypatch, admin=False, username="sloan")
 
@@ -532,6 +532,31 @@ def test_another_user_cannot_write_a_skill_back_into_the_hives_own_checkout(repo
     assert response.status_code == 403
     assert "pull request" in response.json()["detail"]
     assert reached == []
+
+
+def test_a_mind_holding_a_role_is_shown_the_tier_that_role_suggests_for_its_model(repo, monkeypatch):
+    """Feature 893: where a Mind's model is chosen, its roles' suggested tiers
+    are what the page is handed to show above the model box."""
+    testing.run(roles_data.seed())
+    coder = testing.run(store.create_role("Coder", slug="coder", suggested_tier="medium"))
+    silent = testing.run(store.create_role("Silent", slug="silent"))
+    judge = testing.run(store.create_role("Judge", slug="judge", suggested_tier="extra-high"))
+
+    async def registry():
+        return [{"name": "stash", "id": "mind-stash", "owner": "daniel", "gateway_url": GATEWAY}]
+
+    monkeypatch.setattr(main_mod, "_broker_minds_safe", registry)
+    client = _client(monkeypatch)
+    assert client.put("/api/minds/stash/roles",
+                      json={"role_ids": [coder, silent]}).status_code == 200
+
+    shown = client.get("/api/minds/stash/roles").json()["suggested_tiers"]
+
+    assert shown == [{"role": "Coder", "tier": "medium"}]
+    assert client.put("/api/minds/stash/roles",
+                      json={"role_ids": [judge]}).status_code == 200
+    assert client.get("/api/minds/stash/roles").json()["suggested_tiers"] == [
+        {"role": "Judge", "tier": "extra high"}]
 
 
 def test_an_owner_gives_their_mind_roles_and_its_grants_are_their_union(repo, monkeypatch):

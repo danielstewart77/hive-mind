@@ -1,4 +1,5 @@
 name: Planner
+suggested_tier: extra-high
 tools:
   - files
   - sub-minds

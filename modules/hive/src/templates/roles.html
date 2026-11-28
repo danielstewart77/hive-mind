@@ -3,15 +3,15 @@
 {% block content %}
 <main class="page" data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}">
     <header class="page-header">
-        <div class="page-header-copy"><p class="page-eyebrow">Role management</p><h1 class="page-title">Roles</h1><p class="page-description">A role is a named set of skills, hooks, a model and the built-in tools an agent may use. An agent under role management holds the general role and any others it is given, and may use exactly what they grant together. Anything no role grants is not allowed, except the model: when no role an agent holds names one, it runs the model it is configured with.</p></div>
+        <div class="page-header-copy"><p class="page-eyebrow">Role management</p><h1 class="page-title">Roles</h1><p class="page-description">A role is a named set of skills, hooks and the built-in tools an agent may use. An agent under role management holds the general role and any others it is given, and may use exactly what they grant together. Anything no role grants is not allowed. A role may also suggest a model tier: that is advice shown where a Mind&#39;s model is chosen, and it never decides which model a Mind runs.</p></div>
         <div class="page-actions"><a class="button button-quiet" href="/skills/submit"><i data-lucide="git-pull-request"></i>Submit a skill</a>{% if current_user.is_admin %}<button class="button button-primary" type="button" id="role-new"><i data-lucide="plus"></i>New role</button>{% endif %}</div>
     </header>
     <div id="roles-status" class="event-hints"></div>
     <section class="surface" id="role-editor" hidden>
-        <div class="surface-header"><div><h2 id="role-editor-title">New role</h2><p>Tick what this role grants. Anything left unticked is not allowed. The lists are what exists: the models the proxy serves, and the skills and hooks the Minds report.</p></div></div>
+        <div class="surface-header"><div><h2 id="role-editor-title">New role</h2><p>Tick what this role grants. Anything left unticked is not allowed. The lists are what exists: the skills and hooks the Minds report.</p></div></div>
         <form class="surface-body overview-stack" id="role-form">
             <div class="field"><label for="role-name">Name</label><input id="role-name" name="name" required maxlength="80"></div>
-            <div class="field"><label for="role-model">Model</label><select id="role-model" name="model"></select><small id="role-model-note"></small></div>
+            <div class="field"><label for="role-tier">Suggested model tier</label><select id="role-tier" name="suggested_tier"></select><small>Shown above the model box of a Mind holding this role. It fills in nothing and refuses nothing.</small></div>
             <fieldset class="field"><legend>Built-in tools</legend><div id="role-tools"></div></fieldset>
             <div class="field"><label>Skills</label><small id="role-skills-note"></small><label class="checkbox-row"><input type="checkbox" id="role-community"> Show community submissions</label>
                 <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Granted</th><th>Skill</th><th>Repo</th><th>Minds that have it</th></tr></thead><tbody id="role-skills"></tbody></table></div></div>
@@ -22,7 +22,7 @@
         </form>
     </section>
     <section class="surface">
-        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Role</th><th>Repo</th><th>Model</th><th>Built-in tools</th><th>Skills</th><th>Hooks</th><th></th></tr></thead><tbody id="roles-table"><tr><td colspan="7" class="loading-state">Loading roles…</td></tr></tbody></table></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Role</th><th>Repo</th><th>Suggested tier</th><th>Built-in tools</th><th>Skills</th><th>Hooks</th><th></th></tr></thead><tbody id="roles-table"><tr><td colspan="7" class="loading-state">Loading roles…</td></tr></tbody></table></div>
     </section>
 </main>
 <script>
@@ -44,7 +44,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         unreadable: {label: "Repo copy unreadable", actions: []}
     };
     const ACTION_LABELS = {diff: "Diff", keep: "Keep yours", take: "Take the repo update", promote: "Promote yours to the hive"};
-    let roles = [], tools = [], editing = null, catalog = null;
+    let roles = [], tools = [], tiers = [], editing = null, catalog = null;
     // What the role grants while it is being edited. The tables are painted
     // from these, and saving sends these: a grant leaves a role only by
     // being unticked, never by its row being off the screen.
@@ -71,7 +71,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             let mark = state.label + (role.kept ? " (kept yours)" : "");
             if (role.error) mark += ": " + role.error;
             return '<tr><td>' + h.escapeHtml(role.name || role.slug) + (role.general ? " <small>held by every managed agent</small>" : "") +
-                '</td><td>' + h.escapeHtml(mark) + '</td><td>' + h.escapeHtml(role.model || "none") +
+                '</td><td>' + h.escapeHtml(mark) + '</td><td>' + h.escapeHtml(tierLabel(role.suggested_tier) || "none") +
                 '</td><td>' + toolsCell(role) + '</td><td>' + h.escapeHtml((role.skills || []).join(", ") || "none") +
                 '</td><td>' + h.escapeHtml((role.hooks || []).join(", ") || "none") +
                 '</td><td class="row-actions">' + buttons.join(" ") + '</td></tr>' +
@@ -81,23 +81,15 @@ window.addEventListener("DOMContentLoaded", async function () {
     async function load() {
         try {
             const body = await h.requestJson("/api/roles");
-            roles = body.roles || []; tools = body.tools || [];
+            roles = body.roles || []; tools = body.tools || []; tiers = body.tiers || [];
             render();
         } catch (error) { tbody.innerHTML = '<tr><td colspan="7"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
     }
-    function paintModel(current) {
-        const select = form.elements.model;
-        const models = catalog ? catalog.models || [] : [];
-        const providers = [];
-        models.forEach(function (m) { if (providers.indexOf(m.provider) < 0) providers.push(m.provider); });
-        let html = '<option value="">none: this role names no model</option>';
-        if (current && !models.some(function (m) { return m.id === current; })) html += '<option value="' + h.escapeHtml(current) + '">' + h.escapeHtml(current) + ' (not listed by the proxy)</option>';
-        providers.forEach(function (provider) {
-            html += '<optgroup label="' + h.escapeHtml(provider) + '">' + models.filter(function (m) { return m.provider === provider; }).map(function (m) { return '<option value="' + h.escapeHtml(m.id) + '">' + h.escapeHtml(m.id) + '</option>'; }).join("") + '</optgroup>';
-        });
-        select.innerHTML = html;
+    function tierLabel(tier) { return String(tier || "").replace(/-/g, " "); }
+    function paintTier(current) {
+        const select = form.elements.suggested_tier;
+        select.innerHTML = '<option value="">none: this role suggests no tier</option>' + tiers.map(function (tier) { return '<option value="' + h.escapeHtml(tier) + '">' + h.escapeHtml(tierLabel(tier)) + '</option>'; }).join("");
         select.value = current || "";
-        document.getElementById("role-model-note").textContent = !catalog ? "" : catalog.models_error ? "The proxy's model list could not be read (" + catalog.models_error + "), so only this role's own model is offered." : "";
     }
     // One table of ticks. Every name the Minds report, and every name the
     // role already grants whether or not a Mind reported it.
@@ -141,13 +133,11 @@ window.addEventListener("DOMContentLoaded", async function () {
             return '<label class="checkbox-row"><input type="checkbox" name="tools" value="' + h.escapeHtml(tool) + '"' + (on ? " checked" : "") + '> ' + h.escapeHtml(TOOL_LABELS[tool] || tool) + '</label>';
         }).join("");
         const formStatus = document.getElementById("role-form-status");
-        const current = role && role.model ? role.model : "";
         catalog = null;
-        paintModel(current);
+        paintTier(role && role.suggested_tier ? role.suggested_tier : "");
         ["skills", "hooks"].forEach(function (kind) { document.getElementById("role-" + kind).innerHTML = ""; document.getElementById("role-" + kind + "-note").textContent = ""; });
-        formStatus.textContent = "Asking the proxy and the Minds what exists…";
+        formStatus.textContent = "Asking the Minds what exists…";
         document.getElementById("role-save").disabled = true;
-        form.elements.model.disabled = true;
         editor.hidden = false;
         form.elements.name.focus();
         try {
@@ -157,11 +147,9 @@ window.addEventListener("DOMContentLoaded", async function () {
             formStatus.textContent = "";
         } catch (error) {
             if (editing !== role) return;
-            catalog = {models: [], models_error: error.message, skills: [], hooks: [], skills_unanswered: [], hooks_unanswered: [], minds_asked: 0};
+            catalog = {skills: [], hooks: [], skills_unanswered: [], hooks_unanswered: [], minds_asked: 0};
             formStatus.textContent = "What exists could not be read: " + error.message + ". Only what this role already grants is shown.";
         }
-        paintModel(current);
-        form.elements.model.disabled = false;
         paintLists();
         document.getElementById("role-save").disabled = false;
     }
@@ -178,7 +166,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         event.preventDefault();
         const body = {
             name: form.elements.name.value,
-            model: form.elements.model.value || null,
+            suggested_tier: form.elements.suggested_tier.value || null,
             tools: Array.from(form.querySelectorAll('input[name="tools"]:checked')).map(function (i) { return i.value; }),
             skills: Array.from(chosen.skills).sort(),
             hooks: Array.from(chosen.hooks).sort()

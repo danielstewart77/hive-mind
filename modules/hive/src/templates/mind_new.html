@@ -18,10 +18,10 @@
                 <div class="field is-full"><label>Harness</label><div class="choice-grid">{% for harness in install_options.harnesses %}<label class="choice"><input type="radio" name="harness" value="{{ harness.value }}"{% if harness.value == install_options.default_harness %} checked{% endif %}><span class="choice-copy"><strong>{{ harness.label }}</strong><small>{{ harness.description }}</small></span></label>{% endfor %}</div></div>
                 <div class="form-grid">
                     <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>Select a connection configured in <a href="/settings/providers">Settings → Providers</a>.</small></div>
-                    <div class="field"><label for="mind-default-model">Initial model</label><select id="mind-default-model" name="default_model" required><option value="">Select a provider first</option></select><small id="mind-model-status" role="status"></small><button class="button button-quiet" id="mind-model-refresh" type="button">Refresh models</button></div>
+                    <div class="field"><label for="mind-default-model">Initial model</label><small id="mind-model-suggestion" role="status" hidden></small><select id="mind-default-model" name="default_model" required><option value="">Select a provider first</option></select><small id="mind-model-status" role="status"></small><button class="button button-quiet" id="mind-model-refresh" type="button">Refresh models</button></div>
                 </div>
                 <div class="field is-full"><label for="mind-proxy-key">Mind’s key</label><input id="mind-proxy-key" name="proxy_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" required><small>Paste the new Mind’s own key. It is its inference key, and the gateway, the memory store and the tools accept the same value as this Mind. The Hive does not make one for you. A key another Mind holds is refused. On a provider someone else runs, whoever runs it also learns this value, and it opens this Hive’s services as this Mind.</small></div>
-                <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. Choosing a role that names a model fills in the model.</small></div>
+                <div class="field is-full"><label>Roles</label><div id="mind-roles"></div><small>Optional. A Mind created from roles is under role management from its first turn: it holds general and these, and may use what they grant together. A role may suggest a model tier, shown above the model box; it fills in nothing and the choice of model stays yours.</small></div>
                 <div id="mind-error" class="error-state" hidden></div>
                 <div class="form-actions"><button class="button button-primary" type="submit" id="mind-submit"><i data-lucide="wand-sparkles"></i><span>Scaffold Mind</span></button><small id="mind-progress" role="status" hidden>Writing its folder, issuing its keys, listing it in the stack, registering it, then building and starting its container. The first build can take several minutes; leave this page open.</small></div>
             </form>
@@ -141,14 +141,19 @@ window.addEventListener("DOMContentLoaded", function () {
         const roles = ((await h.requestJson("/api/roles")).roles || []).filter(function (r) { return r.id !== null; });
         const box = document.getElementById("mind-roles");
         box.innerHTML = roles.map(function (r) {
-            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-model="' + h.escapeHtml(r.model || "") + '"' + (r.general ? ' data-general="true"' : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind; tick it alone to manage this Mind by general only)" : "") + '</label>';
+            return '<label class="checkbox-row"><input type="checkbox" value="' + r.id + '" data-role-name="' + h.escapeHtml(r.name || "") + '" data-tier="' + h.escapeHtml(String(r.suggested_tier || "").replace(/-/g, " ")) + '"' + (r.general ? ' data-general="true"' : "") + '> ' + h.escapeHtml(r.name) + (r.general ? " (held by every managed Mind; tick it alone to manage this Mind by general only)" : "") + '</label>';
         }).join("");
-        box.addEventListener("change", function (event) {
-            const model = event.target.dataset && event.target.dataset.model;
-            if (event.target.checked && model) {
-                if (Array.from(form.elements.default_model.options).some(o => o.value === model)) form.elements.default_model.value = model;
-                else document.getElementById("mind-model-status").textContent = "The role’s model is not listed by this provider for this Mind. Select an available model.";
-            }
+        // The roles ticked say which tier they suggest, above the model box.
+        // Advice only: the box is never filled from it and no model is refused.
+        box.addEventListener("change", function () {
+            const ticked = Array.from(box.querySelectorAll("input:checked"));
+            const general = box.querySelector("input[data-general]");
+            const held = ticked.slice();
+            if (ticked.length && general && held.indexOf(general) < 0) held.unshift(general);
+            const lines = held.filter(function (i) { return i.dataset.tier; }).map(function (i) { return "The " + i.dataset.roleName + " role suggests " + (/^[aeiou]/.test(i.dataset.tier) ? "an " : "a ") + i.dataset.tier + " tier model."; });
+            const note = document.getElementById("mind-model-suggestion");
+            note.textContent = lines.join(" ");
+            note.hidden = !lines.length;
         });
     } catch (error) { document.getElementById("mind-roles").textContent = "Roles could not be read: " + error.message; } })();
 

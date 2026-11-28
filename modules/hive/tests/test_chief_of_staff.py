@@ -1368,3 +1368,109 @@ async def test_a_story_two_tasks_are_on_works_on_both_when_one_has_a_working_chi
 
     assert _by_id(tree, watching["id"])["active"] is True
     assert _by_id(tree, working["id"])["active"] is True
+
+
+# -- a stall is lifted to the story above it (feature 916) -------------------
+
+async def _doing(agent_id, *, parent=None, tool="", now=NOW):
+    """A report from a reporter that can see tool calls and thinking."""
+    return await staff.record_agent_event(
+        agent_id, staff.EVENT_DOING, mind_id=MIND, conversation_ref=CONVERSATION,
+        session_id="sess-rep", parent_agent_id=parent, tool=tool,
+        reports_thinking=True, reports_output=True, now=now)
+
+
+async def test_a_stalled_sub_agent_puts_the_warning_on_the_story_above_it():
+    story_task, child = await _story_task_with_a_child()
+    await _doing("c1", parent="p1", now=NOW + 10)
+
+    before = await cos.get_tree(now=NOW + 10 + 29)
+    after = await cos.get_tree(now=NOW + 10 + 30)
+
+    assert "warning" not in _by_id(before, story_task["id"])
+    assert _by_id(after, child["id"])["reading"] == "stalled"
+    assert _by_id(after, story_task["id"])["warning"] is True
+
+
+async def test_a_story_with_one_child_working_and_another_stalled_shows_the_warning():
+    story_task, child = await _story_task_with_a_child()
+    await _doing("p1", tool="Bash: run the suite", now=NOW + 10)
+    await _doing("c1", parent="p1", now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 10 + 10 * 60)
+
+    assert _by_id(tree, child["id"])["reading"] == "stalled"
+    assert _by_id(tree, story_task["id"])["warning"] is True
+    assert _by_id(tree, story_task["id"])["active"] is False
+
+
+async def test_a_stalled_mind_puts_the_warning_on_the_story_it_has_started():
+    task, one, two = await _feature_task_with_two_stories()
+    await kanban_data.update_story(one["id"], status="in_progress")
+    await staff.note_running(task["id"])
+    stalled = {"session_id": "sess-rep", "open": True, "reading": "stalled",
+               "tool": "", "tool_started_at": None, "heard_at": NOW - 200,
+               "quiet_at": NOW - 170, "stalled_at": NOW - 80, "now": NOW}
+
+    tree = await cos.get_tree(now=NOW, turns={"sess-rep": stalled})
+
+    assert _by_id(tree, task["id"])["reading"] == "stalled"
+    assert _by_id(tree, one["id"])["warning"] is True
+    assert "warning" not in _by_id(tree, two["id"])
+
+
+async def test_a_mind_inside_one_long_tool_call_is_drawn_working_with_what_it_runs():
+    task = await _paired_task()
+    running = {"session_id": "sess-rep", "open": True, "reading": "working",
+               "tool": "Bash: run the suite", "tool_started_at": NOW - 600,
+               "heard_at": NOW - 600, "quiet_at": None, "stalled_at": None,
+               "now": NOW}
+
+    # Twenty minutes after the session's last stamp, where the card used to
+    # go dark.
+    tree = await cos.get_tree(now=NOW + 20 * 60, turns={"sess-rep": running})
+
+    card = _by_id(tree, task["id"])
+    assert (card["active"], card["doing"], card["doing_for"]) == (
+        True, "Bash: run the suite", 600)
+
+
+async def test_a_mind_between_turns_is_never_drawn_stalled_however_long_it_waits():
+    task, one, two = await _feature_task_with_two_stories()
+    await kanban_data.update_story(one["id"], status="in_progress")
+    await staff.note_running(task["id"])
+    ended = {"session_id": "sess-rep", "open": False, "now": NOW}
+
+    tree = await cos.get_tree(now=NOW + 3 * 60 * 60, turns={"sess-rep": ended})
+
+    card = _by_id(tree, task["id"])
+    assert card.get("reading") != "stalled"
+    assert card["active"] is False
+    assert "warning" not in _by_id(tree, one["id"])
+
+
+async def test_a_sub_agent_inside_one_long_tool_call_is_drawn_working_with_what_it_runs():
+    await _story_task_with_a_child()
+    await _doing("c1", parent="p1", tool="Bash: run the suite", now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 10 + 10 * 60)
+
+    child = next(n for n in tree["nodes"] if n.get("doing"))
+    assert (child["reading"], child["active"], child["doing_for"]) == (
+        "working", True, 10 * 60)
+
+
+async def test_a_silent_sub_agent_is_handed_how_long_until_it_reads_quiet_and_stalled():
+    """The page counts on between its loads from these, so a thirty second
+    mark is shown when it comes and not at the next load."""
+    story_task, child = await _story_task_with_a_child()
+    await staff.record_agent_event(
+        "c1", staff.EVENT_DOING, mind_id=MIND, conversation_ref=CONVERSATION,
+        session_id="sess-rep", parent_agent_id="p1", reports_output=True,
+        now=NOW + 10)
+
+    tree = await cos.get_tree(now=NOW + 10 + 20)
+
+    node = _by_id(tree, child["id"])
+    assert (node["silent_for"], node["quiet_in"], node["stalled_in"]) == (
+        20, 10, 100)

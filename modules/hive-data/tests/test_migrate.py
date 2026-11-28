@@ -378,3 +378,24 @@ async def test_the_previous_release_still_verifies_and_writes_against_the_curren
                 "WHERE id = 'old-release-row'") == 1
         finally:
             await connection.close()
+
+
+async def test_a_database_that_already_holds_steps_18_and_19_gets_the_key_steps_20_to_22_in_order():
+    """This host's database records 18 as role_suggested_tier and 19 as
+    agent_in_flight. The key steps must come after them: a step is skipped by
+    number, so a key step numbered 18 or 19 would never run there."""
+    async with claimed_database(ADMIN_DSN, "hive_data_other_") as dsn:
+        every = migrate.steps()
+        await migrate.apply(dsn, chosen=[s for s in every if s.version <= 19])
+        recorded = (await migrate.check(dsn))["recorded"]
+        assert recorded[-2:] == [18, 19]
+        names = {s.version: s.name for s in every}
+        assert names[18] == "role_suggested_tier" and names[19] == "agent_in_flight"
+
+        out = await migrate.apply(dsn)
+
+        assert out["applied"] == [20, 21, 22]
+        assert [names[v] for v in out["applied"]] == [
+            "one_record_of_keys", "approval_decided_by", "sign_in_keys_end"]
+        report = await migrate.check(dsn)
+        assert report["ok"] and report["pending"] == []

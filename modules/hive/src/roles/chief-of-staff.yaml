@@ -1,4 +1,5 @@
 name: Chief of Staff
+suggested_tier: medium
 tools:
   - shell
   - files

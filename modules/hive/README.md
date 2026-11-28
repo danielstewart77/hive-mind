@@ -121,7 +121,10 @@ start and says to remove them.
 The session cookie is marked Secure only when the browser came over https —
 the request's own scheme, or `X-Forwarded-Proto` from a TLS-terminating
 proxy — so sign-in works over plain http at an IP address. It is host-only
-unless `HIVE_COOKIE_DOMAIN` names a parent domain shared with the terminal.
+unless `HIVE_COOKIE_DOMAIN` names a parent domain shared with the terminal
+and the browser is at an address inside that domain; at localhost or an IP
+address it stays host-only, because a browser drops a cookie whose domain
+does not cover the host it came from.
 `HIVE_TERMINAL_URL` is the terminal's address for the console's links to it;
 unset, those links are not drawn.
 

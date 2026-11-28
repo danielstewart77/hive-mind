@@ -599,7 +599,7 @@ async def logout(request: Request):
                 status_code=503,
                 detail="Could not sign you out just now; try again.")
     response = RedirectResponse(url="/login", status_code=303)
-    clear_session_cookie(response)
+    clear_session_cookie(request, response)
     log_event(log, "auth.logout", **_actor_fields(user))
     return response
 
@@ -2862,7 +2862,20 @@ async def api_chief_of_staff(
     ago than that is left out of the answer (feature 6.11).
     """
     del user
-    return await chief_of_staff.get_tree(window_days=days)
+    # Each mind's own turn, as the gateway sees it: the one thing on this
+    # page the database cannot say. A gateway that does not answer, or an
+    # older one without the route, leaves every card read as it was before.
+    turns: dict[str, dict] = {}
+    try:
+        # Three seconds, so a gateway that hangs costs the page three
+        # seconds and its marks, never the tree.
+        answer = await asyncio.wait_for(
+            _gateway_json("/sessions/turns"), timeout=3.0)
+        turns = {str(t["session_id"]): t for t in answer.get("turns", [])
+                 if isinstance(t, dict) and t.get("session_id")}
+    except Exception:  # noqa: BLE001 - a view, never the page
+        turns = {}
+    return await chief_of_staff.get_tree(window_days=days, turns=turns)
 
 
 async def _graph_for_person(limit: int) -> dict:
@@ -4844,7 +4857,8 @@ def _role_id(value: str) -> int:
 async def api_roles(user: dict = Depends(require_admin_or_route_bearer)):
     """Every role, each marked tracked, local, differs, repo only or unreadable."""
     del user
-    return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS)}
+    return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS),
+            "tiers": list(roles_data.TIERS)}
 
 
 #: How long one Mind is waited on for each of its two lists. A Mind that is
@@ -4876,30 +4890,21 @@ async def _mind_report(mind: dict) -> dict:
 
 @app.get("/api/roles/catalog")
 async def api_roles_catalog(user: dict = Depends(require_admin_or_route_bearer)):
-    """What a role can be given: every model, skill and hook that exists.
+    """What a role can be given: every skill and hook that exists.
 
-    The editor ticks from this and types none of it. Models are the proxy's
-    list; skills and hooks are what the registered Minds report. Everything
-    is asked at once, and each part that does not answer is said to be
-    missing rather than passed off as empty.
+    The editor ticks from this and types none of it: skills and hooks are
+    what the registered Minds report. Everything is asked at once, and each
+    part that does not answer is said to be missing rather than passed off
+    as empty. A role is given no model (feature 893), so none is listed.
     """
     del user
     minds = await _broker_minds_safe()
-    community, listing, *reports = await asyncio.gather(
+    community, *reports = await asyncio.gather(
         _within(skill_submissions.community_names()),
-        _within(_proxy_json("/v1/models")),
         *(_mind_report(m) for m in minds))
     body = roles_data.catalog(list(reports), community or set())
     body["minds_asked"] = len(minds)
     body["community_unread"] = community is None
-    seen: set[str] = set()
-    models = []
-    for row in (listing or {}).get("data", []) if isinstance(listing, dict) else []:
-        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] not in seen:
-            seen.add(row["id"])
-            models.append({"id": row["id"], "provider": str(row.get("provider") or "other")})
-    body.update(models=models,
-                models_error=None if models else "the proxy did not answer with a model list")
     return body
 
 
@@ -5136,9 +5141,11 @@ async def api_mind_roles(name: str, user: dict = Depends(require_auth)):
     """The roles a Mind holds and what their union grants it, read now."""
     del user
     mind_id = await _mind_id_for(name)
+    held = await store.roles_of(mind_id)
     return {"grants": await store.grants_for(mind_id),
-            "roles": [{"id": r["id"], "slug": r["slug"], "name": r["name"]}
-                      for r in await store.roles_of(mind_id)]}
+            "roles": [{"id": r["id"], "slug": r["slug"], "name": r["name"]} for r in held],
+            # Advice for whoever picks this Mind's model; it decides nothing.
+            "suggested_tiers": roles_data.suggestions(held)}
 
 
 @app.put("/api/minds/{name}/roles")
@@ -6805,13 +6812,13 @@ async def api_admin_user_microsoft_unbind(username: str, user: dict = Depends(re
 
 
 @app.post("/api/sign-ins/end")
-async def api_end_my_sign_ins(user: dict = Depends(require_auth)):
+async def api_end_my_sign_ins(request: Request, user: dict = Depends(require_auth)):
     """A person ends every sign-in of their own, on every device."""
     ended = await _store_call(auth.get_store().end_all_sign_ins, user["username"])
     log_event(log, "auth.sign_ins.ended", **_actor_fields(user),
               username=user["username"], ended=ended)
     response = JSONResponse({"ended": ended})
-    clear_session_cookie(response)
+    clear_session_cookie(request, response)
     return response
 
 

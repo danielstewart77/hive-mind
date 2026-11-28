@@ -71,7 +71,9 @@ _AGENT_SETTABLE = frozenset({"finished_at", "outcome"})
 #: child's `finished` event is the first thing to name its provider.
 _AGENT_REPORTABLE = frozenset({
     "agent_type", "about", "session_id", "conversation_ref",
-    "parent_agent_id", "active_at", "finished_at", "outcome", "task_id"})
+    "parent_agent_id", "active_at", "finished_at", "outcome", "task_id",
+    "tool", "tool_started_at", "thinking_at", "reports_tools",
+    "reports_thinking", "reports_output"})
 
 #: An end a harness reported without saying how it went. Distinct from an
 #: empty outcome, which is a row nobody has ended at all.
@@ -98,6 +100,29 @@ OUTCOME_ABANDONED = "abandoned"
 ENDED = "ended"
 WORKING = "working"
 RUNNING = "running"
+
+#: The two readings feature 916 added, for a child or a mind whose reporter
+#: can see tool calls. `QUIET` is silence that is not yet a warning, and only
+#: exists where thinking cannot be seen: a model thinking and a model hung
+#: look the same from outside, so the first stretch of silence claims
+#: neither. `STALLED` is the warning: a turn open, nothing in flight, and
+#: nothing heard for long enough that something is wrong.
+QUIET = "quiet"
+STALLED = "stalled"
+
+#: How long nothing may be heard, with no tool in flight, before the silence
+#: means something. Daniel, 2026-11-27: "I think I'd like to know after 30
+#: seconds or no activity". Where thinking can be seen this is the stall
+#: itself; where it cannot, this is where quiet begins.
+STALL_AFTER = 30.0
+
+#: How long the same silence lasts before it is a stall where thinking
+#: cannot be seen. Approved the same day: quiet from thirty seconds, stalled
+#: at two minutes, so a model merely thinking does not cry wolf.
+STALL_AFTER_UNSEEN = 120.0
+
+#: The longest the words naming a tool call are stored.
+TOOL_WORDS = 60
 
 #: What separates the mind from the harness's own id in a stored key, and is
 #: refused inside either half so the composition stays injective.
@@ -414,7 +439,14 @@ async def finish_agent(agent_id: str, *, outcome: str = "",
 SPAWNED = "spawned"
 EVENT_WORKING = "working"
 EVENT_ENDED = "ended"
-_EVENTS = (SPAWNED, EVENT_WORKING, EVENT_ENDED)
+#: What the child has in flight right now, said as one report by a reporter
+#: that reads the child's own log: the tool call, or none, and whether it is
+#: thinking. A snapshot rather than a pair of "started" and "finished"
+#: events, because the reporters race and drop by construction: a lost
+#: "finished" could never be cured, where a wrong snapshot is replaced by the
+#: next one.
+EVENT_DOING = "doing"
+_EVENTS = (SPAWNED, EVENT_WORKING, EVENT_ENDED, EVENT_DOING)
 
 #: How long after a reported ending an activity report must arrive to mean
 #: the child was woken, rather than being the tail of the run that ended.
@@ -494,7 +526,24 @@ _AGENT_UPSERT = f"""ON CONFLICT ("id") DO UPDATE SET
         WHEN "agents"."finished_at" IS NULL
              OR "agents"."outcome" = '{OUTCOME_ABANDONED}'
             THEN EXCLUDED."outcome"
-        ELSE "agents"."outcome" END"""
+        ELSE "agents"."outcome" END,
+    "tool" = CASE WHEN EXCLUDED."reports_tools" THEN EXCLUDED."tool"
+        WHEN EXCLUDED."finished_at" IS NOT NULL THEN ''
+        ELSE "agents"."tool" END,
+    "tool_started_at" = CASE
+        WHEN EXCLUDED."reports_tools" THEN EXCLUDED."tool_started_at"
+        WHEN EXCLUDED."finished_at" IS NOT NULL THEN NULL
+        ELSE "agents"."tool_started_at" END,
+    "thinking_at" = CASE WHEN EXCLUDED."thinking_at" IS NULL
+        THEN "agents"."thinking_at"
+        ELSE GREATEST(COALESCE("agents"."thinking_at",
+                               EXCLUDED."thinking_at"),
+                      EXCLUDED."thinking_at") END,
+    "reports_tools" = "agents"."reports_tools" OR EXCLUDED."reports_tools",
+    "reports_thinking" = "agents"."reports_thinking"
+        OR EXCLUDED."reports_thinking",
+    "reports_output" = "agents"."reports_output"
+        OR EXCLUDED."reports_output" """
 
 
 def agent_key(mind_id: str, agent_id: str,
@@ -550,8 +599,23 @@ async def record_agent_event(
         label: str = "", conversation_ref: str | None = None,
         session_id: str | None = None, parent_agent_id: str | None = None,
         task_id: str | None = None, outcome: str | None = None,
+        tool: str = "", tool_running_for: float | None = None,
+        thinking: bool = False, reports_thinking: bool = False,
+        reports_output: bool = False,
         now: float | None = None, unit: Unit | None = None) -> Row:
     """Record one reported event about one sub-agent, and return its row.
+
+    `tool`, `tool_running_for`, `thinking`, `reports_thinking` and
+    `reports_output` belong to `EVENT_DOING` alone and are ignored on every
+    other event. `reports_output` says the reporter also sees what the child
+    produces between its tool calls; one that does not can name a call in
+    flight and cannot speak for the silence after it. An ending clears the
+    call in flight, so a child woken again does not wake holding a call that
+    died with its last run. `tool` is the
+    few words naming the call in flight, empty for none, and
+    `tool_running_for` is how many seconds the reporter's log says it has
+    been running: a length, not a moment, so the start is placed on this
+    recorder's clock like every other stamp here.
 
     The one way a harness's children reach the ledger, and idempotent in
     every direction a detached reporter can get wrong:
@@ -568,7 +632,7 @@ async def record_agent_event(
     conversation before it is stored, because that is the scope its own
     uniqueness rests on; `parent_agent_id` is namespaced the same way, since
     a child's parent ran in the same process and the same conversation. `state` is one of
-    `SPAWNED`, `EVENT_WORKING` or `EVENT_ENDED`.
+    `SPAWNED`, `EVENT_WORKING`, `EVENT_ENDED` or `EVENT_DOING`.
 
     One limit, named rather than hidden: `started_at` is the moment this
     recorder first heard of the child. When an ending arrives for a child
@@ -606,6 +670,12 @@ async def record_agent_event(
                 "harness actually said.")
     moment = _now(now)
     ended = state == EVENT_ENDED
+    doing = state == EVENT_DOING
+    words = " ".join(str(tool or "").split())[:TOOL_WORDS] if doing else ""
+    try:
+        running_for = max(0.0, float(tool_running_for or 0.0))
+    except (TypeError, ValueError):
+        running_for = 0.0
     if parent_agent_id and parent_agent_id == agent_id:
         raise ValueRefused(
             f"a sub-agent cannot have spawned itself, and {agent_id!r} is "
@@ -626,7 +696,15 @@ async def record_agent_event(
                             if parent_agent_id else None),
         "task_id": task_id,
         "started_at": moment,
-        "active_at": moment if state == EVENT_WORKING else None,
+        # A report of what is in flight is evidence the child is alive at
+        # this moment, exactly as an activity report is.
+        "active_at": moment if state in (EVENT_WORKING, EVENT_DOING) else None,
+        "tool": words,
+        "tool_started_at": moment - running_for if words else None,
+        "thinking_at": moment if doing and thinking else None,
+        "reports_tools": doing,
+        "reports_thinking": doing and bool(reports_thinking),
+        "reports_output": doing and bool(reports_output),
         "finished_at": moment if ended else None,
         "outcome": (outcome or OUTCOME_UNKNOWN) if ended else "",
     }
@@ -658,6 +736,74 @@ def agent_state(row: Row, *, now: float, fresh_within: float) -> str:
     if active is not None and -fresh_within <= now - active <= fresh_within:
         return WORKING
     return RUNNING
+
+
+def reading(*, tool: bool, heard_at: float, sees_thinking: bool,
+            now: float) -> str:
+    """Working, quiet or stalled, for an open turn whose tool calls can be seen.
+
+    The one place the thirty seconds and the two minutes are applied, shared
+    by a sub-agent record and a mind's own turn so the two cannot drift.
+    `tool` is whether a tool call is in flight, which is working however
+    long it has run: a call produces nothing until it returns, and ten
+    minutes of a test suite is not ten minutes of silence. `heard_at` is the
+    last moment anything at all was heard: output, thinking, or the start.
+
+    A caller asks this only for a turn known to be open, from a source able
+    to see tool calls. Whether either is true is the caller's to know.
+    """
+    if tool:
+        return WORKING
+    silence = now - heard_at
+    if silence < STALL_AFTER:
+        return WORKING
+    if sees_thinking or silence >= STALL_AFTER_UNSEEN:
+        return STALLED
+    return QUIET
+
+
+def turns(*, tool: bool, heard_at: float, sees_thinking: bool) -> dict[str, float | None]:
+    """The moments `reading` will change its answer, for a page's own clock.
+
+    A page reloads less often than thirty seconds matters, so it is handed
+    when the reading it was shown stops being true rather than left to show
+    a stale one. None for a change that will not come: a tool in flight
+    turns into nothing by the clock, and where thinking can be seen there is
+    no quiet stretch before the stall.
+    """
+    if tool:
+        return {"quiet_at": None, "stalled_at": None}
+    if sees_thinking:
+        return {"quiet_at": None, "stalled_at": heard_at + STALL_AFTER}
+    return {"quiet_at": heard_at + STALL_AFTER,
+            "stalled_at": heard_at + STALL_AFTER_UNSEEN}
+
+
+def agent_heard_at(row: Row) -> float:
+    """The last moment this child was heard from: output, thinking or start."""
+    return max(float(row.get(key) or 0.0)
+               for key in ("active_at", "thinking_at", "started_at"))
+
+
+def agent_reading(row: Row, *, now: float, fresh_within: float) -> str:
+    """What this record says the child is doing, with what is in flight.
+
+    `agent_state` with the two readings feature 916 added. A record whose
+    reporter cannot see tool calls is read exactly as `agent_state` reads
+    it, and so is never quiet or stalled: silence from a reporter that can
+    only say "began" and "over" is not evidence of anything, and calling it
+    a stall would put a warning on every child of an older reporter.
+    """
+    if row.get("finished_at") is not None:
+        return ENDED
+    if not row.get("reports_tools"):
+        return agent_state(row, now=now, fresh_within=fresh_within)
+    if not row.get("reports_output"):
+        # A call in flight is known; the silence between two calls is not.
+        return (WORKING if row.get("tool")
+                else agent_state(row, now=now, fresh_within=fresh_within))
+    return reading(tool=bool(row.get("tool")), heard_at=agent_heard_at(row),
+                   sees_thinking=bool(row.get("reports_thinking")), now=now)
 
 
 async def retire_stale_agents(*, now: float, timeout: float,

@@ -712,6 +712,140 @@ def _spin_started_stories(nodes: dict[str, dict[str, Any]],
             current = parent.get(current)
 
 
+def _in_flight(read: str, *, tool: str, tool_started_at: float | None,
+               heard_at: float, turns: dict[str, float | None],
+               now: float) -> dict[str, Any]:
+    """What a node says about its own turn, as lengths of time from `now`.
+
+    Lengths and not moments, so a page whose clock disagrees with the
+    hive's still counts correctly: it adds its own elapsed seconds to what
+    it was handed. `quiet_in` and `stalled_in` are how long until the
+    reading it was shown stops being true, which `staff.turns` decided; the
+    page shows that change when it comes and decides none of it.
+    """
+    def until(moment: float | None) -> float | None:
+        return None if moment is None else max(0.0, moment - now)
+
+    return {
+        "reading": read,
+        "doing": tool,
+        "doing_for": (max(0.0, now - tool_started_at)
+                      if tool and tool_started_at is not None else None),
+        "silent_for": None if tool else max(0.0, now - heard_at),
+        "quiet_in": until(turns.get("quiet_at")),
+        "stalled_in": until(turns.get("stalled_at")),
+    }
+
+
+def _agent_in_flight(agent: dict[str, Any], state: str,
+                     now: float) -> dict[str, Any]:
+    """`_in_flight` for a sub-agent record, or nothing for one whose
+    reporter cannot see tool calls: that record claims no more than it did."""
+    if not agent.get("reports_tools") or state == staff.ENDED:
+        return {}
+    if not agent.get("reports_output"):
+        # A reporter that sees calls and not the output between them: a
+        # call in flight is named, and its silence is dated as nothing.
+        if not agent.get("tool"):
+            return {}
+        return _in_flight(state, tool=agent["tool"],
+                          tool_started_at=agent.get("tool_started_at"),
+                          heard_at=staff.agent_heard_at(agent),
+                          turns={}, now=now)
+    facts = {"tool": bool(agent.get("tool")),
+             "heard_at": staff.agent_heard_at(agent),
+             "sees_thinking": bool(agent.get("reports_thinking"))}
+    return _in_flight(state, tool=agent.get("tool") or "",
+                      tool_started_at=agent.get("tool_started_at"),
+                      heard_at=facts["heard_at"],
+                      turns=staff.turns(**facts), now=now)
+
+
+def _mind_turn(sessions: list[str], turns: dict[str, dict[str, Any]],
+               now: float) -> dict[str, Any] | None:
+    """What the minds on a task have in flight, from the gateway's own view.
+
+    None when the gateway can speak for none of this task's conversations,
+    which leaves the card exactly as it was read before. Otherwise the open
+    turn that most needs seeing: a stalled one before a quiet one before a
+    working one, because the warning is the thing that must not be missed.
+    A task all of whose known turns have ended is between turns, which is
+    not an error and says so by claiming nothing.
+    """
+    known = [turns[s] for s in sessions if s in turns
+             and turns[s].get("open") is not None]
+    if not known:
+        return None
+    opened = [t for t in known if t.get("open")]
+    if not opened:
+        # Between turns only when every conversation on the task is known
+        # to have ended its turn. One the gateway cannot speak for - a
+        # terminal pane - may be the one doing the work.
+        if len(known) < len(sessions):
+            return None
+        return {"reading": "between turns"}
+    order = {staff.STALLED: 0, staff.QUIET: 1, staff.WORKING: 2}
+    turn = min(opened, key=lambda t: order.get(t.get("reading"), 3))
+    # The gateway's clock stamped these; its own `now` is what they are
+    # measured from, so a console on another host does not skew them.
+    then = float(turn.get("now") or now)
+    return _in_flight(
+        turn.get("reading") or staff.WORKING, tool=turn.get("tool") or "",
+        tool_started_at=turn.get("tool_started_at"),
+        heard_at=float(turn.get("heard_at") or then),
+        turns={"quiet_at": turn.get("quiet_at"),
+               "stalled_at": turn.get("stalled_at")}, now=then)
+
+
+def _lend_warning(nodes: dict[str, dict[str, Any]],
+                  parent: dict[str, str]) -> None:
+    """A stalled sub-agent or mind puts the warning on the story above it.
+
+    Requirement 6 of feature 916: a stall is seen without hunting. A stalled
+    child marks every story on the way up from it. A stalled mind has no
+    story above its card - the card is the top of its work - so it marks
+    the stories it has started beneath it, the same ones a running mind
+    spins (`_spin_started_stories`). A marked story no longer reads as
+    working: one child working and another stalled is a story with a
+    problem, and the warning is what must not be missed.
+    """
+    warned: set[str] = set()
+    for node in nodes.values():
+        if node.get("reading") != staff.STALLED:
+            continue
+        if node["kind"] == "agent":
+            seen: set[str] = set()
+            current = parent.get(node["id"])
+            while current is not None and current not in seen:
+                seen.add(current)
+                above = nodes.get(current)
+                if above is None:
+                    break
+                if above.get("work_kind") in STORY_KINDS:
+                    warned.add(above.get("board_item") or above["id"])
+                current = parent.get(current)
+        elif node["kind"] == "task":
+            if node.get("work_kind") in STORY_KINDS:
+                warned.add(node.get("board_item") or node["id"])
+            for story in nodes.values():
+                if (story["kind"] != "story"
+                        or story.get("status") != BOARD_STARTED):
+                    continue
+                seen = set()
+                current = parent.get(story["id"])
+                while current is not None and current not in seen:
+                    seen.add(current)
+                    if current == node["id"]:
+                        warned.add(story.get("board_item") or story["id"])
+                        break
+                    current = parent.get(current)
+    for node in nodes.values():
+        if (node.get("work_kind") in STORY_KINDS
+                and (node.get("board_item") or node["id"]) in warned):
+            node["warning"] = True
+            node["active"] = False
+
+
 def _lend_activity(nodes: dict[str, dict[str, Any]],
                    parent: dict[str, str]) -> None:
     """A story with a working sub-agent anywhere beneath it is working too.
@@ -745,7 +879,9 @@ def _lend_activity(nodes: dict[str, dict[str, Any]],
 
 
 async def get_tree(*, chief: str | None = None, now: float | None = None,
-                   window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
+                   window_days: int = DEFAULT_WINDOW_DAYS,
+                   turns: dict[str, dict[str, Any]] | None = None,
+                   ) -> dict[str, Any]:
     """Everything the page draws, in one answer.
 
     `nodes` and `edges` are the live tree, rooted at `CHIEF_ID`. `barrel` is
@@ -848,10 +984,22 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
         working = await _assigned(sessions, names, now=moment)
         activity = _activity(task, sessions, working["alive"])
         question = task.get("question")
+        # The gateway's own view of these minds' turns, where it has one:
+        # a turn it calls open is working, quiet or stalled as it says, and
+        # one it calls ended is not working whatever the session's last
+        # stamp suggests. Where it can speak for none of them the card is
+        # read as it always was.
+        turn = _mind_turn([s for s in sessions if s in working["present"]],
+                          turns or {}, moment)
+        if turn is None or activity != "working":
+            active = _active(activity, working["fresh"])
+            turn = {}
+        else:
+            active = turn.get("reading") == staff.WORKING
         nodes[task["id"]] = _node(
             task["id"], label, "task", status=task["status"],
             activity=activity, work_kind=work_kind,
-            active=_active(activity, working["fresh"]),
+            active=active, **turn,
             minds=working["minds"], session_names=working["session_names"],
             sessions=sessions, question=question,
             board_item=board_item,
@@ -900,8 +1048,8 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
             # working only while a harness's activity report is fresh, and
             # running otherwise - which is all most harnesses can ever say,
             # and all the chief's own delegates ever say.
-            state = staff.agent_state(agent, now=moment,
-                                      fresh_within=FRESH_WITHIN)
+            state = staff.agent_reading(agent, now=moment,
+                                        fresh_within=FRESH_WITHIN)
             # Orphaned: a running record whose child cannot still be alive.
             # For the chief's own delegates that is the clock, because their
             # turn timeout is `AGENT_TIMEOUT`. A reported child runs inside
@@ -916,11 +1064,18 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
                                           timeout=AGENT_TIMEOUT)
             else:
                 stale = agent.get("session_id") not in working["present"]
-            stale = stale and state == staff.RUNNING
+            # A child whose conversation is gone is dead whatever its last
+            # report said was in flight; only output fresh enough to have
+            # come from a live child says otherwise.
+            stale = stale and staff.agent_state(
+                agent, now=moment,
+                fresh_within=FRESH_WITHIN) == staff.RUNNING
+            in_flight = {} if stale else _agent_in_flight(agent, state, moment)
             nodes.setdefault(agent["id"], _node(
                 agent["id"], _agent_label(agent), "agent",
                 status="orphaned" if stale else state,
-                work_kind="agent", active=state == staff.WORKING,
+                work_kind="agent",
+                active=state == staff.WORKING and not stale, **in_flight,
                 agent_type=agent.get("agent_type", ""),
                 about=agent.get("about", ""), stale=stale,
                 started_at=agent["started_at"]))
@@ -936,6 +1091,7 @@ async def get_tree(*, chief: str | None = None, now: float | None = None,
                 by_id, kinds, numbers)
     _spin_started_stories(nodes, parent)
     _lend_activity(nodes, parent)
+    _lend_warning(nodes, parent)
 
     # What each tile says. A ledger task on a board item is called by that
     # item's ID, so the name beside it is that item's name too: an ID and a

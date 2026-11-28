@@ -133,8 +133,10 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at"),
     #: Role Management (step 16, feature 10.18).
     "board.roles": (
-        "id", "slug", "name", "skills", "hooks", "model", "tools",
-        "kept_against", "created_at", "updated_at"),
+        "id", "slug", "name", "skills", "hooks", "tools",
+        "kept_against", "created_at", "updated_at",
+        #: The model tier a role suggests (step 18): advice, never a rule.
+        "suggested_tier"),
     "board.managed_minds": ("mind_id", "managed_at"),
     "board.mind_roles": ("mind_id", "role_id", "assigned_at"),
     "board.skill_submissions": (
@@ -158,7 +160,12 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "staff.agents": (
         "id", "task_id", "brief", "about", "outcome", "started_at",
         "finished_at", "mind_id", "agent_type", "session_id",
-        "conversation_ref", "parent_agent_id", "active_at"),
+        "conversation_ref", "parent_agent_id", "active_at",
+        #: What the child has in flight (step 19): the tool call, when it
+        #: began, when it was last seen thinking, and what its reporter is
+        #: able to see at all.
+        "tool", "tool_started_at", "thinking_at", "reports_tools",
+        "reports_thinking", "reports_output"),
     #: Lucent's half. Qualified keys, not bare ones, and that is the point:
     #: `credentials` exists in both `core` and `memory`, the 12 holders that
     #: appear in both share no `token_sha`, and a bare name could only ever

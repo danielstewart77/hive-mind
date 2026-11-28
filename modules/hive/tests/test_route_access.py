@@ -658,27 +658,27 @@ def test_the_roles_bearer_is_attached_to_the_roles_page_routes_and_no_others():
 def test_the_operator_creates_changes_and_deletes_a_role_with_the_roles_bearer_and_no_session(
         builtin_console, monkeypatch):
     """Everything a person does on the Roles page, with no session: make a
-    role, change its name, model, skills, tools and hooks, add and remove one
+    role, change its name, suggested tier, skills, tools and hooks, add and remove one
     skill, and delete it — and the listing the page reads shows each, so the
     change is stored and not merely reported."""
     _a_mind_holding("operator", "an-operator-token")
     operator = builtin_console.client()
 
     made = operator.post("/api/roles", headers=_ROLES_GOOD, json={
-        "name": "Reviewer", "slug": "reviewer", "model": "a-model", "skills": ["read"],
+        "name": "Reviewer", "slug": "reviewer", "suggested_tier": "low", "skills": ["read"],
         "tools": ["files"], "hooks": ["guard"]})
     assert made.status_code == 200, made.text
     rid = made.json()["id"]
     role = _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]
-    assert (role["name"], role["model"], role["skills"], role["tools"],
-            role["hooks"]) == ("Reviewer", "a-model", ["read"], ["files"], ["guard"])
+    assert (role["name"], role["suggested_tier"], role["skills"], role["tools"],
+            role["hooks"]) == ("Reviewer", "low", ["read"], ["files"], ["guard"])
 
     changed = operator.put(f"/api/roles/{rid}", headers=_ROLES_GOOD, json={
-        "name": "Chief Reviewer", "model": None, "skills": ["read", "write"],
+        "name": "Chief Reviewer", "suggested_tier": None, "skills": ["read", "write"],
         "tools": ["shell", "web"], "hooks": ["guard", "audit"]})
     assert changed.status_code == 200, changed.text
     role = _roles_in_the_listing(operator, _ROLES_GOOD)["reviewer"]
-    assert (role["name"], role["model"], role["skills"], role["tools"],
+    assert (role["name"], role["suggested_tier"], role["skills"], role["tools"],
             role["hooks"]) == ("Chief Reviewer", None, ["read", "write"],
                                ["shell", "web"], ["guard", "audit"])
 

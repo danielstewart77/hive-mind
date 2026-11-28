@@ -66,8 +66,33 @@
   .cos-run {
     border-radius:50%; border:2px solid #2dd4bf; background:rgba(45,212,191,0.18);
   }
+  /* Silence that is not yet a warning: where thinking cannot be seen, a
+     model thinking and a model hung look alike, so the first stretch claims
+     neither. Still, hollow and grey. */
+  .cos-quiet {
+    border-radius:50%; border:2px dashed #94a3b8; background:transparent;
+  }
+  /* Stalled: a turn open, nothing in flight, nothing heard. A triangle
+     with a mark in it, so it is read by its shape and not its colour
+     alone, and it pulses because it is the one thing on this page that
+     must not be missed. */
+  .cos-warn {
+    border:0 !important; display:flex; align-items:center; justify-content:center;
+    color:#fbbf24; font-weight:700; line-height:1;
+    animation:cos-pulse 1.2s ease-in-out infinite;
+  }
+  .cos-warn::before { content:"\26A0"; }
+  @keyframes cos-pulse { 50% { opacity:0.35; } }
+  /* What a node has in flight and for how long, beneath it. */
+  .cos-words {
+    position:absolute; transform:translateX(-50%); white-space:nowrap;
+    color:#cbd5e1; pointer-events:none; text-align:center;
+  }
+  .cos-words.is-stalled { color:#fbbf24; font-weight:600; }
+  .cos-words.is-quiet { color:#94a3b8; }
   @media (prefers-reduced-motion: reduce) {
     .cos-spin { animation-duration:3s; }
+    .cos-warn { animation:none; }
   }
 
   /* The barrel. Its header, with the close control, stays put and only the
@@ -450,6 +475,16 @@
         faceId: face ? face.mind_id : '',
         faceInitial: face ? face.initial : '',
         faceVersion: face ? face.image_version : 0,
+        // What the hive said this node has in flight, as lengths of time
+        // from the moment it answered. The page counts on from there and
+        // shows a change the hive already dated; it decides none.
+        reading: n.reading || '',
+        doing: n.doing || '',
+        doingFor: typeof n.doing_for === 'number' ? n.doing_for : null,
+        silentFor: typeof n.silent_for === 'number' ? n.silent_for : null,
+        quietIn: typeof n.quiet_in === 'number' ? n.quiet_in : null,
+        stalledIn: typeof n.stalled_in === 'number' ? n.stalled_in : null,
+        warning: n.warning === true,
         detail: n.about || n.description || ''
       } });
     });
@@ -854,7 +889,8 @@
     return cy.nodes().map(function (n) {
       var d = n.data();
       return [d.id, d.kind, d.workKind, d.faceId, d.faceVersion,
-              d.active ? 1 : 0, d.activity, d.itemId].join(':');
+              d.active ? 1 : 0, d.activity, d.itemId, d.reading,
+              d.doing, d.warning ? 1 : 0].join(':');
     }).join('|');
   }
 
@@ -902,7 +938,21 @@
         deco.appendChild(entry.itemId);
       }
 
-      if (d.active === true) {
+      if (d.warning || d.reading === 'working' || d.reading === 'quiet' ||
+          d.reading === 'stalled') {
+        // A node the hive can read: its mark and its words follow the
+        // clock between loads (`tick`), so both are made here and set there.
+        entry.spin = document.createElement('span');
+        entry.read = true;
+        deco.appendChild(entry.spin);
+        // A story carrying only a warning lent from beneath it has nothing
+        // in flight of its own to put into words.
+        if (d.reading) {
+          entry.words = document.createElement('span');
+          entry.words.className = 'cos-words';
+          deco.appendChild(entry.words);
+        }
+      } else if (d.active === true) {
         entry.spin = document.createElement('span');
         entry.spin.className = 'cos-spin';
         deco.appendChild(entry.spin);
@@ -990,8 +1040,64 @@
             place(entry.spin, box.x1 + w / 2 - ss / 2, box.y2 - inset - ss, ss);
           }
           entry.spin.style.borderWidth = Math.max(1.5, ss * 0.16) + 'px';
+          entry.spin.style.fontSize = (ss * 1.25) + 'px';
         }
       }
+      if (entry.words) {
+        var labelled = entry.node.renderedBoundingBox({ includeLabels: true });
+        entry.words.style.display = (hidden || !spinnersOn) ? 'none' : '';
+        entry.words.style.left = (box.x1 + w / 2) + 'px';
+        entry.words.style.top = (labelled.y2 + 2 * zoom) + 'px';
+        entry.words.style.fontSize = Math.max(8, 10 * zoom) + 'px';
+      }
+    });
+    tick();
+  }
+
+  // A length of time the way it is said aloud: seconds, then minutes.
+  function span(seconds) {
+    var s = Math.max(0, Math.floor(seconds));
+    if (s < 60) return s + ' s';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + ' min';
+    return Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
+  }
+
+  // What a node reads as now: what the hive said when it answered, moved on
+  // by the changes it dated. A tool in flight turns into nothing by the
+  // clock; silence turns quiet and then stalled at the moments it gave.
+  function readingNow(d, elapsed) {
+    if (!d.reading) return d.warning ? 'stalled' : '';
+    if (d.reading === 'working' && d.doing) return 'working';
+    if (d.stalledIn !== null && elapsed >= d.stalledIn) return 'stalled';
+    if (d.quietIn !== null && elapsed >= d.quietIn) return 'quiet';
+    return d.reading;
+  }
+
+  function tick() {
+    var elapsed = lastGoodAt ? (Date.now() - lastGoodAt) / 1000 : 0;
+    Object.keys(decoFor).forEach(function (id) {
+      var entry = decoFor[id];
+      if (!entry.read) return;
+      var d = entry.node.data();
+      var now = readingNow(d, elapsed);
+      // The mark is the warning wherever one was lent, whatever the node
+      // itself is doing: one child working and another stalled is a story
+      // with a problem. The words beneath stay the node's own.
+      var mark = d.warning ? 'stalled' : now;
+      entry.spin.className = mark === 'stalled' ? 'cos-warn'
+        : mark === 'quiet' ? 'cos-quiet' : 'cos-spin';
+      entry.spin.title = mark;
+      if (!entry.words) return;
+      var words = '';
+      if (now === 'working' && d.doing && d.doingFor !== null) {
+        words = d.doing + ', ' + span(d.doingFor + elapsed);
+      } else if ((now === 'quiet' || now === 'stalled') && d.silentFor !== null) {
+        words = now + ', ' + span(d.silentFor + elapsed);
+      }
+      entry.words.textContent = words;
+      entry.words.className = 'cos-words' +
+        (now === 'stalled' ? ' is-stalled' : now === 'quiet' ? ' is-quiet' : '');
     });
   }
 
@@ -1354,6 +1460,8 @@
 
   load();
   setInterval(function () { load(); }, REFRESH_MS);
+  // The clocks under the nodes move every second, not every load.
+  setInterval(tick, 1000);
   setInterval(checkStale, 5000);
 })();
 </script>

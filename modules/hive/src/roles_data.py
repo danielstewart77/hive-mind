@@ -1,7 +1,8 @@
 """Roles on the console: each one against its repo copy (feature 10.18).
 
-A role is a named set of skills, hooks, a model and an allow-list of the
-harness's built-in tools; the rules about holding them — the union, the
+A role is a named set of skills, hooks and an allow-list of the harness's
+built-in tools, and it may suggest a model tier (advice shown where a Mind's
+model is chosen, never a rule: feature 893); the rules about holding them — the union, the
 general role every managed agent holds, that a managed agent stays managed —
 are `hive_data.roles`'s, because the gateway reads the same union.
 
@@ -54,6 +55,7 @@ from hive_data import roles as role_rules
 REPO_DIR = Path(__file__).resolve().parent / "roles"
 
 TOOLS = role_rules.TOOLS
+TIERS = role_rules.TIERS
 GENERAL = role_rules.GENERAL
 
 #: The largest repo file read as a role. A role is a few dozen names.
@@ -69,8 +71,19 @@ def repo_dir() -> Path:
 
 # ------------------------------------------------------------ the role shape
 
+def tier_of(value: Any) -> str | None:
+    """A suggested tier in its stored spelling, or None for no suggestion.
+
+    "Extra high" and "extra_high" are `extra-high`, the way the data layer
+    reads them, so a role file, the editor and a caller of the routes cannot
+    spell the same tier three ways. Whether it is a tier at all is for the
+    caller to say: an unknown word comes back as it was spelled.
+    """
+    return "-".join(str(value or "").strip().lower().replace("_", " ").split()) or None
+
+
 def canonical(role: dict[str, Any]) -> dict[str, Any]:
-    """A role as the four grants and a name, in the one order compared."""
+    """A role as its name, suggestion and grants, in the one order compared."""
     def names(key: str) -> list[str]:
         out = []
         for value in role.get(key) or []:
@@ -80,10 +93,10 @@ def canonical(role: dict[str, Any]) -> dict[str, Any]:
         return sorted(out)
 
     tools = [t for t in TOOLS if t in {str(v).strip() for v in role.get("tools") or []}]
-    model = str(role.get("model") or "").strip() or None
+    tier = tier_of(role.get("suggested_tier"))
     return {
         "name": " ".join(str(role.get("name") or "").split()),
-        "model": model,
+        "suggested_tier": tier,
         "tools": tools,
         "skills": names("skills"),
         "hooks": names("hooks"),
@@ -108,7 +121,7 @@ def _parse(path: Path) -> dict[str, Any]:
     except (OSError, yaml.YAMLError, UnicodeDecodeError) as exc:
         return {"error": str(exc).splitlines()[0] if str(exc) else type(exc).__name__}
     if not isinstance(data, dict):
-        return {"error": "not a mapping of name, model, tools, skills and hooks"}
+        return {"error": "not a mapping of name, suggested_tier, tools, skills and hooks"}
     if not str(data.get("name") or "").strip():
         return {"error": "no name"}
     for key in ("tools", "skills", "hooks"):
@@ -117,9 +130,10 @@ def _parse(path: Path) -> dict[str, Any]:
     unknown = [str(t) for t in data.get("tools") or [] if str(t).strip() not in TOOLS]
     if unknown:
         return {"error": f"not a built-in tool: {', '.join(unknown)}"}
-    if data.get("model") is not None and not isinstance(data.get("model"), str):
-        return {"error": "model is not a name"}
-    return canonical(data)
+    role = canonical(data)
+    if role["suggested_tier"] is not None and role["suggested_tier"] not in TIERS:
+        return {"error": f"suggested_tier is not one of {', '.join(TIERS)}"}
+    return role
 
 
 def repo_roles() -> dict[str, dict[str, Any]]:
@@ -159,14 +173,15 @@ def describe(hive: dict[str, Any] | None, repo: dict[str, Any] | None,
     row: dict[str, Any] = {"slug": slug, "state": state}
     if hive is not None:
         row.update({
-            "id": hive["id"], "name": hive["name"], "model": hive["model"],
+            "id": hive["id"], "name": hive["name"],
+            "suggested_tier": hive["suggested_tier"],
             "tools": [t for t in TOOLS if t in (hive["tools"] or [])],
             "skills": list(hive["skills"] or []), "hooks": list(hive["hooks"] or []),
             "general": hive["slug"] == GENERAL,
         })
     else:
         row.update({"id": None, "general": slug == GENERAL,
-                    **({k: repo[k] for k in ("name", "model", "tools", "skills", "hooks")}
+                    **({k: repo[k] for k in ("name", "suggested_tier", "tools", "skills", "hooks")}
                        if repo and "error" not in repo else {"name": slug})})
     if state == "unreadable":
         row["error"] = repo["error"]
@@ -217,7 +232,8 @@ async def seed() -> dict[str, Any]:
             if "error" in copy or slug in existing or copy["name"].lower() in names:
                 continue
             await store.create_role(copy["name"], slug=slug, skills=copy["skills"],
-                                    hooks=copy["hooks"], model=copy["model"],
+                                    hooks=copy["hooks"],
+                                    suggested_tier=copy["suggested_tier"],
                                     tools=copy["tools"])
             added.append(slug)
         await _ensure_general()
@@ -261,7 +277,7 @@ async def take_repo(slug: str) -> dict[str, Any]:
         raise HTTPException(status_code=409,
                             detail=f"The repo copy of this role cannot be read: {repo['error']}")
     hive = await store.role_by_slug(slug)
-    grants = {k: repo[k] for k in ("skills", "hooks", "model", "tools")}
+    grants = {k: repo[k] for k in ("skills", "hooks", "suggested_tier", "tools")}
     try:
         if hive is None:
             role_id = await store.create_role(repo["name"], slug=slug, **grants)
@@ -382,7 +398,7 @@ def catalog(reports: list[dict[str, Any]], community: set[str]) -> dict[str, Any
 # ------------------------------------------------------------- editing
 
 def grants_from(body: dict[str, Any]) -> dict[str, Any]:
-    """The four grants out of a request body, refused when malformed."""
+    """The grants and the suggested tier out of a request body, refused when malformed."""
     out: dict[str, Any] = {}
     for key in ("skills", "hooks", "tools"):
         if key in body:
@@ -396,8 +412,29 @@ def grants_from(body: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(status_code=400,
                                 detail=f"Not a built-in tool: {', '.join(unknown)}")
     if "model" in body:
-        value = body["model"]
-        if value is not None and not isinstance(value, str):
-            raise HTTPException(status_code=400, detail="model must be a name")
-        out["model"] = value
+        # Said, not swallowed: a caller from before feature 893 would be told
+        # its role was saved while the model it sent went nowhere.
+        raise HTTPException(
+            status_code=400,
+            detail="A role names no model. It may suggest a tier: send "
+                   f"suggested_tier, one of {', '.join(TIERS)}, or leave it out.")
+    if "suggested_tier" in body:
+        value = body["suggested_tier"]
+        tier = tier_of(value) if value is None or isinstance(value, str) else ""
+        if tier is not None and tier not in TIERS:
+            raise HTTPException(status_code=400,
+                                detail=f"suggested_tier must be one of {', '.join(TIERS)}, or empty")
+        out["suggested_tier"] = tier
     return out
+
+
+def suggestions(roles: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """What the roles a Mind holds suggest for its model, one per role.
+
+    Each role that suggests a tier, by its name, in the order given. A role
+    suggesting none is left out, so a Mind none of whose roles suggests
+    anything is shown no line at all. This is the whole of a suggestion: it
+    is read by a person choosing a model and by nothing else.
+    """
+    return [{"role": str(r["name"]), "tier": str(r["suggested_tier"]).replace("-", " ")}
+            for r in roles if r.get("suggested_tier")]

@@ -48,3 +48,30 @@ def test_a_sign_in_through_a_tls_terminating_proxy_marks_the_session_cookie_secu
                              headers={"X-Forwarded-Proto": "https"})
 
     assert "secure" in set_cookie.lower()
+
+
+# --- the parent domain the terminal shares ------------------------------------
+
+def test_a_sign_in_outside_the_cookie_domain_gets_a_host_only_cookie(
+    builtin_console, monkeypatch
+):
+    """Daniel, 2026-11-26: signing in at localhost:8710 was accepted and
+    landed back on the login page. The cookie carried the parent domain, and
+    a browser drops a cookie whose domain does not cover its host."""
+    monkeypatch.setenv("HIVE_COOKIE_DOMAIN", "sparktobloom.com")
+
+    for address in ("http://localhost:8710", "http://192.168.50.7:8710",
+                    "https://evilsparktobloom.com"):
+        _, set_cookie = _sign_in(address)
+        assert "domain=" not in set_cookie.lower(), address
+
+
+def test_a_sign_in_inside_the_cookie_domain_gets_a_cookie_on_that_domain(
+    builtin_console, monkeypatch
+):
+    monkeypatch.setenv("HIVE_COOKIE_DOMAIN", "sparktobloom.com")
+
+    for address in ("https://hive.sparktobloom.com", "https://sparktobloom.com",
+                    "https://hive.sparktobloom.com:8443"):
+        _, set_cookie = _sign_in(address)
+        assert "domain=sparktobloom.com" in set_cookie.lower(), address

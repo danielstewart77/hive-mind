@@ -26,7 +26,7 @@ async def _general(**grants) -> int:
     if row is None:
         made = await roles.create_role("General")
         row = {"id": made["row"]["id"]}
-    await roles.update_role(row["id"], **{"skills": [], "hooks": [], "model": None,
+    await roles.update_role(row["id"], **{"skills": [], "hooks": [],
                                           "tools": [], **grants})
     return row["id"]
 
@@ -39,10 +39,9 @@ async def _role(label: str, **grants) -> int:
 async def test_an_agent_holding_two_roles_may_use_their_union_and_nothing_else(connected):
     await _general(skills=["memory"], hooks=["time_inject"])
     writer = await _role("Writer", skills=["remember", "pdf-formatter"],
-                         tools=["files"], model="claude-haiku-5-5")
+                         tools=["files"])
     builder = await _role("Builder", skills=["code", "remember"],
-                          hooks=["training_capture"], tools=["shell", "web"],
-                          model="claude-opus-5-5")
+                          hooks=["training_capture"], tools=["shell", "web"])
     await _role("Unheld", skills=["send-sms"], tools=["sub-minds"])
     mind = f"mind-{_tag()}"
 
@@ -52,7 +51,6 @@ async def test_an_agent_holding_two_roles_may_use_their_union_and_nothing_else(c
     assert grants["managed"] is True
     assert grants["skills"] == ["code", "memory", "pdf-formatter", "remember"]
     assert grants["hooks"] == ["time_inject", "training_capture"]
-    assert sorted(grants["models"]) == ["claude-haiku-5-5", "claude-opus-5-5"]
     assert grants["tools"] == ["shell", "files", "web"]
 
 

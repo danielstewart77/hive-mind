@@ -1,8 +1,10 @@
 """The named operations over roles: what an agent may use (feature 10.18).
 
-A role is a named set of four grants — skills, hooks, a model and the
-harness's built-in tools (`TOOLS`). An agent holds roles and may use exactly
-the union of what they grant. Roles do not nest: a role holds grants, never
+A role is a named set of three grants — skills, hooks and the harness's
+built-in tools (`TOOLS`). An agent holds roles and may use exactly the union
+of what they grant. A role also carries a suggested model tier (`TIERS`),
+which is advice shown where a mind's model is chosen and grants nothing: no
+role decides which model a mind runs (feature 893). Roles do not nest: a role holds grants, never
 another role, so the union is one flat read rather than a walk.
 
 **Management is switched on per mind, and stays on.** `board.managed_minds`
@@ -51,12 +53,17 @@ SUBMISSIONS = "board.skill_submissions"
 #: grants. The schema checks the same list.
 TOOLS = ("shell", "files", "sub-minds", "web")
 
+#: The model tiers a role may suggest, smallest first. The words the Chief of
+#: Staff workflow uses; the schema checks the same list. No model carries a
+#: tier: a person reads the suggestion and picks.
+TIERS = ("low", "medium", "high", "extra-high")
+
 #: The role every managed mind holds. Its slug, which never changes.
 GENERAL = "general"
 
 #: What `update_role` may set. The slug is fixed at creation: it is what the
 #: role's repo copy is filed under, and a rename must not orphan that file.
-_ROLE_SETTABLE = frozenset({"name", "skills", "hooks", "model", "tools",
+_ROLE_SETTABLE = frozenset({"name", "skills", "hooks", "suggested_tier", "tools",
                             "kept_against", "updated_at"})
 
 _SUBMISSION_SETTABLE = frozenset({"branch", "new_skill", "pr_number", "pr_url", "merged_at",
@@ -96,9 +103,19 @@ def _tools(values: Iterable[str] | None) -> list[str]:
     return [t for t in TOOLS if t in chosen]
 
 
-def _model(value: str | None) -> str | None:
-    text = str(value or "").strip()
-    return text or None
+def _tier(value: str | None) -> str | None:
+    """A suggested tier as stored, or None for no suggestion.
+
+    "Extra high" and "extra_high" are the stored `extra-high`.
+    """
+    text = "-".join(str(value or "").strip().lower().replace("_", " ").split())
+    if not text:
+        return None
+    if text not in TIERS:
+        raise ValueRefused(
+            f"not a tier a role can suggest: {value!r}. "
+            f"The tiers are {', '.join(TIERS)}.")
+    return text
 
 
 def _name(value: str) -> str:
@@ -132,7 +149,7 @@ async def role_by_slug(slug: str, *, unit: Unit | None = None) -> Row | None:
 async def create_role(name: str, *, slug: str | None = None,
                       skills: Iterable[str] | None = None,
                       hooks: Iterable[str] | None = None,
-                      model: str | None = None,
+                      suggested_tier: str | None = None,
                       tools: Iterable[str] | None = None,
                       at: float | None = None,
                       unit: Unit | None = None) -> Row:
@@ -142,14 +159,14 @@ async def create_role(name: str, *, slug: str | None = None,
     sql, args = _sql.insert(ROLES, {
         "slug": slug_of(slug or clean), "name": clean,
         "skills": _names(skills), "hooks": _names(hooks),
-        "model": _model(model), "tools": _tools(tools),
+        "suggested_tier": _tier(suggested_tier), "tools": _tools(tools),
         "created_at": now, "updated_at": now,
     }, returning=("id",))
     return await _execute_returning(unit, sql, *args)
 
 
 async def update_role(role_id: int, *, name: Any = UNSET, skills: Any = UNSET,
-                      hooks: Any = UNSET, model: Any = UNSET,
+                      hooks: Any = UNSET, suggested_tier: Any = UNSET,
                       tools: Any = UNSET, kept_against: Any = UNSET,
                       at: float | None = None,
                       unit: Unit | None = None) -> Row:
@@ -161,8 +178,8 @@ async def update_role(role_id: int, *, name: Any = UNSET, skills: Any = UNSET,
         fields["skills"] = _names(skills)
     if hooks is not UNSET:
         fields["hooks"] = _names(hooks)
-    if model is not UNSET:
-        fields["model"] = _model(model)
+    if suggested_tier is not UNSET:
+        fields["suggested_tier"] = _tier(suggested_tier)
     if tools is not UNSET:
         fields["tools"] = _tools(tools)
     if kept_against is not UNSET:
@@ -278,15 +295,13 @@ async def grants_for(mind_id: str, *, unit: Unit | None = None) -> Row:
     `managed` False means roles decide nothing about this mind and every
     other field is empty — not "denied everything". For a managed mind each
     list is the union, each name once: a grant held through two roles is
-    one grant, and losing one of the two leaves it held by the other.
-    `models` is every model a held role names, in role order (general
-    first), since a role names one model and an agent may hold several.
+    one grant, and losing one of the two leaves it held by the other. A
+    role's suggested tier is not a grant and is not here.
     """
     held = await roles_of(mind_id, unit=unit)
     managed = bool(held) or await is_managed(mind_id, unit=unit)
     skills: list[str] = []
     hooks: list[str] = []
-    models: list[str] = []
     tools: list[str] = []
     for role in held:
         for name in role["skills"] or []:
@@ -295,8 +310,6 @@ async def grants_for(mind_id: str, *, unit: Unit | None = None) -> Row:
         for name in role["hooks"] or []:
             if name not in hooks:
                 hooks.append(name)
-        if role["model"] and role["model"] not in models:
-            models.append(role["model"])
         for name in role["tools"] or []:
             if name not in tools:
                 tools.append(name)
@@ -306,7 +319,6 @@ async def grants_for(mind_id: str, *, unit: Unit | None = None) -> Row:
         "roles": [r["slug"] for r in held],
         "skills": sorted(skills),
         "hooks": sorted(hooks),
-        "models": models,
         "tools": [t for t in TOOLS if t in tools],
     }
 

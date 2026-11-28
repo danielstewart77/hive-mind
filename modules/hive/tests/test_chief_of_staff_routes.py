@@ -5,6 +5,8 @@ see it, that the page is the page, and that the whole picture arrives in one
 answer rather than three that could disagree about the same moment.
 """
 
+import time
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -12,7 +14,7 @@ import accounts
 import auth
 import kanban_data
 import main as main_mod
-from hive_data import staff
+from hive_data import core, staff
 from hive_site import testing as suite
 
 NOW = 1_800_000_000.0
@@ -122,3 +124,37 @@ def test_the_barrel_window_is_seven_days_unless_the_page_asks_for_another(
 
     assert [b["id"] for b in default["barrel"]] == [recent]
     assert [b["id"] for b in wide["barrel"]] == [recent, old]
+
+
+def test_the_tree_is_built_with_each_minds_turn_as_the_gateway_reads_it(
+        signed_in, monkeypatch):
+    """The one thing on the page the database cannot say. Without it a mind
+    in a long tool call goes dark and a hung one never warns."""
+    async def rows():
+        # The route reads the real clock, so the conversation is live now.
+        at = time.time()
+        await staff.add_status("in progress")
+        await core.upsert_mind(mind_id="mind-live", name="Cypher",
+                               gateway_url="http://localhost:8426", model="m",
+                               harness="dsh", registered_at=at, last_seen=at)
+        await core.create_session(id="sess-live", surface="telegram",
+                                  surface_id="chat-1", mind_id="mind-live",
+                                  created_at=at, last_active=at)
+        task = await staff.create_task("Live work", "in progress", now=at)
+        await staff.attach_session(task["id"], "sess-live", now=at)
+        await staff.note_running(task["id"])
+    suite.run(rows())
+
+    async def gateway(path, **_):
+        assert path == "/sessions/turns"
+        return {"turns": [{
+            "session_id": "sess-live", "open": True, "reading": "working",
+            "tool": "Bash: run the suite", "tool_started_at": NOW - 600,
+            "heard_at": NOW - 600, "quiet_at": None, "stalled_at": None,
+            "now": NOW}]}
+    monkeypatch.setattr(main_mod, "_gateway_json", gateway)
+
+    data = signed_in.get("/api/chief-of-staff").json()
+
+    card = next(n for n in data["nodes"] if n["kind"] == "task")
+    assert (card["doing"], card["doing_for"]) == ("Bash: run the suite", 600)

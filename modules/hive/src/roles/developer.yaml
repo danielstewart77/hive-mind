@@ -1,4 +1,5 @@
 name: Developer
+suggested_tier: high
 tools:
   - shell
   - files

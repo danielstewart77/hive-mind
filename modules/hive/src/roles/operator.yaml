@@ -1,4 +1,5 @@
 name: Operator
+suggested_tier: high
 tools:
   - shell
   - files

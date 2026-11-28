@@ -1118,3 +1118,79 @@ async def test_a_child_cannot_be_its_own_parent(
         await staff.record_agent_event(
             "a1b2c3", staff.SPAWNED, mind_id=a_reporting_mind,
             parent_agent_id="a1b2c3", now=clock)
+
+
+# -- what a child has in flight (feature 916) --------------------------------
+
+async def test_a_sub_agent_with_a_tool_call_in_flight_reads_working_however_long_it_runs(
+        a_reporting_mind, connected, clock):
+    """The ten-minute test run of 2026-11-27: one call, nothing written until
+    it returns, and the child drawn as dead the whole time."""
+    await staff.record_agent_event(
+        "b1", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        tool="Bash: run the suite", tool_running_for=4,
+        reports_thinking=True, reports_output=True, now=clock)
+    row = (await staff.agents(mind_id=a_reporting_mind))[0]
+
+    assert staff.agent_reading(row, now=clock + 10 * 60,
+                               fresh_within=60) == staff.WORKING
+    assert row["tool"] == "Bash: run the suite"
+    assert row["tool_started_at"] == clock - 4
+
+
+async def test_a_sub_agent_seen_thinking_after_a_long_silence_reads_working(
+        a_reporting_mind, connected, clock):
+    await staff.record_agent_event(
+        "b2", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        reports_thinking=True, reports_output=True, now=clock)
+    await staff.record_agent_event(
+        "b2", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        thinking=True, reports_thinking=True, reports_output=True, now=clock + 300)
+    row = (await staff.agents(mind_id=a_reporting_mind))[0]
+
+    assert staff.agent_reading(row, now=clock + 320,
+                               fresh_within=60) == staff.WORKING
+    assert row["thinking_at"] == clock + 300
+
+
+async def test_thirty_seconds_of_silence_with_nothing_in_flight_reads_stalled_and_just_under_does_not(
+        a_reporting_mind, connected, clock):
+    await staff.record_agent_event(
+        "b3", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        reports_thinking=True, reports_output=True, now=clock)
+    row = (await staff.agents(mind_id=a_reporting_mind))[0]
+
+    assert staff.agent_reading(row, now=clock + 29.9,
+                               fresh_within=60) == staff.WORKING
+    assert staff.agent_reading(row, now=clock + 30,
+                               fresh_within=60) == staff.STALLED
+
+
+async def test_where_thinking_cannot_be_seen_silence_reads_quiet_from_thirty_seconds_and_stalled_at_two_minutes(
+        a_reporting_mind, connected, clock):
+    await staff.record_agent_event(
+        "b4", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        reports_output=True, now=clock)
+    row = (await staff.agents(mind_id=a_reporting_mind))[0]
+
+    read = [staff.agent_reading(row, now=clock + after, fresh_within=60)
+            for after in (29.9, 30, 119.9, 120)]
+
+    assert read == [staff.WORKING, staff.QUIET, staff.QUIET, staff.STALLED]
+
+
+async def test_a_tool_call_that_returned_no_longer_holds_the_sub_agent_working(
+        a_reporting_mind, connected, clock):
+    """What is in flight is said as it stands, so the report after the call
+    returned replaces the one that named it."""
+    await staff.record_agent_event(
+        "b5", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        tool="Bash: run the suite", reports_thinking=True, reports_output=True, now=clock)
+    await staff.record_agent_event(
+        "b5", staff.EVENT_DOING, mind_id=a_reporting_mind,
+        reports_thinking=True, reports_output=True, now=clock + 600)
+    row = (await staff.agents(mind_id=a_reporting_mind))[0]
+
+    assert row["tool"] == ""
+    assert staff.agent_reading(row, now=clock + 631,
+                               fresh_within=60) == staff.STALLED

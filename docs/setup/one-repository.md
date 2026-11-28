@@ -268,7 +268,7 @@ hold, a mind at a time.
    story 913 a person's key was a file under the key root (`.people`) and an
    entry in the hive's record of keys. Run this once, **after** this machine has
    been switched to the hive's own sign-in (the old settings `AUTH_SERVICE_URL`,
-   `AUTH_SERVICE_SITE` and `HIVE_AUTH_BACKEND` removed, database step 20 applied,
+   `AUTH_SERVICE_SITE` and `HIVE_AUTH_BACKEND` removed, database steps 18 to 22 applied (18 and 19 are the role-tier and in-flight steps this host already has; 20 to 22 are the keys),
    the sites, gateway, memory store and tools restarted together) and every
    person has an account and password in the hive database:
    `python3 tools/stateless/key_migration/key_migration.py end-person-keys`.
