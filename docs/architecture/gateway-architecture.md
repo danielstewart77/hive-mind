@@ -25,9 +25,9 @@ Messages flow as Server-Sent Events (SSE):
 
 Clients are thin — they handle surface-specific I/O and delegate all intelligence to the gateway.
 
-- `core/gateway_client.py` — shared HTTP client used by all bots
+- `hive_surfaces.gateway_client` (in `modules/hive-surfaces`) — the one shared HTTP client used by Telegram and Discord; `query_stream(..., outcome=)` reports how a turn ended
 - `GatewayClient.query_stream()` — yields text chunks from SSE, unlimited timeout
-- `GatewayClient.query()` — non-streaming convenience wrapper
+- `GatewayClient.query()` — non-streaming wrapper; raises `GatewayTurnError` for a refused, failed or interrupted turn
 
 ## Models
 

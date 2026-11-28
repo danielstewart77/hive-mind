@@ -19,7 +19,6 @@ from hive_data import roles
 
 from comms_pg_fixture import comms_db, register_mind, scratch_dsn  # noqa: F401 - fixtures
 
-ADMIN_TOKEN = "admin-bearer"  # secret-guard: allow
 
 
 def _run(coro):
@@ -61,7 +60,6 @@ def world(comms_db, monkeypatch):
         return asker, sibling, stranger, role_id, slug
 
     asker, sibling, stranger, role_id, slug = _run(setup())
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     from comms import server as server_module
     importlib.reload(server_module)
     with TestClient(server_module.app,
@@ -113,16 +111,6 @@ def test_a_mind_of_another_owner_holding_the_role_is_not_named_to_the_asker(worl
     assert ids == [world.sibling]
 
 
-def test_the_admin_credential_is_told_the_holders_of_every_owner(world):
-    world.hold(world.stranger)
-    world.hold(world.sibling)
-
-    answer = world.ask(as_token=ADMIN_TOKEN)
-
-    assert sorted(m["mind_id"] for m in answer.json()["minds"]) == sorted(
-        [world.stranger, world.sibling])
-
-
 def test_a_role_nobody_holds_and_a_role_that_does_not_exist_answer_an_empty_list(world):
     unheld = world.ask()
     missing = world.client.get("/roles/no-such-role-anywhere/holders")
@@ -139,3 +127,29 @@ def test_the_answer_names_each_holder_by_id_and_name_and_nothing_else(world):
     entry = world.ask().json()["minds"][0]
 
     assert set(entry) == {"mind_id", "name"}
+
+
+def test_a_removed_mind_credential_frees_its_key_for_another_mind_but_a_revoked_one_does_not(
+        comms_db):
+    """A failed creation removes the row it made, so the pasted key can be
+    pasted again; a cut-off keeps its row and the key stays refused."""
+    from comms import user_access
+
+    key = f"pasted-{uuid.uuid4().hex}"  # secret-guard: allow
+    first, second, third = (f"h-{uuid.uuid4().hex[:8]}" for _ in range(3))
+
+    async def go():
+        import hive_data
+        await hive_data.connect()
+        try:
+            await user_access.put_credential(first, "daniel", key, role="mind")
+            await user_access.revoke_credential(first)
+            with pytest.raises(ValueError, match="already held"):
+                await user_access.put_credential(second, "daniel", key, role="mind")
+            assert await user_access.remove_mind_credential(first) is True
+            await user_access.put_credential(third, "daniel", key, role="mind")
+            return (await user_access.credential_for_token(key)).holder
+        finally:
+            await hive_data.close(drain_timeout=5.0)
+
+    assert asyncio.run(go()) == third

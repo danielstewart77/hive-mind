@@ -6,6 +6,7 @@ All Claude CLI interaction flows through here.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -25,7 +26,28 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from comms.config import config
 import comms.broker as broker
-from comms.auth import require_admin_bearer, require_rename_bearer
+
+
+def refuse_sign_in_key(request: Request) -> None:
+    """A sign-in's key ends, so it may not make a key that does not (feature
+    834, requirement 41). The credential-writing routes take an
+    administrator's long-lived key or the admin token, never a sign-in."""
+    caller = request.scope.get("hive_caller")
+    if caller is not None and caller.sign_in_digest:
+        raise HTTPException(
+            403, "A sign-in key cannot make or cut off keys; use an "
+                 "administrator's long-lived key")
+
+
+def require_admin_or_person(request: Request) -> None:
+    """The route's class at the gate already decided who may reach it: the admin
+    credential, an administrator's own key, or (on a route that names a mind)
+    that mind's owner's key. This refuses anything else that got this far."""
+    caller = request.scope.get("hive_caller")
+    if caller is not None and (caller.is_admin or caller.person_admin
+                               or caller.role == "user"):
+        return
+    raise HTTPException(401, "Invalid token")
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from comms import surface_claims
 from comms.network_identity import resolve_container_name
@@ -167,7 +189,7 @@ app.add_middleware(
 )
 
 
-@app.post('/broker/minds/{mind_id}/rename/prepare', dependencies=[Depends(require_admin_bearer)])
+@app.post('/broker/minds/{mind_id}/rename/prepare', dependencies=[Depends(require_admin_or_person)])
 async def prepare_mind_rename(mind_id: str, request: Request):
     body = await request.json()
     operation_id = str(body.get('operation_id') or '')
@@ -179,12 +201,12 @@ async def prepare_mind_rename(mind_id: str, request: Request):
         raise HTTPException(409, str(exc)) from exc
 
 
-@app.get('/broker/minds/rename/capabilities', dependencies=[Depends(require_admin_bearer)])
+@app.get('/broker/minds/rename/capabilities', dependencies=[Depends(require_admin_or_person)])
 async def mind_rename_capabilities():
     return {'version': 1}
 
 
-@app.post('/broker/minds/{mind_id}/rename/release', dependencies=[Depends(require_admin_bearer)])
+@app.post('/broker/minds/{mind_id}/rename/release', dependencies=[Depends(require_admin_or_person)])
 async def release_mind_rename(mind_id: str, request: Request):
     body = await request.json()
     try:
@@ -311,6 +333,24 @@ async def _require_own_session_mind(request: Request, session_id: str) -> None:
         raise HTTPException(404, "Session not found")
 
 
+async def _own_mind_keys_or_refuse(request: Request) -> set[str] | None:
+    """For a route only the admin credential and a mind itself may call.
+
+    None for the admin credential (no restriction); the keys naming the one
+    mind otherwise. Anyone else - a person, a surface bot's service value, an
+    unknown caller - is refused 401, like any admin route.
+    """
+    caller = _caller(request)
+    if caller.sees_everything():
+        return None
+    if caller.role == user_access.USER_KEY:
+        # A person who is not an administrator: the minds they own.
+        return await user_access.visible_minds(caller)
+    if caller.role != user_access.MIND:
+        raise HTTPException(401, "Invalid token")
+    return await user_access.holder_keys(caller)
+
+
 async def _names_own_mind(caller: user_access.Caller, mind_id: object) -> bool:
     """Whether this caller may act *as* the mind it named.
 
@@ -415,7 +455,7 @@ install_fastapi_logging(app, log, "hive-comms")
 # rebuild brings the feed, and the service must still start: the feed is
 # looked up when asked for, and an image without it answers 404, which the
 # console shows as a component to update.
-@app.get("/diagnostics/errors", dependencies=[Depends(require_admin_bearer)])
+@app.get("/diagnostics/errors", dependencies=[Depends(require_admin_or_person)])
 async def diagnostic_errors():
     feed = getattr(hive_logging, "recent_errors", None)
     if feed is None:
@@ -658,8 +698,12 @@ class RegisterMindRequest(BaseModel):
     gateway_url: str
     model: str
     harness: str
-    # The credential the gateway presents on every call it makes to this mind.
-    # Optional on the wire so a mind running an older build still registers.
+    # What the gateway shows this mind. A mind on its one key sends none and
+    # the gateway works it out from the key the mind registers with
+    # (`user_access.gateway_credential`). Only a build that predates the one key
+    # still sends the value from its old file, and that is kept until it moves
+    # (items 841 and 842); an administrator registering a mind may carry the
+    # calculated value, never the key.
     session_token: str | None = None
     # The voice this mind is spoken in, and the engine that speaks it.
     # Optional for the same reason, and an omission leaves the stored value
@@ -805,24 +849,9 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
-    # Naming is its own small capability and stays that way on the way in.
-    # `require_rename_bearer` guards `PUT .../name` precisely so that
-    # `COMMS_BEARER_TOKEN` — held by every surface bot and every mind
-    # container on this hive, the ones on the kids' machines included —
-    # cannot put a label on a conversation. Owning the mind has never been
-    # enough for that, and it is not enough here either: `core.bind_surface`
-    # replaces whatever binding a `client_ref` already had, so a create may
-    # repoint an existing chat at a conversation of the caller's own — and a
-    # name and colour on that row are exactly the disguise the token exists
-    # to deny. Checked only when a label was actually sent, so the creates
-    # that have never carried one are guarded exactly as they were. The admin
-    # token is accepted the ordinary way, so an operator and the chief of
-    # staff need no second secret.
-    if body.name is not None or body.color is not None:
-        require_rename_bearer(
-            x_rename_token=request.headers.get("x-rename-token", ""),
-            authorization=request.headers.get("authorization", ""),
-        )
+    # A name or colour on a create is asked with the key of whoever is asking
+    # (a person's or a mind's): the gate and the checks above have already
+    # held them to a mind they may reach, and no second credential exists.
     # The colour is checked here, where this route can answer 400 for that
     # case alone. A blanket `except ValueError` below would also turn the
     # refusals already raised in `create_session` — no model, a harness that
@@ -916,7 +945,7 @@ async def session_names(request: Request):
     return {sid: value for sid, value in names.items() if sid in mine}
 
 
-@app.put("/sessions/{session_id}/name", dependencies=[Depends(require_rename_bearer)])
+@app.put("/sessions/{session_id}/name")
 async def set_session_name(session_id: str, body: SetSessionNameRequest):
     """Name a conversation, recolour it, or clear either.
 
@@ -939,8 +968,8 @@ async def set_session_name(session_id: str, body: SetSessionNameRequest):
         raise HTTPException(400, str(exc)) from exc
 
 
-@app.get("/sessions/live", dependencies=[Depends(require_admin_bearer)])
-async def live_sessions():
+@app.get("/sessions/live")
+async def live_sessions(request: Request):
     """Every conversation producing output right now, with its context figures.
 
     What a dashboard reads instead of `status`, which is written to
@@ -948,11 +977,26 @@ async def live_sessions():
     column reports every session that has ever taken a turn as busy.
 
     Declared before `/sessions/{session_id}` so the literal path wins.
+
+    The admin credential reads every conversation. A mind's own credential
+    reads only its own mind's rows (the chief of staff finds the conversation
+    to report into this way); any other caller is refused, so a mind never
+    sees another mind's work.
     """
-    return await session_mgr.live_dashboard()
+    keys = await _own_mind_keys_or_refuse(request)
+    board = await session_mgr.live_dashboard()
+    if keys is None:
+        return board
+    return {
+        **board,
+        "sessions": [row for row in board.get("sessions", [])
+                     if user_access.mind_is_named_in(keys, row.get("mind_id"))],
+        "idle": [row for row in board.get("idle", [])
+                 if user_access.mind_is_named_in(keys, row.get("mind_id"))],
+    }
 
 
-@app.get("/sessions/turns", dependencies=[Depends(require_admin_bearer)])
+@app.get("/sessions/turns", dependencies=[Depends(require_admin_or_person)])
 async def session_turns():
     """Each mind's own turn: open or not, and what it has in flight.
 
@@ -960,12 +1004,12 @@ async def session_turns():
     command from a mind whose turn has hung. `open` is None for a
     conversation nobody can speak for, and only an open turn carries a
     `reading`. Declared before `/sessions/{session_id}` so the literal path
-    wins.
+    wins. Administrator only, by the route table (an administrator's own key).
     """
     return {"turns": session_mgr.dashboard.turns()}
 
 
-@app.get("/sessions/live/text", dependencies=[Depends(require_admin_bearer)])
+@app.get("/sessions/live/text", dependencies=[Depends(require_admin_or_person)])
 async def live_session_text(session_id: str, since: int = 0):
     """Everything one live conversation has done after `since`.
 
@@ -1149,7 +1193,7 @@ class CredentialRequest(BaseModel):
 
 @app.put(
     "/credentials/{holder}",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person), Depends(refuse_sign_in_key)],
 )
 async def put_holder_credential(holder: str, body: CredentialRequest):
     """Mint or replace one holder's credential.
@@ -1177,21 +1221,29 @@ async def put_holder_credential(holder: str, body: CredentialRequest):
 
 @app.delete(
     "/credentials/{holder}",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person), Depends(refuse_sign_in_key)],
 )
-async def delete_holder_credential(holder: str):
+async def delete_holder_credential(holder: str, remove: bool = False):
     """Revoke one holder's credential, and only that holder's.
 
     Lands on its next request: the gate reads the table per call, so there is
     nothing to restart and no cache to clear. The row is kept rather than
     deleted, so the screen can say "revoked" where it would otherwise have to
     say "never had one" — different facts with different remedies.
+
+    `remove=true` deletes a mind's row instead: the undo of a creation, and a
+    mind deleted. A revoked row keeps the digest, which then stays refused
+    for every other holder; a key whose only holder is gone must be pasteable
+    again. A cut-off uses the plain revoke above and keeps its row.
     """
+    if remove:
+        removed = await user_access.remove_mind_credential(holder)
+        return {"holder": holder.strip().lower(), "removed": removed}
     revoked = await user_access.revoke_credential(holder)
     return {"holder": holder.strip().lower(), "revoked": revoked}
 
 
-@app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
+@app.get("/credentials", dependencies=[Depends(require_admin_or_person)])
 async def list_credentials():
     """Which holders have a credential, whose they answer for, and whether it
     is live. Never the value."""
@@ -1408,9 +1460,17 @@ async def _run_brief(session_id: str, content: str, images, goal_rounds, sender_
 
 
 @app.get("/minds/{mind_id}/wake-state")
-async def get_mind_wake_state(mind_id: str, since: float | None = None):
+async def get_mind_wake_state(request: Request, mind_id: str, since: float | None = None):
     """Whether a mind is mid-turn or owed a wake, for whatever must not lose
-    either - the recreate of the chief of staff's container. Admin only."""
+    either - the recreate of the chief of staff's container. The admin
+    credential asks about any mind; a mind's own credential only about itself."""
+    keys = await _own_mind_keys_or_refuse(request)
+    if keys is not None:
+        row = await core.get_mind_by_id_or_name(mind_id)
+        if not row or not user_access.mind_is_named_in(keys, row["mind_id"]):
+            raise HTTPException(404, "No such mind")
+        # Asked by name, answered by the id its sessions are stored under.
+        mind_id = row["mind_id"]
     return await session_mgr.mind_idle_state(mind_id, since=since)
 
 
@@ -1465,15 +1525,37 @@ async def list_watches(session_id: str, request: Request):
 
 
 @app.get("/sessions/{session_id}/events")
-async def stream_session_events(session_id: str):
+async def stream_session_events(session_id: str, request: Request):
     """Read-only SSE stream for passive session observers."""
     session = await session_mgr.get_session(session_id)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
+    caller = _caller(request)
+
     async def event_stream():
-        async for event in session_mgr.stream_session_events(session_id):
-            yield f"data: {json.dumps(event)}\n\n"
+        # Ends when the sign-in this stream was opened with ends (feature 834,
+        # requirement 41); a stream on a key that never ends is never cut.
+        events = session_mgr.stream_session_events(session_id).__aiter__()
+        ended = asyncio.ensure_future(user_access.watch_sign_in(caller))
+        try:
+            while True:
+                step = asyncio.ensure_future(events.__anext__())
+                await asyncio.wait({step, ended}, return_when=asyncio.FIRST_COMPLETED)
+                if ended.done():
+                    step.cancel()
+                    with contextlib.suppress(BaseException):
+                        await step
+                    return
+                try:
+                    event = step.result()
+                except StopAsyncIteration:
+                    return
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            ended.cancel()
+            with contextlib.suppress(BaseException):
+                await events.aclose()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1778,14 +1860,30 @@ async def ws_stream(ws: WebSocket, session_id: str):
         await ws.close(code=4401)
         return
     await ws.accept()
-    try:
+
+    async def converse() -> None:
         while True:
             data = await ws.receive_json()
             images = data.get("images")
             async for event in session_mgr.send_message(session_id, data["content"], images=images):
                 await ws.send_json(event)
+
+    # A socket opened with a sign-in's key is closed when that key ends
+    # (feature 834, requirement 41), as the terminal is.
+    work = asyncio.ensure_future(converse())
+    key_ended = asyncio.ensure_future(user_access.watch_sign_in(_caller(ws)))
+    try:
+        await asyncio.wait({work, key_ended}, return_when=asyncio.FIRST_COMPLETED)
+        if key_ended.done() and not work.done():
+            work.cancel()
+            await ws.close(code=user_access.WS_DENY_CODE, reason="sign-in ended")
+        elif work.done() and not work.cancelled():
+            work.result()
     except WebSocketDisconnect:
         pass
+    finally:
+        work.cancel()
+        key_ended.cancel()
 
 
 async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> int | None:
@@ -1989,12 +2087,22 @@ async def ws_attach(ws: WebSocket, session_id: str):
             # and the tile all survive it — so the same watcher that ends the
             # bridge on a close forwards the rotation and keeps going.
             closed = asyncio.ensure_future(_watch_for_close(session_id))
+            # A terminal opened with a sign-in's key is closed when that key
+            # ends (feature 834, requirement 41), not left open on a key every
+            # service now refuses.
+            key_ended = asyncio.ensure_future(
+                user_access.watch_sign_in(_caller(ws)))
             done, _ = await asyncio.wait(
-                {pump, closed}, return_when=asyncio.FIRST_COMPLETED
+                {pump, closed, key_ended}, return_when=asyncio.FIRST_COMPLETED
             )
             if closed not in done:
                 closed.cancel()
-            if closed in done:
+            if key_ended not in done:
+                key_ended.cancel()
+            if key_ended in done and closed not in done and pump not in done:
+                await ws.close(code=user_access.WS_DENY_CODE,
+                               reason="sign-in ended")
+            elif closed in done:
                 close_event = closed.result()
                 if close_event.get("type") == "session_suspended":
                     await ws.close(code=4411, reason="session suspended")
@@ -2031,6 +2139,11 @@ async def ws_attach(ws: WebSocket, session_id: str):
     except aiohttp.ClientError as exc:
         log.warning("attach-pty proxy to %s failed: %s", attach_url, exc)
         await ws.close(code=1011, reason="mind unreachable")
+    except sessions.MindCallFailed as exc:
+        # A mind whose key was cut off is not called, and one whose credential
+        # cannot be read is told so; neither is an unhandled error on the tile.
+        log.warning("attach-pty to %s not made: %s", attach_url, exc)
+        await ws.close(code=1011, reason="mind is not called: its key is cut off or unreadable")
 
 
 # ---------------------------------------------------------------------------
@@ -2378,23 +2491,26 @@ async def role_holders(slug: str, request: Request):
 
 
 @app.get("/broker/minds")
-async def broker_get_minds():
+async def broker_get_minds(request: Request):
     """Return all registered minds from the broker database.
 
-    Each row says whether the hive's admin credential may be sent to the
-    address it registered (`admin_credential_allowed`): only a mind owned by
-    `config.admin_credential_owner()`. The console reads it, so the gateway
-    and the console withhold that credential from the same minds.
-    """
-    from comms.config import admin_credential_owner
-
-    trusted = admin_credential_owner()
-    rows = await broker.get_registered_minds()
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict):
-            owner = str(row.get("owner") or "").strip().lower()
-            row["admin_credential_allowed"] = bool(trusted) and owner == trusted
-    return rows
+    A person's key who is not an administrator sees the minds they own and
+    no others, decided here and not only by the hive site's own filtering
+    (feature 834, story 905)."""
+    minds = await broker.get_registered_minds()
+    caller = _caller(request)
+    if caller.role == user_access.USER_KEY and not caller.sees_everything():
+        mine = await user_access.visible_minds(caller)
+        primary = bool(caller.username) and caller.username == user_access.primary_user()
+        known = await user_access.all_mind_keys()
+        out = []
+        for m in minds:
+            keys = {str(m.get("id") or ""), user_access.normalize_username(m.get("name"))}
+            if keys & mine or (primary and not (user_access.normalize_username(m.get("owner")))):
+                out.append(m)
+        del known
+        return out
+    return minds
 
 
 async def _refuse_foreign_registration(caller, body) -> None:
@@ -2422,8 +2538,27 @@ async def _refuse_foreign_registration(caller, body) -> None:
         if row["mind_id"] == asked_id or (row["name"] or "").lower() == asked_name
     ]
     for mind_id, name in existing:
+        if str(mind_id or "") != asked_id:
+            # The name is held by a row with another identity. core.minds
+            # keys its name case-sensitively and upserts on `mind_id`, so a
+            # mind posting its own name (or its name in another case) with a
+            # fresh `mind_id` and its own gateway_url would be given a second
+            # row for the name. Whoever holds the name is the only identity
+            # that may register it; the admin renames or removes.
+            raise HTTPException(
+                403,
+                f"the name {name!r} is already held by another mind identity",
+            )
         keys = {str(mind_id or ""), user_access.normalize_username(name)}
         if caller.holder not in keys:
+            # An operator mind may re-register a mind of its own owner
+            # (requirement 20); never another person's.
+            if await user_access.operator_may_change(caller.holder, mind_id):
+                if (str(mind_id or "") == asked_id
+                        and user_access.normalize_username(name) != asked_name):
+                    raise HTTPException(
+                        403, f"{caller.holder!r} may not rename {name!r}; the admin does")
+                continue
             raise HTTPException(
                 403,
                 f"{caller.holder!r} may only register itself, not "
@@ -2444,6 +2579,62 @@ async def _refuse_foreign_registration(caller, body) -> None:
             f"{caller.holder!r} may only register itself, not "
             f"{body.name or body.mind_id!r}",
         )
+
+
+def _canonical_address(url: object) -> str:
+    """An address compared as the same place: scheme and host lowered, the
+    scheme's default port and a trailing slash dropped."""
+    from urllib.parse import urlsplit
+
+    text = str(url or "").strip()
+    try:
+        parts = urlsplit(text)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return text.rstrip("/")
+    if not parts.scheme or not host or "\\" in text:
+        return text.rstrip("/")
+    scheme = parts.scheme.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and port != {"http": 80, "https": 443}.get(scheme):
+        host = f"{host}:{port}"
+    # Userinfo, query and fragment are part of the address: changing any of
+    # them is a move, so they stay in the compared form.
+    userinfo = parts.netloc.rpartition("@")[0]
+    prefix = f"{userinfo}@" if "@" in parts.netloc else ""
+    query = f"?{parts.query}" if parts.query else ""
+    fragment = f"#{parts.fragment}" if parts.fragment else ""
+    return f"{scheme}://{prefix}{host}{parts.path.rstrip('/')}{query}{fragment}"
+
+
+async def _refuse_address_change(caller, body) -> None:
+    """An ordinary mind's own key may not move its own address (requirement 20).
+
+    The gateway shows a mind a value made from the mind's key at the address
+    the mind registered, and the hive site sends a person's request there, so a
+    mind that could re-register a different `gateway_url` could capture what
+    is sent. A first registration, a refresh of the same address and a
+    credential refresh keep working. An administrator or the mind's owner
+    (each with their own person key, by the route that changes a mind - this
+    function is never asked about them) and an operator mind - read from the
+    roles tables now - may change it.
+    """
+    row = await core.get_mind(str(body.mind_id or "").strip())
+    if not row:
+        return
+    old = _canonical_address(row["gateway_url"])
+    new = _canonical_address(body.gateway_url)
+    if old == new or not old:
+        return
+    if await user_access.operator_may_change(caller.holder, row["mind_id"]):
+        return
+    raise HTTPException(
+        403,
+        f"{caller.holder!r} may not change its own address from {old!r}; "
+        "an operator changes it",
+    )
 
 
 @app.post("/broker/minds")
@@ -2475,7 +2666,7 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
         # A mind's own credential registers a mind of its credential's
         # person and nobody else's. Without this a kid's box could register a
         # fresh row naming Daniel as owner, at a server of its own, and the
-        # gateway would send that address his admin credential.
+        # gateway would send that address what it sends for Daniel's mind.
         mine = user_access.normalize_username(caller.username)
         named = user_access.normalize_username(body.owner)
         if named and named != mine:
@@ -2483,6 +2674,14 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
                 403, f"{caller.holder!r} may only register a mind of {mine!r}"
             )
         body.owner = mine or None
+        await _refuse_address_change(caller, body)
+        # What the gateway shows this mind is made from the key it registers
+        # with. A build that predates the one key still sends the value it
+        # keeps in its old file, and that stays its own affair until it moves
+        # (items 841 and 842); a mind on its one key sends nothing.
+        if not body.session_token:
+            body.session_token = user_access.gateway_credential(
+                user_access.bearer_of(request.scope))
     try:
         await broker.register_mind(
             mind_id=body.mind_id,
@@ -2506,6 +2705,145 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
     return await broker.get_mind_by_id(body.mind_id)
 
 
+#: What a person or a mind may ask of another mind through the gateway: the
+#: console's reads and changes of a mind's settings, files, skills, symbols,
+#: chat and GitHub tokens, model list and errors. A fixed list of method and
+#: path shapes. Never a conversation, a session or a terminal route: the
+#: credential forwarded with also opens those (requirement 24).
+_FORWARDED = (
+    ("GET", r"runtime"), ("PATCH", r"runtime"),
+    ("GET", r"runtime/settings"), ("PATCH", r"runtime/settings"),
+    ("GET", r"models"),
+    ("GET", r"health"), ("GET", r"host"), ("GET", r"diagnostics/errors"),
+    ("GET", r"surface-token"), ("PUT", r"surface-token"),
+    ("GET", r"github-token"), ("PUT", r"github-token"),
+    ("GET", r"files/[A-Za-z0-9_.-]+"),
+    ("GET", r"files/[A-Za-z0-9_.-]+/content"), ("PUT", r"files/[A-Za-z0-9_.-]+/content"),
+    ("GET", r"skills"),
+    ("GET", r"skills/[A-Za-z0-9_.-]+/diff"),
+    ("POST", r"skills/[A-Za-z0-9_.-]+/install"),
+    ("POST", r"skills/[A-Za-z0-9_.-]+/write-back"),
+    ("POST", r"skills/[A-Za-z0-9_.-]+/resolve"),
+    ("DELETE", r"skills/[A-Za-z0-9_.-]+"),
+    ("GET", r"symbols"), ("GET", r"symbols/roots"),
+)
+_FORWARD_METHODS = ("GET", "PUT", "PATCH", "POST", "DELETE")
+#: The longest a mind is waited for: its own slowest save (a token save checks
+#: Telegram or GitHub first, the console waits its base timeout plus twelve
+#: seconds) with room to spare.
+_FORWARD_TIMEOUT_SECONDS = 45
+
+
+def _forwardable(method: str, tail: str) -> str | None:
+    """The normalised path for a forwardable route, or None. No dot segment,
+    no empty segment, no escape character survives: what is matched is what is
+    sent."""
+    parts = tail.split("/")
+    if any(p in ("", ".", "..") or "\\" in p or "%" in p or "\x00" in p for p in parts):
+        return None
+    clean = "/".join(parts)
+    for allowed_method, shape in _FORWARDED:
+        if allowed_method == method and re.fullmatch(shape, clean):
+            return clean
+    return None
+
+
+def _forward_base(registered: object) -> str | None:
+    """The scheme, host and port of a mind's registered address, rebuilt from
+    its parts. A registered address carrying a path, query, fragment or
+    credentials is refused, so the fixed list of routes is the only thing that
+    decides the path (nothing in the address can swallow it)."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(str(registered or "").strip())
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not host:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username or parts.password:
+        return None
+    shown = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{shown}" + (f":{port}" if port is not None else "")
+
+
+@app.api_route("/broker/minds/{mind_id}/forward/{tail:path}", methods=list(_FORWARD_METHODS))
+async def broker_forward_to_mind(request: Request, mind_id: str, tail: str):
+    """A change to one mind, or a reading of it, made through the gateway.
+
+    Asked with a person's key or a mind's key and nothing else (the gate
+    refuses every other value). The gateway works out whose key it is and
+    whether they may change this mind: a person who is an administrator any
+    mind (read from the hive database on this request), any other person the
+    mind they own, an operator mind a mind of its own owner, an ordinary mind
+    itself. Only then is the request delivered to the mind's registered
+    address with the mind's own gateway credential; the asker's key is never
+    forwarded. Nothing of the request or the answer is logged or kept.
+    """
+    caller = _caller(request)
+    try:
+        row = await core.get_mind_by_id_or_name(mind_id)
+        allowed = row is not None and await user_access.caller_may_change(caller, dict(row))
+        unknown_to_admin = (
+            row is None and caller.role == user_access.USER_KEY
+            and await user_access.person_is_administrator(caller.username))
+    except user_access._STORE_DOWN:
+        return JSONResponse({"detail": "the hive database is not answering"}, status_code=503)
+    if not allowed:
+        if unknown_to_admin:
+            raise HTTPException(404, "No such mind")
+        raise HTTPException(403, "this key may not change that mind")
+    path = _forwardable(request.method, tail)
+    if path is None:
+        raise HTTPException(404, "that is not something a mind can be asked through the gateway")
+    base = _forward_base(row["gateway_url"])
+    if base is None:
+        raise HTTPException(502, "that mind has no usable registered address, it could not be reached")
+    try:
+        auth = await session_mgr.mind_auth_headers(row["mind_id"])
+    except sessions.MindCallFailed as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if not auth:
+        raise HTTPException(
+            409, "this gateway holds no credential for that mind; it has to register again")
+    from urllib.parse import quote
+    url = base + "/" + "/".join(quote(p, safe="") for p in path.split("/"))
+    headers = dict(auth)
+    content_type = request.headers.get("content-type")
+    if content_type:
+        headers["Content-Type"] = content_type
+    body = await request.body()
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=_FORWARD_TIMEOUT_SECONDS)
+        ) as http:
+            async with http.request(
+                request.method, url, params=list(request.query_params.multi_items()),
+                data=body or None, headers=headers, allow_redirects=False,
+            ) as answer:
+                payload = await answer.read()
+                status = answer.status
+                answer_type = answer.headers.get("Content-Type", "application/json")
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            504, "the mind did not answer in time; it is not known whether the change was applied, reload to see",
+        ) from None
+    except aiohttp.ClientError:
+        raise HTTPException(502, "that mind could not be reached") from None
+    if status == 401:
+        raise HTTPException(
+            502, "the credential this gateway holds for that mind is out of date; it refreshes when the mind next registers")
+    if 300 <= status < 400:
+        raise HTTPException(502, "that mind answered with a redirect, which is not followed")
+    from fastapi import Response
+    # Marked as the mind's own answer, so a caller can tell it from the
+    # gateway's own refusals (a mind's 404 and the gateway's 404 mean different
+    # things to a person reading the page).
+    return Response(content=payload, status_code=status, media_type=answer_type.split(";")[0],
+                    headers={"X-Hive-Forwarded": "1"})
+
+
 async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
     """Refuse a mind asking about another mind's bot.
 
@@ -2516,6 +2854,12 @@ async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
     acts for every mind, and the console is how a wedged claim gets fixed.
     """
     caller = _caller(request)
+    if caller.role == user_access.USER_KEY and not caller.sees_everything():
+        # A person who is not an administrator reads the claim of a mind they own.
+        row = await core.get_mind_by_id_or_name(mind_id)
+        if row is None or not await user_access.caller_may_change(caller, dict(row)):
+            raise HTTPException(404, "No such claim")
+        return
     if not await _names_own_mind(caller, mind_id):
         raise HTTPException(404, "No such claim")
 
@@ -2548,7 +2892,7 @@ async def broker_get_surface_claim(
 
 @app.post(
     "/broker/minds/{mind_id}/surface-claim/phrase",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def broker_mint_surface_claim_phrase(mind_id: str, surface: str = "telegram"):
     """Put a fresh pass phrase on offer and hand it back exactly once.
@@ -2576,7 +2920,7 @@ async def broker_mint_surface_claim_phrase(mind_id: str, surface: str = "telegra
 
 @app.post(
     "/broker/minds/{mind_id}/surface-claim/bot",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def broker_record_surface_claim_bot(
     mind_id: str, body: SurfaceClaimBot, surface: str = "telegram"
@@ -2605,7 +2949,7 @@ async def broker_record_surface_claim_bot(
 
 @app.delete(
     "/broker/minds/{mind_id}/surface-claim",
-    dependencies=[Depends(require_admin_bearer)],
+    dependencies=[Depends(require_admin_or_person)],
 )
 async def broker_clear_surface_claim(mind_id: str, surface: str = "telegram"):
     """Release a bot so somebody else can claim it.
@@ -2672,7 +3016,7 @@ async def broker_adopt_surface_claim(
             "claimed_ref": outcome.claimed_ref}
 
 
-@app.put("/broker/minds/{mind_id}/owner", dependencies=[Depends(require_admin_bearer)])
+@app.put("/broker/minds/{mind_id}/owner", dependencies=[Depends(require_admin_or_person)])
 async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
     """Move a mind to another user. Admin-only; the only way an owner changes."""
     try:
@@ -2690,7 +3034,7 @@ async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
     return result
 
 
-@app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
+@app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_or_person)])
 async def broker_update_mind(name: str, body: UpdateMindRequest):
     """Partially update a mind's fields. Admin-only."""
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -2700,7 +3044,7 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
     return result
 
 
-@app.delete("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
+@app.delete("/broker/minds/{name}", dependencies=[Depends(require_admin_or_person)])
 async def broker_delete_mind(name: str):
     """Deregister a mind from the broker database. Admin-only.
 
@@ -2727,6 +3071,12 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
     # and a mind holder may only name itself.
     if not await _names_own_mind(_caller(request), body.from_mind):
         return JSONResponse({"error": "Mind not found"}, status_code=404)
+    person = _caller(request)
+    if person.role == user_access.USER_KEY and not person.sees_everything():
+        # A person who is not an administrator writes only to a mind they own.
+        target = await core.get_mind_by_id_or_name(str(body.to_mind or ""))
+        if target is None or not await user_access.caller_may_change(person, dict(target)):
+            return JSONResponse({"error": "Mind not found"}, status_code=404)
     if not await _mind_exists(body.to_mind):
         return JSONResponse(
             {"error": f"Mind '{body.to_mind}' not found in broker.minds. Register via POST /broker/minds."},
@@ -2781,6 +3131,8 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
 
 async def _sender_owner(caller, from_mind: str) -> str:
     """The person a posted message's request belongs to, or "" for nobody."""
+    if caller.role == user_access.USER_KEY:
+        return user_access.normalize_username(caller.username)
     if caller.sees_everything():
         row = await core.get_mind_by_id_or_name(from_mind)
         owner = str((row or {}).get("owner") or "").strip().lower()
@@ -2864,17 +3216,38 @@ async def secrets_get(key: str, request: Request):
     return {"key": key, "value": value}
 
 
-@app.post("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
-async def secrets_grant_scopes(body: SecretScopeRequest):
-    """Grant a mind access to one or more secret keys. Admin-only."""
+async def _person_may_scope(request: Request, mind_name: str):
+    """None when the caller is a person who may change this mind, else the
+    refusal. A mind's key, a service and an unknown mind are all refused in
+    the same words."""
+    caller = _caller(request)
+    if caller.role != user_access.USER_KEY:
+        return JSONResponse({"error": "Mind not found"}, status_code=404)
+    target = await core.get_mind_by_id_or_name(str(mind_name or "").strip())
+    if target is None or not await user_access.caller_may_change(caller, dict(target)):
+        return JSONResponse({"error": "Mind not found"}, status_code=404)
+    return None
+
+
+@app.post("/secrets/scopes")
+async def secrets_grant_scopes(body: SecretScopeRequest, request: Request):
+    """Grant a mind access to one or more secret keys, with a person's own key:
+    an administrator's, or the key of the person who owns that mind."""
+    refused = await _person_may_scope(request, body.mind_name)
+    if refused is not None:
+        return refused
     for key in body.secret_keys:
         await grant_secret_scope(body.mind_name, key)
     return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
 
 
-@app.delete("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
-async def secrets_revoke_scopes(body: SecretScopeRequest):
-    """Revoke a mind's access to one or more secret keys. Admin-only."""
+@app.delete("/secrets/scopes")
+async def secrets_revoke_scopes(body: SecretScopeRequest, request: Request):
+    """Revoke a mind's access to one or more secret keys, with a person's own
+    key: an administrator's, or the key of the person who owns that mind."""
+    refused = await _person_may_scope(request, body.mind_name)
+    if refused is not None:
+        return refused
     for key in body.secret_keys:
         await revoke_secret_scope(body.mind_name, key)
     return {"ok": True, "mind_name": body.mind_name, "revoked": body.secret_keys}
@@ -2885,27 +3258,17 @@ async def secrets_list_scopes(mind_name: str, request: Request):
     """List all secret keys a mind is allowed to access.
 
     Auth paths:
-    - Admin bearer (cross-mind listing — caller doesn't have to match mind_name)
     - Network identity (a mind listing its own scopes — caller IP resolves to mind_name)
 
     The gate in front of every route is already satisfied at this point;
     here we just decide whether the caller can read THIS specific mind's scopes.
     """
-    admin_token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    auth_header = request.headers.get("authorization", "")
-    is_admin = (
-        admin_token
-        and auth_header.startswith("Bearer ")
-        and auth_header[7:] == admin_token
-    )
-
-    if not is_admin:
-        caller_ip = request.client.host if request.client else None
-        if not caller_ip:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        caller_name = await resolve_container_name(caller_ip)
-        if caller_name != mind_name:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+    caller_ip = request.client.host if request.client else None
+    if not caller_ip:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    caller_name = await resolve_container_name(caller_ip)
+    if caller_name != mind_name:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     keys = await get_secret_scopes(mind_name)
     return {"mind_name": mind_name, "secret_keys": keys}

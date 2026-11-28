@@ -9,6 +9,7 @@ about admission and a real spawn would need a live mind.
 
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import importlib
 from unittest.mock import AsyncMock, patch
 
@@ -30,7 +31,7 @@ STRANGER_TG = "5559999"
 
 @pytest.fixture()
 def gateway(monkeypatch, comms_db):  # noqa: F811
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    admin_person_key(ADMIN)
     from comms import server as server_module
 
     importlib.reload(server_module)

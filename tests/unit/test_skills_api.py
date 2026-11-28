@@ -49,7 +49,7 @@ def _build(monkeypatch, tmp_path, harness: str):
     monkeypatch.setenv("DSH_HOME", str(homes["dsh"]))
     monkeypatch.setattr(skills_api, "PROJECT_DIR", project, raising=True)
     monkeypatch.setattr(skill_reference, "PROJECT_DIR", project, raising=True)
-    monkeypatch.setattr(runtime_api, "admin_token", lambda: ADMIN_TOKEN, raising=True)
+    monkeypatch.setattr(runtime_api, "_own_key", lambda: ADMIN_TOKEN, raising=True)
     SENT.clear()
     monkeypatch.setattr(skill_reference, "proxy_catalog", lambda *a: (lambda h: None))
     monkeypatch.setattr(skill_reference, "telegram_notifier", lambda *a: SENT.append)

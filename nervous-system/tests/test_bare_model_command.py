@@ -8,6 +8,7 @@ pre-proxy alias (`opus`) that matches no deployment name in the catalog
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import asyncio
 import importlib
 import time
@@ -35,7 +36,7 @@ def _run(coro):
 
 @pytest.fixture
 def app_client(comms_db, monkeypatch):  # noqa: F811 - the imported fixture
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
 
     from comms import server as server_module
 

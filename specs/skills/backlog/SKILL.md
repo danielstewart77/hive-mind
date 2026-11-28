@@ -108,9 +108,9 @@ finished, never to tidy the board.
 
 ## When it refuses
 
-- *refused this mind's board credential* — `BOARD_PUSH_TOKEN` is unset or
-  is not the value the console holds. Not yours to rotate: tell the owner.
-- *does not reach ...* — that operation is not on this token, by design.
+- *refused* — your own key is unset or is not live, or you hold no board role.
+  Not yours to change: tell the owner.
+- *does not reach ...* — that operation is not in your board role (planner cannot delete), by design.
   Say so plainly rather than looking for another way round it.
 - *has ... under it* — the delete would take more than the row. Read what
   is under it, then move those rows out or pass `--cascade` on purpose.

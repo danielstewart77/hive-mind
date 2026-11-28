@@ -11,6 +11,7 @@ short-circuit path skips broker work when the flag is off.
 """
 from __future__ import annotations
 
+from comms_broker_pg import service_key  # noqa: E402
 import asyncio
 import hashlib
 import hmac
@@ -75,7 +76,7 @@ def app_client(monkeypatch, broker_db):
     The lifespan opens the pool on the app's own loop; `broker_db` has
     already emptied the database and named it in the environment.
     """
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    service_key(GRILL_ADMIN)
     monkeypatch.setenv("SMS_INBOUND_HMAC_SECRET", "test-secret")
 
     # Import the app fresh so lifespan picks up the env vars above.

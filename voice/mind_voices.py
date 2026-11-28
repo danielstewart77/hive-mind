@@ -108,33 +108,39 @@ class MindVoiceResolver:
         clock=time.monotonic,
     ) -> None:
         self._url = comms_url or ""
+        # No credential of its own: the key of whoever is asking now, as a value
+        # or a function read at each request. The gateway recognises that key
+        # from the one record and answers as it would that caller.
         self._token = token or ""
         self._ttl = ttl_seconds
         self._timeout = timeout
         self._fetch = fetch
         self._clock = clock
-        self._index: dict[str, str] = {}
-        self._names: dict[str, str] = {}
-        self._fetched_at: float | None = None
+        # One reading per asking key: what a person's key lists is theirs.
+        self._held: dict[str, tuple[float, dict[str, str], dict[str, str]]] = {}
+        self._token_now = ""
 
     def _index_now(self) -> dict[str, str]:
         if not self._url:
             return {}
+        token = self._token() if callable(self._token) else self._token
+        self._token_now = token or ""
         now = self._clock()
-        if self._fetched_at is not None and now - self._fetched_at < self._ttl:
-            return self._index
+        held = self._held.get(self._token_now)
+        if held is not None and now - held[0] < self._ttl:
+            return held[1]
         try:
-            rows = self._fetch(self._url, self._token, self._timeout)
+            rows = self._fetch(self._url, self._token_now, self._timeout)
         except Exception as exc:
             log.warning("mind voice listing unreadable: %s", exc)
             # Keep whatever was last known and try again after the TTL rather
             # than hammering a gateway that is down once per spoken sentence.
-            self._fetched_at = now
-            return self._index
-        self._index = voice_index(rows)
-        self._names = name_index(rows)
-        self._fetched_at = now
-        return self._index
+            old = held[1:] if held else ({}, {})
+            self._held[self._token_now] = (now, *old)
+            return old[0]
+        index, names = voice_index(rows), name_index(rows)
+        self._held[self._token_now] = (now, index, names)
+        return index
 
     def short_name(self, voice_id: str) -> str:
         """This mind's short name, for a caller holding only its UUID."""
@@ -142,7 +148,8 @@ class MindVoiceResolver:
         if not key:
             return ""
         self._index_now()
-        return self._names.get(key, "")
+        held = self._held.get(self._token_now)
+        return held[2].get(key, "") if held else ""
 
     def resolve(
         self, voice_id: str, *, env_map: dict[str, str], default: str

@@ -107,15 +107,15 @@ def send_notification(message: str) -> None:
 def _broker_token() -> str:
     """The comms bearer token.
 
-    ``COMMS_BEARER_TOKEN`` is the canonical name — it is what
+    The mind's one key (``MIND_KEY``) is read first; ``COMMS_BEARER_TOKEN`` is
+    the canonical name — it is what
     ``comms/auth.py`` actually reads. ``HIVEMIND_BROKER_TOKEN`` is a
     legacy alias carrying the same value on bare-metal installs; it is
     honoured so a mind whose env predates the consolidation still
     authenticates.
     """
-    return os.environ.get("COMMS_BEARER_TOKEN") or os.environ.get(
-        "HIVEMIND_BROKER_TOKEN", ""
-    )
+    return (os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN")
+            or os.environ.get("HIVEMIND_BROKER_TOKEN", ""))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

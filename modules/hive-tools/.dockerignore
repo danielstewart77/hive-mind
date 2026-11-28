@@ -1,0 +1,13 @@
+# The build context is this folder, which sits inside hive-mind's checkout.
+# Nothing secret belongs here (see docker-compose.yml: the tools' state lives
+# outside the checkout), but a stray one never goes into an image.
+.git
+.env
+.env.*
+!.env.example
+credentials
+data
+tests
+docs
+__pycache__
+*.pyc

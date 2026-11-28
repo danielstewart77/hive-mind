@@ -8,6 +8,7 @@ stored owner: only the admin route moves a mind between users.
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key, service_key  # noqa: E402
 import asyncio
 import importlib
 
@@ -46,7 +47,7 @@ def _listed(client) -> dict:
 
 @pytest.fixture
 def app_client(monkeypatch, broker_db):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
 
     from comms import server as server_module
 
@@ -172,7 +173,7 @@ def test_a_pre_owner_mind_still_registers_unchanged_after_the_upgrade(
 ) -> None:
     """Rollout in any order: new comms, old mind, no owner stamped yet."""
     _pre_owner_row()
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
     from comms import server as server_module
 
     importlib.reload(server_module)
@@ -190,7 +191,7 @@ def test_a_pre_owner_row_registering_with_an_owner_is_listed_under_it(
     monkeypatch, broker_db
 ) -> None:
     _pre_owner_row()
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
     from comms import server as server_module
 
     importlib.reload(server_module)
@@ -246,21 +247,58 @@ def test_a_minds_own_registration_lands_under_its_credentials_person(app_client)
     assert _listed(app_client)["arnold"]["owner"] == "sloan"
 
 
-def test_the_listing_marks_which_minds_may_be_sent_the_admin_credential(
-    app_client, monkeypatch,
-) -> None:
-    """The console reads this, so it withholds from the same minds."""
-    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "daniel")
-    app_client.post("/broker/minds", json=_registration(owner="Daniel"))
-    app_client.post("/broker/minds", json=_registration(
-        mind_id="22222222-2222-4222-8222-222222222222", name="arnold", owner="sloan"))
+def test_a_mind_with_its_own_key_is_refused_on_the_administrator_only_routes(app_client) -> None:
+    """Feature 834 story 883: no mind holds the administrator key, and its
+    own key opens none of what only that key opens."""
+    kid = _a_kids_credential()
+    for method, path in (("get", "/credentials"), ("get", "/sessions/live/text?session_id=x"),
+                         ("put", "/broker/minds/arnold/owner")):
+        response = getattr(app_client, method)(path, headers=kid)
+        assert response.status_code == 401, path
 
-    listed = _listed(app_client)
-    assert listed[MIND_A]["admin_credential_allowed"] is True
-    assert listed["22222222-2222-4222-8222-222222222222"]["admin_credential_allowed"] is False
 
-    monkeypatch.setenv("COMMS_ADMIN_CREDENTIAL_OWNER", "")
-    assert _listed(app_client)[MIND_A]["admin_credential_allowed"] is False
+def test_a_mind_reads_only_its_own_live_sessions_and_wake_state(app_client, monkeypatch) -> None:
+    """The chief of staff gave up the administrator key: its own key reads its
+    own mind's rows on the two routes it needs, and another mind's are refused
+    or left out."""
+    kid = _a_kids_credential()
+    app_client.post("/broker/minds", headers=kid, json=_registration(
+        mind_id="arnold", name="arnold", gateway_url="http://192.168.5.64:8433"))
+    app_client.post("/broker/minds", headers=ADMIN, json=_registration(owner="daniel"))
+
+    own = app_client.get("/minds/arnold/wake-state", headers=kid)
+    assert own.status_code == 200 and own.json()["mind_id"] == "arnold"
+    other = app_client.get(f"/minds/{MIND_A}/wake-state", headers=kid)
+    assert other.status_code == 404
+    from comms import server as server_module
+
+    board = {"sessions": [{"session_id": "s-own", "mind_id": "arnold"},
+                          {"session_id": "s-other", "mind_id": MIND_A}],
+             "idle": [{"session_id": "i-own", "mind_id": "arnold"},
+                      {"session_id": "i-other", "mind_id": MIND_A}],
+             "observed_at": 1.0}
+
+    async def _board():
+        return board
+
+    monkeypatch.setattr(server_module.session_mgr, "live_dashboard", _board)  # the feed is outside what is tested
+    mine = app_client.get("/sessions/live", headers=kid).json()
+    assert [r["session_id"] for r in mine["sessions"]] == ["s-own"]
+    assert [r["session_id"] for r in mine["idle"]] == ["i-own"]
+    everything = app_client.get("/sessions/live").json()  # the admin credential
+    assert len(everything["sessions"]) == 2 and len(everything["idle"]) == 2
+
+
+def test_a_person_or_a_surface_service_is_refused_the_chiefs_two_reads(app_client) -> None:
+    from comms import user_access
+
+    asyncio.run(put_credential_row(
+        holder="a-bot", username="sloan", role=user_access.SERVICE,
+        token_sha=user_access.digest("bot-credential"),
+    ))
+    bot = {"Authorization": "Bearer bot-credential"}
+    assert app_client.get("/sessions/live", headers=bot).status_code == 401
+    assert app_client.get(f"/minds/{MIND_A}/wake-state", headers=bot).status_code == 401
 
 
 def test_a_mind_cannot_rename_itself(app_client) -> None:
@@ -341,4 +379,5 @@ def test_a_mind_cannot_read_a_conversation_it_is_not_party_to(app_client, monkey
         "content": "private"}).status_code == 200
 
     assert app_client.get("/broker/conversations/c-private", headers=kid).status_code == 404
-    assert app_client.get("/broker/conversations/c-private").status_code == 200
+    service = {"Authorization": f"Bearer {service_key('a-service-key-for-tests')}"}
+    assert app_client.get("/broker/conversations/c-private", headers=service).status_code == 200

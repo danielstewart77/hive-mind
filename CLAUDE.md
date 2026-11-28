@@ -337,7 +337,6 @@ hive-mind/
 ├── core/                          # Internal libraries (not entry points)
 │   ├── secrets.py                # Shared get_credential() utility
 │   ├── keyring_backend.py        # Keyring backend for containerised minds
-│   ├── gateway_client.py         # Shared HTTP client for bots → hive-comms
 │   ├── notify_utils.py           # Shared Telegram notification utility
 │   ├── path_validation.py        # CWE-22 path traversal protection for skill agents
 │   ├── scheduled_skills.py       # Scheduler-driven skill runs
@@ -430,64 +429,27 @@ makes to a mind carries that mind's own credential.
 
 | Layer | Owner | Lifetime |
 |---|---|---|
-| `minds/<name>/session_token` (0600) | the mind, on disk | durable truth |
-| `broker.minds.session_token` | comms | a cache of the above |
+| the mind's one key (key file) | the console writes it; the mind reads it | durable truth |
+| `broker.minds.session_token` | comms | HMAC-SHA256 of a fixed label under the key: what the gateway shows the mind, never the key |
 
-The mind mints the token on first use and publishes it in the boot
-registration it already performs — the same admin-guarded upsert that carries
-its model and address. Comms reads it per call through
+There is no second secret. The mind works out the same value from the key it
+holds on every request and compares (`core.mind_key.gateway_credential`); no
+`session_token` file is made, read or mounted and `MIND_SESSION_TOKEN` is not
+read; a file left by an older build is deleted when the mind starts on its key.
+Comms works it out when it sees the key (a mind registering with it, the
+console replacing it) and keeps only that value, through
 `broker.get_mind_session_token`, the one accessor that returns it; every mind
-listing goes through `_public_mind`, which strips the column, because those
-listings answer to the service token every surface bot holds. One token taken
-off one mind opens that mind and no other, which matters most for the minds
-trusted least — the two Windows boxes the boys use.
-
-The admin token is deliberately *not* the credential on this path: it unlocks
-`PATCH /runtime`, the skills write-back and the file editor, and a routine chat
-turn must not carry the thing that owns the machine. A mind still accepts it,
-so the console or the operator can reach a wedged session directly.
-
-All seven outbound paths carry it — spawn, message, interrupt, release,
-rotate-pty, kill, and the terminal WebSocket proxy — and **a refusal is
-reported as a refusal on each**. A 401 or 503 is never folded into the shape
-that means something else: a mind that is down, a mind with nothing to
-release, a mind holding no live terminal, a mind offering no models. Three of
-those are remedies applied to the wrong machine. Two of them were worse than
-cosmetic: a refused release read as "nothing to release" let a cross-surface
-adoption retarget ownership over a harness that was still running — two
-processes on one transcript — and a refused kill read as success left a tmux
-session and its context alive until the box rebooted. The terminal tile closes
-on **4416** rather than the 4415 that means "no pty route in this image".
-
-On the mind side (`minds/runtime_api.py`, mounted by the mind server) one
-middleware guards every `/sessions` route, reading `scope["path"]` and not
-`request.url.path` — Starlette builds that URL from the *Host header*, so a
-Host carrying a `/` moves the route out of `.path` while the router still
-matches it. Credentials compare as bytes, since `compare_digest` raises
-`TypeError` on non-ASCII `str` and that 500 reaches the gateway as "no
-terminal route". A mind that cannot establish its own credential answers
-**503**, never open: an unreadable token file is not an absent one, and
-treating it as absent serves the whole session surface to the LAN while the
-gateway keeps presenting a token nobody checks.
-
-**The rollout direction is one-way.** Comms can start sending a credential
-with no risk to anything — a mind that does not check one ignores it. A mind
-cannot start requiring one before comms sends it. So comms first, then minds
-one at a time; deploying the code to a mind is the act that flips it.
+listing goes through `_public_mind`, which strips the column. A mind whose key
+is cut off is not called. Replacing a mind's key replaces this with it.
 
 **Two caveats, stated rather than papered over.** Per-mind isolation is real
 between *hosts* — the kid boxes, Hex, Dragoman, this workstation — and weaker
 than the phrase suggests in two places. The five container minds all
-bind-mount the same tree read-write, so each can read
-`minds/<other>/session_token`; injecting `MIND_SESSION_TOKEN` per container
-from its own env file fixes that. And the guard accepts the admin token as
-well as the session token, deliberately, so the console and the operator can
-reach a wedged pane — but on this hive that resolves to
-`COMMS_ADMIN_BEARER_TOKEN`, which every mind already holds. So a compromised
-mind can still reach another's session surface with a credential it had
-before; what it cannot do any more is reach one with nothing at all. A
-distinct `MIND_ADMIN_TOKEN` per mind closes that, and is the next thing worth
-doing if the boys' boxes stop being trusted.
+bind-mount the same tree read-write, so each shares a tree; none holds a second secret file, only its own key from
+its own key folder. The guard accepts the session credential and the mind's own key
+(for the console's settings changes) and nothing hive-wide: no mind holds or
+accepts a gateway administrator key (feature 834). Each mind's own key reaches
+only its own routes.
 
 ### Who a containerised bot answers
 
@@ -609,11 +571,8 @@ the ids come from picker buttons and rename prompts that deliberately never
 expire. The 409 remains for the rows still marked closed in the store from
 before deletion-on-close.
 
-The route carries `X-Rename-Token` (`COMMS_RENAME_TOKEN`, or the admin token)
-on top of the service bearer, and **refuses when neither is configured**. The
-service token is held by every surface bot and every mind container on the
-hive; reading a name is not worth guarding, changing one is. Reads ride
-`GET /sessions` and `GET /sessions/names` on the service token alone.
+A rename is asked with the key of the person or mind asking (the gate holds it
+to a conversation of a mind that caller may reach); there is no rename token.
 
 ## Gateway API
 

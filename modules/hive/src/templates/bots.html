@@ -1,0 +1,209 @@
+{% extends "layout.html" %}
+{% block title %}Bots · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Surfaces</p><h1 class="page-title">Bots</h1><p class="page-description">One bot answers one person. Each is registered against a mind you own.</p></div>
+    </header>
+    <section class="surface">
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Surface</th><th>Token</th><th>Bot</th><th>Answers (account id)</th><th></th></tr></thead><tbody id="bots-table"><tr><td colspan="6" class="loading-state">Loading bots…</td></tr></tbody></table></div>
+    </section>
+    <section class="surface" id="register-panel">
+        <div class="surface-header"><div><h2>Register a bot</h2></div></div>
+        <div class="surface-body overview-stack">
+            <div class="field">
+                <label for="register-mind">Mind</label>
+                <select id="register-mind"></select>
+            </div>
+            <div class="field">
+                <label for="register-surface">Surface</label>
+                <select id="register-surface"><option value="telegram">Telegram</option><option value="discord">Discord</option></select>
+            </div>
+            <ol id="register-steps" class="numbered-steps"></ol>
+            <form id="register-form" class="overview-stack">
+                <div class="field">
+                    <label for="register-token">Bot token</label>
+                    <input id="register-token" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="Paste the token">
+                </div>
+                <div class="form-actions"><button class="button button-primary" type="submit" id="register-save">Verify and store</button></div>
+                <small id="register-status"></small>
+            </form>
+        </div>
+    </section>
+    <section class="surface" id="claim-panel" hidden>
+        <div class="surface-header"><div><h2>Pass phrase</h2></div></div>
+        <div class="surface-body overview-stack">
+            <p id="claim-phrase" class="phrase-shown"></p>
+            <small id="claim-note"></small>
+        </div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    const tbody = document.getElementById("bots-table");
+    const steps = document.getElementById("register-steps");
+    const mindSelect = document.getElementById("register-mind");
+    const surfaceSelect = document.getElementById("register-surface");
+    const status = document.getElementById("register-status");
+    const claimPanel = document.getElementById("claim-panel");
+    const claimPhrase = document.getElementById("claim-phrase");
+    const claimNote = document.getElementById("claim-note");
+
+    const STEPS = {
+        telegram: [
+            "Open Telegram and start a chat with @BotFather.",
+            "Send /newbot and answer the two questions: a display name, then a username ending in bot.",
+            "BotFather replies with a token that looks like 123456789 followed by a colon and a long string. Copy it.",
+            "Paste it below and press Verify and store.",
+            "Open your new bot and send it the pass phrase this page then shows you."
+        ],
+        discord: [
+            "Open discord.com/developers/applications and press New Application.",
+            "Open the Bot section, press Reset Token, and copy the token it shows once.",
+            "Still in the Bot section, under Privileged Gateway Intents, switch on Message Content and save. Without it the bot cannot read messages and will not start.",
+            "Under Installation or OAuth2, generate an invite URL with the bot scope and open it to add the bot to a server you are in.",
+            "Paste the token below and press Verify and store.",
+            "Send the bot a direct message containing the pass phrase this page then shows you."
+        ]
+    };
+
+    function renderSteps() {
+        const list = STEPS[surfaceSelect.value] || [];
+        steps.innerHTML = list.map(function (text) {
+            return "<li>" + h.escapeHtml(text) + "</li>";
+        }).join("");
+    }
+
+    function tokenCell(bot) {
+        if (!bot.reachable) { return h.statusPill(false, "", "Mind unreachable"); }
+        if (!bot.stored) { return h.statusPill(false, "", "No token"); }
+        if (bot.accepted === true) { return h.statusPill(true, "Accepted", ""); }
+        if (bot.accepted === false) { return h.statusPill(false, "", "Refused"); }
+        return h.statusPill(false, "", "Could not ask");
+    }
+
+    function answersCell(bot) {
+        const claim = bot.claim || {};
+        if (!claim.known) {
+            return '<span class="muted" title="' + h.escapeHtml(claim.detail || "") + '">Unknown</span>';
+        }
+        if (claim.claimed) { return h.escapeHtml(claim.claimed_ref); }
+        if (claim.phrase_pending) { return '<span class="muted">Phrase on offer</span>'; }
+        return '<span class="muted">Unclaimed</span>';
+    }
+
+    function actionsCell(bot) {
+        const claim = bot.claim || {};
+        const target = h.escapeHtml(bot.mind) + '" data-surface="' + h.escapeHtml(bot.surface);
+        if (claim.known && claim.claimed) {
+            return '<button class="button button-quiet" type="button" data-clear="' + target + '">Release</button>';
+        }
+        if (!claim.known) { return ""; }
+        return '<button class="button button-quiet" type="button" data-phrase="' + target + '">Show phrase</button>';
+    }
+
+    let bots = [];
+
+    function render() {
+        tbody.innerHTML = bots.length ? bots.map(function (bot) {
+            return "<tr><td>" + h.escapeHtml(bot.mind) + "</td><td>" + h.escapeHtml(bot.surface)
+                + "</td><td>" + tokenCell(bot) + "</td><td>" + h.escapeHtml(bot.bot_username || "")
+                + "</td><td>" + answersCell(bot) + "</td><td>" + actionsCell(bot) + "</td></tr>";
+        }).join("") : '<tr><td colspan="6"><div class="empty-state"><h3>No bots yet</h3><p>Register one below.</p></div></td></tr>';
+    }
+
+    async function load() {
+        try {
+            const body = await h.requestJson("/api/bots");
+            bots = body.bots || [];
+            render();
+            const names = [];
+            bots.forEach(function (bot) {
+                if (names.indexOf(bot.mind) === -1) { names.push(bot.mind); }
+            });
+            mindSelect.innerHTML = names.map(function (name) {
+                return '<option value="' + h.escapeHtml(name) + '">' + h.escapeHtml(name) + "</option>";
+            }).join("");
+        } catch (error) {
+            tbody.innerHTML = '<tr><td colspan="6"><div class="error-state">' + h.escapeHtml(error.message) + "</div></td></tr>";
+        }
+    }
+
+    async function showPhrase(mind, surface) {
+        claimPanel.hidden = false;
+        claimPhrase.textContent = "";
+        claimNote.textContent = "";
+        try {
+            const body = await h.requestJson(
+                "/api/minds/" + encodeURIComponent(mind) + "/bot-claim/phrase?surface=" + encodeURIComponent(surface),
+                { method: "POST" }
+            );
+            claimPhrase.textContent = body.phrase;
+            claimNote.textContent = "Send this to the " + surface + " bot for " + mind
+                + " within thirty minutes. It is shown once and cannot be read again.";
+        } catch (error) {
+            claimNote.textContent = error.message;
+        }
+        await load();
+    }
+
+    tbody.addEventListener("click", async function (event) {
+        const phraseButton = event.target.closest("[data-phrase]");
+        if (phraseButton) {
+            await showPhrase(phraseButton.dataset.phrase, phraseButton.dataset.surface);
+            return;
+        }
+        const clearButton = event.target.closest("[data-clear]");
+        if (clearButton) {
+            claimPanel.hidden = false;
+            claimPhrase.textContent = "";
+            claimNote.textContent = "";
+            try {
+                await h.requestJson(
+                    "/api/minds/" + encodeURIComponent(clearButton.dataset.clear)
+                        + "/bot-claim?surface=" + encodeURIComponent(clearButton.dataset.surface),
+                    { method: "DELETE" }
+                );
+                claimNote.textContent = "Released. Press Show phrase to hand it to somebody.";
+            } catch (error) {
+                claimNote.textContent = error.message;
+            }
+            await load();
+        }
+    });
+
+    document.getElementById("register-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const button = document.getElementById("register-save");
+        const input = document.getElementById("register-token");
+        button.disabled = true;
+        status.textContent = "Checking the token with " + surfaceSelect.value + "…";
+        try {
+            const body = await h.requestJson(
+                "/api/minds/" + encodeURIComponent(mindSelect.value)
+                    + "/surface-token?surface=" + encodeURIComponent(surfaceSelect.value),
+                {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token: input.value })
+                }
+            );
+            input.value = "";
+            status.textContent = "Stored for " + (body.bot_username || "this bot")
+                + ". The mind picks it up when it next restarts.";
+            await load();
+            await showPhrase(mindSelect.value, surfaceSelect.value);
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    surfaceSelect.addEventListener("change", renderSteps);
+    renderSteps();
+    await load();
+});
+</script>
+{% endblock %}

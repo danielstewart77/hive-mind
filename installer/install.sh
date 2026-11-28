@@ -3,7 +3,10 @@
 #
 # Checks the machine, clones hive-mind into $HIVE_HOME (default ~/hive), and
 # starts the installer detached, so an SSH session that drops does not take it
-# down. Prints the setup page's address, port and link. Nothing is written
+# down. Prints the setup page's address, port and link. HIVE_RELEASE=<tag or
+# commit> puts the clone on that release (detached); without it a fresh clone is
+# the default branch's tip at that moment and an existing one stays where it is
+# if it is on a release, else is fast-forwarded. Nothing is written
 # before every check has passed, and nothing is written outside $HIVE_HOME.
 #
 # Everything is inside main(), called on the last line: a download cut short
@@ -19,6 +22,47 @@ main() {
     echo "hive install: $1" >&2
     echo "  fix: $2" >&2
     exit 1
+  }
+
+  # A module that has become ordinary tracked files of hive-mind (hive-data;
+  # the others follow) cannot be pulled over while a git clone of it sits at
+  # the same path: git refuses, naming the files it would overwrite. So before
+  # the pull, once the update is fetched and shown to carry the module as
+  # files, a clone that holds nothing unsaved is moved beside itself (same
+  # folder, so its link back to hive-mind's .git still resolves) and left for
+  # the operator to delete. A clone with uncommitted work, or commits no
+  # remote has, is never moved: the install stops and says so.
+  make_room_for_moved_modules() {
+    local repo="$1" name path stamp
+    for name in hive-data hive-surfaces hive terminal hive-tools; do
+      path="modules/$name"
+      [ -e "$repo/$path/.git" ] || continue
+      git -C "$repo" ls-tree HEAD -- "$path" | grep -q '^160000 ' || continue
+      git -C "$repo" fetch --quiet \
+        || fail "could not fetch $repo" "check the network (and any web proxy), then run again"
+      git -C "$repo" rev-parse --verify -q '@{u}' >/dev/null \
+        || fail "$repo has no upstream branch, so the update cannot be read" \
+                "git -C $repo branch --set-upstream-to origin/<branch>, then run again"
+      git -C "$repo" ls-tree '@{u}' -- "$path" | grep -q '^040000 ' || continue
+      [ -z "$(git -C "$repo/$path" status --porcelain)" ] \
+        || fail "$repo/$path has uncommitted changes, and $name now lives inside hive-mind" \
+                "commit or discard them there (or copy them into $repo/$path after the update), then run again"
+      [ -z "$(git -C "$repo/$path" log --branches HEAD --not --remotes --oneline)" ] \
+        && [ -z "$(git -C "$repo/$path" stash list)" ] \
+        || fail "$repo/$path has commits that no remote has, and $name now lives inside hive-mind" \
+                "git -C $repo/$path push, or keep them elsewhere, then run again"
+      stamp="$(date +%Y%m%d%H%M%S)"
+      mv "$repo/$path" "$repo/modules/.$name.moved-aside-$stamp" \
+        || fail "could not move $repo/$path aside" "move it away by hand, then run again"
+      echo "$name is now part of hive-mind: the old clone was moved to $repo/modules/.$name.moved-aside-$stamp (safe to delete once you have carried its untracked .env and data/ into modules/$name; hive-tools is the exception: its .env, credentials/ and data/ go to ~/.config/hive-tools, never into the checkout)."
+    done
+  }
+
+  release_is_not_a_branch() {
+    case "$2" in origin/*|refs/heads/*|refs/remotes/*) fail "$2 is a branch, and a release is a tag or a commit" "name a tag or a commit" ;; esac
+    git -C "$1" show-ref --verify -q "refs/remotes/origin/$2" 2>/dev/null \
+      && fail "$2 is a branch, and a release is a tag or a commit" "name a tag (git ls-remote --tags $HIVE_REPO_BASE/hive-mind.git) or a commit"
+    return 0
   }
 
   command -v git >/dev/null 2>&1 || fail "git is not installed" "sudo apt-get install -y git"
@@ -127,19 +171,34 @@ PY
   chmod 700 "$HIVE_HOME/state"
   local repo="$HIVE_HOME/repos/hive-mind"
   if [ -d "$repo/.git" ]; then
-    git -C "$repo" pull --ff-only --quiet \
-      || fail "could not update $repo" "git -C $repo status — commit or discard local changes, then run again"
+    make_room_for_moved_modules "$repo"
+    if [ -n "${HIVE_RELEASE:-}" ]; then
+      # A named release (a tag or a commit), never a branch tip.
+      release_is_not_a_branch "$repo" "$HIVE_RELEASE"
+      git -C "$repo" fetch --quiet --tags origin \
+        && git -C "$repo" checkout --quiet --detach "$HIVE_RELEASE" \
+        || fail "could not put $repo on release $HIVE_RELEASE" "git -C $repo status — commit or discard local changes, check the name, then run again"
+    elif git -C "$repo" symbolic-ref --quiet HEAD >/dev/null; then
+      git -C "$repo" pull --ff-only --quiet \
+        || fail "could not update $repo" "git -C $repo status — commit or discard local changes, then run again"
+    fi
+    # else: on a release already (scripts/release.sh put it there); it stays.
   else
     rm -rf "$repo.partial"   # left by a clone the network cut short
     git clone --quiet "$HIVE_REPO_BASE/hive-mind.git" "$repo.partial" \
       || fail "could not clone hive-mind from $HIVE_REPO_BASE" "check the network (and any web proxy), then run again"
+    if [ -n "${HIVE_RELEASE:-}" ]; then
+      release_is_not_a_branch "$repo.partial" "$HIVE_RELEASE"
+      git -C "$repo.partial" checkout --quiet --detach "$HIVE_RELEASE" \
+        || fail "$HIVE_RELEASE is not a tag or commit of hive-mind" "name one: git ls-remote --tags $HIVE_REPO_BASE/hive-mind.git"
+    fi
     mv "$repo.partial" "$repo"
   fi
 
   local log="$HIVE_HOME/state/installer.log" mark=0
   [ -f "$log" ] && mark="$(wc -l < "$log")"
   cd "$repo"
-  HIVE_HOME="$HIVE_HOME" HIVE_REPO_BASE="$HIVE_REPO_BASE" \
+  HIVE_HOME="$HIVE_HOME" HIVE_REPO_BASE="$HIVE_REPO_BASE" HIVE_RELEASE="${HIVE_RELEASE:-}" \
     setsid nohup python3 -m installer --home "$HIVE_HOME" \
     >>"$HIVE_HOME/state/installer.out" 2>&1 </dev/null &
 

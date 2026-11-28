@@ -6,6 +6,7 @@ Secrets come from two real, live sources — not a keyring-with-third-party-.env
 
 1. **System keyring** (primary for skill/tool-level secrets) — `core.keyring_backend.HiveMindKeyring`, a `keyrings.alt.file.PlaintextKeyring` subclass whose storage path comes directly from the `KEY_RING` env var (e.g. `/usr/src/app/data/keyring`), not `XDG_DATA_HOME`.
 2. **`.env` files** (primary for service-to-service bearer tokens) — two separate files, both consumed via Docker Compose `env_file:` by real Python services: repo root `.env` (bot tokens, `COMMS_BEARER_TOKEN`) and `nervous-system/.env` (`LUCENT_BEARER_TOKEN`, `COMMS_BEARER_TOKEN` — must match the root value, plus the two admin tokens). `lucent` and `comms` both have `env_file: ./nervous-system/.env` in `docker-compose.yml` — this is not a third-party-only exception.
+   A mind's own credential is one value, a file `/run/mind-key/key` in a folder only that mind mounts (outside the checkout, never in a `.env`; `MIND_KEY` in the environment is the fallback for a mind made before key files), accepted by the gateway, the memory store, the tools and the proxy as that mind; see `docs/architecture/mind-folder-contract.md`. Until a mind is moved the per-service variables named here stand for it.
 3. **Environment variable fallback** — `get_credential()` falls back to `os.getenv()` when keyring lookup fails or returns nothing, which is how a plain `.env`-sourced value satisfies code that calls `get_credential()`.
 
 ## Reading Secrets
@@ -26,7 +27,7 @@ Service name for all keys: `hive-mind`.
 
 ## Managed Keys — feature-specific, only if you're using them
 
-`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `LUCENT_ADMIN_BEARER_TOKEN`/`COMMS_ADMIN_BEARER_TOKEN`, `SMS_INBOUND_HMAC_SECRET`.
+`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `LUCENT_ADMIN_BEARER_TOKEN`/`COMMS_ADMIN_BEARER_TOKEN` (the console and the services only; no mind holds either), `SMS_INBOUND_HMAC_SECRET`.
 
 ## Rules
 

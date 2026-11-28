@@ -1,0 +1,51 @@
+{% extends "layout.html" %}
+{% block title %}Dashboard · Hive{% endblock %}
+{% block content %}
+{#
+  A wall view: every mind that is talking right now, side by side, with the
+  machines underneath them and the subscription allowances above.
+
+  Three things on this page are deliberately not drawn as zero when they are
+  unknown, because on every one of them a zero reads as good news:
+  a context bar with no count, a provider with no observed allowance, and a
+  host whose probe never answered. Each renders as its own state instead.
+#}
+<main class="page dashboard-page">
+    <header class="page-header">
+        <div class="page-header-copy">
+            <p class="page-eyebrow">Live</p>
+            <h1 class="page-title">Dashboard</h1>
+        </div>
+        <div class="page-actions"><span class="dash-clock" id="dash-observed">—</span></div>
+    </header>
+
+    <div id="dash-error" class="error-state" hidden></div>
+
+    <div class="dash-top">
+    <section class="surface dash-providers" aria-label="Provider allowance">
+        <div class="surface-header"><div><h2>Token pressure</h2></div></div>
+        <div class="dash-provider-grid" id="dash-providers"></div>
+    </section>
+    <section class="surface dash-hosts" aria-label="Machines">
+        <div class="surface-header"><div><h2>Machines</h2></div></div>
+        <div class="dash-host-grid" id="dash-hosts"></div>
+    </section>
+    </div>
+
+    <section aria-label="Live conversations">
+        <div class="dash-section-head">
+            <h2>Generating</h2>
+        </div>
+        <div class="dash-columns" id="dash-columns"></div>
+        <p class="dash-empty" id="dash-idle" hidden>No mind is producing output right now.</p>
+    </section>
+
+    <section class="surface" aria-label="Idle conversations">
+        <div class="surface-header"><div><h2>Idle</h2></div></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Conversation</th><th>Model</th><th>Size</th><th>Rotates at</th><th>Window</th><th>Measured</th></tr></thead><tbody id="dash-idle-rows"></tbody></table></div>
+        <p class="dash-empty" id="dash-idle-empty" hidden>No open conversations.</p>
+    </section>
+
+</main>
+<script src="{{ request.url_for('static', path='dashboard.js') }}?v={{ asset_versions['dashboard.js'] }}" defer></script>
+{% endblock %}

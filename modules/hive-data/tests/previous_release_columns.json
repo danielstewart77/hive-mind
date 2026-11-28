@@ -1,0 +1,382 @@
+{
+ "active_sessions": [
+  "client_type",
+  "client_ref",
+  "session_id"
+ ],
+ "auth_settings": [
+  "key",
+  "value"
+ ],
+ "board.capability_node_settings": [
+  "node_id",
+  "endpoint",
+  "updated_at"
+ ],
+ "board.design_notices": [
+  "id",
+  "design_id",
+  "kind",
+  "page",
+  "body",
+  "created_at",
+  "claimed_at",
+  "delivered_at"
+ ],
+ "board.design_sessions": [
+  "id",
+  "title",
+  "conversation_id",
+  "surface",
+  "mind_id",
+  "repos",
+  "requirements",
+  "tests",
+  "functions",
+  "accepted",
+  "stale",
+  "revision",
+  "created_at",
+  "updated_at"
+ ],
+ "board.edge_mind_settings": [
+  "name",
+  "profile",
+  "role",
+  "deployment",
+  "updated_at"
+ ],
+ "board.operation_requesters": [
+  "request_id",
+  "username",
+  "created_at"
+ ],
+ "board.work_items": [
+  "id",
+  "kind",
+  "parent_id",
+  "title",
+  "status",
+  "position",
+  "description",
+  "requirements",
+  "acceptance_criteria",
+  "qa_tests",
+  "subtype"
+ ],
+ "context_overhead": [
+  "mind_id",
+  "harness",
+  "model",
+  "surface",
+  "tokens",
+  "observed_at"
+ ],
+ "conversations": [
+  "id",
+  "created_at"
+ ],
+ "credentials": [
+  "holder",
+  "username",
+  "role",
+  "token_sha",
+  "created_at",
+  "revoked_at"
+ ],
+ "group_members": [
+  "group_name",
+  "user_id"
+ ],
+ "groups": [
+  "name",
+  "created_at"
+ ],
+ "memories": [
+  "id",
+  "mind_id",
+  "content",
+  "embedding",
+  "content_search",
+  "tags",
+  "source",
+  "data_class",
+  "tier",
+  "as_of",
+  "expires_at",
+  "superseded",
+  "recurring",
+  "codebase_ref",
+  "created_at"
+ ],
+ "memory.credentials": [
+  "holder",
+  "username",
+  "role",
+  "mind_id",
+  "token_sha",
+  "created_at",
+  "revoked_at"
+ ],
+ "memory.edges": [
+  "id",
+  "mind_id",
+  "source_id",
+  "target_id",
+  "type",
+  "as_of",
+  "source",
+  "data_class",
+  "tier",
+  "created_at",
+  "properties",
+  "owner"
+ ],
+ "memory.nodes": [
+  "id",
+  "mind_id",
+  "type",
+  "name",
+  "first_name",
+  "last_name",
+  "properties",
+  "data_class",
+  "tier",
+  "source",
+  "as_of",
+  "created_at",
+  "updated_at",
+  "owner"
+ ],
+ "memory.schema_edges": [
+  "name",
+  "source_type",
+  "target_type",
+  "attr_schema",
+  "symmetric",
+  "created_at"
+ ],
+ "memory.schema_types": [
+  "name",
+  "kind",
+  "property_schema",
+  "created_at"
+ ],
+ "memory.soul_changes": [
+  "id",
+  "node_id",
+  "mind_name",
+  "mind_id",
+  "actor",
+  "reason",
+  "before_json",
+  "after_json",
+  "at",
+  "created_at"
+ ],
+ "messages": [
+  "id",
+  "conversation_id",
+  "from_mind",
+  "to_mind",
+  "message_number",
+  "content",
+  "rolling_summary",
+  "metadata",
+  "status",
+  "recipient_session_id",
+  "response_error",
+  "timestamp"
+ ],
+ "minds": [
+  "mind_id",
+  "name",
+  "gateway_url",
+  "model",
+  "harness",
+  "registered_at",
+  "last_seen",
+  "session_token",
+  "voice",
+  "voice_engine",
+  "owner"
+ ],
+ "secret_scopes": [
+  "mind_name",
+  "secret_key",
+  "granted_at"
+ ],
+ "session_memory": [
+  "id",
+  "mind_id",
+  "mind_name",
+  "client_ref",
+  "conversation_id",
+  "body",
+  "created_at"
+ ],
+ "session_turns": [
+  "id",
+  "session_id",
+  "role",
+  "content",
+  "created_at"
+ ],
+ "sessions": [
+  "id",
+  "conversation_id",
+  "surface",
+  "surface_id",
+  "opening_line",
+  "model",
+  "created_at",
+  "last_active",
+  "status",
+  "mind_id",
+  "rotation_armed",
+  "harness_sid",
+  "carry_forward",
+  "carry_forward_sid",
+  "carry_forward_at",
+  "context_tokens",
+  "context_threshold",
+  "context_window",
+  "context_observed_at",
+  "name",
+  "color",
+  "effort",
+  "harness",
+  "terminal_held",
+  "context_kind",
+  "context_has_images",
+  "context_model",
+  "resend_content",
+  "resend_images",
+  "resend_goal_rounds",
+  "resend_dispatched_at",
+  "conversation_started_at",
+  "context_opening_tokens",
+  "context_opening_surface",
+  "carry_forward_prompt_cap"
+ ],
+ "settings": [
+  "key",
+  "value",
+  "updated_at"
+ ],
+ "sso_bindings": [
+  "provider",
+  "subject",
+  "username",
+  "created_at"
+ ],
+ "staff.agents": [
+  "id",
+  "task_id",
+  "brief",
+  "about",
+  "outcome",
+  "started_at",
+  "finished_at",
+  "mind_id",
+  "agent_type",
+  "session_id",
+  "conversation_ref",
+  "parent_agent_id",
+  "active_at"
+ ],
+ "staff.statuses": [
+  "name"
+ ],
+ "staff.task_sessions": [
+  "session_id",
+  "task_id",
+  "attached_at"
+ ],
+ "staff.tasks": [
+  "id",
+  "name",
+  "description",
+  "status",
+  "created_at",
+  "updated_at",
+  "stopped_at",
+  "woken_at",
+  "board_item",
+  "question"
+ ],
+ "surface_accounts": [
+  "surface",
+  "account_ref",
+  "username",
+  "linked_at"
+ ],
+ "surface_claims": [
+  "mind_id",
+  "surface",
+  "claimed_ref",
+  "claimed_at",
+  "phrase_hash",
+  "phrase_issued_at",
+  "phrase_expires_at",
+  "bot_ref",
+  "phrase_attempts",
+  "released_at"
+ ],
+ "tools.api_tokens": [
+  "id",
+  "name",
+  "token_hash",
+  "created_at",
+  "last_used_at",
+  "revoked_at"
+ ],
+ "tools.hitl_requests": [
+  "id",
+  "tool_name",
+  "caller_mind",
+  "params_json",
+  "status",
+  "created_at",
+  "expires_at",
+  "decided_at",
+  "tool_method",
+  "tool_path",
+  "tool_body",
+  "outcome_ok",
+  "outcome_status",
+  "outcome_body",
+  "outcome_at"
+ ],
+ "tools.sudo_grants": [
+  "id",
+  "tool_name",
+  "caller_mind",
+  "granted_at",
+  "expires_at"
+ ],
+ "tools.tool_hitl_settings": [
+  "tool_name",
+  "mode",
+  "sudo_timeout_minutes"
+ ],
+ "tools.users": [
+  "id",
+  "username",
+  "password_hash",
+  "is_admin",
+  "created_at",
+  "disabled_at"
+ ],
+ "users": [
+  "id",
+  "username",
+  "password_hash",
+  "created_at",
+  "disabled_at",
+  "must_change",
+  "email",
+  "domain_account",
+  "session_version"
+ ]
+}

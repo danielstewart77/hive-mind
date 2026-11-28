@@ -1,0 +1,387 @@
+"""Unit tests for the Telegram proactive-delivery consumer.
+
+The consumer drains hive_surfaces.proactive and posts each item via the Application's
+bot, splitting messages over Telegram's 4096-char limit.
+"""
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from hive_surfaces import proactive
+from hive_surfaces import telegram_bot
+
+
+@pytest.fixture(autouse=True)
+def _fresh_queue():
+    proactive._reset()
+    yield
+    proactive._reset()
+
+
+async def _run_consumer_until_drained(app):
+    task = asyncio.create_task(telegram_bot._proactive_consumer(app))
+    # Give the consumer a few loop turns to drain the queue.
+    for _ in range(50):
+        await asyncio.sleep(0.005)
+        if proactive._queue.empty():
+            break
+    await asyncio.sleep(0.02)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def test_consumer_posts_item_to_correct_chat():
+    app = MagicMock()
+    app.bot.send_message = AsyncMock()
+    proactive.enqueue(4242, "unsolicited turn")
+
+    await _run_consumer_until_drained(app)
+
+    app.bot.send_message.assert_awaited_once_with(chat_id=4242, text="unsolicited turn")
+
+
+class _VoiceServer:
+    """The voice server's transport: records what it was asked to say."""
+
+    def __init__(self, status=200, audio=b"OGG-AUDIO"):
+        self.status, self.audio, self.asked = status, audio, []
+
+    def post(self, url, json=None, **_):
+        self.asked.append((url, json))
+        server = self
+
+        class _Response:
+            status = server.status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def read(self):
+                return server.audio
+
+            async def text(self):
+                return "voice server is down"
+
+        return _Response()
+
+
+async def test_an_unprompted_turn_is_spoken_to_the_chat_it_was_posted_to(monkeypatch):
+    """A turn the mind took on its own is followed by a voice note, as a
+    reply is: Daniel, 2026-11-23, the chief of staff's wake reports arrived
+    silent while his answers were spoken."""
+    server = _VoiceServer(audio=b"SPOKEN")
+    monkeypatch.setattr(telegram_bot, "http", server)
+    monkeypatch.setattr(telegram_bot, "ALWAYS_VOICE", True)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock()
+    app.bot.send_voice = AsyncMock()
+    proactive.enqueue(4242, "Mordecai has finished the plan.")
+
+    await _run_consumer_until_drained(app)
+
+    assert [asked["text"] for _, asked in server.asked] == ["Mordecai has finished the plan."]
+    call = app.bot.send_voice.await_args
+    assert call.kwargs["chat_id"] == 4242
+    assert call.kwargs["voice"].read() == b"SPOKEN"
+
+
+async def test_a_voice_server_that_is_down_costs_the_sound_and_not_the_text(monkeypatch):
+    """The text is the delivery. A failed voice note must not put the turn
+    back on the queue, where it would be posted a second time."""
+    monkeypatch.setattr(telegram_bot, "http", _VoiceServer(status=503))
+    monkeypatch.setattr(telegram_bot, "ALWAYS_VOICE", True)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock()
+    app.bot.send_voice = AsyncMock()
+    proactive.enqueue(7, "the report")
+
+    await _run_consumer_until_drained(app)
+
+    app.bot.send_message.assert_awaited_once_with(chat_id=7, text="the report")
+    assert proactive._queue.empty()
+
+
+async def test_consumer_splits_long_messages():
+    app = MagicMock()
+    app.bot.send_message = AsyncMock()
+    long_text = "x" * (telegram_bot.TELEGRAM_MSG_LIMIT + 100)
+    proactive.enqueue(7, long_text)
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    sent = "".join(c.kwargs["text"] for c in app.bot.send_message.await_args_list)
+    assert sent == long_text
+    for call in app.bot.send_message.await_args_list:
+        assert call.kwargs["chat_id"] == 7
+        assert len(call.kwargs["text"]) <= telegram_bot.TELEGRAM_MSG_LIMIT
+
+
+async def test_a_failed_send_is_retried_rather_than_dropped(monkeypatch):
+    """Requirement 13: an answer arrives late rather than never.
+
+    This queue is where an undeliverable button answer lands, so a single
+    failed attempt followed by a shrug is the bug, not the behaviour: the
+    operator acted, the action happened, and the sentence saying so is gone.
+    The first send raises and the second succeeds — one message, two attempts.
+    """
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    proactive.enqueue(1, "will land on the retry")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    assert app.bot.send_message.await_args.kwargs["text"] == "will land on the retry"
+
+
+async def test_retrying_spans_an_outage_measured_in_hours(monkeypatch):
+    """Requirement 13: the budget has to match the failure it was written for.
+
+    The 2026-09-17 outage ran for hours. A retry budget measured in seconds
+    does not survive it — it only moves where the answer is lost — so the
+    attempts and the interval together have to cover an outage of that shape.
+    """
+    assert telegram_bot._PROACTIVE_MAX_ATTEMPTS * telegram_bot._PROACTIVE_RETRY_S >= 3600
+
+
+async def test_a_failing_message_goes_to_the_back_of_the_queue(monkeypatch):
+    """Requirement 13: a stuck message must not hold up the ones behind it.
+
+    Retrying in place is simpler and wrong: with a budget spanning hours, one
+    undeliverable item would silence every answer queued behind it for hours
+    too. The second message goes out while the first is still being retried.
+    """
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[RuntimeError("down"), None, None]
+    )
+    proactive.enqueue(1, "keeps failing")
+    proactive.enqueue(2, "behind it")
+
+    await _run_consumer_until_drained(app)
+
+    delivered = [c.kwargs["text"] for c in app.bot.send_message.await_args_list]
+    # The second message was attempted before the first was retried.
+    assert delivered.index("behind it") < len(delivered) - 1 or delivered[-1] == "keeps failing"
+    assert "behind it" in delivered
+
+
+async def test_a_permanently_undeliverable_message_is_given_up_on(monkeypatch):
+    """Requirement 13: retrying is bounded, because the queue has to drain.
+
+    A message with nowhere to go — the bot blocked, the chat deleted — retried
+    forever is a consumer that never empties. It is abandoned to the journal,
+    which is a worse place than the operator's phone and a far better one than
+    nowhere.
+    """
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_MAX_ATTEMPTS", 3)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(side_effect=RuntimeError("blocked"))
+    proactive.enqueue(1, "never deliverable")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 3
+    assert proactive._queue.empty()
+
+
+async def test_what_is_still_queued_at_shutdown_reaches_the_journal(caplog):
+    """Requirement 13: a restart must not lose an answer without a trace.
+
+    The queue is process memory, and restarting the service is the one action
+    the operator performs by hand. Dropping pending answers silently there is
+    the same loss this whole path exists to close.
+    """
+    import logging
+
+    proactive.enqueue(4242, "the answer you never saw")
+
+    with caplog.at_level(logging.WARNING):
+        await telegram_bot._on_shutdown(MagicMock())
+
+    assert any("the answer you never saw" in r.getMessage() for r in caplog.records)
+    assert proactive._queue.empty()
+
+
+async def test_chat_not_found_is_abandoned_without_retrying(monkeypatch):
+    """A destination that does not exist is not an outage.
+
+    "Chat not found" is Telegram's answer about the chat id itself, so no
+    amount of waiting changes it. Given the outage budget it cost 60 attempts
+    over three hours, each logging a warning — 180 lines of one NetSage window
+    on 2026-10-15, for one message that was never deliverable.
+    """
+    from telegram.error import BadRequest
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(side_effect=BadRequest("Chat not found"))
+    proactive.enqueue(1556059743968039065, "nowhere to go")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 1, (
+        "a permanently invalid destination is attempted once, not sixty times"
+    )
+    assert proactive._queue.empty()
+
+
+async def test_a_blocked_bot_is_abandoned_without_retrying(monkeypatch):
+    """Being blocked is a decision, not an outage. Retrying it for three hours
+    tells the operator nothing and fills the journal with a line the sensor
+    reads as an anomaly."""
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=Forbidden("Forbidden: bot was blocked by the user")
+    )
+    proactive.enqueue(42, "blocked")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 1
+    assert proactive._queue.empty()
+
+
+async def test_an_outage_still_gets_the_full_retry_budget(monkeypatch):
+    """The permanent-failure check must not cost a real outage its retries.
+
+    A NetworkError is exactly what the hours-long budget was written for, so
+    it keeps retrying where "Chat not found" stops.
+    """
+    from telegram.error import NetworkError
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[NetworkError("connection reset"), None]
+    )
+    proactive.enqueue(8776938611, "arrives late")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    assert app.bot.send_message.await_args.kwargs["text"] == "arrives late"
+
+
+async def test_a_bad_request_about_the_message_still_retries(monkeypatch):
+    """Only a destination verdict is permanent. A BadRequest naming something
+    else is not read as one, because the class is shared and guessing wide
+    would abandon answers an outage would have delivered."""
+    from telegram.error import BadRequest
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[BadRequest("Message_thread_not_found"), None]
+    )
+    proactive.enqueue(7, "retried")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+
+
+async def test_a_migrated_group_is_redelivered_to_its_new_chat_id(monkeypatch):
+    """The one invalid destination that can be repaired rather than abandoned.
+
+    A group promoted to a supergroup gets a new chat id, and Telegram hands
+    the new one back on the error. python-telegram-bot raises `ChatMigrated`,
+    which subclasses `TelegramError` directly — not `BadRequest` — and whose
+    text is "Group migrated to supergroup. New chat id: N", matching none of
+    the permanent markers. So it took the full 60 attempts at three minutes
+    against an id that would never work, producing exactly the journal
+    signature this change exists to remove, while `exc.new_chat_id` carried
+    the destination that would have worked.
+    """
+    from telegram.error import ChatMigrated
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[ChatMigrated(-1001234567890), None]
+    )
+    proactive.enqueue(-400111, "follows the group")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    assert app.bot.send_message.await_args.kwargs["chat_id"] == -1001234567890, (
+        "the retry goes to the id Telegram named, not the dead one"
+    )
+    assert app.bot.send_message.await_args.kwargs["text"] == "follows the group"
+
+
+async def test_being_kicked_from_a_group_keeps_its_retries(monkeypatch):
+    """`Forbidden` is not one verdict.
+
+    Telegram answers 403 both for a user who blocked the bot (final) and for a
+    bot removed from a group (a re-add fixes it). Treating the class as
+    permanent was the wide guess this change's own reasoning warns against —
+    it journals an answer on the first attempt where three hours of retries
+    would have delivered it.
+    """
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[Forbidden("Forbidden: bot was kicked from the group chat"), None]
+    )
+    proactive.enqueue(-100200, "arrives after the re-add")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+
+
+async def test_a_blocked_user_is_still_final(monkeypatch):
+    """The verdicts that no retry can change still stop on the first answer."""
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    for text in ("Forbidden: bot was blocked by the user",
+                 "Forbidden: user is deactivated"):
+        proactive._reset()
+        app = MagicMock()
+        app.bot.send_message = AsyncMock(side_effect=Forbidden(text))
+        proactive.enqueue(42, "nowhere")
+        await _run_consumer_until_drained(app)
+        assert app.bot.send_message.await_count == 1, text
+
+
+async def test_the_reply_path_does_not_back_off_against_a_dead_chat(monkeypatch):
+    """`_deliver` retried a permanent verdict with backoff before handing the
+    text to the queue. The backoff is for a flaky connection; spending it on
+    an answer that cannot change only delays getting the text into the
+    record."""
+    from telegram.error import BadRequest
+
+    slept = []
+
+    async def no_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(telegram_bot.asyncio, "sleep", no_sleep)
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=BadRequest("Chat not found"))
+
+    ok = await telegram_bot._deliver(bot, 1556059743968039065, "into the record")
+
+    assert ok is False
+    assert bot.send_message.await_count == 1, "attempted once, not three times"
+    assert slept == [], "and no backoff was spent on a verdict"

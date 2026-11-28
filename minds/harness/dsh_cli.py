@@ -55,6 +55,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from core import mind_key
 from minds.harness import chat_surface, role_files, role_guard
 from minds import (
     context_overflow,
@@ -88,7 +89,7 @@ RUNTIME_PATH = MIND_DIR / "runtime.yaml"
 RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
 NAME: str = RUNTIME["name"]
 MIND_ID: str = RUNTIME["mind_id"]
-RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
+RUNTIME_ENV: dict[str, Any] = mind_key.runtime_env(RUNTIME.get("env", {}) or {})
 
 NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
@@ -356,7 +357,7 @@ def _role_hooks_env(env: dict[str, str], timeout: float = 10.0) -> dict[str, str
     source = hooks_config()
     return role_guard.prepare(
         DSH_HOME, source, env.get("MIND_ID") or NAME,
-        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
+        env.get("COMMS_URL", ""), mind_key.resolve(env, "COMMS_BEARER_TOKEN"), timeout=timeout,
         # Story 10.18.15: the hooks and skills its roles name arrive here,
         # before the hooks file dsh is handed is written from the mind's own.
         on_grants=lambda grants: (role_files.provision(
@@ -582,7 +583,7 @@ DEFAULT_PERMISSION_MODE = "danger-full-access"
 PROXY_KEY_ENV = "HIVE_PROXY_KEY"
 
 #: The env names a mind's own block may carry its proxy credential under.
-_PROXY_KEY_SOURCES = ("HIVE_PROVIDER_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
+_PROXY_KEY_SOURCES = ("HIVE_PROVIDER_TOKEN", "MIND_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
 
 #: And its endpoint.
 _PROXY_URL_SOURCES = ("DSH_PROXY_BASE_URL", "OLLAMA_BASE_URL", "OPENAI_BASE_URL",
@@ -1131,7 +1132,11 @@ async def _compose_turn_env(sid: str, state: dict) -> dict[str, str]:
     and compared against a resident process's own environment to decide whether
     that process still speaks for this conversation.
     """
-    env = os.environ.copy()
+    # The key file first: a key replaced since the last turn is the one this
+    # turn's process is given, and a resident process whose composed
+    # environment differs from this one is respawned on it.
+    mind_key.refresh()
+    env = mind_key.snapshot()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     window = await _turn_window(
         state["model"],

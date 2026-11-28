@@ -45,15 +45,13 @@ config = _Config()
 
 
 def admin_credential_owner() -> str:
-    """The one person whose minds may still be sent this gateway's admin
-    credential, or "" for nobody.
+    """The person whose request a message from a mind with no owner on its row
+    is taken to be, or "" for nobody.
 
     `COMMS_ADMIN_CREDENTIAL_OWNER`, else `admin_credential_owner` in
-    comms/config.yaml (read fresh, so setting it needs only a restart). Only
-    for a mind of theirs still running code that refuses its own session
-    credential on the routes the gateway calls; every other mind is sent its
-    own credential and nothing else (DECIDED 2026-11-15, Daniel: a mind not
-    owned by him never reaches his credentials).
+    comms/config.yaml (read fresh). It names a person only. It decides nothing
+    about credentials: no mind is sent the gateway's admin credential, by this
+    or any setting (feature 834, requirement 17).
     """
     if "COMMS_ADMIN_CREDENTIAL_OWNER" in os.environ:
         # Set, even to nothing, it decides: empty is nobody.

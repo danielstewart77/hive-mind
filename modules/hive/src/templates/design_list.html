@@ -1,0 +1,20 @@
+{% extends "layout.html" %}
+{% block title %}Design · Hive{% endblock %}
+{% block content %}
+<main class="design-page">
+    <div class="terminal-box">
+        <h2>design sessions</h2>
+        <p>requirements, tests and the call graph for one piece of work. a mind opens one when you ask it to; it outlives the conversation that created it.</p>
+        <div id="design-error" class="events-error" style="display:none"></div>
+        <table class="design-table">
+            <thead>
+                <tr><th>title</th><th>attached to</th><th>pages</th><th>last written</th><th></th></tr>
+            </thead>
+            <tbody id="design-rows"></tbody>
+        </table>
+        <p id="design-empty" class="event-hints" style="display:none">No design sessions yet.</p>
+    </div>
+</main>
+<script src="{{ request.url_for('static', path='design.js') }}?v={{ asset_versions['design.js'] }}"></script>
+<script>designList();</script>
+{% endblock %}

@@ -21,6 +21,7 @@ NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
 from comms import user_access as ua  # noqa: E402
+from comms_broker_pg import admin_person_key  # noqa: E402
 from comms_broker_pg import (  # noqa: E402,F401 - fixtures
     broker_db,
     execute,
@@ -69,7 +70,7 @@ def gateway(broker_db, monkeypatch):
     decision is the handler's.
     """
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    admin_person_key(ADMIN_TOKEN)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
     async def seed():
@@ -452,17 +453,15 @@ def test_a_mind_records_turns_for_its_own_conversations(gateway):
     """A mind's rotation hook presents that mind's own credential. Refusing it
     here takes that mind's rotation ledger down silently: terminal turns never
     reach it, `last_active` stops being bumped, and the stale-session sweep
-    eventually suspends a terminal in daily use. An admin reaches every
-    conversation, because comms reports on every mind's behalf."""
+    eventually suspends a terminal in daily use."""
     client, spy = gateway
 
-    for token in (SKIPPY_MIND_TOKEN, ADMIN_TOKEN):
-        answer = client.post(
-            "/sessions/record-turn", json=_turn_body("111"), headers=_auth(token)
-        )
-        assert answer.json() == {"ok": True}, token
+    answer = client.post(
+        "/sessions/record-turn", json=_turn_body("111"), headers=_auth(SKIPPY_MIND_TOKEN)
+    )
+    assert answer.json() == {"ok": True}
 
-    assert [t["client_ref"] for t in spy["recorded"]] == ["111", "111"]
+    assert [t["client_ref"] for t in spy["recorded"]] == ["111"]
 
 
 def test_a_mind_cannot_record_a_turn_on_another_minds_conversation(gateway):

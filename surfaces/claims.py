@@ -24,7 +24,7 @@ import asyncio
 import logging
 import os
 
-from hive_surfaces import surface_claim
+from hive_surfaces import own_key, surface_claim
 
 from config import config as stack_config
 
@@ -151,7 +151,8 @@ def install_claim_resolver(surface: str) -> surface_claim.ClaimResolver | None:
     "my bot refuses me" to a container with no mind id.
     """
     comms_url = os.environ.get("COMMS_URL", "").strip()
-    token = os.environ.get("COMMS_BEARER_TOKEN", "").strip()
+    # The bot holds no credential of its own: it presents its mind's key.
+    token = own_key.current  # read at each ask, so a replaced key is followed
     mind_id = os.environ.get("MIND_ID", "").strip()
     if not comms_url or not mind_id:
         log.warning(

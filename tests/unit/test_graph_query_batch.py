@@ -74,7 +74,12 @@ class Seeded:
 @pytest_asyncio.fixture
 async def client(store, monkeypatch):
     """The real app over ASGI, on this test's own event loop."""
-    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    # A service key recorded in the one record of keys: reaches every owner.
+    from hive_data import access, core
+    import time
+    await core.upsert_credential(
+        holder="reader-for-tests", username="daniel", role="service",
+        token_sha=access.digest(ADMIN_TOKEN), created_at=time.time(), revoked_at=None)
 
     from lucent_api.server import create_app
 

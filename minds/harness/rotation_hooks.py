@@ -25,6 +25,7 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+from core import mind_key
 from minds import models_api, rotation_marker_api, rotation_policy
 from minds.harness.hook_commands import managed_python_command
 
@@ -372,7 +373,7 @@ def check(event: dict, harness: str, runtime_path: Path) -> dict | None:
              f"reason={policy.get('reason') or 'invalid_value'} sid={conversation_id}")
 
     comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
-    bearer = os.environ.get("COMMS_BEARER_TOKEN", "")
+    bearer = mind_key.resolve(os.environ, "COMMS_BEARER_TOKEN")
     client_type = os.environ.get("SURFACE", "")
     client_ref = os.environ.get("CLIENT_REF", "")
     report = {"conversation_id": conversation_id, "kind": measured["kind"],
@@ -441,7 +442,7 @@ def fire(event: dict, runtime_path: Path) -> None:
     marker["updated_at"] = time.time()
     marker_path.write_text(json.dumps(marker))
     comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
-    bearer = os.environ.get("COMMS_BEARER_TOKEN", "")
+    bearer = mind_key.resolve(os.environ, "COMMS_BEARER_TOKEN")
     try:
         response = _post(f"{comms_url}/sessions/fire-rotation", bearer, {
             "client_type": marker.get("client_type") or "",

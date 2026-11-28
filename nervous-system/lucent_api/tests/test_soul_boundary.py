@@ -48,13 +48,14 @@ import pytest
 import pytest_asyncio
 from hive_data import graph
 
-from .conftest import unique
+from .conftest import an_administrator, put_credential, unique
 
 # Skippy's own credential. It used to be one value every hook on every host
 # held; it is now this mind's alone, and the holder is the mind.
 SERVICE_TOKEN = "skippys-own-credential"  # secret-guard: allow
-ADMIN_TOKEN = "admin-token-hive-tools-holds"  # secret-guard: allow
-SOUL_TOKEN = "soul-token-only-the-console-holds"  # secret-guard: allow
+#: The key the hive site presents for a person editing a soul: an
+#: administrator's own, made by the `client` fixture.
+SOUL_TOKEN = ""
 
 ORIGINAL_SOUL = [
     "I am Skippy the Magnificent.",
@@ -116,8 +117,8 @@ async def client(store, monkeypatch):
     — the `store` fixture owns the pool, and a lifespan shutdown here would
     close it under the fixtures that still need it.
     """
-    monkeypatch.setenv("LUCENT_SOUL_BEARER_TOKEN", SOUL_TOKEN)
-    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    global SOUL_TOKEN
+    _, SOUL_TOKEN = await an_administrator()
 
     from lucent_api.server import create_app
 
@@ -247,12 +248,8 @@ async def test_a_blob_for_a_node_that_is_not_a_mind_is_left_alone(a_soul):
 @pytest.mark.asyncio
 async def test_the_sanctioned_route_takes_its_own_credential_and_only_that(
         client, a_soul):
-    """The service token and the admin token are turned away at the door.
-
-    The admin case is the interesting one: hive-tools holds it, and
-    hive-tools is the service the Stop hook reached Ollama through. A
-    boundary admin can cross is a boundary the sub-mind path can cross.
-    """
+    """A service key is turned away at the door; an administrator's own
+    person key opens it."""
     wanted = ORIGINAL_SOUL + ["I handle indignity with grace."]
     body = {
         "name": a_soul.name,
@@ -261,7 +258,7 @@ async def test_the_sanctioned_route_takes_its_own_credential_and_only_that(
         "reason": "Reviewed a flagged proposal and accepted it, reworded.",
     }
 
-    for token in (SERVICE_TOKEN, ADMIN_TOKEN):
+    for token in (SERVICE_TOKEN,):
         refused = await client.post(
             "/graph/soul", headers={"Authorization": f"Bearer {token}"},
             json=body)
@@ -277,21 +274,18 @@ async def test_the_sanctioned_route_takes_its_own_credential_and_only_that(
 
 
 @pytest.mark.asyncio
-async def test_an_unconfigured_soul_token_locks_the_route_rather_than_opening_it(
-        client, a_soul, monkeypatch):
-    """The service bearer used to bypass when unset; this must not.
+async def test_a_person_who_is_not_an_administrator_or_owner_is_refused(
+        client, a_soul):
+    """A person's own key opens the soul of a mind they own and of nobody
+    else's, and a person who is not an administrator is no administrator."""
+    _, plain = await an_administrator(admin=False)
 
-    A soul that is writable because nobody set a variable is exactly the
-    posture this boundary exists to end.
-    """
-    monkeypatch.delenv("LUCENT_SOUL_BEARER_TOKEN")
-
-    response = await client.post(
-        "/graph/soul", headers={"Authorization": "Bearer anything"},
-        json={"name": a_soul.name, "soul_values": [], "actor": "mind",
+    refused = await client.post(
+        "/graph/soul", headers={"Authorization": f"Bearer {plain}"},
+        json={"name": a_soul.name, "soul_values": [], "actor": "console",
               "reason": "x"})
 
-    assert response.status_code == 503, response.text
+    assert refused.status_code == 403, refused.text
     assert await a_soul.soul() == ORIGINAL_SOUL
 
 
@@ -304,12 +298,9 @@ async def _a_mind_with_its_own_key(a_soul: Mind) -> str:
     The holder is the mind's short name and the credential carries the uuid
     its Mind node is keyed by — the shape every live mind's row has.
     """
-    from lucent_api import holder_access
-
     token = unique("own-key")
-    await holder_access.put_credential(
-        holder=a_soul.name, username=OWNER, token=token,
-        role=holder_access.MIND, mind_id=a_soul.mind_id)
+    await put_credential(
+        a_soul.name, OWNER, token, role="mind", mind_id=a_soul.mind_id)
     return token
 
 

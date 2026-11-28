@@ -62,6 +62,7 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+from core import mind_key
 from minds.harness import role_guard
 
 #: Where the tracked scripts are kept in this repository.
@@ -670,7 +671,7 @@ def granted_hooks(environ: dict | None = None) -> list[str] | None:
     environ = os.environ if environ is None else environ
     mind = environ.get("MIND_ID") or environ.get("MIND_NAME") or ""
     grants = role_guard.fetch(mind, environ.get("COMMS_URL", ""),
-                              environ.get("COMMS_BEARER_TOKEN", ""))
+                              mind_key.resolve(environ, "COMMS_BEARER_TOKEN"))
     if not grants or not grants.get("managed"):
         return None
     hooks = grants.get("hooks")

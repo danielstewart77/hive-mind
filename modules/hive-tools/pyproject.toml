@@ -1,0 +1,17 @@
+[project]
+name = "hive-tools"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# ../hive-data: the data package is the checkout's own modules/hive-data.
+pythonpath = [".", "../hive-data"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120

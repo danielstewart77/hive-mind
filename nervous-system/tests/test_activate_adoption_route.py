@@ -11,6 +11,7 @@ Checked against the row the real session manager stored. The mind is the
 one thing stubbed: releasing a pane and spawning a process are calls to it.
 """
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import importlib
 from unittest.mock import AsyncMock, patch
 
@@ -32,7 +33,7 @@ GRILL_ADMIN = "admin-credential-for-tests"  # secret-guard: allow
 
 @pytest.fixture()
 def client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    admin_person_key(GRILL_ADMIN)
 
     from comms import server as server_module
 

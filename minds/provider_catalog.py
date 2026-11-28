@@ -27,7 +27,7 @@ async def fetch(connection: dict, env: dict) -> list[dict]:
     base = str(connection.get("base_url") or "").rstrip("/")
     root = base[:-3] if base.endswith("/v1") else base
     v1 = base if base.endswith("/v1") else base + "/v1"
-    token = env.get("HIVE_PROVIDER_TOKEN") or env.get("DSH_API_KEY") or env.get("OPENAI_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN") or ""
+    token = env.get("HIVE_PROVIDER_TOKEN") or env.get("MIND_KEY") or env.get("DSH_API_KEY") or env.get("OPENAI_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN") or ""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     if api == "anthropic":
         headers = {"anthropic-version": "2023-06-01", **({"x-api-key": token} if token else {})}

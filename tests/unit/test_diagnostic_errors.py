@@ -86,7 +86,7 @@ def test_mind_error_feed_requires_admin_and_returns_terminal_exception(monkeypat
 
     from minds import mind_server
 
-    monkeypatch.setenv('MIND_ADMIN_TOKEN', 'diagnostics-test-admin')
+    monkeypatch.setenv('MIND_KEY', 'diagnostics-test-admin')
     client = TestClient(mind_server.app)
     assert client.get('/diagnostics/errors').status_code == 401
     try:

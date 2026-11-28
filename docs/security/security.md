@@ -6,6 +6,8 @@ Hive Mind is an AI system with filesystem access, API credentials, and the abili
 
 **Secret isolation.** Secrets are stored in the system keyring (`core/keyring_backend.py`, a `keyrings.alt.file.PlaintextKeyring` subclass), retrieved via `core/secrets.py::get_credential(key)` — keyring first, falls back to `os.getenv()`. A root `.env` and `nervous-system/.env` still hold real secrets consumed via Docker Compose `env_file:` (both `lucent` and `comms` use it) — this isn't a keyring-only system; `.env` files are a real, live secret path, not just a third-party fallback.
 
+**hive-tools isolation.** Moving its source into this repository gave nobody new power: it is the only hive service holding the host's Docker socket, its secrets and state sit outside the checkout, its image is built from the committed tree, and `modules/` is hidden from every container that mounts the checkout. See [docs/architecture/hive-tools.md](../architecture/hive-tools.md).
+
 **hive-tools bearer auth.** The external `hive-tools` HTTP service requires `Authorization: Bearer <token>` on every request; the token is stored in the keyring as `HIVE_TOOLS_TOKEN` and propagated into mind containers via compose `env_file`. See [docs/architecture/hive-tools.md](../architecture/hive-tools.md).
 
 **hive-comms / hive-lucent bearer auth.** Both services require `COMMS_BEARER_TOKEN` / `LUCENT_BEARER_TOKEN` on every route except `/health`. Empty token = bypass mode with a startup warning — set both in production. See [nervous-system/README.md](../../nervous-system/README.md#bearer-auth).

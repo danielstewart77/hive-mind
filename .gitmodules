@@ -1,45 +1,13 @@
-# hive-mind's manifest: every repository it depends on, cloned with it under
-# modules/. Not pinned: scripts/modules.sh brings each to the newest commit of
-# its `branch` and leaves it checked out on that branch. To pin one for a
-# reason, add `pin = <commit>` to its entry. `ignore = all` keeps the commit
-# hive-mind records from drifting into unrelated hive-mind commits.
-[submodule "modules/hive-tools"]
-	path = modules/hive-tools
-	url = https://github.com/danielstewart77/hive-tools.git
-	branch = master
-	ignore = all
-[submodule "modules/hive-data"]
-	path = modules/hive-data
-	url = https://github.com/danielstewart77/hive-data.git
-	branch = main
-	ignore = all
-[submodule "modules/hive"]
-	path = modules/hive
-	url = https://github.com/danielstewart77/hive.git
-	branch = main
-	ignore = all
-[submodule "modules/terminal"]
-	path = modules/terminal
-	url = https://github.com/danielstewart77/terminal.git
-	branch = main
-	ignore = all
+# hive-mind's manifest: the two repositories that stay outside it, each
+# cloned under modules/. A release of hive-mind pins each at the exact commit
+# its tree records (the gitlink); scripts/modules.sh checks that commit out.
+# `branch` is read only when a developer opts in to following a branch tip
+# (HIVE_MODULES_FLOAT=1); `pin = <commit>` held a module at a commit then.
 [submodule "modules/inference-proxy"]
 	path = modules/inference-proxy
 	url = https://github.com/danielstewart77/inference-proxy.git
 	branch = main
-	ignore = all
 [submodule "modules/hive-harness-dsh"]
 	path = modules/hive-harness-dsh
 	url = https://github.com/danielstewart77/hive-harness-dsh.git
 	branch = master
-	ignore = all
-[submodule "modules/hive-surfaces"]
-	path = modules/hive-surfaces
-	url = https://github.com/danielstewart77/hive-surfaces.git
-	branch = main
-	ignore = all
-[submodule "modules/auth-service"]
-	path = modules/auth-service
-	url = https://github.com/danielstewart77/auth-service.git
-	branch = main
-	ignore = all

@@ -53,7 +53,6 @@ HARNESS_SID = "codex-thread-0001"
 @pytest.fixture()
 def gateway(broker_db, monkeypatch):
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
     async def seed():

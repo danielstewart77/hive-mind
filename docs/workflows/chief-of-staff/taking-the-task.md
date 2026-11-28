@@ -14,8 +14,9 @@ description: Take a piece of work the owner hands over, give it to the mind that
 `{"error"}` on a refusal. Every comms call goes to `$COMMS_URL` with
 `-H "Authorization: Bearer $COMMS_BEARER_TOKEN" -H "Content-Type: application/json"`:
 your own credential, which the gateway accepts for a mind of your owner.
-Only the live feed, `GET /sessions/live` and `GET /sessions/live/text`, needs
-the admin token, `$COMMS_ADMIN_BEARER_TOKEN`.
+`GET /sessions/live` takes your own key too and answers with your own mind's
+rows. Only the live text, `GET /sessions/live/text`, is an administrator route
+no mind can call.
 Never the broker: it ends a callee's session after each wake, which orphans
 the task.
 
@@ -586,7 +587,7 @@ board item the task names.
    `GET $COMMS_URL/sessions/live/text?session_id=<id>` for the blocks while
    they are still buffered. Every call carries
    `-H "Authorization: Bearer $COMMS_BEARER_TOKEN"`, except the live text, which is
-   an admin route and takes `$COMMS_ADMIN_BEARER_TOKEN`.
+   an administrator route that no mind can call; read the history instead.
 2. Judge by reading, never by pattern-matching the text: did it finish, fail,
    or is it holding a question?
 3. If it is holding a question, decide whether the task already answers it —

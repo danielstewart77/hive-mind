@@ -27,11 +27,13 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from core import mind_key
 from minds import mind_server, models_api, pty_attach, runtime_api
 from minds.harness import claude_cli, codex_cli, dsh_cli, rotation_hooks
 
-SESSION = {"Authorization": "Bearer test-mind-session-token"}  # secret-guard: allow
 ADMIN_TOKEN = "test-admin-token"  # secret-guard: allow
+# What the gateway shows a mind is made from the mind's one key (here MIND_KEY).
+SESSION = {"Authorization": f"Bearer {mind_key.gateway_credential(ADMIN_TOKEN)}"}
 ADMIN = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "transcripts"
 CODEX_ROLLOUT = "rollout-2026-06-01T16-11-51-019e83f4-b0b3-7a61-b649-392094c6ef10.jsonl"
@@ -122,7 +124,7 @@ def homes(monkeypatch, tmp_path):
         adapter.SESSIONS.clear()
     codex_cli.THREADS.clear()
     mind_server.HARNESS_OF.clear()
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MIND_KEY", ADMIN_TOKEN)
     # A harness process running this suite carries its own model's figures,
     # and a spawn inherits the environment it runs in.
     for var in ("HIVE_MODEL_CONTEXT_WINDOW", "HIVE_ROTATION_THRESHOLD_TOKENS"):
@@ -721,7 +723,7 @@ def _runtime_app(tmp_path: Path) -> tuple[TestClient, Path]:
 def test_setting_the_default_harness_with_a_model_it_offers_writes_both(
     tmp_path, proxy, monkeypatch,
 ):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MIND_KEY", ADMIN_TOKEN)
     proxy({"codex": [{"id": "gpt-5.6-terra", "context_window": 400_000}]})
     client, path = _runtime_app(tmp_path)
 
@@ -743,7 +745,7 @@ def test_setting_the_default_harness_with_a_model_it_offers_writes_both(
 def test_a_default_harness_without_a_model_it_offers_is_refused_and_nothing_written(
     tmp_path, proxy, monkeypatch, body,
 ):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MIND_KEY", ADMIN_TOKEN)
     proxy({"codex": [{"id": "gpt-5.6-terra"}], "claude": [{"id": "claude-opus-5"}]})
     client, path = _runtime_app(tmp_path)
     before = path.read_bytes()
@@ -1720,6 +1722,7 @@ def test_the_gateway_drops_a_replaced_conversations_rotation_marker(
     it on the mind's disk, where only the mind can reach it. Only that
     conversation's files go; absent ones are already gone."""
     monkeypatch.setenv("AUTO_REMEMBER_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("MIND_KEY", ADMIN_TOKEN)
     for path in _markers(tmp_path, "old-conv") + _markers(tmp_path, "live-conv"):
         path.write_text("{}")
     client = TestClient(mind_server.app)

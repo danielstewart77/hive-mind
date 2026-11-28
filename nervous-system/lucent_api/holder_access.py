@@ -64,10 +64,11 @@ for a container that had not been configured yet. A store that cannot
 establish who is calling refuses: 503, naming the reason, rather than handing
 every mind's memory to the LAN while it waits for an operator to notice.
 
-`LUCENT_ADMIN_BEARER_TOKEN` is kept, and is the one credential that is still a
-shared value. It has to be: it is how the console reaches the store, and it is
-the only way the mint route is reachable on a first boot where the credentials
-table is necessarily empty.
+There is no administrator credential. A key is recognised from the one record
+in `core.credentials`, read on every request (`hive_data.access`): recorded,
+replaced or cut off once there, it takes effect here on the next request. This
+store registers no keys of its own. What an administrator does here is done
+with the administrator's own person key (`auth.require_admin_bearer`).
 
 The *variable* holders present is still `LUCENT_BEARER_TOKEN`, deliberately.
 It is the same slot it always was, and renaming it would mean editing every
@@ -80,15 +81,12 @@ sharing somebody else's identity.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import os
-import time
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
-from hive_data import graph
+from hive_data import access, core
 
 #: What a holder is. A mind or a service is the machinery; a person is not.
 MIND = "mind"
@@ -110,19 +108,6 @@ PRIMARY_USER_ENV = "LUCENT_PRIMARY_USER"
 
 def primary_user() -> str:
     return str(os.getenv(PRIMARY_USER_ENV, "")).strip().lower()
-
-#: There is no DDL here any more, and that is the point.
-#:
-#: `init_credentials` used to run `CREATE TABLE IF NOT EXISTS credentials` on
-#: every gated request. Against Postgres that is unqualified, so it resolves
-#: against `search_path` and builds an empty `public.credentials` while the
-#: real holders sit in `memory.credentials` — a store that reads as
-#: configured while every mind gets a four-oh-one. `CREATE TABLE IF NOT
-#: EXISTS` is also not atomic, so two first requests after a restart can
-#: raise `DuplicateTable` out of a FastAPI dependency, which is a five
-#: hundred on authentication rather than a refusal. The table is applied to
-#: the database as an artifact, once, outside this process.
-
 
 @dataclass(frozen=True)
 class Caller:
@@ -303,121 +288,33 @@ class Caller:
 
 
 def digest(token: str) -> str:
-    """The stored form. A value this process is handed is never written down
-    as it arrived, so a reader of the table cannot present what it finds."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    """The stored form of a key, as the one record keeps it."""
+    return access.digest(token)
 
 
 def normalize_holder(name: object) -> str:
     return str(name or "").strip().lower()
 
 
-async def put_credential(
-    holder: str,
-    username: str,
-    token: str,
-    role: str = MIND,
-    mind_id: str | None = None,
-) -> dict:
-    """Mint or replace one holder's credential.
-
-    Replacing clears a revocation: an operator issuing a new value has not
-    asked for it to arrive dead.
-    """
-    key = normalize_holder(holder)
-    if not key:
-        raise ValueError("a credential names the holder it belongs to")
-    name = normalize_holder(username)
-    if not name:
-        raise ValueError("a credential names the user its holder answers to")
-    if not token:
-        raise ValueError("a credential needs a value")
-    if key == SHARED:
-        raise ValueError(
-            "'shared' is a provenance every mind writes to, not a holder"
-        )
-    if role not in ROLES:
-        raise ValueError(f"unknown credential role: {role!r}")
-    sha = digest(token)
-    clash = await graph.credential_holder_of_digest(
-        token_sha=sha, other_than=key)
-    if clash:
-        raise ValueError(
-            f"that value is already held by {clash!r}; "
-            "a credential belongs to one holder"
-        )
-    provenance = str(mind_id or "").strip() or None
-    now = time.time()
-    await graph.credential_put(
-        holder=key, username=name, role=role, token_sha=sha,
-        mind_id=provenance, created_at=now)
-    return {
-        "holder": key,
-        "username": name,
-        "role": role,
-        "mind_id": provenance,
-        "created_at": now,
-    }
-
-
-async def revoke_credential(holder: str) -> bool:
-    """Mark one holder's credential dead, and only that holder's."""
-    written = await graph.credential_revoke(
-        holder=normalize_holder(holder), at=time.time())
-    return int(written.get("rows", 0)) > 0
-
-
-async def all_credentials() -> list[dict]:
-    """Every holder and whether it is live. Never the value.
-
-    An operator does not need the value, they need to know whether the
-    holder has one that works.
-    """
-    rows = await graph.credentials_all()
-    rows.sort(key=lambda r: (str(r.get("username") or ""),
-                             str(r.get("holder") or "")))
-    return [
-        {
-            "holder": r["holder"],
-            "username": r["username"],
-            "role": r["role"],
-            "mind_id": r["mind_id"],
-            "created_at": r["created_at"],
-            "revoked_at": r["revoked_at"],
-            "live": r["revoked_at"] is None,
-        }
-        for r in rows
-    ]
-
-
 async def credential_for_token(token: str) -> Caller | None:
-    """The holder a presented value belongs to, or None.
+    """The holder a presented key belongs to, or None.
 
-    Read per call, never cached: a revocation that needs a restart to land is
-    not a revocation.
+    Read from the one record (`core.credentials`) per call, never cached: a
+    key replaced or cut off there is refused here on the next request. A
+    person's own key is no memory-store caller (it is accepted only for the
+    administrator and soul routes, which read it themselves).
     """
-    if not token:
+    key = await access.key_for(token)
+    if key is None or key.role == access.USER_KEY:
         return None
-    presented = digest(token)
-    rows = await graph.credentials_live()
-    for row in rows:
-        holder = row["holder"]
-        username = row["username"]
-        role = row["role"]
-        mind_id = row["mind_id"]
-        token_sha = row["token_sha"]
-        # Constant-time, on bytes: `compare_digest` raises TypeError on a str
-        # holding anything outside ASCII.
-        if hmac.compare_digest(
-            presented.encode("ascii"), str(token_sha).encode("ascii")
-        ):
-            return Caller(
-                holder=normalize_holder(holder),
-                username=normalize_holder(username),
-                role=str(role or PERSON),
-                mind_id=str(mind_id or ""),
-            )
-    return None
+    role = key.role if key.role in ROLES else SERVICE
+    mind_id = ""
+    if role == MIND:
+        known = await core.get_mind_by_id_or_name(key.holder)
+        if known is not None:
+            mind_id = str(known["mind_id"] or "")
+    return Caller(holder=key.holder, username=key.username, role=role,
+                  mind_id=mind_id)
 
 
 def _bearer(authorization: str) -> str:
@@ -434,29 +331,40 @@ def _bearer(authorization: str) -> str:
 
 
 async def resolve_caller(token: str) -> Caller:
-    admin = os.environ.get("LUCENT_ADMIN_BEARER_TOKEN", "")
-    if admin and token and hmac.compare_digest(
-        token.encode("utf-8"), admin.encode("utf-8")
-    ):
-        return Caller(is_admin=True, role=SERVICE)
     found = await credential_for_token(token)
     return found or Caller()
 
 
+#: The one read a signed-in person's own key may make of the graph: the picture
+#: the hive site draws for them. Nothing else of the graph or of memory.
+PERSON_GRAPH_READ = ("GET", "/graph/data")
+
+
+async def _person_graph_caller(token: str) -> Caller | None:
+    """The caller for a person's own key on the graph picture: their own graph,
+    or every graph for an administrator. None for any other key."""
+    key = await access.key_for(token)
+    if key is None or key.role != access.USER_KEY:
+        return None
+    if await access.live_person(key.username) is None:
+        return None
+    return Caller(holder=key.username, username=key.username, role=PERSON,
+                  is_admin=await access.person_is_administrator(key.username))
+
+
 async def _store_configured() -> bool:
-    """Whether this store can establish who anybody is.
+    """Whether the one record holds any live key at all.
 
     The read is not wrapped in a broad `except`. A failure here means the
     database did not answer, and reporting that as "no credentials
     configured" sends the operator to the credentials page over a store
     whose credentials are fine.
     """
-    if os.environ.get("LUCENT_ADMIN_BEARER_TOKEN"):
-        return True
-    return await graph.credentials_configured()
+    return bool(await core.list_live_credentials())
 
 
-async def require_holder(authorization: str = Header(default="")) -> Caller:
+async def require_holder(authorization: str = Header(default=""),
+                         request: Request = None) -> Caller:  # type: ignore[assignment]
     """The FastAPI dependency every memory and graph route is gated by.
 
     Returns the caller rather than None, because which mind is asking is the
@@ -475,6 +383,9 @@ async def require_holder(authorization: str = Header(default="")) -> Caller:
     if not token:
         raise HTTPException(401, "Missing or invalid Authorization header")
     caller = await resolve_caller(token)
+    if (not caller.recognised and request is not None
+            and (request.method, request.url.path) == PERSON_GRAPH_READ):
+        caller = await _person_graph_caller(token) or caller
     if not caller.recognised:
         raise HTTPException(401, "Invalid token")
     return caller

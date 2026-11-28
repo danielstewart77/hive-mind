@@ -1,0 +1,27 @@
+# Attaches the wheel and sdist of hive-surfaces to the GitHub release of a tag
+# `hive-surfaces-vX.Y.Z`. Only that tag form starts it, and only that package
+# is built: another package's tag (hive-data-v..., a bare v...) never does.
+name: hive-surfaces release
+on:
+  push:
+    tags:
+      - "hive-surfaces-v[0-9]+.[0-9]+.[0-9]+"
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build (refuses unless the tag equals pyproject's version)
+        run: python scripts/build-package-release.py "$GITHUB_REF_NAME" --out dist
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "hive-surfaces ${GITHUB_REF_NAME#hive-surfaces-v}"
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

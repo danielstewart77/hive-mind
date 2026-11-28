@@ -1,0 +1,14 @@
+{% extends "layout.html" %}
+{% block title %}Waiting for you · Hive{% endblock %}
+{% block content %}
+<main class="page approval-page">
+  <div class="surface" style="padding:1rem;display:grid;gap:.75rem;max-width:900px">
+    <h1>Waiting for your yes</h1>
+    <p>Each of these is a call a mind has open right now, waiting on you. If nobody answers in time the mind is told no.</p>
+    {% if not waiting %}<p>Nothing is waiting for you.</p>{% endif %}
+    {% for row in waiting %}
+      <p><a href="/approvals/{{ row.hitl_request_id }}">{{ row.caller_mind }} asks to use {{ row.tool_name }}</a>, asked {{ row.asked_at }}.</p>
+    {% endfor %}
+  </div>
+</main>
+{% endblock %}

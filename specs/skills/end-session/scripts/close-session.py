@@ -34,7 +34,7 @@ def load_env() -> None:
 
 
 def gateway_request(path: str, method: str = "GET") -> object:
-    token = os.environ.get("COMMS_BEARER_TOKEN", "")
+    token = os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN", "")
     base_url = os.environ.get("COMMS_URL", "")
     if not token or not base_url:
         raise RuntimeError("COMMS_BEARER_TOKEN and COMMS_URL are required")

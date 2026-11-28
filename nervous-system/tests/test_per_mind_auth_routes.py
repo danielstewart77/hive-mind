@@ -8,6 +8,7 @@ whether a refusal reaches a person as itself or as "Internal server error" and
 """
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key, service_key  # noqa: E402
 import asyncio
 import importlib
 from unittest.mock import patch
@@ -40,7 +41,7 @@ def _run(coro):
 
 @pytest.fixture
 def app_client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
 
     from comms import server as server_module
 
@@ -118,7 +119,8 @@ def test_the_models_route_answers_502_rather_than_an_empty_catalog(app_client) -
     is the distinction the picker was built to carry."""
     client, server_module = app_client
     with patch.object(server_module.session_mgr, "mind_models", _refusing):
-        response = client.get("/models", params={"mind_id": MIND_A})
+        response = client.get("/models", params={"mind_id": MIND_A},
+                              headers={"Authorization": f"Bearer {service_key('a-service-key-for-tests')}"})
     assert response.status_code == 502
     assert "credential" in response.text
 

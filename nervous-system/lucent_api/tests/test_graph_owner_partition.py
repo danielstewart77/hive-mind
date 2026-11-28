@@ -30,7 +30,7 @@ import hive_data
 from hive_data import graph as hd_graph
 
 from lucent_api import holder_access as ha
-from lucent_api.tests.conftest import unique
+from lucent_api.tests.conftest import put_credential, unique
 
 ADMIN = "lucent-admin-credential"  # secret-guard: allow
 
@@ -82,15 +82,14 @@ async def hive(store, registered_types, monkeypatch):
             harness="claude", registered_at=1_800_000_000.0,
             last_seen=1_800_000_000.0)
 
-    await ha.put_credential(holders["skippy"], mine, tokens["skippy"],
+    await put_credential(holders["skippy"], mine, tokens["skippy"],
                             role=ha.MIND, mind_id=skippy_uuid)
-    await ha.put_credential(holders["mordecai"], mine, tokens["mordecai"],
+    await put_credential(holders["mordecai"], mine, tokens["mordecai"],
                             role=ha.MIND)
-    await ha.put_credential(holders["zach"], theirs, tokens["zach"],
+    await put_credential(holders["zach"], theirs, tokens["zach"],
                             role=ha.MIND, mind_id=zach_uuid)
-    await ha.put_credential(holders["comms"], mine, tokens["comms"],
+    await put_credential(holders["comms"], mine, tokens["comms"],
                             role=ha.SERVICE)
-    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN)
 
     from lucent_api.server import create_app
 
@@ -310,7 +309,7 @@ async def test_a_holder_whose_credential_names_no_user_reaches_nothing(
     # Minted by hand: `put_credential` refuses a credential naming no user,
     # and the row is the state this guard exists for.
     await inspector.execute(
-        'INSERT INTO memory.credentials '
+        'INSERT INTO core.credentials '
         '(holder, username, role, token_sha, created_at) '
         'VALUES ($1, $2, $3, $4, $5)',
         unique("nobody"), "", ha.MIND, ha.digest(nobodys), 1.0)
@@ -488,12 +487,6 @@ async def test_a_service_credential_reaches_every_owners_graph(hive) -> None:
         assert (await _query(hive, hive.comms, name))["found"] is True, name
 
 
-@pytest.mark.asyncio
-async def test_the_admin_credential_reaches_every_owners_graph(hive) -> None:
-    theirs = hive.name("Clay")
-    await _seed(hive, theirs, owner=hive.theirs)
-
-    assert (await _query(hive, hive.admin, theirs))["found"] is True
 
 
 @pytest.mark.asyncio
@@ -513,34 +506,8 @@ async def test_a_service_credential_edits_another_owners_node(
     assert (await _blob(inspector, name, hive.theirs))["checked"] is True
 
 
-@pytest.mark.asyncio
-async def test_the_admin_credential_edits_another_owners_node(
-    hive, inspector
-) -> None:
-    name = hive.name("Clay")
-    await _seed(hive, name, owner=hive.theirs)
-
-    answer = await hive.client.post(
-        "/graph/properties/merge", headers=hive.h(hive.admin),
-        json={"entity_type": "Person", "name": name, "owner": hive.theirs,
-              "properties": json.dumps({"checked": True})})
-
-    assert answer.status_code == 200, answer.text
-    assert (await _blob(inspector, name, hive.theirs))["checked"] is True
 
 
-@pytest.mark.asyncio
-async def test_a_node_the_admin_creates_is_readable_by_a_mind(
-    hive, monkeypatch
-) -> None:
-    """The admin value answers for nobody, so a row it creates takes the
-    primary user — never the empty string, which no mind can read."""
-    monkeypatch.setenv("LUCENT_PRIMARY_USER", hive.mine)
-    name = hive.name("NewGuy")
-
-    assert (await _create(hive, hive.admin, name)).status_code == 200
-
-    assert (await _query(hive, hive.skippy, name))["found"] is True
 
 
 @pytest.mark.asyncio
@@ -773,3 +740,24 @@ async def test_an_upserts_node_half_landing_without_its_edge_says_so(
     assert node in detail and "MEMBER_OF" in detail, detail
     # The node half really did land, which is the fact the refusal reports.
     assert await _row(inspector, node, hive.mine) is not None
+
+
+# ---- the hive site's graph picture, asked with a person's own key ---------
+
+
+@pytest.mark.asyncio
+async def test_a_persons_own_key_draws_their_graph_and_opens_nothing_else(hive) -> None:
+    from lucent_api.tests.conftest import an_administrator
+
+    person, key = await an_administrator(admin=False, username=hive.mine)
+    await _seed(hive, hive.name("mine"), hive.mine)
+    await _seed(hive, hive.name("theirs"), hive.theirs)
+
+    drawn = await hive.client.get("/graph/data", headers=hive.h(key))
+    refused = await hive.client.post(
+        "/graph/query", headers=hive.h(key), json={"names": [hive.name("mine")]})
+
+    labels = {n["label"] for n in drawn.json()["nodes"]}
+    assert drawn.status_code == 200
+    assert hive.name("mine") in labels and hive.name("theirs") not in labels
+    assert refused.status_code == 401

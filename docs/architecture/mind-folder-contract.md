@@ -67,6 +67,57 @@ AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/${MIND_NAME}/data/auto-remember
 
 The bearer tokens come from the host-level `.env` and are interpolated by Docker Compose at container start.
 
+### One key per mind
+
+A mind has one key, the value its owner pasted when it was made, and presents
+it to every hive service as that mind: the inference proxy, the gateway, the
+memory store and the tools. The key is a FILE, not an environment value: one
+folder per mind, `<key root>/<name>/key`, kept outside the checkout (every mind
+mounts the checkout, so a key inside it would be readable by every mind) and
+mounted read-only into that mind alone. Its compose fragment names two things:
+
+```
+MIND_KEY_FILE=/run/mind-key/key                 # where the mind reads its key
+${HOST_KEY_DIR}/<name>:/run/mind-key:ro         # a volume: its own folder, and no other
+# its bots mount the same folder (read-only) and present the same key
+```
+
+The console is the only writer: it holds the key root read-write
+(`HIVE_KEY_ROOT`) and replaces the file by writing a temporary file in the same
+folder, fsyncing it and renaming it over the old one, so a reader sees the old
+key or the new one and never half of one. A FOLDER is mounted because a
+single-file bind mount cannot be replaced atomically. The key is in no `.env`
+and in no container creation setting (so not in `docker inspect`).
+
+The mind re-reads the file at each request and at each spawn
+(`core.mind_key.refresh`: one `stat`, the file read only when it changed) and
+sets every per-service name from it, so a replaced key is the mind's key on its
+next request with no restart and no recreate. A file that is not there when the
+mind starts falls back to `MIND_KEY` in its environment (the transition for a
+mind made before key files). After a good key has been read, an unreadable,
+garbled (not the shape of a key) or empty file keeps the last good key and is
+logged once, never with the key. A turn already running, a terminal session
+already open and a hook process already started keep the key they were given
+until they end; new ones get the new key.
+
+A mind on another machine has no console that can write its folder: a person
+places the key file there (mode 0600, in a folder mounted or readable by that mind
+only) and sets `MIND_KEY_FILE` to it.
+
+At start and at each refresh `core.mind_key.apply_environment` sets
+`COMMS_BEARER_TOKEN`, `HIVEMIND_BROKER_TOKEN`, `LUCENT_BEARER_TOKEN`,
+`HIVE_TOOLS_TOKEN`, `MIND_PROXY_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`
+and `DSH_API_KEY` from it, so the harness binaries and the per-mind hook copies
+(which read those names) are unchanged. A mind started with neither a key file
+nor `MIND_KEY` keeps the per-service variables above: that is the transition,
+until a mind's key is moved and the old values are retired. A `runtime.yaml` `env:` block is not where
+a key lives; with a key set, any key-bearing name in it is ignored, and
+the inference names above are the mind's key, not a place for an outside
+credential (keep one of those under another name). To
+replace a mind's key, paste the new one on the mind's page: the console writes
+the file and the mind takes it at its next request. A mind made before key files
+is recreated once to add the mount; after that no replacement needs a recreate.
+
 Surfaces (Telegram, Discord, web) reach a mind's backend through
 `hive-comms` rather than the mind container directly:
 `HIVE_MIND_SERVER_URL=http://hive-comms:8424`. `comms` is registered as

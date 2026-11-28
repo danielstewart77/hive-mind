@@ -736,7 +736,7 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
         Guarded like the writes: this returns the full text of every skill
         the mind runs, on a port reachable across the LAN.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -753,7 +753,7 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
     async def get_skill_diff(
         req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
     ):
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -766,7 +766,7 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
         req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
     ):
         """Take the repo's reference onto this mind — apply and revert alike."""
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -783,7 +783,7 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
         req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
     ):
         """Copy this mind's reference into its repo checkout, uncommitted."""
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -802,7 +802,7 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
         Every other copy is regenerated from it. This is what a conflict
         notification asks the operator, or the mind, to decide.
         """
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:
@@ -817,7 +817,7 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
         req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
     ):
         """Remove this mind's reference and copies; the repo keeps its own."""
-        denied = authorize_admin(req)
+        denied = await authorize_admin(req)
         if denied is not None:
             return denied
         try:

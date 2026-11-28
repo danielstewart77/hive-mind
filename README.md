@@ -10,7 +10,7 @@ Each mind is its own named identity — self-chosen, not scripted — running Cl
 
 **Memory is a first-class system, not an afterthought.** Two things drove this. The first is practical: when you say "remember this" or "do you remember," there needs to be a real mechanism behind it — not a chat log search. Every piece of information is classified by data type, stored as a semantic embedding, and retrieved by meaning, not recency. The second runs deeper. A mind's personality is designed to grow organically over time, and a static file can't do that. Semantic memories and knowledge graph relationships are the infrastructure a person would actually need to develop a continuous identity — not simulate one.
 
-**Sensitive capabilities deliberately isolated.** Email, calendar, Docker Compose, and other write/destructive operations live in the external [`hive-tools`](https://github.com/danielstewart77/hive-mind-tools) service — a separate FastAPI process with bearer auth and a HITL approval gate. Minds reach it over HTTP; they cannot perform these operations in-process. A compromised mind can ask, but can't execute without explicit human approval routed through Telegram.
+**Sensitive capabilities deliberately isolated.** Email, calendar, Docker Compose, and other write/destructive operations live in the external [`hive-tools`](modules/hive-tools) service (its own container, built from this repository) — a separate FastAPI process with bearer auth and a HITL approval gate. Minds reach it over HTTP; they cannot perform these operations in-process. A compromised mind can ask, but can't execute without explicit human approval routed through Telegram.
 
 ## Architecture
 
@@ -47,26 +47,44 @@ docker compose up -d --build
 
 All services run on a shared Docker network (`hivemind`). The gateway (`hive-comms`, built from `nervous-system/`) is at `http://localhost:8426`; the vector store + knowledge graph (`hive-lucent`) is at `http://localhost:8425`.
 
-## Modules (`modules/`)
+## Modules (`modules/`) and releases
 
-Every repository hive-mind depends on is a module in its manifest,
-[`.gitmodules`](.gitmodules): hive-tools, hive-data, hive (the console),
-terminal, inference-proxy, hive-harness-dsh, hive-surfaces and auth-service
-(where people sign in to the hive, with local accounts or third-party
-sign-in; every hive runs it), each under `modules/<name>`. Clone hive-mind and bring them all in at the latest:
+hive-mind is one repository. The data package, the chat surfaces, the console,
+the terminal and the tools are ordinary folders of it, at `modules/hive-data`,
+`modules/hive-surfaces`, `modules/hive`, `modules/terminal` and
+`modules/hive-tools`; the first two are also installable alone at a tag
+(`hive-data-vX.Y.Z`, `hive-surfaces-vX.Y.Z`, see
+[docs/setup/hive-data-versions.md](docs/setup/hive-data-versions.md)). Two
+repositories stay outside it, each independently versioned and listed in
+[`.gitmodules`](.gitmodules): inference-proxy and
+hive-harness-dsh, each under `modules/<name>`.
+
+A release is a commit of hive-mind named by a tag. It records, in its own
+tree, the exact commit of each of those two. Clone it and bring them in at
+those commits:
 
 ```bash
 git clone https://github.com/danielstewart77/hive-mind.git && cd hive-mind
+git checkout --detach <release-tag>
 scripts/modules.sh
 ```
 
-Nothing is pinned. `scripts/modules.sh` brings each module to the newest
-commit of its branch and leaves it checked out on that branch, so you can
-work in it, commit and push as in any clone; run it again to update. A module
-you have switched to another branch is left alone. To pin one for a reason,
-add `pin = <commit>` to its entry. The installer runs the same script, and
-the containers that mount hive-mind never see the modules: a mind reaches
-Hive Tools over its API, not its code.
+`scripts/modules.sh` checks each module out at the commit the release records,
+detached, and never moves work: a module on a branch, or holding commits no
+remote has, is left as it is and named. Following a branch tip is an explicit
+opt-in for development (`HIVE_MODULES_FLOAT=1 scripts/modules.sh`).
+
+Put a machine on a release, and go back, with one command each:
+
+```bash
+scripts/release.sh to <release-tag>     # onto that release
+scripts/release.sh back                 # onto the one before
+```
+
+The written procedure, with what it leaves alone and where going back stops
+holding, is [docs/setup/one-repository.md](docs/setup/one-repository.md).
+The containers that mount hive-mind never see the modules: a mind reaches the
+tools over their API, not their code.
 
 ## Documentation (`docs/`)
 

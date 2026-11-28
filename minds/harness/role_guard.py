@@ -258,7 +258,7 @@ def current(env: dict[str, str] | None = None) -> dict:
     path = Path(path_text) if path_text else None
     saved = read_grants(path) or {}
     fresh = fetch(env.get("MIND_ID") or env.get("MIND_NAME", ""),
-                  env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""))
+                  env.get("COMMS_URL", ""), (env.get("MIND_KEY") or env.get("COMMS_BEARER_TOKEN", "")).strip())
     if fresh is not None and fresh.get("unregistered") and saved.get("managed"):
         # The gateway knew this mind as managed when the process was started
         # and a managed mind stays managed, so a "never heard of it" now is a

@@ -97,7 +97,12 @@ async def client(store, monkeypatch):
     `TestClient` would run the routes in a portal thread with a loop of its
     own, and the pool's connections belong to the loop that opened them.
     """
-    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    # A service key recorded in the one record of keys: reaches every owner.
+    from hive_data import access, core
+    import time
+    await core.upsert_credential(
+        holder="reader-for-tests", username="daniel", role="service",
+        token_sha=access.digest(ADMIN_TOKEN), created_at=time.time(), revoked_at=None)
 
     from lucent_api.server import create_app
 

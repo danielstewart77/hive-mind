@@ -103,9 +103,9 @@ def _run(ledger, capsys, monkeypatch, *argv):
 
 
 def test_every_command_finds_what_it_calls_in_the_hive_data_beside_it(ledger):
-    # The suite imports the host's hive-data checkout, which is what the
-    # containers mount. Failing here is that checkout standing behind this
-    # one - or a command named as needing something hive_data never had.
+    # The suite imports the in-repository modules/hive-data (editable
+    # install), which is what the containers mount. Failing here is that copy
+    # standing behind this one - or a command named as needing something hive_data never had.
     assert {c: ledger.missing(c) for c in ledger.NEEDS} == {
         c: [] for c in ledger.NEEDS}
 

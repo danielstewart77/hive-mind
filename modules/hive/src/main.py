@@ -1,0 +1,6951 @@
+"""Hive admin site: graph, memory, and standing rules for the hive mind.
+
+Auth lives in the hive itself (see auth.py) so a cloned hive is
+self-contained; the auth db and secret are shared with the terminal site.
+"""
+
+import asyncio
+import base64
+import hashlib
+import ipaddress
+import json
+import logging
+import os
+import re
+import shlex
+import time
+from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+
+import httpx
+import yaml
+import mind_rename
+from starlette.responses import JSONResponse
+from fastapi import (
+    Depends,
+    FastAPI,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
+
+import auth
+import features
+import hive_errors
+import console_access
+import credential_registry
+import dashboard_data
+import design_data
+import design_delivery
+import design_graph
+import holder_credentials
+import mind_key_files
+import key_migration
+import chief_of_staff
+import kanban_data
+import mind_creation
+import mind_files
+import mind_images
+import mind_mounts
+import mind_runtime
+import mind_skills
+import operator_attachment
+import mind_soul
+import mind_symbols
+import provider_data
+import remote_access_data
+import roles_data
+import route_access
+import skill_submissions
+import sentinel_review
+import sso
+import store
+from hive_data import core
+from hive_data.errors import HiveDataError, ValueRefused
+from auth import (
+    clear_session_cookie,
+    get_current_user_from_request,
+    require_auth,
+    seed_first_user,
+    set_session_cookie,
+)
+from capability_install import (
+    HIVE_TOOLS_PLACEMENT_NOTE,
+    InstallInProgress,
+    clone_inference_proxy,
+    hive_tools_install_status,
+    inference_proxy_status,
+)
+from config import BASE_DIR
+import configuration_data as configuration_data_module
+from configuration_data import (
+    DEFAULT_OLLAMA_BASE_URL,
+    OWNER_RE,
+    clear_capability_endpoint,
+    get_capability_endpoint,
+    get_edge_mind_metadata,
+    internal_mind_exists,
+    local_runtime_configuration,
+    normalize_endpoint,
+    scaffold_internal_mind,
+    set_capability_endpoint,
+    set_edge_mind_metadata,
+)
+from credentials_data import rotate_credential, set_github_pat
+from graph_data import get_graph_data
+from hive_logging import configure_logging, install_fastapi_logging, log_event, recent_errors
+from settings_data import (
+    DEFAULT_VOICE_CLIP,
+    ClipExists,
+    build_mind_registry,
+    hive_tools_status,
+    list_downloads,
+    list_voice_clips,
+    resolve_download_path,
+    save_voice_clip,
+)
+
+_canvas_connections: set[WebSocket] = set()
+_canvas_elements: list[dict] = []
+log = configure_logging("hive-control-plane")
+
+
+# Live design-delivery tasks, held so the event loop's weak references
+# cannot collect one while it is waiting out a model turn.
+_DESIGN_DELIVERIES: set = set()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Open the store, seed the first account, send what is owed, and stop.
+
+    The store is opened here rather than on first use. A lazy open under two
+    concurrent first requests builds two connection pools and holds double
+    the connections against a ceiling shared with every other service in the
+    hive, with nothing reporting that it happened.
+    """
+    del app
+    auth.refuse_old_settings()
+    await store.open()
+    log_event(log, "store.opened", component="hive-control-plane",
+              engine="postgres")
+    await seed_first_user()
+    # Four pieces of work used to be taken up here, with nobody clicking, and
+    # so with a key kept for the purpose: finishing a started rename, taking
+    # back a creation cut short, finishing a key replacement cut short and
+    # sending a saved design submission. None is done at start now. Each is
+    # left waiting (`waiting_work`) and is finished on the next click of the
+    # person who started it, or of any administrator, with that person's own
+    # sign-in key.
+    # The ready-made roles, once per hive (story 10.18.3). A failure is
+    # logged and the console still starts: the roles page then says what the
+    # repo holds and offers each as "take the repo copy".
+    try:
+        # A task of its own: the store refuses a unit of work opened inside
+        # this lifespan's generator, and the seed is one.
+        seeded = await asyncio.create_task(roles_data.seed())
+        log_event(log, "roles.seed", component="hive-control-plane", **seeded)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "roles.seed_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
+    global _canvas_elements
+    _canvas_elements = _load_canvas_state()
+    log_event(log, "service.started", component="hive-control-plane")
+    # A submission stored and not yet sent when this process stopped stays
+    # stored and shows as waiting; the next click of the person who saved it
+    # (or of an administrator) sends it.
+    try:
+        yield
+    finally:
+        await mind_rename.stop()
+        log_event(log, "service.stopped", component="hive-control-plane")
+        # Before the store closes: what it had not taken back stays recorded
+        # for the next start.
+        # The delivery tasks go before the store does, and are waited for.
+        # Left to the loop's own cancellation they are cancelled *after* the
+        # store is closed, and `deliver_notice`'s own handler — the one that
+        # releases a claimed notice so a later sweep can retry it — then
+        # reaches a closed store and raises instead. The notice stays
+        # claimed, every later sweep steps over it, and a submission the page
+        # reported as saved is never delivered by any path.
+        await _settle_design_deliveries()
+        await store.close()
+
+
+#: How long shutdown waits for a design delivery to put its notice back. The
+#: release is one statement; what it may be waiting on is the model turn the
+#: cancellation interrupts, and a shutdown that waited on that would be a
+#: restart that hangs for minutes.
+DELIVERY_SETTLE_SECONDS = 10.0
+
+
+async def _settle_design_deliveries() -> None:
+    """Cancel the in-flight deliveries and let each release its notice."""
+    tasks = [task for task in _DESIGN_DELIVERIES if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks,
+                                       timeout=DELIVERY_SETTLE_SECONDS)
+    if pending:
+        log_event(log, "design.delivery.not_settled",
+                  level=logging.WARNING, component="hive-control-plane",
+                  waiting=len(pending),
+                  detail="a claimed notice may still be claimed; the next "
+                         "start will step over it")
+
+
+app = FastAPI(
+    title="Hive",
+    description="Admin console for the hive mind",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+# Authorization lives in one table (console_access.TABLE), enforced in front
+# of every route and websocket; a route the table does not name is admin-only.
+app.add_middleware(mind_runtime.PersonScope, after_click=lambda *args: _pick_up_waiting_work(*args))
+app.add_middleware(mind_rename.EditGate)
+app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
+
+
+# The registry is read for the signed-in person, with the key that came with
+# the click (`route_access`): this site holds no key of its own and keeps none
+# for anyone.
+install_fastapi_logging(app, log, "hive-control-plane")
+
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
+# Where the terminal site lives, for the console's links to it. From the
+# environment because the address is each hive's own; unset, the links are
+# not drawn rather than pointing at somebody else's terminal.
+templates.env.globals["terminal_url"] = os.getenv("HIVE_TERMINAL_URL", "")
+
+
+def _canvas_state_path() -> Path:
+    # Absolute default, not BASE_DIR-relative: hive's Dockerfile copies src/
+    # into /app/src (unlike spark_to_bloom's flat /app), so BASE_DIR.parent
+    # is /app, not the container root the ./data:/data mount lands on.
+    return Path(os.getenv("CANVAS_STATE_PATH", "/data/canvas_state.json"))
+
+
+def _load_canvas_state() -> list[dict]:
+    p = _canvas_state_path()
+    try:
+        if p.exists():
+            with open(p) as f:
+                data = json.load(f)
+            return data.get("elements", []) if isinstance(data, dict) else []
+    except Exception:
+        pass
+    return []
+
+
+def _save_canvas_state() -> None:
+    p = _canvas_state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as f:
+        json.dump({"elements": _canvas_elements}, f)
+
+
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _xml_escape(s: str) -> str:
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _canvas_bounds(elements: list[dict]) -> tuple[float, float, float, float]:
+    """Bounding box across all elements. Falls back to a default frame when empty."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for el in elements:
+        t = el.get("type")
+        if t == "path":
+            nums = [float(n) for n in _NUM_RE.findall(el.get("d", ""))]
+            # path data is a flat stream of x,y pairs once commands are stripped
+            xs.extend(nums[0::2])
+            ys.extend(nums[1::2])
+        elif t == "text":
+            x, y = float(el.get("x", 0)), float(el.get("y", 0))
+            size = float(el.get("size", 14))
+            # Estimate the run's extent. The renderer is monospace, so a glyph
+            # is about 0.6em wide; without this a right-hand column of labels
+            # falls outside the viewBox and the snapshot silently crops it.
+            xs.extend([x, x + 0.6 * size * len(str(el.get("content", "")))])
+            ys.extend([y - size, y])
+        elif t == "image":
+            x, y = float(el.get("x", 0)), float(el.get("y", 0))
+            xs.extend([x, x + float(el.get("w", 0))])
+            ys.extend([y, y + float(el.get("h", 0))])
+    if not xs or not ys:
+        return (0.0, 0.0, 1280.0, 800.0)
+    pad = 40.0
+    minx, miny = min(xs) - pad, min(ys) - pad
+    w = max(xs) - min(xs) + pad * 2
+    h = max(ys) - min(ys) + pad * 2
+    return (minx, miny, max(w, 1.0), max(h, 1.0))
+
+
+def _canvas_to_svg(slide: int | None = None) -> str:
+    """Compose the current board into a standalone dark-background SVG.
+
+    This is the snapshot Skippy rasterizes (chrome --headless) so he can
+    actually see what Daniel drew, since he cannot watch the live websocket.
+    """
+    elements = _canvas_elements
+    if slide is not None:
+        want = _slide_of(slide)
+        elements = [e for e in elements if _slide_of(e.get("slide")) == want]
+    minx, miny, w, h = _canvas_bounds(elements)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="{minx:.1f} {miny:.1f} {w:.1f} {h:.1f}" '
+        f'width="{w:.0f}" height="{h:.0f}">',
+        f'<rect x="{minx:.1f}" y="{miny:.1f}" width="{w:.1f}" height="{h:.1f}" fill="#090912"/>',
+    ]
+    for el in elements:
+        t = el.get("type")
+        color = _xml_escape(el.get("color", "#c9a84c"))
+        if t == "path":
+            parts.append(
+                f'<path d="{_xml_escape(el.get("d", ""))}" stroke="{color}" '
+                f'stroke-width="{el.get("sw", 2)}" fill="none" '
+                f'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+        elif t == "text":
+            parts.append(
+                f'<text x="{el.get("x", 0)}" y="{el.get("y", 0)}" fill="{color}" '
+                f'font-family="monospace" font-size="{el.get("size", 14)}">{_xml_escape(el.get("content", ""))}</text>'
+            )
+        elif t == "image":
+            parts.append(
+                f'<image x="{el.get("x", 0)}" y="{el.get("y", 0)}" '
+                f'width="{el.get("w", 200)}" height="{el.get("h", 150)}" '
+                f'href="{_xml_escape(el.get("src", ""))}" preserveAspectRatio="xMidYMid meet"/>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _gateway_base_url() -> str:
+    return os.getenv("GATEWAY_API_URL") or "http://hive-comms:8424"
+
+
+def _lucent_base_url() -> str:
+    return os.getenv("LUCENT_API_URL") or "http://hive-lucent:8424"
+
+
+def _lucent_bearer_token() -> str:
+    return os.getenv("LUCENT_BEARER_TOKEN", "")
+
+
+def _asset_versions() -> dict[str, int]:
+    static_dir = BASE_DIR / "static"
+    return {
+        path.name: int(path.stat().st_mtime_ns)
+        for path in static_dir.iterdir()
+        if path.is_file()
+    }
+
+
+async def _render_template(request: Request, template_name: str,
+                           **context) -> HTMLResponse:
+    context.setdefault("current_user",
+                       await get_current_user_from_request(request))
+    context.setdefault("asset_versions", _asset_versions())
+    if context["current_user"]:
+        context.setdefault("feature_enabled", await features.enabled(context["current_user"]))
+        context.setdefault("feature_catalogue", features.FEATURES)
+    if remote_access_data.trusted(request) and (context.get("current_user") or {}).get("username") == request.headers.get("x-hive-remote-owner"):
+        context["terminal_url"] = request.headers.get("x-hive-remote-terminal", "")
+    context["request"] = request
+    return templates.TemplateResponse(request, template_name, context)
+
+
+def _safe_next_path(next_path: str | None, fallback: str = "/") -> str:
+    if next_path and next_path.startswith("/") and not next_path.startswith("//"):
+        return next_path
+    return fallback
+
+
+def _actor_fields(user: dict | None) -> dict:
+    """Stable, non-secret actor identity for mutation audit records."""
+    return {
+        "actor_id": user.get("id") if user else None,
+        "actor_username": user.get("username") if user else None,
+        "actor_type": "user" if user else "anonymous",
+    }
+
+
+def _login_redirect_for(request: Request) -> RedirectResponse:
+    path = request.url.path
+    # A decision is posted, and a sign-in lands on a page by GET: after signing
+    # in the person is put on the request they were deciding, not on a path
+    # that answers a GET with 405. (The route table sends a signed-out post
+    # here first; this is the same rule for a post that gets past it.)
+    decision = re.fullmatch(r"(/approvals/[^/]+)/decision", path)
+    if decision:
+        path = decision.group(1)
+    next_path = urllib.parse.quote(path, safe="/")
+    return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
+
+
+async def _person_headers_or_none() -> dict:
+    """The person's key for a status display that never gates a route: no key
+    shows the gateway as asked without one, which it refuses, in words."""
+    try:
+        return await _person_headers()
+    except HTTPException:
+        return {}
+
+
+async def _person_headers() -> dict:
+    """The signed-in person's own key, as the gateway's bearer.
+
+    Everything this site asks of the gateway, the memory store and the tools is
+    asked because a person asked, so it carries the key that came with that
+    click (the sign-in cookie, `route_access.acting_key`) and nothing else:
+    not a key read from a file, not one kept from an earlier click, not one of
+    this site's own, because it holds none. Refused with a sentence, and never
+    with 401 for want of one: the middleware has already sent a person whose
+    key has ended to the sign-in page.
+    """
+    person = route_access.acting_person()
+    key = route_access.acting_key()
+    if not person or not key:
+        raise HTTPException(
+            status_code=403,
+            detail="nobody is signed in, so nothing is asked of the gateway",
+        )
+    return {"Authorization": f"Bearer {key}"}
+
+
+def _gateway_json_sync(path: str, params: dict | None, headers: dict) -> dict | list:
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    url = f"{_gateway_base_url().rstrip('/')}{path}{query}"
+    request = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def _gateway_json(path: str, params: dict | None = None) -> dict | list:
+    headers = await _person_headers()
+    try:
+        return await asyncio.to_thread(_gateway_json_sync, path, params, headers)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=exc.code, detail=f"Gateway request failed: {path}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
+
+
+async def _gateway_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json_body: dict | None = None,
+) -> dict | list:
+    headers = await _person_headers()
+    url = f"{_gateway_base_url().rstrip('/')}{path}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.request(
+            method, url, params=params, json=json_body, headers=headers,
+        )
+    if response.status_code >= 400:
+        # Never the gateway's 401: this site's own layout would sign the
+        # person out over it. It means their key is not accepted.
+        status = 502 if response.status_code == 401 else response.status_code
+        detail = ("the gateway did not accept your sign-in; sign in again"
+                  if response.status_code == 401 else response.text)
+        raise HTTPException(status_code=status, detail=detail)
+    if not response.content:
+        return {}
+    data = response.json()
+    return data if isinstance(data, (dict, list)) else {}
+
+
+def _lucent_headers() -> dict:
+    token = _lucent_bearer_token()
+    if not token:
+        raise HTTPException(status_code=503, detail="lucent bearer token not configured")
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _lucent_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json_body: dict | None = None,
+):
+    url = f"{_lucent_base_url().rstrip('/')}{path}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.request(
+            method, url, params=params, json=json_body, headers=_lucent_headers()
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        if resp.status_code == 204 or not resp.content:
+            return {}
+        return resp.json()
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    # Public routes are not resolved by the route table, so the lookup — a
+    # read of the record — happens here, off the event loop.
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    if user.get("must_change"):
+        return RedirectResponse(url="/password", status_code=303)
+    return RedirectResponse(url=await _landing_path(user), status_code=303)
+
+
+async def _landing_path(user: dict) -> str:
+    """Where the console opens: the Chief of Staff page for whoever may see
+    it and has not hidden it, Overview for everyone else."""
+    if user.get("is_admin") and (await features.enabled(user))["chief-of-staff"]:
+        return "/chief-of-staff"
+    return "/overview"
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/"):
+    current_user = await get_current_user_from_request(request)
+    if current_user:
+        return RedirectResponse(url=_safe_next_path(next), status_code=303)
+    return await _login_page(request, next_path=_safe_next_path(next))
+
+
+async def _login_page(request: Request, *, status_code: int = 200,
+                      **context) -> HTMLResponse:
+    response = await _render_template(
+        request,
+        "login.html",
+        current_user=None,
+        sign_in_methods=sso.sign_in_methods(context.get("next_path") or "/"),
+        **context,
+    )
+    response.status_code = status_code
+    return response
+
+
+@app.post("/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    account_store = auth.get_store()
+    try:
+        user, token = await account_store.sign_in(username, password)
+    except auth.AuthError as exc:
+        log_event(
+            log, "auth.login.rejected", level=logging.WARNING,
+            actor_username=username, reason=type(exc).__name__,
+        )
+        return await _login_page(
+            request,
+            status_code=exc.status,
+            error=exc.message,
+            next_path=_safe_next_path(next),
+        )
+
+    target = "/password" if user.get("must_change") else _safe_next_path(next)
+    response = RedirectResponse(url=target, status_code=303)
+    set_session_cookie(request, response, token)
+    log_event(log, "auth.login.succeeded", **_actor_fields(user))
+    return response
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    user = await get_current_user_from_request(request)
+    account_store = auth.get_store()
+    token = auth.session_token(request, account_store)
+    if token:
+        try:
+            await account_store.sign_out(token)
+        except auth.ServiceUnavailable:
+            # Not signed out: say so, and keep the cookie so the person can
+            # try again rather than believe a live key has ended.
+            raise HTTPException(
+                status_code=503,
+                detail="Could not sign you out just now; try again.")
+    response = RedirectResponse(url="/login", status_code=303)
+    clear_session_cookie(response)
+    log_event(log, "auth.logout", **_actor_fields(user))
+    return response
+
+
+# ── Microsoft and Windows sign-in (sso.py) ─────────────────────────────
+
+
+async def _sso_signed_in(request: Request, account_store, user: dict,
+                         via: str, next_path: str):
+    """A console session for an account an outside identity matched."""
+    token = await sso.start_session(account_store, user, via)
+    response = RedirectResponse(url=_safe_next_path(next_path), status_code=303)
+    set_session_cookie(request, response, token)
+    log_event(log, "auth.login.succeeded", **_actor_fields(user), via=via)
+    return response
+
+
+async def _sso_refused(request: Request, exc: Exception, via: str,
+                       next_path: str):
+    status = getattr(exc, "status", 401)
+    message = getattr(exc, "message", None) or "Sign-in failed."
+    log_event(
+        log, "auth.login.rejected", level=logging.WARNING, via=via,
+        reason=type(exc).__name__, detail=str(exc)[:300],
+    )
+    return await _login_page(
+        request, status_code=status, error=message,
+        next_path=_safe_next_path(next_path)
+    )
+
+
+@app.get(sso.MICROSOFT_PATH, response_class=HTMLResponse)
+async def login_microsoft(request: Request, next: str = "/"):
+    config = sso.microsoft_config()
+    if config is None:
+        raise HTTPException(status_code=404)
+    try:
+        location, flow = await sso.begin_microsoft(config, _safe_next_path(next))
+    except sso.SignInFailed as exc:
+        return await _sso_refused(request, exc, sso.MICROSOFT, next)
+    response = RedirectResponse(url=location, status_code=303)
+    response.set_cookie(
+        sso.FLOW_COOKIE_NAME, flow, max_age=sso.FLOW_MAX_AGE, path=sso.MICROSOFT_PATH,
+        httponly=True, secure=auth.request_is_https(request), samesite="lax",
+    )
+    return response
+
+
+@app.get(sso.MICROSOFT_CALLBACK_PATH, response_class=HTMLResponse)
+async def login_microsoft_callback(
+    request: Request, code: str = "", state: str = "", error: str = ""
+):
+    config = sso.microsoft_config()
+    if config is None:
+        raise HTTPException(status_code=404)
+    flow_cookie = request.cookies.get(sso.FLOW_COOKIE_NAME, "")
+    next_path = str((await auth.read_flow(flow_cookie) or {}).get("next")
+                    or "/")
+    account_store = auth.get_store()
+    try:
+        if error:
+            raise sso.SignInFailed("Microsoft sign-in was cancelled or refused.")
+        _, claims = await sso.finish_microsoft(
+            config, code=code, state=state, flow_cookie=flow_cookie
+        )
+        user = await sso.match_microsoft(
+            account_store, subject=sso.microsoft_subject(claims),
+            email=sso.verified_email(claims),
+        )
+        response = await _sso_signed_in(
+            request, account_store, user, sso.MICROSOFT, next_path)
+    except (sso.SignInFailed, auth.AuthError) as exc:
+        response = await _sso_refused(request, exc, sso.MICROSOFT, next_path)
+    response.delete_cookie(sso.FLOW_COOKIE_NAME, path=sso.MICROSOFT_PATH)
+    return response
+
+
+_NO_DOMAIN_TICKET = (
+    "This browser did not offer a Windows domain sign-in. Use another way to sign in."
+)
+
+
+@app.get(sso.WINDOWS_PATH, response_class=HTMLResponse)
+async def login_windows(request: Request, next: str = "/"):
+    config = sso.windows_config()
+    if config is None:
+        raise HTTPException(status_code=404)
+    next_path = _safe_next_path(next)
+    token = sso.negotiate_token(request.headers.get("authorization", ""))
+    if token is None:
+        # The one place the console asks for a ticket. A browser that has
+        # none shows this body: the sign-in page with the other methods.
+        page = await _login_page(
+            request, status_code=401, error=_NO_DOMAIN_TICKET, next_path=next_path
+        )
+        page.headers["WWW-Authenticate"] = "Negotiate"
+        return page
+    if not token or sso.is_ntlm(token):
+        # Challenging again would loop a browser that has only NTLM to give.
+        return await _sso_refused(
+            request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path
+        )
+    try:
+        principal, reply = await run_in_threadpool(
+            sso.accept_security_context, token, config.keytab, config.spn
+        )
+    except Exception as exc:  # noqa: BLE001 - every failure is "no usable ticket"
+        log_event(
+            log, "auth.windows.ticket_refused", level=logging.WARNING,
+            reason=type(exc).__name__, detail=str(exc)[:300],
+        )
+        return await _sso_refused(request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path)
+    account_store = auth.get_store()
+    try:
+        user = await sso.match_domain_account(
+            account_store, sso.domain_account_for(principal, config))
+        response = await _sso_signed_in(
+            request, account_store, user, "windows", next_path)
+    except auth.AuthError as exc:
+        return await _sso_refused(request, exc, "windows", next_path)
+    if reply:
+        response.headers["WWW-Authenticate"] = (
+            "Negotiate " + base64.b64encode(reply).decode("ascii")
+        )
+    return response
+
+
+async def _password_page(request: Request, *, status_code: int = 200,
+                         **context) -> HTMLResponse:
+    user = await get_current_user_from_request(request)
+    response = await _render_template(
+        request,
+        "password.html",
+        current_user=None,
+        account=user,
+        **context,
+    )
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
+
+
+@app.get("/password", response_class=HTMLResponse)
+async def password_page(request: Request):
+    return await _password_page(request)
+
+
+@app.post("/password")
+async def password_submit(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    """A signed-in user sets their own password — the only page a user who
+    must change theirs can reach."""
+    user = await get_current_user_from_request(request)
+    if new_password != confirm_password:
+        return await _password_page(request, status_code=400, error="The new passwords do not match.")
+    account_store = auth.get_store()
+    try:
+        token = await account_store.change_password(
+            auth.session_token(request, account_store),
+            current_password,
+            new_password,
+        )
+    except auth.AuthError as exc:
+        return await _password_page(request, status_code=exc.status, error=exc.message)
+    response = RedirectResponse(url="/", status_code=303)
+    set_session_cookie(request, response, token)
+    log_event(log, "auth.password.changed", **_actor_fields(user))
+    return response
+
+
+# ── Control center ─────────────────────────────────────────────────────
+
+
+async def _console_page(request: Request, template_name: str, **context):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    response = await _render_template(request, template_name, **context)
+    # Every console page carries its own script inline, so a heuristically
+    # cached copy is a cached application. A phone that fetched a page before
+    # a fix keeps running the broken version across reloads — and there is no
+    # gesture on iOS that reliably bypasses it, so the symptom is a control
+    # that silently sends nothing while the server shows no request at all.
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.get("/overview", response_class=HTMLResponse)
+async def overview_page(request: Request):
+    return await _console_page(request, "overview.html")
+
+
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    return await _console_page(request, "setup.html")
+
+
+@app.get("/minds", response_class=HTMLResponse)
+async def minds_page(request: Request):
+    return await _console_page(request, "minds.html")
+
+
+@app.get("/roles", response_class=HTMLResponse)
+async def roles_page(request: Request):
+    return await _console_page(request, "roles.html")
+
+
+@app.get("/skills/submit", response_class=HTMLResponse)
+async def skill_submit_page(request: Request):
+    return await _console_page(request, "skill_submit.html")
+
+
+@app.get("/bots", response_class=HTMLResponse)
+async def bots_page(request: Request):
+    return await _console_page(request, "bots.html")
+
+
+@app.get("/usage", response_class=HTMLResponse)
+async def usage_page(request: Request):
+    return await _console_page(request, "usage.html")
+
+
+# Registered before /minds/{mind_id}: FastAPI matches in declaration order,
+# so the parameterised route would otherwise swallow this literal one.
+@app.get("/minds/new", response_class=HTMLResponse)
+async def new_mind_page(request: Request):
+    return await _console_page(
+        request,
+        "mind_new.html",
+        install_options=_mind_install_options(internal=True),
+        default_ollama_url=await get_capability_endpoint("ollama")
+        or os.getenv("OLLAMA_URL", "")
+        or DEFAULT_OLLAMA_BASE_URL,
+    )
+
+
+@app.get("/minds/{mind_id}", response_class=HTMLResponse)
+async def mind_detail_page(request: Request, mind_id: str):
+    return await _console_page(request, "mind_detail.html", mind_id=mind_id, hive_tools_url=_hive_tools_console_url())
+
+
+@app.get("/kanban", response_class=HTMLResponse)
+async def kanban_page(request: Request):
+    # A page, not an API: an unauthenticated browser belongs at the login
+    # form like every other console route, not holding a bare 401.
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    target = "/kanban/board"
+    if request.url.query:
+        target += f"?{request.url.query}"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.get("/kanban/board", response_class=HTMLResponse)
+async def kanban_board_page(request: Request):
+    return await _console_page(request, "kanban.html", view="board")
+
+
+@app.get("/kanban/backlog", response_class=HTMLResponse)
+async def kanban_backlog_page(request: Request):
+    return await _console_page(request, "kanban.html", view="backlog")
+
+
+#: What each bearer the board routes admit is called in the handler's user.
+_BEARER_USERS = {
+    console_access.BOARD: "board-bearer",
+    console_access.BOARD_PLANNER: "board-planner-bearer",
+    console_access.ROLES: "roles-bearer",
+    console_access.KEY_MIGRATION: "key-migration-operator",
+}
+
+
+async def require_admin_or_route_bearer(request: Request) -> dict:
+    """A signed-in admin, or one of the bearers the route's rule admits.
+
+    These routes are guarded by a session like every other admin route, and
+    a caller outside a browser — the one-database check, a Mind working the
+    backlog — has no session to present. The bearer is verified by the route
+    table before the route runs; this only reads *which* one it was, so the
+    credential is never compared here. A bearer the table did not verify for
+    this route never reaches this function, so an unrecognised name falls
+    through to the session rather than being treated as anyone.
+    """
+    via = route_access.bearer_of(request)
+    if via in _BEARER_USERS:
+        # The mind whose own key it was, recognised from the one record.
+        who = route_access.identity_of(request) or _BEARER_USERS[via]
+        return {"username": who, "via": "bearer"}
+    return await require_auth(request)
+
+
+@app.get("/api/kanban/relations/{record_id}")
+async def api_kanban_relations(
+        record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    del user
+    return await _kanban_call(kanban_data.item_relations, record_id)
+
+
+@app.get("/kanban/item/{record_id}", response_class=HTMLResponse)
+async def kanban_item_page(request: Request, record_id: str):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    try:
+        record = await kanban_data.find_item(record_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    return await _console_page(request, "kanban_item.html", item=record)
+
+
+@app.get("/edge-minds", response_class=HTMLResponse)
+async def edge_minds_page(request: Request):
+    return await _console_page(request, "edge_minds.html")
+
+
+@app.get("/edge-minds/new", response_class=HTMLResponse)
+async def new_edge_mind_page(request: Request):
+    return await _console_page(
+        request,
+        "edge_mind_new.html",
+        edge_comms_url=os.getenv("EDGE_COMMS_URL", ""),
+        edge_lucent_url=os.getenv("EDGE_LUCENT_URL", ""),
+        edge_hive_tools_url=os.getenv("EDGE_HIVE_TOOLS_URL", ""),
+        edge_ollama_url=await get_capability_endpoint("ollama")
+        or os.getenv("OLLAMA_URL", ""),
+        install_options=_mind_install_options(),
+    )
+
+
+# Kanban API deliberately uses one REST mapping: collection POST, item PATCH/DELETE.
+_KANBAN_CREATE_FIELDS = {
+    "epics": {"title"},
+    "features": {"epic_id", "title"},
+    "stories": {"title", "feature_id", "epic_id", "status"},
+    # A task may name no parent at all (story 3.7.4), so only its title is
+    # required.
+    "tasks": {"title", "parent_id", "status"},
+}
+_KANBAN_METADATA_FIELDS = {"description", "requirements", "acceptance_criteria", "qa_tests"}
+_KANBAN_UPDATE_FIELDS = {
+    "epics": {"title", "status", "before_id", "type", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "features": {"epic_id", "title", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "stories": {"title", "feature_id", "epic_id", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "tasks": {"title", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+}
+
+
+async def _kanban_body(request: Request, allowed: set[str], required: set[str] = frozenset()):
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Malformed JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    missing = required - body.keys()
+    extra = body.keys() - allowed
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise HTTPException(status_code=400, detail=f"Unsupported fields: {', '.join(sorted(extra))}")
+    if "status" in body and body["status"] not in kanban_data.STATUSES:
+        raise HTTPException(status_code=400, detail=f"unsupported status: {body['status']}")
+    if "before_id" in body and not isinstance(body["before_id"], str):
+        raise HTTPException(status_code=400, detail="before_id must be a string")
+    return body
+
+
+async def _kanban_call(function, *args, **kwargs):
+    """Run a board operation and map its refusals to the wire.
+
+    Awaited rather than run off the loop: the store is async, and a
+    statement is a pooled round trip that does not block the loop.
+    """
+    try:
+        return await function(*args, **kwargs)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/kanban/data")
+async def api_kanban_data(
+        user: dict = Depends(require_admin_or_route_bearer)):
+    del user
+    return await _kanban_call(kanban_data.get_data)
+
+
+@app.get("/api/kanban/board")
+async def api_kanban_board(user: dict = Depends(require_auth)):
+    """The board and every row's order number, from one read, for the page
+    that draws one in the order of the other."""
+    del user
+    return await _kanban_call(kanban_data.get_board)
+
+
+@app.get("/api/kanban/numbers")
+async def api_kanban_numbers(
+        user: dict = Depends(require_admin_or_route_bearer)):
+    del user
+    return await _kanban_call(kanban_data.backlog_numbers)
+
+
+_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story", "tasks": "task"}
+_PLURAL = {"epic": "epics", "feature": "features", "story": "stories", "task": "tasks"}
+_SINGULAR = {"epics": "epic", "features": "feature", "stories": "story", "tasks": "task"}
+
+
+@app.get("/api/kanban/{kind}/{record_id}/descendants")
+async def api_kanban_descendants(
+        kind: str, record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """What a delete of this row would take with it, counted now.
+
+    The page asks immediately before it puts the number in front of Daniel.
+    Its own copy of the board is from whenever it last loaded, and agreeing
+    to destroy two stories that are really nine is not a confirmation.
+    """
+    del user
+    if kind not in _KANBAN_UPDATE_FIELDS:
+        raise HTTPException(status_code=404, detail="Kanban resource not found")
+    return await _kanban_call(kanban_data.count_descendants, record_id)
+
+
+@app.post("/api/kanban/epics")
+@app.post("/api/kanban/features")
+@app.post("/api/kanban/stories")
+@app.post("/api/kanban/tasks")
+async def api_kanban_create(
+        request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    del user
+    kind = request.url.path.rsplit("/", 1)[-1]
+    fields = _KANBAN_CREATE_FIELDS[kind]
+    required = {"title"} if kind in ("stories", "tasks") else fields
+    body = await _kanban_body(request, fields, required)
+    if kind == "stories" and ((body.get("feature_id") is None) == (body.get("epic_id") is None)):
+        raise HTTPException(status_code=400, detail="story requires exactly one of feature_id or epic_id")
+    if kind == "tasks" and body.get("parent_id") == "":
+        body["parent_id"] = None
+    return await _kanban_call(getattr(kanban_data, f"create_{_SINGULAR[kind]}"), **body)
+
+
+@app.patch("/api/kanban/{kind}/{record_id}")
+async def api_kanban_update(
+        kind: str, record_id: str, request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    del user
+    if kind not in _KANBAN_UPDATE_FIELDS:
+        raise HTTPException(status_code=404, detail="Kanban resource not found")
+    # The URL names the kind the page was built with; a type change may have moved the row since.
+    actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
+    body = await _kanban_body(request, _KANBAN_UPDATE_FIELDS[actual])
+    if set(body) == {"before_id"} and body["before_id"]:
+        return await _kanban_call(kanban_data.place_before, record_id, body["before_id"])
+    if set(body) == {"parent_id"}:
+        return await _kanban_call(kanban_data.set_parent, record_id, body["parent_id"] or None)
+    if not body:
+        raise HTTPException(status_code=400, detail="At least one update field is required")
+    entity = _SINGULAR[actual]
+    # One save: the type and parent first, then the fields, so the page makes a single request.
+    changes = dict(body)
+    if "type" in changes or "parent_id" in changes:
+        clearing = "parent_id" in changes and changes["parent_id"] in (None, "")
+        chosen = None if clearing else changes.get("parent_id")
+        new_type = changes.pop("type", None) or await _kanban_call(kanban_data.current_type, record_id)
+        changes.pop("parent_id", None)
+        await _kanban_call(kanban_data.change_type, record_id, new_type, chosen, clearing)
+        changes.pop("parent", None)
+        if not changes:
+            return await _kanban_call(kanban_data.find_item, record_id)
+        actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
+        entity = _SINGULAR[actual]
+    return await _kanban_call(getattr(kanban_data, f"update_{entity}"), record_id, **changes)
+
+
+@app.delete("/api/kanban/{kind}/{record_id}")
+async def api_kanban_delete(
+        kind: str, record_id: str, only_if_empty: bool = False,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """Remove a row and everything under it.
+
+    `?only_if_empty=true` refuses a row with anything under it, decided
+    inside the delete rather than by a count read beforehand. The board
+    tool sends it unless the caller asked for the cascade.
+    """
+    del user
+    if kind not in _KANBAN_UPDATE_FIELDS:
+        raise HTTPException(status_code=404, detail="Kanban resource not found")
+    actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
+    return await _kanban_call(
+        getattr(kanban_data, f"delete_{_SINGULAR[actual]}"), record_id,
+        only_if_empty=only_if_empty)
+
+
+# ── the files a work item carries ──────────────────────────────────────
+#
+# Keyed by the item's id alone, under `/items/` rather than the kind-named
+# collections above: the kind is never looked up, so a kind the board gains
+# later carries attachments with no change here. See `kanban_data`.
+
+
+def _attachment_disposition(disposition: str, filename: str) -> str:
+    """A Content-Disposition header for any file name.
+
+    Headers are Latin-1. A name in another script - or a macOS screenshot's,
+    which carries a narrow no-break space before "PM" - written into the
+    header as it stands fails every download of a file that was kept. So the
+    plain `filename` is an ASCII stand-in and the real name travels in the
+    RFC 5987 form every current browser reads first.
+    """
+    fallback = "".join(
+        c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in filename
+    ) or "attachment"
+    quoted = urllib.parse.quote(filename, safe="")
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quoted}"
+
+
+@app.get("/api/kanban/items/{record_id}/attachments")
+async def api_kanban_attachments(
+        record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """This item's attachments, oldest first, without their bytes."""
+    del user
+    return await _kanban_call(kanban_data.list_attachments, record_id)
+
+
+#: What a multipart body may carry beyond the file itself: the boundaries,
+#: the part headers and the file's name. Generous, because a refusal on this
+#: margin would be a file under the cap refused for its envelope.
+_ATTACHMENT_ENVELOPE_BYTES = 64 * 1024
+
+
+@app.post("/api/kanban/items/{record_id}/attachments")
+async def api_kanban_attachment_upload(
+        record_id: str, request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """Keep a file against this item, and answer with what was kept.
+
+    Anything but a 200 means the file was not kept, and says why: an empty
+    file, one over the cap, an item that is not there, or a store that
+    refused the write.
+
+    The form is parsed here rather than declared as an `UploadFile`
+    parameter, because a declared one is parsed - the whole body spooled to
+    disk - before this runs. A body whose declared length is already past
+    the cap is refused unread. One sent without a length (chunked) is still
+    spooled by the parser before the cap refuses it, as a mind's picture is;
+    a browser's upload always declares one.
+    """
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > (
+            kanban_data.MAX_ATTACHMENT_BYTES + _ATTACHMENT_ENVELOPE_BYTES):
+        raise HTTPException(
+            status_code=413,
+            detail=(f"That file is over the {kanban_data.MAX_ATTACHMENT_BYTES}-byte "
+                    "limit. It was not kept."),
+        )
+    try:
+        form = await request.form(max_files=1, max_fields=8)
+    except Exception as exc:  # starlette raises its own parse errors
+        raise HTTPException(
+            status_code=400, detail=f"The upload could not be read: {exc}"
+        ) from exc
+    try:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(
+                status_code=400, detail="No file was sent: the form field is `file`.")
+        data = await file.read(kanban_data.MAX_ATTACHMENT_BYTES + 1)
+        filename = file.filename
+    finally:
+        # The spooled part is a temporary file; closed here rather than left
+        # to whenever the request object is collected.
+        await form.close()
+    try:
+        kept = await _kanban_call(
+            kanban_data.add_attachment, record_id, filename, data)
+    except HiveDataError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The file was not kept: the board's store refused it ({exc})",
+        ) from exc
+    log_event(
+        log, "kanban.attachment.added", **_actor_fields(user),
+        item_id=record_id, attachment_id=kept["id"],
+        size_bytes=kept["size_bytes"], content_type=kept["content_type"],
+    )
+    return kept
+
+
+@app.get("/api/kanban/items/{record_id}/attachments/{attachment_id}")
+async def api_kanban_attachment(
+        record_id: str, attachment_id: int,
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """One attachment's bytes, as the type its own bytes decided.
+
+    An image is shown in place; anything else is only ever a download, so a
+    kept HTML or SVG file never runs as a page on the console's origin.
+    Immutable for a year: an attachment is never altered once kept, and its
+    id is never reused.
+    """
+    del user
+    if not 1 <= attachment_id < 2**63:
+        # No row's id: the column is a bigint, and the driver refuses a
+        # larger one as an error rather than as nothing found.
+        raise HTTPException(status_code=404, detail=f"Attachment not found: {attachment_id}")
+    kept = await _kanban_call(kanban_data.get_attachment, record_id, attachment_id)
+    disposition = "inline" if kept["is_image"] else "attachment"
+    return Response(
+        content=kept["content"],
+        media_type=kept["content_type"],
+        headers={
+            "Content-Disposition": _attachment_disposition(disposition, kept["filename"]),
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
+
+
+@app.get("/api/minds/install-options")
+async def api_mind_install_options(user: dict = Depends(require_auth)):
+    """Valid harness/provider/role/deployment combinations, for the install
+    forms. One source of truth, so the console cannot drift from setup.sh."""
+    del user
+    return _mind_install_options()
+
+
+@app.post("/api/minds")
+async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
+    """Scaffold a containerised Mind in this Hive's own stack.
+
+    Writes runtime.yaml and container/compose.yaml, then returns the commands
+    that build and register it. Personality and soul stay conversational —
+    this creates a runtime, not an identity.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+
+    name = str(body.get("name") or "").strip().lower()
+    if mind_rename.reserved(name):
+        raise HTTPException(409, 'That name is reserved by a pending rename')
+    harness = str(body.get("harness") or "dsh")
+    provider = str(body.get("provider") or "")
+    connection = None
+    if body.get("provider_id"):
+        try:
+            connection = await provider_data.get_connection(str(body["provider_id"]))
+            provider = provider_data.harness_provider(connection, harness)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+        raise HTTPException(
+            status_code=400,
+            detail="Name must be 2 to 32 lowercase letters, numbers, or hyphens",
+        )
+    try:
+        _validate_harness_provider(harness, provider, internal=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        if connection:
+            proxy_key, _ = await holder_credentials.accept_mind_provider_token(body.pop("provider_token", body.pop("proxy_key", None)), for_mind=name)
+        else:
+            proxy_key, _ = await holder_credentials.validate_mind_proxy_key(body.pop("proxy_key", None), for_mind=name)
+    except holder_credentials.KeyHeldByAnother as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except (holder_credentials.MintRefused, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    default_model = str(
+        body.get("default_model") or ("" if connection else _INTERNAL_MIND_DEFAULT_MODELS[provider])
+    ).strip()
+    if connection and not configuration_data_module._MODEL_NAME_RE.fullmatch(default_model):
+        raise HTTPException(status_code=400, detail="Select an initial model from the provider's model list")
+    mind_id = str(body.get("mind_id") or uuid.uuid4())
+    try:
+        mind_id = str(uuid.UUID(mind_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Mind ID must be a UUID") from exc
+
+    if await _mind_name_is_taken(name):
+        raise HTTPException(status_code=409, detail="That Mind name is already taken")
+    if await asyncio.to_thread(configuration_data_module.name_is_a_host_already, name):
+        raise HTTPException(
+            status_code=409,
+            detail="That name is already an address on the hive's network",
+        )
+    held_by = await holder_credentials.name_held_by_something_else(name)
+    if held_by:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{held_by} already has a credential holder called {name!r}. "
+                "Creating this Mind would replace the credential that holder "
+                "is using."
+            ),
+        )
+
+    # A mind's id is what its roles, its memory and its gateway row are keyed
+    # by: one the gateway already knows is another mind's, and assigning
+    # roles to it would replace that mind's.
+    if body.get("mind_id"):
+        # An id the request brought, not one made here a moment ago: asked of
+        # the gateway itself, which must answer. A listing that failed reads
+        # as "no such mind", and would wave through another mind's id.
+        known = await _gateway_json("/broker/minds")
+        if _registered_mind(
+                [m for m in known if isinstance(m, dict)] if isinstance(known, list) else [],
+                mind_id):
+            raise HTTPException(status_code=409, detail="That Mind ID is already in use")
+    obstacle = await asyncio.to_thread(
+        configuration_data_module.new_mind_obstacle, name, harness)
+    if obstacle:
+        raise HTTPException(
+            status_code=409, detail=f"{name} was not made, and nothing was written: {obstacle}.")
+
+    # Every mind created here talks to the inference proxy with its own key
+    # (story 2.1.9, DECIDED 2026-11-15 by Daniel), so an Ollama mind's base is
+    # the proxy, never a bare daemon: there its calls go unmetered and its
+    # proxy key is sent to a host that is not the proxy.
+    ollama_base_url = (
+        configuration_data_module.mind_proxy_base_url() if provider == "ollama" else "")
+
+    # Created from a role (story 10.18.2): the roles are checked before
+    # anything is written, and held before the Mind's first turn.
+    role_ids = body.get("role_ids") or []
+    if not isinstance(role_ids, list) or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in role_ids):
+        raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    # General alone is a choice too: managed, holding only what every
+    # managed Mind holds.
+    managed = bool(role_ids) or body.get("roles_managed") is True
+    if role_ids:
+        known = {r["id"] for r in await store.roles_list()}
+        unknown = [i for i in role_ids if i not in known]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"No such role: {unknown[0]}")
+
+    owner = await _new_mind_owner(body, user)
+
+    # From here on something is written, and creating a Mind is all or
+    # nothing (Daniel, 2026-11-17): a step that fails takes back everything
+    # the steps before it wrote, and the page is told the Mind was not made
+    # and which step failed. It used to report each failure and leave the
+    # rest standing, which is how a page came to print "Started" under three
+    # refusals for a mind that existed nowhere it could run. See
+    # mind_creation.py for the record each step is taken under.
+    creation = mind_creation.Creation(
+        name, mind_id, owner, started_by=str(user.get("username") or ""))
+    try:
+        creation.begin()
+    except mind_creation.InProgress as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{name} was not made, and nothing was written: this console "
+                   f"could not open its record of the creation ({exc}).") from exc
+    step = "Writing its folder"
+    try:
+        creation.mark("folder")
+        written = scaffold_internal_mind(
+            name,
+            mind_id=mind_id,
+            harness=harness,
+            provider=provider,
+            default_model=default_model,
+            owner=owner,
+            description=str(body.get("description") or ""),
+            ollama_base_url=ollama_base_url,
+            **({"connection": connection} if connection else {}),
+        )
+        if connection:
+            step = "Recording its provider connection"
+            creation.mark("provider")
+            await provider_data.bind_mind(name, connection["id"])
+
+        # The generated compose file reads this mind's own variables, so
+        # without these the container comes up holding nothing and is
+        # refused by every service on its first call.
+        step = "Issuing its credentials"
+        creation.mark("credentials")
+        minted, credential_error = await holder_credentials.provision_mind(
+            name, mind_id, owner, proxy_key=proxy_key,
+        )
+        if credential_error:
+            raise _CreationStepFailed(credential_error)
+
+        # The fragment the scaffold wrote is invisible to `docker compose`
+        # until the stack file lists it. Recorded whether or not a line was
+        # added: one already there for this name points at the fragment just
+        # written, and left behind a failed creation it names a file that is
+        # gone — which `docker compose` refuses the whole stack for.
+        step = "Listing it in the stack"
+        creation.mark("stack")
+        await asyncio.to_thread(configuration_data_module.include_mind_in_stack, name)
+
+        # A mind created here holds no gateway admin credential and cannot
+        # register itself, so this is the only registration it ever gets.
+        step = "Registering it with the gateway"
+        creation.mark("gateway")
+        await _register_scaffolded_mind(name, {"owner": owner}, user)
+
+        # The Mind's own node, written as the Mind. A mind with no node is a
+        # mind whose first memory write has nothing to hang from, and seeding
+        # it with the console's credential would record every mind in the
+        # hive as something the console created.
+        #
+        # After the gateway knows the Mind, never before: the node is written
+        # with its edge to its owner, and the memory store refuses an edge
+        # from a mind the gateway has no row for. Asked the other way round,
+        # every creation on a real hive failed here (found by the real-mind
+        # proof, 2026-11-18).
+        step = "Its node in the graph"
+        location = holder_credentials.locate(
+            holder_credentials.SERVICES["lucent"], name)
+        credential = (
+            holder_credentials._loaded_value(location) if location else None)
+        if not credential:
+            raise _CreationStepFailed(
+                "this Mind holds no memory-store credential, so its node "
+                "cannot be written as itself")
+        # Recorded before it is asked for. The memory store can refuse the
+        # edge after the node has landed, and no answer at all is not a
+        # refusal either. The undo deletes as this Mind, which can only
+        # delete what this Mind wrote, and a node that is not there is
+        # nothing to take back.
+        creation.mark("node")
+        await mind_soul.seed_mind_node(name, mind_id, owner, credential)
+
+        # Last, and still before its container is asked for: a Mind never
+        # takes a turn unmanaged, and no step can fail after this one. Role
+        # management is never taken off a mind id once put on, so held any
+        # earlier a failed creation would leave an id managed for good.
+        if managed:
+            step = "Its role assignment"
+            creation.mark("roles")
+            await store.set_mind_roles(mind_id, role_ids)
+            # Made holding the operator role: its fragment says so before its
+            # container is first made from it, so there is nothing to re-make.
+            if any(r["slug"] == operator_attachment.OPERATOR_ROLE_SLUG
+                   for r in await store.roles_of(mind_id)):
+                await asyncio.to_thread(operator_attachment.reconcile, name, True)
+    except Exception as exc:  # noqa: BLE001 - every failure unmakes the mind
+        why = str(getattr(exc, "detail", "") or exc) or type(exc).__name__
+        try:
+            leftovers = await mind_creation.unmake(creation, _deregister_mind)
+        finally:
+            creation.release()
+        log_event(
+            log, "mind.create.failed", **_actor_fields(user), mind_name=name,
+            mind_id=mind_id, harness=harness, provider=provider, step=step,
+            reason=why[:500], left_behind=leftovers,
+        )
+        if isinstance(exc, holder_credentials.KeyHeldByAnother):
+            # One plain sentence: the step it failed on is not the person's
+            # concern, and the undo has already removed what landed.
+            detail = f"{name} was not made. {why}" + (
+                " Left behind, and to be removed by hand: " + "; ".join(leftovers) + "."
+                if leftovers else "")
+            raise HTTPException(status_code=409, detail=detail) from exc
+        detail = f"{name} was not made. {step} failed: {why.rstrip('.')}. " + (
+            "Left behind, and to be removed by hand: " + "; ".join(leftovers) + "."
+            if leftovers else "Everything written for it has been removed.")
+        # A refusal of what was asked for is the asker's to fix; anything
+        # else is a service behind this console that did not do its part,
+        # and never that service's own status: a 401 from the memory store
+        # passed on would read, to the page, as this session having ended.
+        raise HTTPException(
+            status_code=400 if isinstance(exc, ValueError) else 502, detail=detail,
+        ) from exc
+
+    # Made. The record is closed before the container is asked for: from
+    # here nothing is taken back, whatever the start does.
+    creation.close()
+    start = await _start_mind_container(name, user)
+    log_event(
+        log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
+        mind_id=mind_id, harness=harness, provider=provider,
+        credentials=[m["service"] for m in minted], started=start["started"],
+        start_operation=start["operation_id"], start_error=start["error"],
+    )
+    return {
+        "mind_id": mind_id,
+        "roles": role_ids,
+        "written": written,
+        "credentials": minted,
+        "registration": {
+            "name": name,
+            "mind_id": mind_id,
+            "model": default_model,
+            "harness": harness,
+            "provider": provider,
+            "owner": owner,
+        },
+        **_start_report(name, start),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Work that waits for a person (feature 834, story 913)
+# ---------------------------------------------------------------------------
+# Four kinds of work used to be taken up when this site started, with nobody
+# clicking and so with a key kept for the purpose. None is. Each stays on its
+# record, naming the person who started it (a name, never a key), shows as
+# waiting with who it waits for (`/api/waiting-work`), and is carried on by the
+# next click of that person, or of any administrator, with the sign-in key that
+# came with that click. The key is handed to the step as an argument and lives
+# in that one running step; when it ends nothing here holds it.
+
+_WAITING_BACKGROUND: set = set()
+
+
+def _in_the_background(coroutine) -> None:
+    task = asyncio.ensure_future(coroutine)
+    _WAITING_BACKGROUND.add(task)
+    task.add_done_callback(_WAITING_BACKGROUND.discard)
+
+
+async def _pick_up_waiting_work(person: str, is_admin: bool, key: str) -> None:
+    """After a click of `person` (with `key`), carry on what waits for them, or
+    for anyone when they are an administrator. Never raises into the click.
+
+    The background steps started here act as this person with this key for
+    their own run only (the context they are started in is theirs); nothing is
+    stored."""
+    acting = route_access.begin_acting(person, key)
+    try:
+        for operation in mind_rename.waiting(person, is_admin):
+            mind_rename.kick(operation["operation_id"], key)
+        if await design_delivery.waiting(person, is_admin):
+            _start_design_delivery(person, is_admin, key)
+        if any(is_admin or mind_creation.waits_for(c) == person
+               for c in mind_creation.pending() if c.name not in mind_creation._MAKING):
+            _in_the_background(_sweep_interrupted_creations(person, is_admin))
+        if holder_credentials.waiting_replacements(person, is_admin):
+            _in_the_background(_recover_key_replacements(person, is_admin))
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the click
+        log_event(log, "waiting_work.pick_up_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
+    finally:
+        route_access.end_acting(acting)
+
+
+def _start_design_delivery(person: str, is_admin: bool, key: str | None) -> None:
+    """Send what is owed to this person, in the background, with the key that
+    came with this click. With no person and no key (a mind's own call) nothing
+    is sent: what is stored waits for a person's next click."""
+    if not person or not key:
+        return
+    task = asyncio.create_task(design_delivery.deliver_pending(person, is_admin, key))
+    _DESIGN_DELIVERIES.add(task)
+    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+
+
+async def _waiting_work_for(person: str, is_admin: bool) -> list[dict]:
+    """Everything waiting for this person, in words: what it is, which mind
+    or page, and who it waits for."""
+    found: list[dict] = []
+    for operation in mind_rename.waiting(person, is_admin):
+        found.append({"kind": "rename", "what": f"Renaming {operation.get('old')} to {operation.get('new')}",
+                      "waits_for": mind_rename.waits_for(operation), "status": operation.get("status")})
+    for creation in mind_creation.pending():
+        if creation.name in mind_creation._MAKING:
+            continue
+        who = mind_creation.waits_for(creation)
+        if is_admin or who == person:
+            found.append({"kind": "creation", "what": f"Taking back the half-made mind {creation.name}",
+                          "waits_for": who, "status": "waiting"})
+    for record in holder_credentials.waiting_replacements(person, is_admin):
+        found.append({"kind": "key_replacement", "what": f"Finishing the replacement of {record.get('mind')}'s key",
+                      "waits_for": key_journal_waits_for(record), "status": "waiting"})
+    for notice in await design_delivery.waiting(person, is_admin):
+        found.append({"kind": "design", "what": f"Sending a saved {notice.get('kind')} of the {notice.get('page')} page",
+                      "waits_for": design_delivery.waits_for(notice), "status": "waiting"})
+    return found
+
+
+def key_journal_waits_for(record: dict) -> str:
+    return holder_credentials.key_journal.waits_for(record)
+
+
+@app.get("/api/waiting-work")
+async def api_waiting_work(user: dict = Depends(require_auth)):
+    """What is waiting for the signed-in person (every person's, for an
+    administrator), and who each piece waits for."""
+    return {"waiting": await _waiting_work_for(
+        str(user["username"]).lower(), bool(user.get("is_admin")))}
+
+
+async def _recover_key_replacements(person: str, is_admin: bool) -> None:
+    """Finish or undo a key replacement this console was stopped in the middle
+    of, for the person it waits for."""
+    try:
+        for recovered in await holder_credentials.recover_replacements(person, is_admin):
+            log_event(log, "mind.key.recovered", component="hive-control-plane",
+                      level=logging.INFO if recovered["recovered"] else logging.ERROR,
+                      mind=recovered["mind"], recovered=recovered["recovered"])
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "mind.key.recover_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
+
+
+async def _sweep_interrupted_creations(person: str, is_admin: bool) -> None:
+    try:
+        for swept in await mind_creation.sweep(
+                _deregister_mind, _gateway_mind_id_named, person=person, is_admin=is_admin):
+            log_event(log, "mind.create.swept", component="hive-control-plane",
+                      level=logging.WARNING, **swept)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the console
+        log_event(log, "mind.create.sweep_failed", level=logging.ERROR,
+                  component="hive-control-plane", error=str(exc))
+
+
+async def _gateway_mind_id_named(name: str) -> str:
+    """The id of the mind the gateway holds under this name, or "" for none.
+    Raises when the gateway does not answer: that is not "none"."""
+    minds = await _gateway_json("/broker/minds")
+    if not isinstance(minds, list):
+        raise HTTPException(status_code=502, detail="the gateway's mind listing was not a list")
+    for mind in minds:
+        if isinstance(mind, dict) and str(mind.get("name") or "").lower() == name:
+            return str(mind.get("id") or "")
+    return ""
+
+
+class _CreationStepFailed(Exception):
+    """A step of creating a Mind that answered with a failure, not an error."""
+
+
+async def _start_mind_container(name: str, user: dict) -> dict:
+    """Ask Hive Tools to build and start a Mind's container; say what came of it.
+
+    One of three things, and never an exception: started, waiting on an
+    admin's approval in Hive Tools, or not started and why. Asked for here
+    rather than handed back as a shell line — the approval for touching this
+    host's containers is the admin's click in Hive Tools, which is a record
+    of who started what (story 2.1.9, decided 2026-11-15).
+
+    It is not part of making the Mind, and a start that fails unmakes
+    nothing: see mind_creation.py.
+    """
+    start = {"started": False, "error": None, "operation_id": None}
+    try:
+        up = await _hive_tools_request(
+            "POST", "/docker/up",
+            params={"path": mind_mounts.hive_mind_project_path(), "service": name},
+            timeout=310.0,
+        )
+        operation = up.get("hitl_request_id")
+        if operation:
+            start["operation_id"] = str(operation)
+            # Recorded so the pending approval has a requester. Failing at
+            # that is said; the request is already in flight.
+            try:
+                await console_access.record_operation_from(up, user)
+            except Exception as exc:  # noqa: BLE001 - reported below
+                start["error"] = (
+                    f"the start is waiting on approval, but recording who "
+                    f"asked failed: {exc}")
+        elif up.get("error") or up.get("status") == "error":
+            # Hive Tools answers 2xx with the compose failure in the body —
+            # a broken fragment, a build that did not finish, an unknown
+            # service. Reading that as started sends the operator to talk to
+            # a container that does not exist.
+            start["error"] = str(
+                up.get("error") or up.get("stderr") or "the start failed")
+        else:
+            start["started"] = True
+    except Exception as exc:  # noqa: BLE001 - reported; the Mind is made
+        start["error"] = str(getattr(exc, "detail", "") or exc) or type(exc).__name__
+    return start
+
+
+def _start_report(name: str, start: dict) -> dict:
+    """The start, as the page is told it."""
+    waiting = bool(start["operation_id"])
+    return {
+        "started": start["started"],
+        "start_operation": start["operation_id"],
+        "start_error": start["error"],
+        # The soul is authored in conversation, not here — see setup-personality.
+        "next_step": (
+            f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
+            if start["started"] else
+            f"{name} is made. Starting it waits on an approval in Hive Tools; "
+            "if nobody answers within the wait it is refused, and you can "
+            "start it again here."
+            if waiting else
+            f"{name} is made but is not running: its container did not start. "
+            "Building its image the first time can take longer than the wait "
+            "allows, so try starting it again before anything else."
+        ),
+    }
+
+
+async def _deregister_mind(name: str, mind_id: str) -> None:
+    """Take a mind a failed creation registered back out of the gateway.
+
+    Only the row carrying this mind's id. A name the gateway holds under
+    another id is another mind, and one it does not hold was never
+    registered — the registration is what failed.
+    """
+    minds = await _gateway_json("/broker/minds")
+    rows = [m for m in minds if isinstance(m, dict)] if isinstance(minds, list) else []
+    if not _registered_mind(rows, mind_id):
+        return
+    try:
+        await _gateway_request("DELETE", f"/broker/minds/{name}")
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+
+@app.post("/api/minds/{name}/start")
+async def api_start_mind(name: str, user: dict = Depends(require_auth)):
+    """Start, again, the container of a Mind made on this host.
+
+    For a Mind whose first start did not happen — the image build outlasted
+    the wait, or the approval lapsed. The same request creation makes.
+    """
+    normalized = name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    if not internal_mind_exists(normalized):
+        raise HTTPException(status_code=404, detail="No Mind of that name was made here")
+    if mind_creation.is_open(normalized):
+        # Half made: started now it would come up without its keys, and a
+        # step that then failed would delete its folder under it.
+        raise HTTPException(
+            status_code=409, detail=f"{normalized} is still being made, or being taken back")
+    start = await _start_mind_container(normalized, user)
+    log_event(
+        log, "mind.start.requested", **_actor_fields(user), mind_name=normalized,
+        started=start["started"], start_operation=start["operation_id"],
+        start_error=start["error"],
+    )
+    return _start_report(normalized, start)
+
+
+async def _new_mind_owner(body: dict, user: dict) -> str:
+    """The user a new Mind is created for: the one named, else the admin
+    creating it. Refused unless that is an account this console knows."""
+    owner = auth.normalize_username(str(body.get("owner") or "")) or auth.normalize_username(
+        str(user.get("username") or "")
+    )
+    if not OWNER_RE.fullmatch(owner):
+        raise HTTPException(status_code=400, detail="Every Mind needs an owner")
+    try:
+        await auth.get_store().get_user(owner)
+    except auth.NotFound as exc:
+        raise HTTPException(status_code=400, detail=f"No user named {owner}") from exc
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    return owner
+
+
+def _registration_owner(
+    existing: dict | None, body: dict, user: dict, configured: object = None
+) -> str | None:
+    """Who a mind registered from the console belongs to.
+
+    A mind comms already holds keeps its stored owner, so the field is left
+    out — comms refuses a registration naming a different one. A new mind is
+    the owner named in the request, else the one its runtime.yaml was
+    scaffolded with, else the registering admin.
+    """
+    if existing and route_access.owner_of(existing):
+        return None
+    for candidate in (body.get("owner"), configured, user.get("username")):
+        owner = auth.normalize_username(str(candidate or ""))
+        if owner:
+            return owner
+    return None
+
+
+def _registered_mind(minds: list[dict], mind_id: str) -> dict | None:
+    """Comms keys a mind on its id; a name match with another id is not it."""
+    return next((m for m in minds if mind_id and str(m.get("id") or "") == mind_id), None)
+
+
+async def _register_scaffolded_mind(normalized: str, body: dict, user: dict) -> dict:
+    """Register a mind scaffolded here with the gateway; returns comms' answer.
+
+    Done at creation as well as from the button: a mind created here holds
+    no gateway admin credential and cannot register itself, so a create
+    whose page was closed before the click would leave a mind the gateway
+    never learns the session credential of.
+    """
+    try:
+        configuration = local_runtime_configuration(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    registration = {
+        "mind_id": str(configuration.get("mind_id") or ""),
+        "name": normalized,
+        "gateway_url": str(configuration.get("gateway_url") or ""),
+        "model": str(configuration.get("default_model") or ""),
+        "harness": str(configuration.get("harness") or ""),
+    }
+    # A mind made here can rewrite its own runtime.yaml, and this goes to the
+    # gateway with the admin credential: which row it is, where it answers
+    # and whose it is are taken from what this console wrote, not from it.
+    as_made = configuration_data_module.identity_as_made(normalized)
+    if as_made:
+        registration.update(as_made)
+    existing = _registered_mind(await _broker_minds_safe(), registration["mind_id"])
+    owner = _registration_owner(
+        existing, body, user, None if as_made else configuration.get("owner"))
+    if owner:
+        registration["owner"] = owner
+    # What the gateway shows this mind is made from the mind's one key, which
+    # this console holds in the mind's key file. Only the calculated value
+    # travels, never the key; no key file yet, nothing is carried and the
+    # gateway keeps what it has.
+    try:
+        one_key = mind_key_files.read(normalized)
+    except mind_key_files.KeyFileError:
+        one_key = None
+    if one_key:
+        registration["session_token"] = holder_credentials.gateway_credential(one_key)
+    # POST /broker/minds is an admin route on comms; the service token gets 401.
+    broker_result = await _gateway_request(
+        "POST", "/broker/minds", json_body=registration
+    )
+    log_event(
+        log, "mind.registered", **_actor_fields(user), mind_name=normalized,
+        mind_id=str(configuration.get("mind_id") or ""),
+    )
+    return broker_result
+
+
+@app.post("/api/minds/{name}/register")
+async def api_register_mind(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Register a scaffolded Mind with the broker once its container is up."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    normalized = name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    broker_result = await _register_scaffolded_mind(normalized, body, user)
+    return {"registered": True, "broker": broker_result}
+
+
+@app.get("/capability-nodes", response_class=HTMLResponse)
+async def capability_nodes_page(request: Request):
+    return await _console_page(request, "capability_nodes.html")
+
+
+@app.get("/outposts", include_in_schema=False)
+@app.get("/outposts/new", include_in_schema=False)
+async def legacy_outpost_page(request: Request):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    target = "/edge-minds/new" if request.url.path.endswith("/new") else "/edge-minds"
+    return RedirectResponse(target, status_code=308)
+
+
+@app.get("/tools", include_in_schema=False)
+async def legacy_tools_page(request: Request):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return RedirectResponse("/capability-nodes", status_code=308)
+
+
+@app.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    return await _console_page(request, "activity.html")
+
+
+@app.get("/training", response_class=HTMLResponse)
+async def training_page(request: Request):
+    return await _console_page(request, "training.html")
+
+
+@app.get("/harness-runs", response_class=HTMLResponse)
+async def harness_runs_page(request: Request):
+    return await _console_page(request, "harness_runs.html")
+
+
+# The run collector writes this file; the console only reads it. The model-testing
+# checkout is not mounted into this container, and the hive's own data directory
+# already is — so the measurement travels as one file rather than as a new mount.
+HARNESS_RUNS_FILE = Path("/data/harness-runs.json")
+
+
+@app.get("/api/harness-runs")
+async def api_harness_runs(user: dict = Depends(require_auth)):
+    """Every recorded harness run's tool traffic.
+
+    An absent file is reported as no runs rather than as an error: the collector
+    has simply not run yet on this host, which is a different sentence from the
+    console being broken, and the page says which.
+    """
+    try:
+        return json.loads(HARNESS_RUNS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"generated": None, "source": str(HARNESS_RUNS_FILE), "runs": []}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"harness run file unreadable: {exc}") from exc
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page(request: Request):
+    return await _console_page(request, "dashboard.html")
+
+
+async def _proxy_base_url() -> str:
+    try:
+        return provider_data.root_url(await provider_data.get_connection("hive-proxy"))
+    except ValueError:
+        raise RuntimeError("Configure the Hive Proxy connection in Settings → Providers") from None
+
+
+def _proxy_headers() -> dict:
+    """The console's own proxy key.
+
+    Absent is a state, not a failure: the allowance panel reports "not
+    configured" and the rest of the page renders. A console that refused to
+    load because one key was unset would hide the minds, the hosts and the
+    conversations over a panel nobody had wired yet.
+    """
+    token = os.getenv("INFERENCE_PROXY_KEY", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+async def _proxy_json(path: str) -> dict:
+    headers = _proxy_headers()
+    if not headers:
+        raise RuntimeError("INFERENCE_PROXY_KEY is not configured for this console")
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        response = await client.get(f"{await _proxy_base_url()}{path}", headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+async def _fetch_provider_limits() -> dict:
+    return {"providers": (await _proxy_json("/v1/providers/limits")).get("providers", [])}
+
+
+async def _fetch_model_catalog() -> dict:
+    """Deployment name to published context window, from the model map.
+
+    The proxy owns that map, so this is a relay rather than a table the
+    console keeps — a second copy would disagree the first time somebody
+    edited a row.
+    """
+    listing = await _proxy_json("/v1/models")
+    rows = [
+        row for row in listing.get("data", [])
+        if isinstance(row, dict) and row.get("id")
+    ]
+    return {
+        "catalog": {row["id"]: row.get("context_window") for row in rows},
+    }
+
+
+async def _probe_mind_host(mind: dict) -> dict:
+    """One mind's account of the machine it runs on.
+
+    Every failure keeps its own shape. A refused mind is up and holding a
+    token we do not have; one running an older build has no route yet; one
+    that never answered may be asleep, firewalled or off. Three remedies,
+    three machines — collapsing them is how an evening goes into rebooting
+    a box whose only problem was an environment variable.
+    """
+    name = mind.get("name") or ""
+    gateway = (mind.get("gateway_url") or "").strip().rstrip("/")
+    if not gateway:
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
+                "reading": None, "error": "no gateway URL in the registry"}
+    # The request goes to the gateway as the signed-in person (story 900); a
+    # refusal to send (nobody signed in, not this person's mind, no key) is
+    # `unconfigured` with the sentence, never "unreachable": it is not a
+    # statement about the machine.
+    try:
+        async with httpx.AsyncClient(timeout=dashboard_data.HOST_PROBE_TIMEOUT) as client:
+            response = await mind_runtime.send(client, "GET", f"{gateway}/host")
+    except HTTPException as exc:
+        said = str(exc.detail)
+        if exc.status_code == 504 or (exc.status_code == 502 and "could not be reached" in said):
+            status_word = "unreachable"
+        elif "the mind refused" in said:
+            status_word = "refused"
+        else:
+            status_word = "unconfigured"
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": status_word,
+                "reading": None, "error": str(exc.detail)}
+    except Exception as exc:  # noqa: BLE001 — unreachable is a state
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unreachable",
+                "reading": None, "error": str(exc)}
+    status = dashboard_data.host_status_for(response.status_code)
+    if status != "reporting":
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": status,
+                "reading": None, "error": response.text[:200]}
+    return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "reporting",
+            "reading": response.json(), "error": None}
+
+
+async def _fetch_hosts() -> dict:
+    """Every mind's machine, asked all at once.
+
+    Concurrently and with a per-mind deadline, because one sleeping Windows
+    box DROPs rather than refuses: asked in sequence it would hold up every
+    other machine's figures, and the page would present them all as current.
+    """
+    minds = await _broker_minds_safe()
+    reports = await asyncio.gather(
+        *[_probe_mind_host(mind) for mind in minds], return_exceptions=True
+    )
+    settled = [
+        report
+        if isinstance(report, dict)
+        # Named, not blanked: a nameless failure row merges with every other
+        # nameless one, and the second dead machine disappears behind the
+        # first.
+        else {"mind": mind.get("name") or "", "mind_id": mind.get("id"),
+              "last_seen": mind.get("last_seen"),
+              "status": "unreachable", "reading": None, "error": str(report)}
+        for mind, report in zip(minds, reports)
+    ]
+    merged = dashboard_data.merge_hosts(settled)
+    return {**dashboard_data.watchable_hosts(merged), "reports": settled}
+
+
+class _PerPersonSnapshot:
+    """The hosts reading, one per signed-in person.
+
+    The hosts are asked of every mind through the gateway with the asking
+    person's own key (story 905), so what a person who may not reach a mind
+    reads is not what an administrator reads: one shared reading would show
+    each the other's answers for the cache window. Each person's reading is
+    still single-flight and held for the same time."""
+
+    def __init__(self, fetch, *, ttl):
+        self._fetch = fetch
+        self._ttl = ttl
+        self._clock = time.time
+        self._by_person: dict[str, dashboard_data.SharedSnapshot] = {}
+
+    async def get(self) -> dict:
+        person = mind_runtime._PERSON.get() or ""
+        found = self._by_person.get(person)
+        if found is None:
+            found = dashboard_data.SharedSnapshot(self._fetch, ttl=self._ttl, clock=self._clock)
+            self._by_person[person] = found
+        found._fetch, found._ttl, found._clock = self._fetch, self._ttl, self._clock
+        return await found.get()
+
+    def invalidate(self) -> None:
+        self._by_person.clear()
+
+
+_host_snapshot = _PerPersonSnapshot(_fetch_hosts, ttl=dashboard_data.HOST_TTL_SECONDS)
+_provider_snapshot = dashboard_data.SharedSnapshot(
+    _fetch_provider_limits, ttl=dashboard_data.PROVIDER_TTL_SECONDS
+)
+_catalog_snapshot = dashboard_data.SharedSnapshot(
+    _fetch_model_catalog, ttl=dashboard_data.CATALOG_TTL_SECONDS
+)
+
+
+async def _live_sessions() -> dict:
+    """Which conversations are producing, asked of the only party that knows."""
+    # Admin-guarded on the gateway: the body carries assistant prose from
+    # every conversation in the hive, which the service token every surface
+    # bot holds must not open.
+    payload = await _gateway_json("/sessions/live")
+    if not isinstance(payload, dict) or "sessions" not in payload:
+        # A gateway too old to know this route answers 200 with the body of
+        # GET /sessions/{id} for the id "live". Folding that into an empty
+        # list renders a running hive as a silent one, which is the failure
+        # this page exists to catch.
+        raise RuntimeError(
+            "the gateway answered /sessions/live with an unexpected shape "
+            "(it may predate the route)"
+        )
+    return payload
+
+
+@app.get("/api/dashboard")
+async def api_dashboard(user: dict = Depends(require_auth)):
+    """One reading of the hive: who is talking, how full, and on what.
+
+    Guarded like every other console API. This one carries context counts,
+    host inventory and subscription spend — guarding only the HTML would
+    leave all of it on an unauthenticated JSON route.
+    """
+    del user
+    live, hosts, providers, catalog = await asyncio.gather(
+        _live_sessions(),
+        _host_snapshot.get(),
+        _provider_snapshot.get(),
+        _catalog_snapshot.get(),
+        return_exceptions=True,
+    )
+    windows = catalog.get("catalog", {}) if isinstance(catalog, dict) else {}
+    sessions = live.get("sessions", []) if isinstance(live, dict) else []
+    # Every open conversation that is not producing, read from the gateway's
+    # table: how close one is to its rotation point matters most before
+    # anyone types into it.
+    idle = live.get("idle", []) if isinstance(live, dict) else []
+    for session in [*sessions, *idle]:
+        context = dict(session.get("context") or {})
+        context["window"] = dashboard_data.resolve_window(
+            context.get("window"), dashboard_data.window_for(session.get("model"), windows)
+        )
+        # A conversation's threshold comes from the mind or gateway report.
+        # A proxy-wide model percentage belongs to no specific mind/session.
+        context["threshold"] = dashboard_data.resolve_threshold(
+            context.get("threshold"), context["window"],
+            context.get("threshold_percent"),
+        )
+        session["context"] = dashboard_data.context_reading(context)
+    registry = await _broker_minds_safe()
+    columns = dashboard_data.name_columns(
+        dashboard_data.ordered_columns(sessions), registry
+    )
+    return {
+        "columns": columns,
+        "idle": dashboard_data.name_columns(idle, registry),
+        "hosts": hosts if isinstance(hosts, dict) else {"hosts": [], "stale": True,
+                                                        "error": str(hosts)},
+        "providers": dashboard_data.annotate_providers(providers)
+        if isinstance(providers, dict)
+        else {"providers": [], "stale": True, "error": str(providers)},
+        "sessions_error": None if isinstance(live, dict) else str(live),
+        "observed_at": time.time(),
+    }
+
+
+@app.get("/api/dashboard/text")
+async def api_dashboard_text(
+    session_id: str, since: int = 0, user: dict = Depends(require_auth)
+):
+    """Everything one live conversation has done since `since`.
+
+    Relayed from comms, which types each block rather than filtering it:
+    prose, thinking, the tool call with its input and the result with its
+    body. The console spends its admin bearer here on behalf of whoever is
+    logged in, so any account in the console's user table reads any mind's
+    command output and file contents. That is the page working as specified
+    — the dashboard exists to show the work — and it is the reason this
+    route is behind `require_auth` at all.
+    """
+    del user
+    return await _gateway_json(
+        "/sessions/live/text",
+        {"session_id": session_id, "since": since}
+    )
+
+
+@app.get("/api/overview")
+async def api_overview(user: dict = Depends(require_auth)):
+    """The hive at a glance — to a non-admin, the part of it that is theirs."""
+    all_minds = await _broker_minds_safe()
+    minds = route_access.visible_minds(user, all_minds)
+    try:
+        sessions_raw = await _gateway_json("/sessions")
+        sessions = sessions_raw if isinstance(sessions_raw, list) else []
+    except Exception:
+        sessions = []
+    sessions = route_access.visible_sessions(user, sessions, all_minds)
+    comms_health, lucent_health = await asyncio.gather(
+        _service_health(
+            f"{_gateway_base_url().rstrip('/')}/health",
+            headers=await _person_headers_or_none(),
+            service_name="Hive Comms",
+            repair_action="Check the Hive Comms endpoint and your own key, then retry.",
+        ),
+        _service_health(
+            f"{_lucent_base_url().rstrip('/')}/health",
+            headers={},
+            service_name="Lucent",
+            repair_action="Check the memory store's address, then retry.",
+        ),
+    )
+    registry = _add_session_activity(build_mind_registry(minds), sessions)
+    sessions = _add_session_mind_names(sessions, registry)
+    capability_data = await _capability_node_data()
+    tools_node = next(
+        node for node in capability_data["nodes"] if node["id"] == "hive-tools"
+    )
+    edge_minds = await _edge_mind_rows(registry)
+    active_sessions = [
+        session for session in sessions if session.get("status") in {"active", "running"}
+    ]
+    # Capability nodes are the house's own wiring: endpoints and installs.
+    house = bool(user.get("is_admin"))
+    return {
+        "counts": {
+            "minds": len(minds),
+            "edge_minds": len(edge_minds),
+            "capability_nodes": capability_data["summary"]["configured"] if house else 0,
+            "sessions": len(active_sessions),
+        },
+        "minds": registry,
+        "edge_minds": edge_minds,
+        "capability_nodes": capability_data["nodes"] if house else [],
+        "sessions": sessions,
+        "services": {
+            "comms": comms_health,
+            "lucent": lucent_health,
+            "tools": {
+                "installed": tools_node["installed"],
+                **tools_node["health"],
+            },
+        },
+    }
+
+
+async def _edge_mind_rows(registry: list[dict]) -> list[dict]:
+    rows = []
+    profile_overrides = _edge_mind_profile_overrides()
+    name_overrides = _edge_mind_name_overrides() | set(profile_overrides)
+    for mind in registry:
+        local_value = mind.get("local_config")
+        local = local_value if isinstance(local_value, dict) else {}
+        config = local.get("config") or {}
+        name = str(mind.get("name") or "")
+        stored = await get_edge_mind_metadata(name) or {}
+        gateway_url = str(mind.get("gateway_url") or "")
+        parsed = urllib.parse.urlparse(gateway_url)
+        external_address = False
+        if not local and parsed.hostname:
+            with suppress(ValueError):
+                address = ipaddress.ip_address(parsed.hostname)
+                external_address = not address.is_loopback and not address.is_unspecified
+        is_edge_mind = (
+            bool(config.get("remote"))
+            or bool(config.get("role"))
+            or bool(config.get("deployment"))
+            or name.lower() in name_overrides
+            or external_address
+        )
+        if not is_edge_mind:
+            continue
+        profile = str(
+            config.get("profile")
+            or stored.get("profile")
+            or profile_overrides.get(name.lower())
+            or "standard"
+        )
+        if profile not in _EDGE_MIND_PROFILES:
+            profile = "standard"
+        rows.append(
+            {
+                "name": name or "Unnamed",
+                "id": mind.get("id") or "",
+                "host": parsed.hostname or "Remote machine",
+                "gateway_url": gateway_url,
+                "profile": profile,
+                "role": config.get("role") or stored.get("role") or "Connected",
+                "deployment": config.get("deployment")
+                or stored.get("deployment")
+                or "Remote",
+                "harness": mind.get("harness") or config.get("harness") or "Unknown",
+                "model": mind.get("model") or config.get("default_model") or "Unknown",
+                "last_seen": mind.get("last_seen"),
+                "last_activity": mind.get("last_activity"),
+                "activity_status": mind.get("activity_status") or "registered",
+            }
+        )
+    return sorted(rows, key=lambda row: str(row["name"]).lower())
+
+
+@app.get("/api/outposts")
+async def legacy_api_outposts(user: dict = Depends(require_auth)):
+    del user
+    return RedirectResponse("/api/edge-minds", status_code=307)
+
+
+@app.get("/api/edge-minds")
+async def api_edge_minds(user: dict = Depends(require_auth)):
+    del user
+    registry = build_mind_registry(await _broker_minds_safe())
+    try:
+        sessions_raw = await _gateway_json("/sessions")
+        sessions = sessions_raw if isinstance(sessions_raw, list) else []
+    except Exception:
+        sessions = []
+    registry = _add_session_activity(registry, sessions)
+    return {"edge_minds": await _edge_mind_rows(registry)}
+
+
+_EDGE_MIND_PROFILES = {"standard", "sentinel"}
+_EDGE_MIND_BOOTSTRAP_PROFILES = {"standard"}
+# `sandboxed` is the word setup.sh accepts. The console said `satellite`, so
+# every satellite bootstrap it generated died on setup.sh's role check.
+_EDGE_MIND_ROLES = {"operator", "sandboxed"}
+_EDGE_MIND_DEPLOYMENTS = {"systemd", "container", "windows-task"}
+
+# Harness and provider are separate axes, matching mind_templates/ and
+# minds/<name>/runtime.yaml. The harness picks the CLI; the provider picks
+# where inference goes. Each CLI speaks one first-party dialect, and ollama is
+# the alternative both share.
+_MIND_PROVIDERS = {"anthropic", "openai", "ollama"}
+_HARNESS_PROVIDERS = {
+    "claude_cli": ("anthropic", "ollama"),
+    "codex_cli": ("openai", "ollama"),
+}
+# A container mind may also run dsh, the hive's default harness (Daniel,
+# 2026-11-17), which reaches every provider through the inference proxy.
+_INTERNAL_HARNESS_PROVIDERS = {
+    "dsh": ("openai", "anthropic", "ollama"),
+    **_HARNESS_PROVIDERS,
+}
+_HARNESS_LABELS = {"dsh": "DSH", "claude_cli": "Claude CLI", "codex_cli": "Codex CLI"}
+_HARNESS_DESCRIPTIONS = {
+    "dsh": "Hive's default harness, with persistent conversations and Hive tools.",
+    "claude_cli": "Long-lived stream-json session per conversation.",
+    "codex_cli": "One codex exec subprocess per turn.",
+}
+_PROVIDER_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-5",
+    "openai": "gpt-5.4",
+    "ollama": "qwen3:8b",
+}
+# A container mind created here calls the inference proxy (story 2.1.9), so
+# it starts on a model the proxy serves; `gpt-5.4` and `qwen3:8b` are not.
+_INTERNAL_MIND_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-5",
+    "openai": "gpt-5.6-terra",
+    "ollama": "gpt-oss:20b-32k",
+}
+_EDGE_MIND_SURFACES = {"telegram", "discord"}
+
+
+def _mind_install_options(*, internal: bool = False) -> dict:
+    """The one source of truth the install forms render from.
+
+    Hardcoding these in the template is how the console drifted out of step
+    with setup.sh in the first place.
+    """
+    harness_providers = _INTERNAL_HARNESS_PROVIDERS if internal else _HARNESS_PROVIDERS
+    return {
+        "default_harness": "dsh" if internal else "claude_cli",
+        "harnesses": [
+            {
+                "value": harness,
+                "label": _HARNESS_LABELS[harness],
+                "description": _HARNESS_DESCRIPTIONS[harness],
+                "providers": list(providers),
+            }
+            for harness, providers in harness_providers.items()
+        ],
+        "providers": [
+            {
+                "value": provider,
+                "default_model": _PROVIDER_DEFAULT_MODELS[provider],
+                # What the container-mind form starts on: a model the proxy
+                # serves, since that is what such a mind calls.
+                "internal_default_model": _INTERNAL_MIND_DEFAULT_MODELS[provider],
+            }
+            for provider in sorted(_MIND_PROVIDERS)
+        ],
+        "roles": sorted(_EDGE_MIND_ROLES),
+        "deployments": sorted(_EDGE_MIND_DEPLOYMENTS),
+        "surfaces": sorted(_EDGE_MIND_SURFACES),
+    }
+
+
+def _validate_harness_provider(harness: str, provider: str, *, internal: bool = False) -> None:
+    harness_providers = _INTERNAL_HARNESS_PROVIDERS if internal else _HARNESS_PROVIDERS
+    if harness not in harness_providers:
+        raise ValueError("Unknown harness")
+    if provider not in _MIND_PROVIDERS:
+        raise ValueError("Unknown provider")
+    if provider not in harness_providers[harness]:
+        allowed = " or ".join(harness_providers[harness])
+        raise ValueError(f"{harness} cannot use the {provider} provider (want {allowed})")
+
+
+def _edge_mind_name_overrides() -> set[str]:
+    return {
+        name.strip().lower()
+        for name in os.getenv("EDGE_MIND_NAMES", "").split(",")
+        if name.strip()
+    }
+
+
+def _edge_mind_profile_overrides() -> dict[str, str]:
+    overrides = {}
+    for item in os.getenv("EDGE_MIND_PROFILES", "").split(","):
+        name, separator, profile = item.strip().partition(":")
+        if not separator:
+            name, separator, profile = item.strip().partition("=")
+        normalized_profile = profile.strip().lower()
+        if separator and name.strip() and normalized_profile in _EDGE_MIND_PROFILES:
+            overrides[name.strip().lower()] = normalized_profile
+    return overrides
+
+_EDGE_MIND_BUNDLES = {
+    "standard": [
+        {
+            "name": "Edge Mind runtime",
+            "kind": "runtime",
+            "description": "One mind runtime, its harness, and selected conversation surfaces.",
+        }
+    ],
+}
+
+
+async def _build_edge_mind_bootstrap(body: dict) -> dict:
+    name = str(body.get("name") or "").strip().lower()
+    profile = str(body.get("profile") or "standard")
+    role = str(body.get("role") or "")
+    deployment = str(body.get("deployment") or "")
+    harness = str(body.get("harness") or "")
+    provider = str(body.get("provider") or "")
+    surfaces = body.get("surfaces") or []
+    raw_mind_id = str(body.get("mind_id") or uuid.uuid4())
+    try:
+        port = int(body.get("port", 8421))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Port must be a number") from exc
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+        raise ValueError("Name must be 2 to 32 lowercase letters, numbers, or hyphens")
+    if profile not in _EDGE_MIND_BOOTSTRAP_PROFILES:
+        raise ValueError("Sentinel profile installation is not automated yet")
+    if role not in _EDGE_MIND_ROLES:
+        raise ValueError("Unknown Edge Mind role")
+    if deployment not in _EDGE_MIND_DEPLOYMENTS:
+        raise ValueError("Unknown deployment type")
+    _validate_harness_provider(harness, provider)
+    default_model = str(
+        body.get("default_model") or _PROVIDER_DEFAULT_MODELS[provider]
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", default_model):
+        raise ValueError("Invalid default model")
+    if not isinstance(surfaces, list) or any(
+        item not in _EDGE_MIND_SURFACES for item in surfaces
+    ):
+        raise ValueError("Unknown conversation surface")
+    if port < 1024 or port > 65535:
+        raise ValueError("Port must be between 1024 and 65535")
+    try:
+        mind_id = str(uuid.UUID(raw_mind_id))
+    except ValueError as exc:
+        raise ValueError("Mind ID must be a UUID") from exc
+    endpoint_settings = {
+        "COMMS_URL": str(body.get("comms_url") or os.getenv("EDGE_COMMS_URL") or ""),
+        "LUCENT_URL_SELF": str(
+            body.get("lucent_url") or os.getenv("EDGE_LUCENT_URL") or ""
+        ),
+        "HIVE_TOOLS_URL": str(
+            body.get("hive_tools_url") or os.getenv("EDGE_HIVE_TOOLS_URL") or ""
+        ),
+    }
+    for key, value in endpoint_settings.items():
+        if value:
+            endpoint_settings[key] = normalize_endpoint(value)
+    ollama_url = ""
+    if provider == "ollama":
+        ollama_url = str(
+            body.get("ollama_url")
+            or os.getenv("OLLAMA_URL")
+            or await get_capability_endpoint("ollama")
+            or ""
+        )
+        if not ollama_url:
+            raise ValueError("Ollama URL is required for the Ollama provider")
+        ollama_url = normalize_endpoint(ollama_url)
+    owner = str(body.get("owner") or "")
+    if not OWNER_RE.fullmatch(owner):
+        raise ValueError("Every Mind needs an owner")
+    args = [
+        "./setup.sh",
+        "--name",
+        name,
+        "--owner",
+        owner,
+        "--profile",
+        profile,
+        "--role",
+        role,
+        "--deployment",
+        deployment,
+        "--harness",
+        harness,
+        "--provider",
+        provider,
+        "--surfaces",
+        ",".join(surfaces) or "none",
+        "--port",
+        str(port),
+    ]
+    setup_command = " ".join(shlex.quote(part) for part in args)
+    environment_commands = [
+        "cp .env.example .env",
+        f"sed -i {shlex.quote(f's|^MIND_ID=.*|MIND_ID={mind_id}|')} .env",
+    ]
+    for key, value in endpoint_settings.items():
+        if value:
+            environment_commands.append(
+                f"sed -i {shlex.quote(f's|^{key}=.*|{key}={value}|')} .env"
+            )
+    if endpoint_settings["COMMS_URL"]:
+        environment_commands.append(
+            "printf '%s\\n' "
+            + shlex.quote(
+                f"HIVE_MIND_SERVER_URL={endpoint_settings['COMMS_URL']}"
+            )
+            + " >> .env"
+        )
+    prepare_environment = " && ".join(environment_commands)
+    runtime_commands = [
+        setup_command,
+        "sed -i "
+        + shlex.quote(f"s|^default_model:.*|default_model: {default_model}|")
+        + f" minds/{shlex.quote(name)}/runtime.yaml",
+        # No provider sed: setup.sh --provider already wrote it. Only the
+        # model needs overriding, since setup.sh picks a per-provider default.
+        "sed -i "
+        + shlex.quote(f"s|^default_model:.*|default_model: {default_model}|")
+        + " config.yaml",
+    ]
+    if ollama_url:
+        runtime_commands.append(
+            "sed -i "
+            + shlex.quote(
+                f"s|http://your-ollama-host:11434|{ollama_url}|g"
+            )
+            + " config.yaml"
+        )
+    configure_runtime = " && ".join(runtime_commands)
+    commands = [
+        {
+            "name": "Install Edge Mind runtime",
+            "command": (
+                "git clone https://github.com/danielstewart77/hive-edge-minds.git && "
+                f"cd hive-edge-minds && {prepare_environment} && {configure_runtime}"
+            ),
+        }
+    ]
+    return {
+        "mind_id": mind_id,
+        "profile": profile,
+        "command": commands[0]["command"],
+        "commands": commands,
+        "components": _EDGE_MIND_BUNDLES[profile],
+        "required_settings": {
+            key: value or None for key, value in endpoint_settings.items()
+        },
+        "registration": {
+            "name": name,
+            "mind_id": mind_id,
+            "model": default_model,
+            "harness": harness,
+            "provider": provider,
+            "profile": profile,
+            "role": role,
+            "deployment": deployment,
+            "owner": owner,
+        },
+    }
+
+
+@app.post("/api/outposts/bootstrap")
+async def legacy_api_outpost_bootstrap(
+    request: Request, user: dict = Depends(require_auth)
+):
+    del request, user
+    return RedirectResponse("/api/edge-minds/bootstrap", status_code=307)
+
+
+@app.post("/api/edge-minds/bootstrap")
+async def api_edge_mind_bootstrap(request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        body = body if isinstance(body, dict) else {}
+        body = {**body, "owner": await _new_mind_owner(body, user)}
+        result = await _build_edge_mind_bootstrap(body)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "edge_mind.bootstrap.created", **_actor_fields(user),
+        mind_name=result["registration"]["name"], mind_id=result["registration"]["mind_id"],
+        deployment=result["registration"]["deployment"],
+    )
+    return result
+
+
+async def _probe_edge_mind(gateway_url: str) -> dict:
+    endpoint = normalize_endpoint(gateway_url)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(f"{endpoint}/health")
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Edge Mind health check failed: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Edge Mind returned invalid health data")
+    return data
+
+
+@app.post("/api/edge-minds/verify")
+async def api_edge_mind_verify(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    name = str(body.get("name") or "").strip().lower()
+    mind_id = str(body.get("mind_id") or "")
+    gateway_url = str(body.get("gateway_url") or "")
+    model = str(body.get("model") or "")
+    harness = str(body.get("harness") or "")
+    provider = str(body.get("provider") or "")
+    profile = str(body.get("profile") or "")
+    role = str(body.get("role") or "")
+    deployment = str(body.get("deployment") or "")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    try:
+        mind_id = str(uuid.UUID(mind_id))
+        gateway_url = normalize_endpoint(gateway_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+    try:
+        _validate_harness_provider(harness, provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if profile not in _EDGE_MIND_PROFILES:
+        raise HTTPException(status_code=400, detail="Unknown profile")
+    if role not in _EDGE_MIND_ROLES or deployment not in _EDGE_MIND_DEPLOYMENTS:
+        raise HTTPException(status_code=400, detail="Invalid deployment metadata")
+    health = await _probe_edge_mind(gateway_url)
+    if str(health.get("mind_id") or "") != mind_id:
+        raise HTTPException(
+            status_code=400,
+            detail="The responding Edge Mind identity does not match this deployment plan",
+        )
+    if health.get("status") != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail="The responding Edge Mind is not ready for registration",
+        )
+    existing = next(
+        (
+            mind
+            for mind in await _broker_minds_safe()
+            if str(mind.get("name") or "").lower() == name
+        ),
+        None,
+    )
+    if existing and str(existing.get("id") or "") != mind_id:
+        raise HTTPException(status_code=409, detail="That Mind name is already registered")
+    registration = {
+        "mind_id": mind_id,
+        "name": name,
+        "gateway_url": gateway_url,
+        "model": model,
+        # Already the broker's vocabulary — no collapsing step needed now
+        # that the console and the edge repo agree on the harness names.
+        "harness": harness,
+    }
+    owner = _registration_owner(existing, body, user)
+    if owner:
+        registration["owner"] = owner
+    broker_result = await _gateway_request(
+        "POST", "/broker/minds", json_body=registration
+    )
+    await set_edge_mind_metadata(
+        name,
+        profile=profile,
+        role=role,
+        deployment=deployment,
+    )
+    log_event(
+        log, "edge_mind.registered", **_actor_fields(user), mind_name=name,
+        mind_id=mind_id, deployment=deployment, profile=profile, role=role,
+    )
+    return {"registered": True, "health": health, "broker": broker_result}
+
+
+@app.get("/api/tools")
+async def api_tools(user: dict = Depends(require_auth)):
+    del user
+    data = await _capability_node_data()
+    node = next(item for item in data["nodes"] if item["id"] == "hive-tools")
+    return {
+        "present": node["installed"],
+        "path": node.get("path"),
+        "capabilities": node.get("capabilities", []),
+        "health": node["health"],
+    }
+
+
+@app.get("/api/capability-nodes")
+async def api_capability_nodes(user: dict = Depends(require_auth)):
+    del user
+    return await _capability_node_data()
+
+
+def _find_capability_node(data: dict, node_id: str) -> dict:
+    node = next((item for item in data["nodes"] if item["id"] == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Unknown Capability Node")
+    return node
+
+
+@app.put("/api/capability-nodes/{node_id}/configuration")
+async def api_capability_node_configure(
+    node_id: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await request.json()
+    try:
+        endpoint = await set_capability_endpoint(
+            node_id, str(body.get("endpoint") if isinstance(body, dict) else "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    data = await _capability_node_data()
+    log_event(
+        log, "capability_node.configured", **_actor_fields(user),
+        node_id=node_id, endpoint=endpoint,
+    )
+    return {"endpoint": endpoint, "node": _find_capability_node(data, node_id)}
+
+
+@app.delete("/api/capability-nodes/{node_id}/configuration")
+async def api_capability_node_configuration_delete(
+    node_id: str, user: dict = Depends(require_auth)
+):
+    try:
+        removed = await clear_capability_endpoint(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "capability_node.configuration.cleared", **_actor_fields(user),
+        node_id=node_id, removed=removed,
+    )
+    return {"removed": removed}
+
+
+@app.post("/api/capability-nodes/inference-proxy/install")
+async def api_inference_proxy_install(user: dict = Depends(require_auth)):
+    del user
+    try:
+        result = await asyncio.to_thread(clone_inference_proxy)
+    except InstallInProgress as exc:
+        # Transient: the operator double-clicked, or has two tabs open.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result
+
+
+async def _ollama_endpoint() -> str:
+    endpoint = await get_capability_endpoint("ollama") or os.getenv("OLLAMA_URL") or os.getenv(
+        "OLLAMA_BASE_URL"
+    )
+    if not endpoint:
+        raise HTTPException(status_code=409, detail="Configure the Ollama endpoint first")
+    try:
+        return normalize_endpoint(endpoint)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _ollama_request(
+    method: str, path: str, *, json_body: dict | None = None
+) -> dict:
+    timeout = 1800.0 if path == "/api/pull" else 30.0
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                method,
+                f"{await _ollama_endpoint()}{path}",
+                json=json_body,
+            )
+        response.raise_for_status()
+        data = response.json() if response.content else {}
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Ollama request failed: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _validated_model_name(body: object) -> str:
+    model = str(body.get("model") if isinstance(body, dict) else "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+    return model
+
+
+@app.get("/api/capability-nodes/ollama/models")
+async def api_ollama_models(user: dict = Depends(require_auth)):
+    del user
+    version, installed, running = await asyncio.gather(
+        _ollama_request("GET", "/api/version"),
+        _ollama_request("GET", "/api/tags"),
+        _ollama_request("GET", "/api/ps"),
+    )
+    return {
+        "version": version.get("version"),
+        "models": installed.get("models", []),
+        "running": running.get("models", []),
+    }
+
+
+@app.post("/api/capability-nodes/ollama/models/pull")
+async def api_ollama_model_pull(
+    request: Request, user: dict = Depends(require_auth)
+):
+    model = _validated_model_name(await request.json())
+    result = await _ollama_request(
+        "POST", "/api/pull", json_body={"model": model, "stream": False}
+    )
+    log_event(log, "ollama.model.pulled", **_actor_fields(user), model=model)
+    return {"model": model, "result": result}
+
+
+@app.delete("/api/capability-nodes/ollama/models")
+async def api_ollama_model_delete(
+    request: Request, user: dict = Depends(require_auth)
+):
+    model = _validated_model_name(await request.json())
+    result = await _ollama_request("DELETE", "/api/delete", json_body={"model": model})
+    log_event(log, "ollama.model.deleted", **_actor_fields(user), model=model)
+    return {"model": model, "result": result}
+
+
+# ── Graph ──────────────────────────────────────────────────────────────
+
+
+# ── Chief of Staff ─────────────────────────────────────────────────────
+
+
+@app.get("/chief-of-staff", response_class=HTMLResponse)
+async def chief_of_staff_page(request: Request):
+    return await _console_page(request, "chief_of_staff.html")
+
+
+@app.get("/api/chief-of-staff")
+async def api_chief_of_staff(
+        days: int = Query(chief_of_staff.DEFAULT_WINDOW_DAYS, ge=1,
+                          le=chief_of_staff.MAX_WINDOW_DAYS),
+        user: dict = Depends(require_auth)):
+    """The live tree, the barrel and the bubbles, in one answer.
+
+    One call rather than three, so the tree, what has finished and what is
+    waiting on Daniel can never be drawn from different moments and disagree
+    about the same task. `days` is the barrel's window: what finished longer
+    ago than that is left out of the answer (feature 6.11).
+    """
+    del user
+    return await chief_of_staff.get_tree(window_days=days)
+
+
+async def _graph_for_person(limit: int) -> dict:
+    """The graph, asked of the memory store with the signed-in person's own key.
+    Off the event loop: the fetch is a blocking call."""
+    headers = await _person_headers()
+    token = headers["Authorization"].removeprefix("Bearer ")
+    return await asyncio.to_thread(
+        get_graph_data, _lucent_base_url(), limit=limit, bearer_token=token)
+
+
+@app.get("/graph/data")
+async def graph_data(limit: int = 400, user: dict = Depends(require_auth)):
+    del user
+    return await _graph_for_person(limit)
+
+
+@app.get("/graph/public-data")
+async def graph_public_data(limit: int = 400, user: dict = Depends(require_auth)):
+    del user
+    data = await _graph_for_person(limit)
+    public_nodes = [n for n in data.get("nodes", []) if n.get("type") != "Person"]
+    public_ids = {n["id"] for n in public_nodes}
+    public_edges = [
+        e for e in data.get("edges", [])
+        if e.get("source") in public_ids and e.get("target") in public_ids
+    ]
+    return {"nodes": public_nodes, "edges": public_edges}
+
+
+@app.get("/graph", response_class=HTMLResponse)
+async def graph(request: Request):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return await _render_template(request, "graph.html")
+
+
+# ── Memory ─────────────────────────────────────────────────────────────
+
+_MEMORY_ROW_LIMIT_DEFAULT = store.MEMORY_LIMIT_DEFAULT
+_MEMORY_ROW_LIMIT_MAX = store.MEMORY_LIMIT_MAX
+
+
+@app.get("/memory", response_class=HTMLResponse)
+async def memory_page(request: Request):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return await _render_template(request, "memory.html")
+
+
+@app.get("/api/memory/tables")
+async def api_memory_tables(
+        user: dict = Depends(require_admin_or_route_bearer)):
+    """The memory store's tables — the `memory` schema of the hive's
+    database — with a row count each."""
+    del user
+    return {"tables": await store.memory_tables()}
+
+
+@app.get("/api/memory/rows")
+async def api_memory_rows(
+    table: str,
+    limit: int = _MEMORY_ROW_LIMIT_DEFAULT,
+    offset: int = 0,
+    user: dict = Depends(require_admin_or_route_bearer),
+):
+    del user
+    page = await store.memory_rows(table, limit=limit, offset=offset)
+    if page is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    return page
+
+
+# ── Standing rules ─────────────────────────────────────────────────────
+
+_RULE_SOURCES = {"always-remember", "user"}
+
+
+def _normalize_rule_row(row: dict, alias_index: dict) -> dict:
+    raw_mind = row.get("mind_id") or ""
+    entry = alias_index.get(raw_mind)
+    display = entry["name"] if entry else raw_mind
+    return {
+        "id": row.get("id"),
+        "content": row.get("content") or "",
+        "mind_id": raw_mind,
+        "mind_display": display,
+        "tier": row.get("tier") or "",
+        "source": row.get("source") or "",
+        "data_class": row.get("data_class") or "",
+        "tags": row.get("tags") or "",
+        "created_at": row.get("created_at"),
+    }
+
+
+async def _broker_minds_safe() -> list[dict]:
+    try:
+        raw = await _gateway_json("/broker/minds")
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict)]
+
+
+def _build_alias_index(minds: list[dict]) -> dict:
+    """Map every alias (UUID and short name) to a canonical mind entry.
+
+    Lucent rows historically stamp `mind_id` with either the UUID or the
+    short name, depending on which write path created them. This index lets
+    the rules dashboard treat them as the same mind for filtering and
+    display.
+    """
+    index: dict = {}
+    for m in minds:
+        uuid = (m.get("id") or "").strip()
+        name = (m.get("name") or "").strip()
+        if not uuid and not name:
+            continue
+        entry = {"uuid": uuid, "name": name or uuid, "aliases": [a for a in (uuid, name) if a]}
+        for alias in entry["aliases"]:
+            index[alias] = entry
+    index["shared"] = {"uuid": "shared", "name": "shared", "aliases": ["shared"]}
+    return index
+
+
+async def _fetch_rules_for_mind(
+    tier: str, mind_id: str | None, alias_index: dict
+) -> list[dict]:
+    aliases: list[str | None] = [None]
+    if mind_id and mind_id != "all":
+        entry = alias_index.get(mind_id)
+        aliases = entry["aliases"] if entry else [mind_id]
+    seen_ids: set = set()
+    out: list[dict] = []
+    for alias in aliases:
+        params: dict = {"tier": tier, "limit": 100, "offset": 0}
+        if alias is not None:
+            params["mind_id"] = alias
+        fetched = 0
+        while True:
+            data = await _lucent_request("GET", "/memory/list", params=params)
+            entries = data.get("entries") if isinstance(data, dict) else []
+            if not entries:
+                break
+            for e in entries:
+                if e.get("source") not in _RULE_SOURCES:
+                    continue
+                rid = e.get("id")
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+                out.append(_normalize_rule_row(e, alias_index))
+            fetched += len(entries)
+            total = int(data.get("total") or 0)
+            if fetched >= total or fetched >= 1000:
+                break
+            params["offset"] = fetched
+    return out
+
+
+@app.get("/sentinel", response_class=HTMLResponse)
+async def sentinel_page(request: Request):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    # The catalogue state travels in the render rather than being fetched by
+    # the page: an unreachable sensor has to read as unreachable, and a page
+    # that fetched its own catalogue would have nothing to show but an empty
+    # table.
+    catalogue = await sentinel_review.catalogue_state()
+    return await _render_template(
+        request,
+        "sentinel.html",
+        sentinel_configured=bool(sentinel_review.base_url()),
+        catalogue=catalogue,
+    )
+
+
+@app.get("/api/sentinel/buckets")
+async def api_sentinel_buckets(user: dict = Depends(require_auth)):
+    del user
+    return await sentinel_review.fetch_buckets()
+
+
+@app.post("/api/sentinel/buckets/save")
+async def api_sentinel_bucket_save(
+    request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    body = await request.json()
+    slug = (body.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug is required")
+    if "revision" not in body:
+        raise HTTPException(
+            status_code=400,
+            detail="a save must carry the revision the read handed back",
+        )
+    fields = {
+        name: body[name]
+        for name in (
+            "description",
+            "disposition",
+            "qualifier",
+            "promotes_above",
+            "promotes_into",
+            "promotion_window_minutes",
+            "requires_facts",
+        )
+        if name in body
+    }
+    if not fields:
+        raise HTTPException(status_code=400, detail="nothing to save")
+    return await sentinel_review.save_bucket(slug, body["revision"], fields)
+
+
+@app.get("/api/sentinel/review")
+async def api_sentinel_review(user: dict = Depends(require_auth)):
+    del user
+    return await sentinel_review.fetch_review_queue()
+
+
+@app.get("/api/sentinel/queue")
+async def api_sentinel_queue(user: dict = Depends(require_auth)):
+    del user
+    return await sentinel_review.fetch_decision_queue()
+
+
+@app.post("/api/sentinel/review/mark")
+async def api_sentinel_mark(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    kind = (body.get("kind") or "").strip()
+    if kind not in {"rule", "class"}:
+        raise HTTPException(status_code=400, detail="kind must be rule or class")
+    try:
+        row_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="id must be an integer") from None
+    return await sentinel_review.mark_reviewed(kind, row_id, body.get("note"))
+
+
+@app.post("/api/sentinel/review/overturn")
+async def api_sentinel_overturn(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    try:
+        rule_id = int(body.get("rule_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="rule_id must be an integer") from None
+    return await sentinel_review.overturn_rule(
+        rule_id,
+        action_kind=body.get("action_kind"),
+        retire=bool(body.get("retire")),
+        note=body.get("note"),
+    )
+
+
+@app.post("/api/sentinel/queue/apply")
+async def api_sentinel_queue_apply(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    return await sentinel_review.apply_queue(body.get("class_slug"))
+
+
+@app.get("/rules", response_class=HTMLResponse)
+async def rules_page(request: Request):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    minds = await _broker_minds_safe()
+    alias_to_canonical: dict[str, str] = {"shared": "shared"}
+    for m in minds:
+        uuid = (m.get("id") or "").strip()
+        name = (m.get("name") or "").strip()
+        canonical = uuid or name
+        if uuid:
+            alias_to_canonical[uuid] = canonical
+        if name:
+            alias_to_canonical[name] = canonical
+    return await _render_template(
+        request,
+        "rules.html",
+        minds=minds,
+        alias_to_canonical_json=json.dumps(alias_to_canonical),
+    )
+
+
+@app.get("/api/rules")
+async def api_rules_list(
+    mind_id: str | None = None,
+    tier: str | None = None,
+    user: dict = Depends(require_auth),
+):
+    del user
+    tiers = ["standing", "contextual"] if not tier or tier == "all" else [tier]
+    minds = await _broker_minds_safe()
+    alias_index = _build_alias_index(minds)
+    rows: list[dict] = []
+    seen_ids: set = set()
+    for t in tiers:
+        for row in await _fetch_rules_for_mind(t, mind_id, alias_index):
+            if row["id"] in seen_ids:
+                continue
+            seen_ids.add(row["id"])
+            rows.append(row)
+    rows.sort(key=lambda r: (r["tier"] != "standing", -(r["created_at"] or 0)))
+    return {"rules": rows, "count": len(rows)}
+
+
+@app.post("/api/rules")
+async def api_rules_create(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    content = (body.get("content") or "").strip()
+    mind_id = (body.get("mind_id") or "").strip()
+    tier = (body.get("tier") or "").strip()
+    data_class = (body.get("data_class") or "feedback").strip()
+    tags = (body.get("tags") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+    if not mind_id:
+        raise HTTPException(status_code=400, detail="mind_id is required")
+    if tier not in {"standing", "contextual"}:
+        raise HTTPException(status_code=400, detail="tier must be standing or contextual")
+    source = "always-remember" if tier == "standing" else "user"
+    payload = {
+        "content": content,
+        "mind_id": mind_id,
+        "tier": tier,
+        "source": source,
+        "data_class": data_class,
+        "tags": tags,
+    }
+    result = await _lucent_request("POST", "/memory/store", json_body=payload)
+    log_event(
+        log, "rule.created", **_actor_fields(user), rule_id=result.get("id"),
+        mind_id=mind_id, tier=tier, data_class=data_class, content_chars=len(content),
+    )
+    return result
+
+
+@app.put("/api/rules/{rule_id}")
+async def api_rules_update(rule_id: str, request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    content = (body.get("content") or "").strip()
+    tags = (body.get("tags") or "").strip()
+    new_mind = (body.get("mind_id") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+    # Intentionally never forward data_class on update: lucent's memory_update
+    # rewrites `tier` from DATA_CLASS_REGISTRY whenever data_class is set,
+    # which would silently demote standing rules to contextual.
+    payload: dict = {"content": content, "tags": tags}
+    if new_mind:
+        alias_index = _build_alias_index(await _broker_minds_safe())
+        entry = alias_index.get(new_mind)
+        if entry:
+            payload["mind_id"] = entry["uuid"] or entry["name"]
+        elif new_mind == "shared":
+            payload["mind_id"] = "shared"
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown mind: {new_mind}")
+    result = await _lucent_request("PUT", f"/memory/{rule_id}", json_body=payload)
+    log_event(
+        log, "rule.updated", **_actor_fields(user), rule_id=rule_id,
+        mind_id=payload.get("mind_id"), content_chars=len(content),
+    )
+    return result
+
+
+@app.delete("/api/rules/{rule_id}")
+async def api_rules_delete(rule_id: str, user: dict = Depends(require_auth)):
+    result = await _lucent_request("DELETE", f"/memory/{rule_id}")
+    log_event(log, "rule.deleted", **_actor_fields(user), rule_id=rule_id)
+    return result
+
+
+# ── Canvas ─────────────────────────────────────────────────────────────
+
+_CANVAS_KEYS = {
+    "path": ("type", "id", "color", "d", "sw", "slide"),
+    "text": ("type", "id", "x", "y", "content", "color", "size", "slide"),
+    "image": ("type", "id", "x", "y", "w", "h", "src", "slide"),
+}
+
+
+def _slide_of(value: object) -> int:
+    """Slide number an element or message belongs to, 1-based.
+
+    Anything unnumbered or unparseable is slide one — the board predates
+    slides, and its existing content is the first slide of the deck.
+    """
+    try:
+        n = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 1
+    return n if n >= 1 else 1
+
+
+def _apply_canvas_message(data: dict) -> bool:
+    """Apply one canvas mutation to in-memory state and persist it.
+
+    Shared by the websocket surface and the bearer-guarded /canvas/push
+    endpoint so the two paths can never drift. Mutates ``data`` in place to
+    fill a missing id. Returns True when a known message type was handled.
+    """
+    msg_type = data.get("type")
+    if msg_type == "clear":
+        if "slide" in data:
+            # Scoped clear: presenting a deck, wiping the whole board because
+            # one slide went wrong is not a recoverable mistake.
+            target = _slide_of(data.get("slide"))
+            data["slide"] = target
+            _canvas_elements[:] = [
+                e for e in _canvas_elements if _slide_of(e.get("slide")) != target
+            ]
+        else:
+            _canvas_elements.clear()
+    elif msg_type in _CANVAS_KEYS:
+        data.setdefault("id", str(uuid.uuid4()))
+        data["slide"] = _slide_of(data.get("slide"))
+        _canvas_elements.append({k: data[k] for k in _CANVAS_KEYS[msg_type] if k in data})
+    elif msg_type == "move":
+        el_id = data.get("id")
+        nx, ny = data.get("x"), data.get("y")
+        for el in _canvas_elements:
+            if el.get("id") == el_id and el.get("type") in ("text", "image"):
+                el["x"] = nx
+                el["y"] = ny
+                break
+    elif msg_type == "delete":
+        el_id = data.get("id")
+        _canvas_elements[:] = [e for e in _canvas_elements if e.get("id") != el_id]
+    else:
+        return False
+    _save_canvas_state()
+    return True
+
+
+async def _broadcast_canvas(data: dict, exclude: WebSocket | None = None) -> None:
+    for conn in list(_canvas_connections):
+        if conn is exclude:
+            continue
+        try:
+            await conn.send_json(data)
+        except Exception:
+            _canvas_connections.discard(conn)
+
+
+@app.post("/canvas/push")
+async def canvas_push(request: Request):
+    """A mind drawing. Its own key (console_access.a_minds_key) is
+    verified by the route table before this runs; nothing else reaches it."""
+    data = await request.json()
+    if not isinstance(data, dict) or not _apply_canvas_message(data):
+        raise HTTPException(status_code=400, detail="unknown or malformed canvas message")
+    await _broadcast_canvas(data)
+    log_event(
+        log, "canvas.changed", actor_type="mind", actor_username="canvas-push",
+        operation=data.get("type"), element_id=data.get("id"),
+    )
+    return {"ok": True, "id": data.get("id"), "type": data.get("type")}
+
+
+@app.get("/canvas/render.svg")
+async def canvas_render_svg(request: Request, slide: int | None = None):
+    """Standalone SVG snapshot of the board, for Skippy to rasterize and read.
+
+    With ``?slide=N`` the snapshot is that slide alone — what an audience sees
+    at that point in the presentation. Without it, the whole board.
+
+    An admin's browser, or the canvas push bearer a mind draws with; the
+    route table admits only those two, and verifies the bearer itself.
+    """
+    del request
+    return Response(content=_canvas_to_svg(slide), media_type="image/svg+xml")
+
+
+@app.post("/canvas/submit")
+async def canvas_submit(request: Request):
+    """The signed-in person's "I'm done drawing" poke, to a mind of theirs.
+
+    Story 2.1.19: the drawer is whoever is signed in and the turn goes to
+    their own mind, never a fixed one. The body may name the mind; otherwise
+    it is this console's default mind when the drawer owns it, or their only
+    mind. An admin may name any mind, as everywhere else.
+    """
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    note = str(body.get("note", "") or "")
+    asked = str(body.get("mind", "") or "").strip()
+    element_count = len(_canvas_elements)
+    snapshot = str(request.base_url).rstrip("/") + "/canvas/render.svg"
+    who = design_delivery.person_label(user.get("username", ""))
+
+    minds = await route_access.registered_minds()
+    if minds is None:
+        raise HTTPException(status_code=502, detail="could not read the mind registry")
+    own = [m for m in minds if route_access.owner_of(m) == user.get("username")]
+    if asked:
+        target = route_access.find_mind(minds, asked)
+        if target is None or not (user.get("is_admin") or target in own):
+            raise HTTPException(status_code=404, detail=f"no mind of yours named {asked!r}")
+    else:
+        # The page sends no choice yet, so a drawer with several minds and
+        # none of them this console's default gets the first by name rather
+        # than a refusal they have no control to answer.
+        default = route_access.find_mind(own, os.getenv("MIND_NAME", "skippy"))
+        ordered = sorted(own, key=lambda m: str(m.get("name") or ""))
+        target = default or (ordered[0] if ordered else None)
+        if target is None:
+            raise HTTPException(
+                status_code=400, detail="you have no mind to send the drawing to")
+    target_name = str(target.get("name") or "")
+    mind_id = str(target.get("id") or "")
+
+    content = (
+        f"{who} finished a drawing pass on the hive whiteboard and wants you "
+        f"to look. The board currently has {element_count} element(s). Fetch "
+        f"the snapshot with `curl -H \"Authorization: Bearer $MIND_KEY\" "
+        f"{snapshot}` — your own key, the one you draw with; without it the console "
+        "refuses. Rasterize it and respond on Telegram with what you see."
+    )
+    if note:
+        content += f" {who}'s note: {note}"
+
+    headers = {**await _person_headers(), "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            payload = {
+                "conversation_id": str(uuid.uuid4()),
+                "from_mind": "canvas",
+                "to_mind": mind_id,
+                "content": content,
+                "metadata": {"request_type": "canvas_review", "triggered_by": "canvas"},
+            }
+            resp = await client.post(
+                f"{_gateway_base_url()}/broker/messages", json=payload, headers=headers
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"could not reach {target_name}: {exc}") from exc
+    log_event(
+        log, "canvas.review.dispatched", **_actor_fields(user),
+        mind_name=target_name, element_count=element_count, note_chars=len(note),
+    )
+    return {"ok": True, "dispatched_to": target_name, "element_count": element_count}
+
+
+@app.get("/canvas", response_class=HTMLResponse)
+async def canvas(request: Request):
+    return await _console_page(request, "canvas.html")
+
+
+@app.websocket("/ws/canvas")
+async def ws_canvas(websocket: WebSocket):
+    # Admin-only in the route table, which also closes the socket if its
+    # user stops being one while it is open.
+    user = await get_current_user_from_request(websocket)
+    can_draw = user is not None
+    await websocket.accept()
+    _canvas_connections.add(websocket)
+    try:
+        await websocket.send_json({"type": "state", "elements": _canvas_elements})
+        while True:
+            data = await websocket.receive_json()
+            if not can_draw:
+                continue
+            if _apply_canvas_message(data):
+                await _broadcast_canvas(data, exclude=websocket)
+    except WebSocketDisconnect:
+        _canvas_connections.discard(websocket)
+    except Exception:
+        _canvas_connections.discard(websocket)
+
+
+# ── Settings ───────────────────────────────────────────────────────────
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    # The access section is the one a non-admin is shown: their sessions.
+    section = "general" if user.get("is_admin") else "access"
+    return RedirectResponse(url=f"/settings/{section}", status_code=303)
+
+
+_SETTINGS_SECTIONS = {
+    "general", "access", "remote-access", "connections", "providers", "voice", "credentials", "advanced", "users", "features",
+}
+
+
+
+@app.get("/api/settings/remote-access")
+async def api_remote_access_status(user: dict = Depends(require_auth)):
+    try:
+        return await remote_access_data.request("GET", remote_access_data.user_path(user["username"]))
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+@app.put("/api/settings/remote-access")
+async def api_remote_access_configuration(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Configuration must be an object")
+    try:
+        result = await remote_access_data.request("PUT", remote_access_data.user_path(user["username"]),
+            {key: body.get(key) for key in ("website_url", "terminal_url", "tunnel_token")})
+        log_event(log, "remote_access.configured", **_actor_fields(user))
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.post("/api/remote-access/authorize")
+async def api_remote_access_authorize(request: Request):
+    # This private gateway check accepts only its filesystem-held verifier
+    # key and a real account cookie. Admin status never overrides the owner.
+    if not remote_access_data.trusted(request):
+        raise HTTPException(403, "Private remote gateway only")
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Sign in required")
+    body = await request.json()
+    if not isinstance(body, dict) or user["username"] != body.get("owner"):
+        raise HTTPException(403, "Sign in as this connection's owner")
+    return {"authorized": True}
+
+@app.post("/api/remote-access/{action}")
+async def api_remote_access_action(action: str, user: dict = Depends(require_auth)):
+    if action not in {"on", "off"}:
+        raise HTTPException(400, "Choose on or off")
+    try:
+        result = await remote_access_data.request("POST", remote_access_data.user_path(user["username"]) + "/" + action)
+        log_event(log, "remote_access." + action, **_actor_fields(user))
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.put("/api/settings/remote-access/global")
+async def api_remote_access_global(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Configuration must be an object")
+    try:
+        result = await remote_access_data.request("PUT", "/global", {"allowed": body.get("allowed")})
+        log_event(log, "remote_access.global", allowed=result["allowed"], **_actor_fields(user))
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/settings/providers")
+async def api_provider_connections(user: dict = Depends(require_auth)):
+    return {"providers": await provider_data.list_connections()}
+
+
+@app.post("/api/settings/providers")
+async def api_provider_create(request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Provider must be an object")
+        return await provider_data.save_connection(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.put("/api/settings/providers/{provider_id}")
+async def api_provider_update(provider_id: str, request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Provider must be an object")
+        return await provider_data.save_connection(body, provider_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.delete("/api/settings/providers/{provider_id}")
+async def api_provider_delete(provider_id: str, user: dict = Depends(require_auth)):
+    try:
+        await provider_data.delete_connection(provider_id)
+        return {"deleted": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@app.post("/api/settings/providers/{provider_id}/models")
+async def api_provider_models(provider_id: str, request: Request, user: dict = Depends(require_auth)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request must be an object")
+        connection = await provider_data.get_connection(provider_id)
+        harness = str(body.get("harness") or "dsh")
+        provider_data.harness_provider(connection, harness)
+        return {"models": await provider_data.fetch_models(connection, provider_data.normalize_token(body.get("token")), harness)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.get("/settings/{section}", response_class=HTMLResponse)
+async def settings_section_page(request: Request, section: str):
+    if not await get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    if section not in _SETTINGS_SECTIONS:
+        raise HTTPException(status_code=404, detail="settings section not found")
+    return await _render_template(request, "settings.html", settings_section=section)
+
+
+@app.get("/api/settings/minds")
+async def api_settings_minds(user: dict = Depends(require_auth)):
+    all_minds = await _broker_minds_safe()
+    broker_minds = route_access.visible_minds(user, all_minds)
+    try:
+        sessions_raw = await _gateway_json("/sessions")
+        sessions = sessions_raw if isinstance(sessions_raw, list) else []
+    except Exception:
+        sessions = []
+    sessions = route_access.visible_sessions(user, sessions, all_minds)
+    minds = _add_session_activity(build_mind_registry(broker_minds), sessions)
+    for mind in minds:
+        connection = await provider_data.connection_for_mind(mind["name"])
+        if connection and mind.get("local_config") and isinstance(mind["local_config"].get("config"), dict):
+            mind["local_config"]["config"]["provider_connection"] = connection
+    return {"minds": minds}
+
+
+async def _mind_gateway_url(name: str) -> str:
+    """The registered gateway URL for a Mind, by display name."""
+    wanted = route_access.normalize_mind_name(name)
+    for mind in await _broker_minds_safe():
+        if route_access.normalize_mind_name(mind.get("name")) == wanted:
+            return str(mind.get("gateway_url") or "")
+    raise HTTPException(status_code=404, detail="That Mind is not registered")
+
+
+async def _mind_row(name: str) -> dict:
+    """The registered row for a Mind, by display name."""
+    wanted = route_access.normalize_mind_name(name)
+    for mind in await _broker_minds_safe():
+        if route_access.normalize_mind_name(mind.get("name")) == wanted:
+            return mind
+    raise HTTPException(status_code=404, detail="That Mind is not registered")
+
+
+async def _mind_uuid(name: str) -> str:
+    """The durable id comms keys a claim by. The display name is not it."""
+    row = await _mind_row(name)
+    uuid = str(row.get("mind_id") or row.get("id") or "")
+    if not uuid:
+        raise HTTPException(
+            status_code=409, detail="That Mind is registered without an id"
+        )
+    return uuid
+
+
+async def _bot_claim(mind_uuid: str, surface: str) -> dict:
+    """Who this bot answers, as comms records it.
+
+    Never the phrase. An unreachable gateway answers as unknown rather than
+    as an unclaimed bot: the remedy for the first is to go and look at the
+    gateway, and for the second to have somebody send a phrase.
+    """
+    try:
+        body = await _gateway_request(
+            "GET", f"/broker/minds/{mind_uuid}/surface-claim",
+            params={"surface": surface}
+        )
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return {"known": False, "detail": "This gateway predates bot claims"}
+        return {"known": False, "detail": str(exc.detail)}
+    if not isinstance(body, dict):
+        return {"known": False, "detail": "The gateway returned no claim"}
+    return {
+        "known": True,
+        "claimed": bool(body.get("claimed")),
+        "claimed_ref": str(body.get("claimed_ref") or ""),
+        "phrase_pending": bool(body.get("phrase_pending")),
+        "phrase_expires_at": body.get("phrase_expires_at") or 0,
+    }
+
+
+async def _bot_row(mind: dict, surface: str) -> dict:
+    """One row of the bots page: the token's state and the claim beside it.
+
+    Each row is resolved on its own. Two of this hive's minds live on Windows
+    boxes that are normally off, and a listing that failed whole on the first
+    unreachable mind would be a page nobody could use to fix the reachable
+    ones.
+    """
+    name = str(mind.get("name") or "")
+    row = {
+        "mind": name,
+        "surface": surface,
+        "stored": False,
+        "accepted": None,
+        "bot_username": "",
+        "where": "",
+        "detail": "",
+        "reachable": True,
+    }
+    try:
+        state = await mind_runtime.fetch_surface_token(
+            str(mind.get("gateway_url") or ""), surface=surface
+        )
+    except HTTPException as exc:
+        row["reachable"] = False
+        row["detail"] = str(exc.detail)
+    else:
+        row.update({
+            "stored": bool(state.get("stored")),
+            "accepted": state.get("accepted"),
+            "bot_username": str(state.get("bot_username") or ""),
+            "where": str(state.get("where") or ""),
+            "detail": str(state.get("detail") or ""),
+            "preview": str(state.get("preview") or ""),
+        })
+    row["claim"] = await _bot_claim(
+        str(mind.get("mind_id") or mind.get("id") or ""), surface
+    )
+    return row
+
+
+@app.get("/api/usage")
+async def api_usage(days: int = 30, user: dict = Depends(require_auth)):
+    """What the signed-in user's minds cost over the last `days` days; to an
+    admin, every person's and the hive's own services' (story 2.1.17)."""
+    import usage_data
+
+    days = max(1, min(int(days), 365))
+    try:
+        rows = await usage_data.proxy_usage(days)
+    except usage_data.UsageUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    minds = await route_access.registered_minds()
+    if minds is None:
+        raise HTTPException(
+            status_code=503,
+            detail="the hive's registry could not be read, so usage cannot be "
+                   "put under the people it belongs to")
+    return {"days": days, **usage_data.usage_by_person(rows, minds, user)}
+
+
+@app.get("/api/bots")
+async def api_bots(user: dict = Depends(require_auth)):
+    """Every bot registered against a Mind the signed-in user owns.
+
+    Rows are gathered concurrently and each carries its own failure, because
+    the token lives on the Mind's own disk and only that Mind can be asked —
+    so this page is as many round trips as there are bots, over machines that
+    are not all awake.
+    """
+    minds = route_access.visible_minds(user, await _broker_minds_safe())
+    jobs = [
+        _bot_row(mind, surface)
+        for mind in minds
+        for surface in ("telegram", "discord")
+    ]
+    rows = await asyncio.gather(*jobs, return_exceptions=True)
+    return {
+        "bots": [row for row in rows if isinstance(row, dict)],
+        "surfaces": ["telegram", "discord"],
+    }
+
+
+@app.get("/api/minds/{name}/bot-claim")
+async def api_mind_bot_claim(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    del user
+    return await _bot_claim(await _mind_uuid(name), surface)
+
+
+@app.post("/api/minds/{name}/bot-claim/phrase")
+async def api_mind_bot_claim_phrase(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    """Put a fresh pass phrase on offer, and show it once.
+
+    The only answer anywhere that carries the phrase in the clear. Minting
+    again retires the previous one, so an operator who mints twice has not
+    left two live doors open.
+    """
+    del user
+    mind_uuid = await _mind_uuid(name)
+    body = await _gateway_request(
+        "POST", f"/broker/minds/{mind_uuid}/surface-claim/phrase",
+        params={"surface": surface}
+    )
+    if not isinstance(body, dict) or not body.get("phrase"):
+        raise HTTPException(status_code=502, detail="The gateway minted no phrase")
+    log_event(log, "mind.bot_claim.phrase_minted", mind=name, surface=surface)
+    return {
+        "phrase": str(body.get("phrase")),
+        "surface": surface,
+        "expires_at": body.get("expires_at") or 0,
+    }
+
+
+@app.delete("/api/minds/{name}/bot-claim")
+async def api_mind_bot_claim_clear(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    """Release a bot so somebody else can claim it."""
+    del user
+    mind_uuid = await _mind_uuid(name)
+    await _gateway_request(
+        "DELETE", f"/broker/minds/{mind_uuid}/surface-claim",
+        params={"surface": surface}
+    )
+    log_event(log, "mind.bot_claim.cleared", mind=name, surface=surface)
+    return {"ok": True, "surface": surface}
+
+
+@app.get("/api/minds/{name}/configuration")
+async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    configuration = await mind_runtime.fetch_configuration(gateway_url)
+    # Asked of the Mind, not the gateway: the Mind holds the proxy client key
+    # whose permissions decide the answer, and the proxy already filtered the
+    # listing to the request shape this Mind's harness speaks. Nothing is
+    # re-sorted here — the console groups by the provider each row names, so a
+    # provider added to the proxy appears with no change on this side.
+    models = [
+        {
+            "name": str(row.get("name")),
+            "label": str(row.get("label") or row.get("name")),
+            "provider": str(row.get("provider") or ""),
+            "provider_label": str(
+                row.get("provider_label") or row.get("provider") or ""
+            ),
+            "context_window": dashboard_data.window_of(row),
+            # The model's own rotation point, a percentage of its window.
+            "rotation_threshold_percent": dashboard_data.threshold_percent(row),
+        }
+        for row in await mind_runtime.fetch_models(gateway_url)
+        if isinstance(row, dict) and row.get("name")
+    ]
+    default_model = configuration.get("default_model")
+    selected_model = next((row for row in models if row["name"] == default_model), None)
+    selected_window = dashboard_data.window_of(selected_model or {})
+    selected_percent = dashboard_data.threshold_percent(selected_model or {})
+    configuration.update({
+        "context_window": selected_window,
+        "rotation_threshold_percent": selected_percent,
+        "rotation_threshold_tokens": (
+            selected_window * selected_percent // 100
+            if selected_window is not None and selected_percent is not None else None
+        ),
+        "rotation_threshold_status": (
+            "known" if selected_window is not None else "unavailable"
+        ),
+    })
+    return {
+        "configuration": {
+            "name": configuration.get("name") or name,
+            "harness": configuration.get("harness"),
+            "provider": configuration.get("provider"),
+            "default_model": configuration.get("default_model"),
+            "deployment": configuration.get("deployment") or "container",
+        },
+        "models": models,
+    }
+
+
+@app.get("/api/minds/{name}/settings")
+async def api_mind_settings(name: str, user: dict = Depends(require_auth)):
+    """The settings panel for one Mind.
+
+    Which controls come back is the Mind's answer, not this console's: only
+    the Mind knows which harness it runs, and a control its runner ignores is
+    worse than an absent one because nothing on screen could tell the
+    operator it did nothing.
+    """
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    return await mind_runtime.fetch_settings(gateway_url)
+
+
+@app.patch("/api/minds/{name}/settings")
+async def api_mind_settings_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Write the changed settings into this Mind's own runtime.yaml."""
+    body = await request.json()
+    settings = body.get("settings") if isinstance(body, dict) else None
+    if not isinstance(settings, dict) or not settings:
+        raise HTTPException(status_code=400, detail="Nothing was changed")
+    gateway_url = await _mind_gateway_url(name)
+    saved = await mind_runtime.push_settings(gateway_url, settings)
+    log_event(
+        log, "mind.settings.updated", **_actor_fields(user), mind_name=name,
+        settings=sorted(settings),
+    )
+    return {"saved": True, **saved}
+
+
+# ---------------------------------------------------------------------------
+# The project folders a Mind can reach
+#
+# Written into the Mind's own compose fragment, which is the durable truth,
+# and applied by recreating the container: a restart replays the config the
+# container was created with and cannot add a mount.
+# ---------------------------------------------------------------------------
+
+
+def _mount_deployment(name: str) -> str:
+    try:
+        configuration = local_runtime_configuration(name)
+    except ValueError:
+        return ""
+    return str(configuration.get("deployment") or "container")
+
+
+@app.get("/api/minds/{name}/mounts")
+async def api_mind_mounts(name: str, user: dict = Depends(require_auth)):
+    """The project folders this Mind's compose fragment declares.
+
+    A Mind that is not a container reports them as not editable rather than
+    rendering a control that would write a file nothing reads — the same way
+    the restart action is refused for one.
+    """
+    del user
+    deployment = _mount_deployment(name)
+    if deployment != "container":
+        return {
+            "editable": False,
+            "deployment": deployment,
+            "detail": (
+                f"This Mind runs as {deployment or 'something this console cannot see'}, "
+                "not a container in this stack, so its mounts are not editable from here."
+            ),
+            "mounts": [],
+            "infrastructure": [],
+            "roots": [],
+        }
+    try:
+        return {"editable": True, "deployment": deployment, **mind_mounts.read_mounts(name)}
+    except mind_mounts.NoComposeFile as exc:
+        return {
+            "editable": False,
+            "deployment": deployment,
+            "detail": str(exc),
+            "mounts": [],
+            "infrastructure": [],
+            "roots": [],
+        }
+    except (ValueError, OSError, yaml.YAMLError) as exc:
+        # A fragment this console cannot read or parse is a containerised Mind
+        # with a problem, not a Mind that runs under something else. Folding
+        # the two together sends the operator to the wrong machine.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/minds/{name}/mounts/folders")
+async def api_mind_mount_folders(
+    name: str, root: str, path: str = "", user: dict = Depends(require_auth)
+):
+    """The folders directly under one place in a declared root."""
+    del user, name
+    try:
+        return mind_mounts.list_folders(root, path)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/minds/{name}/mounts/folders")
+async def api_mind_mount_folder_create(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Create a folder under a declared root, for mounting in the same action."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="A folder is named in an object")
+    try:
+        created = mind_mounts.create_folder(
+            str(body.get("root") or ""),
+            str(body.get("parent") or ""),
+            str(body.get("name") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create that folder: {exc}") from exc
+    log_event(
+        log, "mind.mounts.folder_created", **_actor_fields(user), mind_name=name,
+        root=created["root"], path=created["path"],
+    )
+    return created
+
+
+@app.put("/api/minds/{name}/mounts")
+async def api_mind_mounts_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Write these folders into the Mind's fragment, then recreate it from it.
+
+    The write comes first and the recreate second, because the fragment is
+    what the next `up` reads however this call ends. A recreate that fails or
+    is still waiting on approval is reported as such rather than as a save
+    that worked — the folders are on disk, but nothing inside the Mind can
+    see them until its container is replaced.
+    """
+    body = await request.json()
+    rows = body.get("mounts") if isinstance(body, dict) else None
+    revision = str((body or {}).get("revision") or "") if isinstance(body, dict) else ""
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="mounts must be a list")
+    deployment = _mount_deployment(name)
+    if deployment != "container":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This Mind runs as {deployment or 'something this console cannot see'}, "
+                "not a container in this stack. Its mounts are set on its own host."
+            ),
+        )
+    try:
+        target = mind_mounts.compose_target(name)
+        state = mind_mounts.save_mounts(name, rows, revision)
+    except mind_mounts.StaleFragment as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except mind_mounts.NoComposeFile as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, OSError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "mind.mounts.updated", **_actor_fields(user), mind_name=name,
+        mounts=[row["container_path"] for row in state["mounts"]],
+    )
+    # Every way this call can fail from here is a fragment that was written
+    # and a container that was not replaced. Saying only "Hive Tools request
+    # failed" reads as nothing having happened, and the next `up` for any
+    # reason then applies an edit the operator believes was refused.
+    written = (
+        "The folders were written to this Mind's compose file, but recreating "
+        "its container did not happen, so nothing inside it has changed yet: "
+    )
+    try:
+        recreate = await _hive_tools_request(
+            "POST",
+            "/docker/up",
+            params={"path": target.project_path, "service": target.service},
+            timeout=310.0,
+        )
+    except HTTPException as exc:
+        raise HTTPException(status_code=502, detail=written + str(exc.detail)) from exc
+    if recreate.get("hitl_request_id"):
+        await console_access.record_operation_from(recreate, user)
+        return {
+            "saved": True,
+            "recreated": False,
+            "operation_id": str(recreate["hitl_request_id"]),
+            "detail": (
+                "Saved. Recreating this Mind's container is waiting on your "
+                "approval in Hive Tools; the new folders appear inside it once "
+                "that goes through."
+            ),
+            **state,
+        }
+    if recreate.get("error") or recreate.get("status") == "error":
+        raise HTTPException(
+            status_code=502,
+            detail=written
+            + str(recreate.get("error") or recreate.get("stderr") or "no detail"),
+        )
+    return {"saved": True, "recreated": True, **state}
+
+
+@app.get("/api/minds/{name}/voice")
+async def api_mind_voice(name: str, user: dict = Depends(require_auth)):
+    """This Mind's engine and voice, and what each engine offers it.
+
+    The current values come from the Mind's own file. What is selectable comes
+    from somewhere different for each engine: Kokoro's voices are a property
+    of the running speech engine and its language, so they are read from the
+    voice server, while Chatterbox clones a recording — so what it offers is
+    the clips sitting in this Mind's own directory.
+
+    Both are reported whichever engine the Mind is on, because the panel has
+    to render the other engine's picker the moment the operator switches to
+    it, without a second round trip to find out what it would contain.
+    """
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    configuration = await mind_runtime.fetch_configuration(gateway_url)
+    offered = await mind_runtime.fetch_voice_catalogue(_voice_server_urls()["kokoro"])
+    engine = (
+        str(configuration.get("voice_engine") or "").strip().lower()
+        or mind_runtime.DEFAULT_VOICE_ENGINE
+    )
+    voice = str(configuration.get("voice") or "")
+    clips = list_voice_clips(name)
+    # A clip the Mind names that is no longer on the disk is said so rather
+    # than shown as nothing selected: the remedy for a missing recording is
+    # not the remedy for never having picked one, and under Chatterbox a Mind
+    # in this state fails to speak at all.
+    missing = bool(
+        engine == mind_runtime.CHATTERBOX
+        and voice
+        and voice not in {clip["name"] for clip in clips}
+    )
+    return {
+        "voice": voice,
+        "voice_engine": engine,
+        "engines": list(mind_runtime.VOICE_ENGINES),
+        "default_clip": DEFAULT_VOICE_CLIP,
+        "clips": clips,
+        "clip_missing": missing,
+        "engine": offered.get("engine") or "",
+        "default_voice": offered.get("default_voice") or "",
+        "catalogue": offered.get("catalogue") or {},
+    }
+
+
+@app.put("/api/minds/{name}/voice")
+async def api_mind_voice_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Set this Mind's voice and the engine that speaks it.
+
+    The Mind's own file first, then the broker row that caches it, in that
+    order for the same reason the model takes: the Mind re-registers from its
+    file on its next start, so a row written against a file that never took
+    would be undone anyway.
+    """
+    del user
+    voice, engine = await _named_voice_and_engine(request)
+    # A clip this Mind does not have mutes it: Chatterbox resolves the name
+    # against the Mind's own directory and refuses when it finds nothing. The
+    # engine is already checked against the ones that exist for exactly this
+    # reason — a save that reports success and silences the Mind is the
+    # outcome being guarded against — and the clip half needs the same guard.
+    # Checked here rather than trusting the page, because the listing it chose
+    # from may be minutes old and a recording can be removed under it.
+    if engine == mind_runtime.CHATTERBOX:
+        held = {clip["name"] for clip in list_voice_clips(name)}
+        if voice not in held:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{name} has no reference clip named {voice}. It may have"
+                    " been removed since this page was loaded — reload and"
+                    " pick again."
+                ),
+            )
+    gateway_url = await _mind_gateway_url(name)
+    configuration = await mind_runtime.push_voice(gateway_url, voice, engine)
+    row = {"voice": voice}
+    if engine:
+        row["voice_engine"] = engine
+    await _gateway_request(
+        "PUT",
+        f"/broker/minds/{urllib.parse.quote(name)}",
+        json_body=row
+    )
+    return {
+        "saved": True,
+        "voice": str(configuration.get("voice") or voice),
+        "voice_engine": str(configuration.get("voice_engine") or engine),
+    }
+
+
+@app.get("/api/minds/{name}/proxy-key")
+async def api_mind_proxy_key_status(name: str, user: dict = Depends(require_auth)):
+    """What a key replacement left undone for this mind, in words; nothing
+    when there is none. Never a key."""
+    return {"needs_attention": [
+        record["detail"] for record in
+        holder_credentials.key_journal.needing_attention(name.strip().lower())]}
+
+
+@app.put("/api/minds/{name}/proxy-key")
+async def api_mind_proxy_key_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Replace a mind's key.
+
+    A mind on one key gets the pasted key on the gateway, the memory store and
+    the tools in one step, the old one refused on its next request at each,
+    and its stored line rewritten where this console can write it. A mind
+    still on its older per-service lines, which only the move to one key
+    changes, keeps the old behaviour of saving the proxy key alone.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    try:
+        configuration = local_runtime_configuration(name)
+        local = True
+    except ValueError:
+        configuration, local = {}, False
+    older = local and holder_credentials.mind_is_not_yet_on_one_key(name)
+    provider_connection = bool(configuration.get("provider_connection"))
+    try:
+        if provider_connection:
+            key, warning = await holder_credentials.accept_mind_provider_token(
+                body.get("proxy_key"), for_mind=name, stored_here=older)
+        else:
+            key, warning = await holder_credentials.validate_mind_proxy_key(
+                body.get("proxy_key"), for_mind=name, stored_here=older)
+        if older:
+            await holder_credentials.store_mind_proxy_key(
+                name, str(configuration.get("owner") or user["username"]), key,
+            )
+            return {"saved": True, "restart_required": True, "warning": warning}
+        row = await core.get_mind_by_id_or_name(name)
+        if not row:
+            raise HTTPException(status_code=404, detail="Mind not found")
+        replaced = await holder_credentials.replace_mind_key(
+            str(row["name"]), str(row.get("owner") or user["username"]),
+            str(row["mind_id"]), key, started_by=str(user["username"]))
+    except holder_credentials.KeyHeldByAnother as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except holder_credentials.ReplacementFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    stored = replaced["stored"] == "written"
+    in_file = bool(replaced.get("key_file"))
+    copies = replaced.get("copies_still_holding_old_key", [])
+    left_over = (f"The console's saved copies {', '.join(copies)} still hold the old key "
+                 "and could not be cleaned; remove them by hand. " if copies else "")
+    return {
+        "saved": True,
+        # A mind reading its key file takes the new key at its next request;
+        # only a mind still on a line in the install's .env must be recreated.
+        "restart_required": stored and not in_file,
+        "services": replaced["services"],
+        "stored": replaced["stored"],
+        "restart_target": replaced["restart_target"],
+        "proxy_note": replaced["proxy_note"],
+        "copies_still_holding_old_key": copies,
+        "next_step": left_over + (
+            "The mind reads its new key from its key file at its next request; "
+            "nothing is restarted." if stored and in_file else
+            "Recreate this mind so it reads its new key (it still reads a line in "
+            "the install's .env, which the move to a key file ends); until then its "
+            "requests are refused." if stored else
+            "Put the new key in the file this mind reads its key from, on the machine "
+            "it runs on (its MIND_KEY_FILE); it takes it at its next request."),
+    }
+
+
+@app.get("/api/minds/{name}/cut-off")
+async def api_mind_cut_off_status(name: str, user: dict = Depends(require_auth)):
+    """Where this mind's inference is cut off, for the mind's page."""
+    return {"inference": await holder_credentials.inference_cut_off_step(name)}
+
+
+@app.post("/api/minds/{name}/cut-off")
+async def api_mind_cut_off(name: str, user: dict = Depends(require_auth)):
+    """Cut a mind off from the hive: its key is refused by the gateway, the
+    memory store and the tools from their next request.
+
+    200 when all three refuse it; 207 with the per-service answer when any
+    does not, so a retry finishes the job. Nothing is deleted and the proxy is
+    not called."""
+    row = await core.get_mind_by_id_or_name(name)
+    if not row:
+        raise HTTPException(status_code=404, detail="Mind not found")
+    result = await holder_credentials.cut_off_mind(str(row["name"]))
+    log_event(
+        log, "mind.cut_off", **_actor_fields(user), mind=result["mind"],
+        ok=result["ok"],
+        services={r["service"]: r["status"] for r in result["services"]},
+    )
+    credential_registry.forget_all()
+    try:
+        result["inference"] = await holder_credentials.inference_cut_off_step(result["mind"])
+    except Exception:  # noqa: BLE001 - the cut-off landed; never mask it
+        result["inference"] = None
+    return JSONResponse(result, status_code=200 if result["ok"] else 207)
+
+
+def _migration_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, holder_credentials.KeyHeldByAnother):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, holder_credentials.ReplacementFailed):
+        return HTTPException(status_code=502, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/settings/key-migration")
+async def api_key_migration_report(user: dict = Depends(require_admin_or_route_bearer)):
+    """Every holder of an old key on the gateway, the memory store and the
+    tools, each with a state. Names, files, variables and digest prefixes; never a value."""
+    del user
+    return await key_migration.account()
+
+
+@app.post("/api/settings/key-migration/retire")
+async def api_key_migration_retire(user: dict = Depends(require_admin_or_route_bearer)):
+    """Retire the old per-service mind keys and the shared tools token. Refused,
+    naming each, while any mind is not moved."""
+    try:
+        result = await key_migration.retire()
+    except key_migration.RetirementRefused as exc:
+        return JSONResponse(
+            {"retired": False, "blocking": exc.blocking,
+             "retirement_warning": key_migration.RETIREMENT_WARNING}, status_code=409)
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed,
+            holder_credentials.MintUncertain) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "keys.retired", **_actor_fields(user),
+              removed=len(result["old_lines_removed"]))
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/end-old-person-keys")
+async def api_key_migration_end_old_person_keys(user: dict = Depends(require_admin_or_route_bearer)):
+    """The one-time step of story 914: end every person's key made the old way
+    and delete their key files. Safe to run twice."""
+    result = await key_migration.end_old_person_keys()
+    log_event(log, "keys.old_person_keys_ended", **_actor_fields(user),
+              people=len(result["ended_people"]))
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/tools-credential/{holder}")
+async def api_key_migration_tools_credential(holder: str, user: dict = Depends(require_admin_or_route_bearer)):
+    """Give a surface bot or the console a tools credential of its own."""
+    try:
+        result = await key_migration.issue_tools_credential(holder)
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed,
+            holder_credentials.MintUncertain) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "keys.tools_credential_issued", **_actor_fields(user), holder=result["holder"])
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/{name}/move")
+async def api_key_migration_move(name: str, user: dict = Depends(require_admin_or_route_bearer)):
+    """Move one existing mind onto the proxy key it already holds."""
+    try:
+        result = await key_migration.move_mind(name, started_by=str(user.get("username") or ""))
+    except (holder_credentials.MintRefused, holder_credentials.KeyHeldByAnother,
+            holder_credentials.ReplacementFailed, holder_credentials.MintUncertain) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "mind.key_moved", **_actor_fields(user), mind=result["mind"])
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/key-migration/{name}/undo")
+async def api_key_migration_undo(name: str, user: dict = Depends(require_admin_or_route_bearer)):
+    """Put one moved mind back on its old per-service values."""
+    try:
+        result = await key_migration.undo_move(name)
+    except (holder_credentials.MintRefused, holder_credentials.ReplacementFailed,
+            holder_credentials.MintUncertain) as exc:
+        raise _migration_error(exc) from None
+    log_event(log, "mind.key_move_undone", **_actor_fields(user), mind=result["mind"])
+    credential_registry.forget_all()
+    return result
+
+
+@app.patch("/api/minds/{name}/configuration")
+async def api_mind_configuration_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await request.json()
+    default_model = str(
+        body.get("default_model") if isinstance(body, dict) else ""
+    ).strip()
+    provider = str(body.get("provider") if isinstance(body, dict) else "").strip()
+    gateway_url = await _mind_gateway_url(name)
+
+    # The Mind's own file first, then the broker row that caches it. In this
+    # order a failure leaves the two agreeing rather than diverging: the Mind
+    # re-registers from the file on its next start, so a row written against
+    # a file that never took would be undone anyway.
+    previous_configuration = await mind_runtime.fetch_configuration(gateway_url)
+    configuration = await mind_runtime.push_default_model(
+        gateway_url, default_model, provider
+    )
+    try:
+        await _gateway_request(
+            "PUT",
+            f"/broker/minds/{urllib.parse.quote(name)}",
+            json_body={"model": default_model}
+        )
+    except HTTPException:
+        previous_model = str(previous_configuration.get("default_model") or "")
+        if previous_model:
+            await mind_runtime.push_default_model(
+                gateway_url,
+                previous_model,
+                str(previous_configuration.get("provider") or ""),
+            )
+        raise
+    log_event(
+        log, "mind.configuration.updated", **_actor_fields(user), mind_name=name,
+        previous_model=previous_configuration.get("default_model"),
+        default_model=default_model,
+        provider=provider or None,
+    )
+    deployment = str(configuration.get("deployment") or "container")
+    return {
+        "saved": True,
+        # Live on the next session this Mind is asked for. The broker row the
+        # gateway reads at session creation has already been updated, and the
+        # Mind's own file now says the same thing, so a restart would change
+        # nothing about the model.
+        "restart_required": False,
+        # Only a containerized Mind can be bounced from here; anything else
+        # runs under an init system this console does not reach.
+        "restartable": deployment == "container",
+        "configuration": {
+            "name": configuration.get("name") or name,
+            "harness": configuration.get("harness"),
+            "provider": configuration.get("provider"),
+            "default_model": configuration.get("default_model"),
+            "deployment": deployment,
+        },
+    }
+
+
+@app.get("/api/minds/{name}/surface-token")
+async def api_mind_surface_token(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    """Whether this Mind's surface has a bot token the bot API accepts.
+
+    Relayed from the Mind, which is the only party that can see where its own
+    token lives. Never the token itself: a console that could read one would
+    put every bot in the hive one session cookie away from being
+    impersonated.
+    """
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    state = await mind_runtime.fetch_surface_token(gateway_url, surface=surface)
+    return {
+        "stored": bool(state.get("stored")),
+        "accepted": state.get("accepted"),
+        "bot_username": str(state.get("bot_username") or ""),
+        "where": str(state.get("where") or ""),
+        "detail": str(state.get("detail") or ""),
+        "preview": str(state.get("preview") or ""),
+    }
+
+
+@app.put("/api/minds/{name}/surface-token")
+async def api_mind_surface_token_set(
+    name: str, request: Request, surface: str = "telegram",
+    user: dict = Depends(require_auth),
+):
+    """Hand this Mind a new bot token for it to verify and store.
+
+    The Mind writes it, because the token has to land where that Mind's
+    surface reads it — its own `.env` on an edge install, a per-mind keyring
+    key in the stack — and this console can see neither.
+
+    The Mind verifies against the bot API before storing, so a token refused
+    there leaves the working one in place. The audit line records which Mind
+    and what came of it; the value never enters a log, a response, or an
+    exception message.
+    """
+    del user
+    body = await request.json()
+    token = str((body or {}).get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="A bot token is required")
+    gateway_url = await _mind_gateway_url(name)
+    try:
+        state = await mind_runtime.push_surface_token(
+            gateway_url, token, surface=surface
+        )
+    except HTTPException as exc:
+        log_event(
+            log, "mind.surface_token.refused", level=logging.WARNING,
+            mind=name, status=exc.status_code,
+        )
+        raise
+    log_event(
+        log, "mind.surface_token.updated", mind=name,
+        bot_username=str(state.get("bot_username") or ""),
+        where=str(state.get("where") or ""),
+    )
+    # The claim was a claim on a bot. Telling comms which bot this token is
+    # releases the claim when the bot has changed, so a brand-new bot does
+    # not answer whoever claimed the old one having never been claimed.
+    bot_ref = str(state.get("bot_username") or "")
+    if bot_ref:
+        try:
+            await _gateway_request(
+                "POST", f"/broker/minds/{await _mind_uuid(name)}/surface-claim/bot",
+                params={"surface": surface}, json_body={"bot_ref": bot_ref}
+            )
+        except HTTPException as exc:
+            # A gateway that predates bot claims, or one that is down. The
+            # token is stored either way, and the page reads the claim as
+            # unknown rather than as a claim on a bot nobody has recorded.
+            log_event(
+                log, "mind.bot_claim.bot_not_recorded", level=logging.WARNING,
+                mind=name, surface=surface, status=exc.status_code,
+            )
+    return {
+        "saved": True,
+        "stored": True,
+        "accepted": True,
+        "bot_username": str(state.get("bot_username") or ""),
+        "where": str(state.get("where") or ""),
+        # The surface read its token when it started and keeps it until it is
+        # recreated, which the page says rather than implying otherwise.
+        "restart_required": True,
+    }
+
+
+@app.get("/api/minds/{name}/soul")
+async def api_mind_soul(name: str, user: dict = Depends(require_auth)):
+    """This Mind's soul, straight from the graph, with its change record.
+
+    Asked of lucent rather than of the Mind: the soul lives in the graph, and
+    a Mind whose soul is wrong is exactly the Mind you may have stopped.
+    """
+    del user
+    soul = await mind_soul.fetch_soul(name)
+    return {
+        "soul_values": soul.get("soul_values") or [],
+        "change_count": soul.get("change_count") or 0,
+        "history": await mind_soul.fetch_history(name),
+    }
+
+
+@app.put("/api/minds/{name}/soul")
+async def api_mind_soul_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Replace this Mind's soul, recorded as a console edit.
+
+    The whole list, not a delta: rewriting a line and removing one are the
+    edits this page exists for, and neither is expressible as an append.
+    """
+    del user
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    values = body.get("soul_values")
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise HTTPException(
+            status_code=400, detail="soul_values must be a list of strings"
+        )
+    await mind_soul.push_soul(name, values, str(body.get("reason") or ""))
+    soul = await mind_soul.fetch_soul(name)
+    return {
+        "soul_values": soul.get("soul_values") or [],
+        "change_count": soul.get("change_count") or 0,
+        "history": await mind_soul.fetch_history(name),
+    }
+
+
+async def _named_voice(request: Request) -> str:
+    """The voice named in a request body, refusing anything that is not one.
+
+    `str(body.get("voice"))` turns an absent key and a JSON null alike into the
+    literal string "None", which is truthy, matches the name pattern, and gets
+    written into a Mind's runtime.yaml as its voice. A body that is not JSON at
+    all is the caller's mistake and answers 400 rather than 500.
+    """
+    return _voice_from(await _json_object(request))
+
+
+async def _json_object(request: Request) -> dict:
+    """A request's body as an object. A body that is not one answers 400."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    return body
+
+
+def _voice_from(body: dict) -> str:
+    voice = body.get("voice")
+    voice = voice.strip() if isinstance(voice, str) else ""
+    if not voice:
+        raise HTTPException(status_code=400, detail="A voice is required")
+    return voice
+
+
+async def _named_voice_and_engine(request: Request) -> tuple[str, str]:
+    """The voice and engine a request names, refusing anything that is not.
+
+    The engine is optional on the wire — a caller setting only a Kokoro voice
+    on a Mind already on Kokoro has no reason to restate it — but an engine
+    that is named must be one that exists. Accepting an unknown one would
+    point the Mind at a voice server nobody is running, and it would go silent
+    rather than refuse the save.
+    """
+    body = await _json_object(request)
+    engine = body.get("voice_engine")
+    engine = engine.strip().lower() if isinstance(engine, str) else ""
+    if engine and engine not in mind_runtime.VOICE_ENGINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{engine} is not a speech engine: "
+            + ", ".join(mind_runtime.VOICE_ENGINES),
+        )
+    return _voice_from(body), engine
+
+
+@app.post("/api/voices/sample")
+async def api_voice_sample(request: Request, user: dict = Depends(require_auth)):
+    """Speak a sample line in one voice, so it can be picked by ear.
+
+    Which server speaks it follows the engine the request names, because the
+    two engines are separate processes with separate models. Under Kokoro the
+    voice belongs to the server and every Mind on this hive reads the same
+    catalogue; under Chatterbox it is a recording in one Mind's own directory,
+    so the Mind is named too and the sample is of that Mind's clip.
+    """
+    del user
+    voice, engine = await _named_voice_and_engine(request)
+    body = await _json_object(request)
+    voice_id = body.get("voice_id")
+    voice_id = voice_id.strip() if isinstance(voice_id, str) else ""
+    # Kokoro when the caller names no engine. Not the Mind-side default:
+    # there is no Mind in this request, and a voice named without an engine is
+    # a catalogued one — the only kind that can be sampled without knowing
+    # whose directory to look in.
+    engine = engine or mind_runtime.KOKORO
+    if engine == mind_runtime.CHATTERBOX and not voice_id:
+        raise HTTPException(
+            status_code=400,
+            detail="A Mind is required to sample one of its reference clips",
+        )
+    audio = await mind_runtime.sample_voice(
+        _voice_server_urls()[engine], voice, voice_id, await _person_headers_or_none()
+    )
+    return Response(content=audio, media_type="audio/ogg")
+
+
+@app.post("/api/minds/{name}/voice/clips")
+async def api_mind_voice_clip_upload(
+    name: str, file: UploadFile, user: dict = Depends(require_auth)
+):
+    """Add a reference recording to this Mind's own directory.
+
+    An upload adds a candidate; it does not change what the Mind speaks in.
+    The clip lands under its own filename beside whatever is already there,
+    and becomes the Mind's voice only when the picker saves it — so uploading
+    a second take cannot silently replace the one currently being spoken.
+    """
+    data = await file.read()
+    try:
+        target = save_voice_clip(name, file.filename or "", data)
+    except ClipExists as exc:
+        # Nothing is wrong with the request, so not a 400: the name is taken,
+        # and the operator has to decide whether this is a new recording or a
+        # replacement for one a Mind may be speaking from right now.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "mind.voice_clip.uploaded", **_actor_fields(user), mind_name=name,
+        clip=target.name, size_bytes=len(data), path=str(target),
+    )
+    return {
+        "ok": True,
+        "clip": target.name,
+        "size_bytes": len(data),
+        "clips": list_voice_clips(name),
+    }
+
+
+# ── a mind's face ──────────────────────────────────────────────────────
+#
+# Keyed by `mind_id` rather than by the short name every other per-mind
+# route uses, and that is deliberate: a name is a display label the registry
+# rewrites on a rename, so a name-keyed picture is one that goes missing the
+# first time a mind is renamed and is inherited by a stranger the first time
+# a name is reused. See `mind_images`.
+
+
+#: One in-flight upload per mind. A double-click on "Upload picture" is two
+#: concurrent calls, and without this they interleave: both stage, both
+#: rename, and the file on disk can be a hybrid of two photos that neither
+#: request has any way to notice — both answered `{"ok": true}`. The console
+#: runs a single worker, so a lock in the process is the whole boundary.
+_IMAGE_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _image_lock(mind_id: str) -> asyncio.Lock:
+    lock = _IMAGE_WRITE_LOCKS.get(mind_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _IMAGE_WRITE_LOCKS[mind_id] = lock
+    return lock
+
+
+async def _mind_by_id(mind_id: str) -> dict:
+    """The registry row this id names, or a 404.
+
+    Checked before anything touches the filesystem, so an upload for a mind
+    that does not exist is refused rather than leaving a file nothing will
+    ever serve.
+    """
+    for row in await core.list_minds():
+        if row.get("mind_id") == mind_id:
+            return row
+    raise HTTPException(status_code=404, detail=f"No such mind: {mind_id}")
+
+
+@app.get("/api/minds/{mind_id}/image")
+async def api_mind_image(mind_id: str, v: str = "",
+                         user: dict = Depends(require_auth)):
+    """This Mind's picture, or the letter it wears until it has one.
+
+    One URL either way. The fallback is generated here rather than drawn by
+    the page because the page is a Cytoscape canvas that can only be handed
+    an image, and because a second implementation of "what if there is no
+    file" is a second thing to get wrong.
+
+    `no-cache` rather than a long life: the URL is fixed per mind, so a
+    browser left to its own heuristics will keep showing a replaced face for
+    hours. The caller also carries a version, so the usual answer here is a
+    304 rather than the bytes.
+    """
+    del user
+    row = await _mind_by_id(mind_id)
+    # A caller that named a version gets a long life, because the version is
+    # part of the URL and a replacement changes it — so there is nothing to
+    # go stale. A caller that named none must revalidate, because its URL
+    # would otherwise serve a replaced picture for as long as the browser
+    # felt like it. `FileResponse` answers no conditional request of its own,
+    # so "revalidate" here really does mean the whole body again; that is the
+    # price of not naming a version, and the chart always names one.
+    headers = {
+        "Cache-Control": ("public, max-age=31536000, immutable" if v
+                          else "no-cache"),
+        "X-Content-Type-Options": "nosniff",
+    }
+    stored = mind_images.stored_image(mind_id)
+    if stored is not None:
+        return FileResponse(stored,
+                            media_type=mind_images.content_type(stored),
+                            headers=headers)
+    letter = mind_images.initial_svg(mind_id, row.get("name") or "")
+    # An ETag so a revalidation can be answered 304 instead of re-sending the
+    # body and re-reading the registry. This branch is the common one: a mind
+    # with no picture is every mind's starting state.
+    headers["ETag"] = '"%s"' % hashlib.sha256(letter).hexdigest()[:32]
+    return Response(content=letter, media_type="image/svg+xml",
+                    headers=headers)
+
+
+@app.post("/api/minds/{mind_id}/image")
+async def api_mind_image_upload(
+    mind_id: str, file: UploadFile, user: dict = Depends(require_auth)
+):
+    """Set or replace this Mind's picture.
+
+    A replacement, unlike a voice clip: there is only ever one picture and
+    Daniel's requirement is that he uploads or replaces it. What the file
+    actually is comes from its own bytes — the browser's content type is
+    caller-supplied and decides nothing.
+    """
+    row = await _mind_by_id(mind_id)
+    data = await file.read()
+    # The write and the version read are one operation. Reading the version
+    # afterwards, outside the lock, is how a second upload's reply reports
+    # the first upload's file — the page then says "Saved" and shows a
+    # different picture than the one just chosen.
+    async with _image_lock(mind_id):
+        try:
+            target = await run_in_threadpool(
+                mind_images.save_image, mind_id, data)
+        except mind_images.ImageRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        version = mind_images.image_version(mind_id)
+    log_event(
+        log, "mind.image.uploaded", **_actor_fields(user),
+        mind_id=mind_id, mind_name=row.get("name") or "",
+        size_bytes=len(data), path=str(target),
+    )
+    return {"ok": True, "mind_id": mind_id,
+            "image_version": version, "size_bytes": len(data)}
+
+
+@app.get("/api/minds/{name}/skills")
+async def api_mind_skills(name: str, community: int = 0,
+                          user: dict = Depends(require_auth)):
+    """Every skill this Mind knows, repo side against installed side.
+
+    Community submissions are left out unless `community=1` asks for them,
+    and labelled when they are listed (story 10.18.9). How many were left
+    out is part of the answer, so the page can say so.
+    """
+    del user
+    payload = await mind_skills.fetch_skills(await _mind_gateway_url(name))
+    return await skill_submissions.filter_skills(payload, include_community=bool(community))
+
+
+@app.get("/api/minds/{name}/skills/{skill}/diff")
+async def api_mind_skill_diff(name: str, skill: str, user: dict = Depends(require_auth)):
+    del user
+    return await mind_skills.fetch_diff(await _mind_gateway_url(name), skill)
+
+
+@app.post("/api/minds/{name}/skills/{skill}/install")
+async def api_mind_skill_install(
+    name: str, skill: str, user: dict = Depends(require_auth)
+):
+    """Copy the repo's version onto this Mind — applying and reverting alike."""
+    result = await mind_skills.install(await _mind_gateway_url(name), skill)
+    log_event(
+        log, "mind.skill.installed", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
+
+
+@app.post("/api/minds/{name}/skills/{skill}/write-back")
+async def api_mind_skill_write_back(
+    name: str, skill: str, user: dict = Depends(require_auth)
+):
+    """Copy this Mind's version into its repo checkout. Nothing is committed."""
+    # A Mind in this hive's own stack writes back into the hive's own
+    # checkout, which is the hive's skills. Anybody but the owner hands the
+    # hive a skill only as a pull request (story 10.18.8).
+    if not user.get("is_admin") and await asyncio.to_thread(
+            (configuration_data_module.HIVE_MIND_MINDS_DIR / route_access.normalize_mind_name(name)).is_dir):
+        raise HTTPException(
+            status_code=403,
+            detail="This Mind's repo is the hive's own. Submit the skill as a "
+                   "pull request from the Submit a skill page instead.")
+    result = await mind_skills.write_back(await _mind_gateway_url(name), skill)
+    log_event(
+        log, "mind.skill.written_back", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
+
+
+@app.delete("/api/minds/{name}/skills/{skill}")
+async def api_mind_skill_remove(
+    name: str, skill: str, user: dict = Depends(require_auth)
+):
+    result = await mind_skills.remove(await _mind_gateway_url(name), skill)
+    log_event(
+        log, "mind.skill.removed", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
+
+
+# ── roles (feature 10.18) ─────────────────────────────────────────────
+
+
+def _role_id(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="No such role") from exc
+    # Roles are keyed by a 64-bit id: a number outside it names no role, and
+    # the database would refuse it as a server error rather than a 404.
+    if not 0 <= number < 2 ** 63:
+        raise HTTPException(status_code=404, detail="No such role")
+    return number
+
+
+@app.get("/api/roles")
+async def api_roles(user: dict = Depends(require_admin_or_route_bearer)):
+    """Every role, each marked tracked, local, differs, repo only or unreadable."""
+    del user
+    return {"roles": await roles_data.listing(), "tools": list(roles_data.TOOLS)}
+
+
+#: How long one Mind is waited on for each of its two lists. A Mind that is
+#: off must not hold the editor shut.
+_CATALOG_DEADLINE = 5.0
+
+
+async def _within(call):
+    """What `call` answered inside the deadline, or `None`.
+
+    Any failure at all: a Mind that answers with a page instead of a list,
+    or a GitHub that hangs, costs its own part of the catalog and nothing
+    else.
+    """
+    try:
+        return await asyncio.wait_for(call, _CATALOG_DEADLINE)
+    except Exception:
+        return None
+
+
+async def _mind_report(mind: dict) -> dict:
+    """One Mind's skills and hooks listings, each `None` when it did not answer."""
+    url = str(mind.get("gateway_url") or "")
+    skills, hooks = await asyncio.gather(
+        _within(mind_skills.fetch_skills(url)),
+        _within(mind_files.fetch_tree(url, "hooks")))
+    return {"mind": str(mind.get("name") or ""), "skills": skills, "hooks": hooks}
+
+
+@app.get("/api/roles/catalog")
+async def api_roles_catalog(user: dict = Depends(require_admin_or_route_bearer)):
+    """What a role can be given: every model, skill and hook that exists.
+
+    The editor ticks from this and types none of it. Models are the proxy's
+    list; skills and hooks are what the registered Minds report. Everything
+    is asked at once, and each part that does not answer is said to be
+    missing rather than passed off as empty.
+    """
+    del user
+    minds = await _broker_minds_safe()
+    community, listing, *reports = await asyncio.gather(
+        _within(skill_submissions.community_names()),
+        _within(_proxy_json("/v1/models")),
+        *(_mind_report(m) for m in minds))
+    body = roles_data.catalog(list(reports), community or set())
+    body["minds_asked"] = len(minds)
+    body["community_unread"] = community is None
+    seen: set[str] = set()
+    models = []
+    for row in (listing or {}).get("data", []) if isinstance(listing, dict) else []:
+        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] not in seen:
+            seen.add(row["id"])
+            models.append({"id": row["id"], "provider": str(row.get("provider") or "other")})
+    body.update(models=models,
+                models_error=None if models else "the proxy did not answer with a model list")
+    return body
+
+
+@app.post("/api/roles")
+async def api_create_role(body: dict, user: dict = Depends(require_admin_or_route_bearer)):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="A role needs a name")
+    grants = roles_data.grants_from(body)
+    if body.get("slug") is not None:
+        # The key a role is filed under (its repo copy, its listing). Left
+        # out, it is the name's, as it always was.
+        if not isinstance(body["slug"], str) or not body["slug"].strip():
+            raise HTTPException(status_code=400, detail="slug must be a name")
+        grants["slug"] = body["slug"]
+    try:
+        role_id = await store.create_role(name, **grants)
+    except roles_data.store_conflict() as exc:
+        raise HTTPException(status_code=409,
+                            detail=f"A role called {name.strip()!r} already exists") from exc
+    except (ValueError, ValueRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(log, "role.created", **_actor_fields(user), role_id=role_id, name=name)
+    return {"ok": True, "id": role_id}
+
+
+@app.put("/api/roles/{role_id}")
+async def api_update_role(role_id: str, body: dict, user: dict = Depends(require_admin_or_route_bearer)):
+    rid = _role_id(role_id)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    fields = roles_data.grants_from(body)
+    if "name" in body:
+        if not isinstance(body["name"], str) or not body["name"].strip():
+            raise HTTPException(status_code=400, detail="A role needs a name")
+        fields["name"] = body["name"]
+    try:
+        # Under the role's lock, so a whole-list replace and a one-skill add
+        # take turns rather than one erasing the other.
+        async with store.transaction(hold=_role_lock(rid)):
+            changed = await store.update_role(rid, **fields)
+    except roles_data.store_conflict() as exc:
+        raise HTTPException(status_code=409,
+                            detail=f"A role called {str(body.get('name')).strip()!r} already exists") from exc
+    except (ValueError, ValueRefused) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not changed:
+        raise HTTPException(status_code=404, detail="No such role")
+    log_event(log, "role.updated", **_actor_fields(user), role_id=rid,
+              fields=sorted(fields))
+    return {"ok": True}
+
+
+@app.delete("/api/roles/{role_id}")
+async def api_delete_role(role_id: str, user: dict = Depends(require_admin_or_route_bearer)):
+    rid = _role_id(role_id)
+    role = await store.role(rid)
+    if role is None:
+        raise HTTPException(status_code=404, detail="No such role")
+    if role["slug"] == roles_data.GENERAL:
+        raise HTTPException(
+            status_code=409,
+            detail="The general role cannot be deleted: every agent under role "
+                   "management holds it. It can be edited.")
+    # Read before the delete, which takes the holdings with it: the minds
+    # that held the operator role lose what it attached.
+    holders = (await store.role_holders(rid)
+               if role["slug"] == operator_attachment.OPERATOR_ROLE_SLUG else [])
+    await store.delete_role(rid)
+    log_event(log, "role.deleted", **_actor_fields(user), role_id=rid, slug=role["slug"])
+    answer: dict = {"ok": True}
+    if holders:
+        names = {str(m.get("mind_id") or m.get("id") or ""): str(m.get("name") or "")
+                 for m in await _broker_minds_safe()}
+        answer["attachments"] = {}
+        for mind_id in holders:
+            if names.get(mind_id):
+                answer["attachments"][names[mind_id]] = (
+                    await _attach_for_roles(names[mind_id], mind_id, user))["attachments"]
+            else:
+                answer["attachments"][mind_id] = {
+                    "changed": False, "recreated": False,
+                    "detail": "This mind is not in the registry, so its attachments were not changed."}
+    return answer
+
+
+def _role_lock(role_id: int) -> str:
+    """The advisory-lock key the one-skill add and remove and the whole-list replace take.
+
+    Taking a role from the repo is a deliberate full replace and does not.
+    """
+    return f"roles:role:{role_id}"
+
+
+def _skill_name(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail="A skill needs a name")
+    return value.strip()
+
+
+@app.post("/api/roles/{role_id}/skills")
+async def api_add_role_skill(role_id: str, body: dict,
+                             user: dict = Depends(require_admin_or_route_bearer)):
+    """Add one skill to a role, leaving every other grant as it is.
+
+    Read, decided and written in one unit under the role's lock, so two
+    callers adding different skills at once both land: a whole-list replace
+    cannot do that, because the second reads the list before the first wrote.
+    A skill the role already holds changes nothing and says so.
+    """
+    rid = _role_id(role_id)
+    skill = _skill_name(body.get("skill") if isinstance(body, dict) else None)
+    async with store.transaction(hold=_role_lock(rid)):
+        role = await store.role(rid)
+        if role is None:
+            raise HTTPException(status_code=404, detail="No such role")
+        held = list(role["skills"] or [])
+        added = skill not in held
+        if added:
+            held.append(skill)
+            await store.update_role(rid, skills=held)
+    if added:
+        log_event(log, "role.skill_added", **_actor_fields(user), role_id=rid, skill=skill)
+    return {"ok": True, "changed": added, "skills": held}
+
+
+@app.delete("/api/roles/{role_id}/skills/{skill}")
+async def api_remove_role_skill(role_id: str, skill: str,
+                                user: dict = Depends(require_admin_or_route_bearer)):
+    """Take one skill off a role, leaving every other grant as it is.
+
+    Atomic for the reason the add is. A skill the role does not hold changes
+    nothing and says so.
+    """
+    rid = _role_id(role_id)
+    skill = _skill_name(skill)
+    async with store.transaction(hold=_role_lock(rid)):
+        role = await store.role(rid)
+        if role is None:
+            raise HTTPException(status_code=404, detail="No such role")
+        held = list(role["skills"] or [])
+        removed = skill in held
+        if removed:
+            held = [name for name in held if name != skill]
+            await store.update_role(rid, skills=held)
+    if removed:
+        log_event(log, "role.skill_removed", **_actor_fields(user), role_id=rid, skill=skill)
+    return {"ok": True, "changed": removed, "skills": held}
+
+
+@app.post("/api/roles/{role_id}/keep")
+async def api_keep_role(role_id: str, user: dict = Depends(require_admin_or_route_bearer)):
+    result = await roles_data.keep_yours(_role_id(role_id))
+    log_event(log, "role.kept", **_actor_fields(user), role_id=role_id)
+    return result
+
+
+@app.post("/api/roles/{role_id}/promote")
+async def api_promote_role(role_id: str, user: dict = Depends(require_admin_or_route_bearer)):
+    result = await roles_data.promote(_role_id(role_id))
+    log_event(log, "role.promoted", **_actor_fields(user), role_id=role_id)
+    return result
+
+
+@app.post("/api/roles/repo/{slug}/take")
+async def api_take_repo_role(slug: str, user: dict = Depends(require_admin_or_route_bearer)):
+    result = await roles_data.take_repo(slug)
+    log_event(log, "role.taken_from_repo", **_actor_fields(user), slug=slug)
+    return result
+
+
+# ── skill submissions (stories 10.18.8 and 10.18.9) ───────────────────
+
+
+async def _uploaded_files(request: Request) -> list[tuple[str, bytes]]:
+    """The skill folder's files, each with its path inside the folder.
+
+    The browser sends `paths` beside `files`, one per file and in the same
+    order, because an upload's own filename is only the last segment.
+    """
+    form = await request.form()
+    files = [f for f in form.getlist("files") if isinstance(f, StarletteUploadFile)]
+    paths = [str(p) for p in form.getlist("paths")]
+    if len(paths) != len(files):
+        raise HTTPException(status_code=400, detail="Every file needs its path inside the folder")
+    out = []
+    for path, upload in zip(paths, files):
+        out.append((path, await upload.read(skill_submissions.MAX_BYTES + 1)))
+    return out
+
+
+@app.get("/api/skill-submissions")
+async def api_skill_submissions(user: dict = Depends(require_auth)):
+    """What has been submitted. A person sees their own; an admin, all."""
+    await skill_submissions.refresh()
+    rows = await store.skill_submissions()
+    if not user.get("is_admin"):
+        rows = [r for r in rows if r["submitted_by"] == str(user.get("username") or "").lower()]
+    return {"submissions": rows, "repository": skill_submissions.REPOSITORY}
+
+
+@app.post("/api/skill-submissions")
+async def api_submit_skill(request: Request, user: dict = Depends(require_auth)):
+    """Open a pull request adding a skill folder. Nothing else is written."""
+    result = await skill_submissions.submit(user, await _uploaded_files(request))
+    log_event(log, "skill.submitted", **_actor_fields(user), skill=result["skill"],
+              pr_number=result["pr_number"])
+    return result
+
+
+@app.post("/api/skill-submissions/{submission_id}/retry")
+async def api_retry_skill_submission(submission_id: int, request: Request,
+                                     user: dict = Depends(require_auth)):
+    result = await skill_submissions.retry(submission_id, user, await _uploaded_files(request))
+    log_event(log, "skill.submission_retried", **_actor_fields(user),
+              submission_id=submission_id, pr_number=result["pr_number"])
+    return result
+
+
+async def _mind_id_for(name: str) -> str:
+    mind = await _mind_row(name)
+    # The registry files a Mind's id under `id`; `mind_id` is the gateway's
+    # own name for the same value.
+    mind_id = str(mind.get("mind_id") or mind.get("id") or "").strip()
+    if not mind_id:
+        raise HTTPException(status_code=404, detail="That Mind has no id in the registry")
+    return mind_id
+
+
+@app.get("/api/minds/{name}/roles")
+async def api_mind_roles(name: str, user: dict = Depends(require_auth)):
+    """The roles a Mind holds and what their union grants it, read now."""
+    del user
+    mind_id = await _mind_id_for(name)
+    return {"grants": await store.grants_for(mind_id),
+            "roles": [{"id": r["id"], "slug": r["slug"], "name": r["name"]}
+                      for r in await store.roles_of(mind_id)]}
+
+
+@app.put("/api/minds/{name}/roles")
+async def api_set_mind_roles(name: str, body: dict, user: dict = Depends(require_auth)):
+    """Give a Mind these roles beside general, and put it under role management."""
+    ids = body.get("role_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        raise HTTPException(status_code=400, detail="role_ids must be a list of role ids")
+    known = {r["id"] for r in await store.roles_list()}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"No such role: {missing[0]}")
+    mind_id = await _mind_id_for(name)
+    await store.set_mind_roles(mind_id, ids)
+    log_event(log, "mind.roles.set", **_actor_fields(user), mind_name=name, role_ids=ids)
+    answer = {"ok": True, "grants": await store.grants_for(mind_id)}
+    answer.update(await _attach_for_roles(name, mind_id, user))
+    return answer
+
+
+async def _attach_for_roles(name: str, mind_id: str, user: dict) -> dict:
+    """Make a console-made mind's container match the roles it now holds.
+
+    The role assignment is already saved and stays saved whatever happens
+    here. A container's attachments are fixed when it is made, so when the
+    fragment had to change (the install's skills folder was never attached,
+    or the operator role was given or taken) the mind is re-made from it, the
+    way the mounts page does, and the answer says so plainly: `attachments`
+    is what came of it.
+    """
+    operator = any(r["slug"] == operator_attachment.OPERATOR_ROLE_SLUG
+                   for r in await store.roles_of(mind_id))
+    try:
+        result = await asyncio.to_thread(operator_attachment.reconcile, name, operator)
+    except (operator_attachment.AttachmentRefused, ValueError, OSError) as exc:
+        return {"attachments": {
+            "changed": False, "recreated": False,
+            "detail": f"The roles are saved, but this mind's attachments were not changed: {exc}"}}
+    if not result["changed"]:
+        return {"attachments": {"changed": False, "recreated": False,
+                                "detail": result.get("detail", "")}}
+    log_event(log, "mind.attachments.changed", **_actor_fields(user), mind_name=name,
+              operator=operator)
+    target = mind_mounts.compose_target(name)
+    made = ("The roles are saved and this mind's compose file now carries "
+            + ("the install's skills folder, writable, and the operator's credential"
+               if operator else "the install's skills folder, read-only")
+            + ". This mind is being re-made from it")
+    try:
+        recreate = await _hive_tools_request(
+            "POST", "/docker/up",
+            params={"path": target.project_path, "service": target.service},
+            timeout=310.0)
+    except HTTPException as exc:
+        return {"attachments": {"changed": True, "recreated": False,
+                                "detail": f"{made}, but that did not happen: {exc.detail}"}}
+    if recreate.get("hitl_request_id"):
+        await console_access.record_operation_from(recreate, user)
+        return {"attachments": {
+            "changed": True, "recreated": False,
+            "operation_id": str(recreate["hitl_request_id"]),
+            "detail": f"{made}; that is waiting on your approval in Hive Tools."}}
+    if recreate.get("error") or recreate.get("status") == "error":
+        return {"attachments": {
+            "changed": True, "recreated": False,
+            "detail": f"{made}, but that did not happen: "
+                      f"{recreate.get('error') or recreate.get('stderr') or 'no detail'}"}}
+    return {"attachments": {"changed": True, "recreated": True,
+                            "detail": f"{made}, and it has been."}}
+
+
+@app.get("/api/minds/{name}/files/{tree}")
+async def api_mind_files(name: str, tree: str, user: dict = Depends(require_auth)):
+    """Every file under one of a Mind's two editable trees."""
+    del user
+    return await mind_files.fetch_tree(await _mind_gateway_url(name), tree)
+
+
+@app.get("/api/minds/{name}/files/{tree}/content")
+async def api_mind_file_content(
+    name: str, tree: str, path: str = "", user: dict = Depends(require_auth)
+):
+    """One file's text, or the Mind's reason it cannot be shown as text."""
+    del user
+    return await mind_files.fetch_file(await _mind_gateway_url(name), tree, path)
+
+
+@app.put("/api/minds/{name}/files/{tree}/content")
+async def api_mind_file_save(
+    name: str, tree: str, body: dict, user: dict = Depends(require_auth)
+):
+    """Save one file back to the Mind, in place.
+
+    `revision` is what the read handed back; the Mind refuses with 409 if it
+    no longer describes the file, which is what stops a stale tab from
+    silently undoing whatever changed it.
+    """
+    # Coerced rather than validated, `text` would turn a missing field, a
+    # null, or a dict into `""` or a Python repr — and the Mind's own
+    # "text required" guard would never be reached. This route writes
+    # executables that run every turn; truncating one to nothing on a
+    # 200 OK is not an acceptable reading of a malformed body.
+    path = body.get("path")
+    text = body.get("text")
+    revision = body.get("revision")
+    if not isinstance(path, str) or not path:
+        raise HTTPException(status_code=400, detail="path required")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="text required")
+    # Required, not optional: a staleness check the caller may omit is one
+    # a refactored fetch will omit, and then a save silently overwrites
+    # whatever landed since the file was read.
+    if not isinstance(revision, str) or not revision:
+        raise HTTPException(
+            status_code=400,
+            detail="revision required — reopen the file and save again",
+        )
+    result = await mind_files.save_file(
+        await _mind_gateway_url(name), tree, path, text, revision
+    )
+    log_event(
+        log,
+        "mind.file.saved",
+        **_actor_fields(user),
+        mind_name=name,
+        tree=tree,
+        path=path,
+        # The bytes, not just the name: this writes hooks that run every
+        # turn as the Mind's own user, and "a file changed" with no way to
+        # tell which change is not an audit trail.
+        size=result.get("size"),
+        revision=result.get("revision"),
+    )
+    return result
+
+
+@app.get("/api/settings/hive-comms/sessions")
+async def api_settings_hive_comms_sessions(user: dict = Depends(require_auth)):
+    sessions = await _gateway_json("/sessions")
+    if not isinstance(sessions, list):
+        sessions = []
+    all_minds = await _broker_minds_safe()
+    sessions = route_access.visible_sessions(user, sessions, all_minds)
+    registry = build_mind_registry(route_access.visible_minds(user, all_minds))
+    return {"sessions": _add_session_mind_names(sessions, registry)}
+
+
+@app.delete("/api/settings/hive-comms/sessions/{session_id}")
+async def api_settings_hive_comms_session_delete(
+    session_id: str, user: dict = Depends(require_auth)
+):
+    url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.delete(url, headers=await _person_headers())
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        result = resp.json() if resp.content else {"ok": True}
+    log_event(log, "session.deleted", **_actor_fields(user), session_id=session_id)
+    return result
+
+
+# Hostnames that never resolve in the operator's browser: the placeholder
+# .env.example ships for every LAN url, and the compose service names, which
+# resolve on the container network and nowhere else.
+_UNREACHABLE_HOSTS = frozenset({"hive-host", "hive-tools", "hive-comms", "hive-lucent"})
+
+
+def _hive_tools_base_url() -> str:
+    return os.getenv("HIVE_TOOLS_URL") or "http://hive-tools:9421"
+
+
+def _hive_tools_console_url() -> str:
+    """A hive-tools URL a *browser* can reach.
+
+    The service-to-service base url is a compose hostname, which resolves for
+    this container and for nothing the operator is sitting in front of.
+
+    .env.example ships the LAN urls pointed at the literal placeholder host, so
+    a fresh install that has not been filled in yet is treated as unconfigured
+    rather than rendered as a link that opens a dead tab.
+    """
+    for candidate in (
+        os.getenv("HIVE_TOOLS_PUBLIC_URL"),
+        os.getenv("EDGE_HIVE_TOOLS_URL"),
+        os.getenv("HIVE_TOOLS_URL"),
+    ):
+        candidate = (candidate or "").strip()
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        if urllib.parse.urlsplit(candidate).hostname in _UNREACHABLE_HOSTS:
+            continue
+        return candidate
+    return ""
+
+
+async def _hive_tools_headers() -> dict[str, str]:
+    """The signed-in person's own key, as the tools' bearer.
+
+    The tools take no key that stands for this site: every call the site makes
+    to them is made because a person asked, so it carries that person's key.
+    Refused with a sentence when nobody is signed in or their key cannot be
+    had (see `_person_headers`)."""
+    return await _person_headers()
+
+
+async def _hive_tools_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json_body: dict | None = None,
+    timeout: float = 30.0,
+) -> dict:
+    """Call Hive Tools.
+
+    ``timeout`` is a parameter because the training pipeline's curate and
+    export passes walk the whole corpus and run for minutes — far past the
+    30 seconds that every other Hive Tools call comfortably fits in.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                method,
+                f"{_hive_tools_base_url().rstrip('/')}{path}",
+                params=params,
+                json=json_body,
+                headers=await _hive_tools_headers(),
+            )
+        if response.status_code in (403, 408):
+            # A call the tools held for a person's yes and answered no: a
+            # denial, or nobody answering in time. Their words, not a bare
+            # status line, are what the person reads.
+            try:
+                refusal = response.json().get("error")
+            except (ValueError, AttributeError):
+                refusal = None
+            if refusal:
+                raise HTTPException(status_code=response.status_code, detail=str(refusal))
+        response.raise_for_status()
+        data = response.json() if response.content else {}
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Hive Tools request failed: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+# ── Approving a tool request, signed in as the person ──────────────────
+# Feature 834, story 908, requirement 38. The tools hold the mind's call
+# open while the request waits and release it on a yes; this site only shows it and carries the person's
+# own key to the tools. The link carries the request's identifier and
+# nothing else: the page asks who is signed in. What happens after a yes
+# stays in the tools (hitl.respond_to_hitl), not here.
+
+
+async def _tools_as_person(method: str, path: str, json_body: dict | None = None):
+    """One call to the tools with the signed-in person's own key."""
+    headers = await _person_headers()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await client.request(
+                method, f"{_hive_tools_base_url().rstrip('/')}{path}",
+                json=json_body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"The tools could not be reached: {exc}") from exc
+
+
+def _when(epoch) -> str:
+    if epoch is None:
+        return ""
+    return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+async def _approval_page(request: Request, request_id: str, *, notice: str = ""):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    # Nothing is fetched until a person is signed in; the tools then say
+    # whether this person may see it, and send nothing of it if not.
+    response = await _tools_as_person(
+        "GET", f"/hitl/{urllib.parse.quote(request_id, safe='')}/review")
+    if response.status_code == 404:
+        return await _render_template(request, "approval.html", state="missing",
+                                      request_id=request_id, notice=notice)
+    if response.status_code in (401, 403):
+        return await _render_template(
+            request, "approval.html", state="refused", request_id=request_id,
+            notice=notice)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="The tools could not show this request.")
+    item = response.json()
+    item["asked_at"] = _when(item.get("created_at"))
+    item["decided_when"] = _when(item.get("decided_at"))
+    item["expires"] = _when(item.get("expires_at"))
+    return await _render_template(request, "approval.html", state=item["status"],
+                                  item=item, request_id=request_id, notice=notice)
+
+
+@app.get("/approvals", response_class=HTMLResponse)
+async def approvals_page(request: Request):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    response = await _tools_as_person("GET", "/hitl/waiting")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="The tools could not list what is waiting.")
+    waiting = response.json().get("waiting", [])
+    for row in waiting:
+        row["asked_at"] = _when(row.get("created_at"))
+    return await _render_template(request, "approvals.html", waiting=waiting)
+
+
+@app.get("/approvals/{request_id}", response_class=HTMLResponse)
+async def approval_page(request: Request, request_id: str):
+    return await _approval_page(request, request_id)
+
+
+@app.post("/approvals/{request_id}/decision", response_class=HTMLResponse)
+async def approval_decision(request: Request, request_id: str, action: str = Form("")):
+    user = await get_current_user_from_request(request)
+    if not user:
+        return _login_redirect_for(request)
+    if action not in ("approve", "deny"):
+        return await _approval_page(request, request_id, notice="Choose approve or deny.")
+    response = await _tools_as_person(
+        "POST", f"/hitl/{urllib.parse.quote(request_id, safe='')}/respond",
+        {"action": action})
+    notice = ""
+    if response.status_code == 409:
+        notice = "This request was already decided or has expired; nothing was changed."
+    elif response.status_code >= 400 and response.status_code not in (403, 404):
+        notice = f"The tools refused the decision ({response.status_code})."
+    return await _approval_page(request, request_id, notice=notice)
+
+
+# Curate and export walk the whole corpus; on a corpus of ~9k turns curation
+# is around 25 seconds and grows with capture. Give them real headroom —
+# Hive Tools already caps them server-side.
+_TRAINING_LONG_TIMEOUT_SECONDS = 1_800.0
+_TRAINING_RUN_KINDS = {"curate", "export", "train"}
+
+
+@app.get("/api/training/status")
+async def api_training_status(user: dict = Depends(require_auth)):
+    """Corpus counts, curation breakdown, GPU state, latest run per kind."""
+    del user
+    return await _hive_tools_request("GET", "/training/status")
+
+
+@app.get("/api/training/base-models")
+async def api_training_base_models(user: dict = Depends(require_auth)):
+    """Candidate bases, annotated with what this host can train and serve."""
+    del user
+    return await _hive_tools_request("GET", "/training/base-models")
+
+
+@app.get("/api/training/in-flight")
+async def api_training_in_flight(user: dict = Depends(require_auth)):
+    """The run holding the card, so a reloaded page can reattach to it."""
+    del user
+    return await _hive_tools_request("GET", "/training/in-flight")
+
+
+@app.post("/api/training/kill")
+async def api_training_kill(request: Request, user: dict = Depends(require_auth)):
+    """Stop a run in flight.
+
+    Restoring the voice stack and closing the ledger is the watcher's job,
+    not this route's — two restore paths racing is how the voice stack
+    comes back twice.
+    """
+    del user
+    body = await request.json()
+    if not isinstance(body, dict) or not str(body.get("name", "")).strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    return await _hive_tools_request(
+        "POST", "/training/kill", json_body={"name": str(body["name"]).strip()}
+    )
+
+
+@app.get("/api/training/logs")
+async def api_training_logs(
+    name: str, tail: int = 200, user: dict = Depends(require_auth)
+):
+    """Recent trainer output, for watching a run go by.
+
+    Read-only in the strictest sense: nothing here starts, stops or reaps
+    anything, so a closed tab is not an event the run can notice.
+    """
+    del user
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    return await _hive_tools_request(
+        "GET",
+        "/training/logs",
+        params={"name": name.strip(), "tail": max(1, min(tail, 2_000))},
+    )
+
+
+@app.get("/api/training/runs")
+async def api_training_runs(
+    kind: str | None = None, limit: int = 20, user: dict = Depends(require_auth)
+):
+    del user
+    if kind and kind not in _TRAINING_RUN_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown run kind: {kind}")
+    params: dict = {"limit": max(1, min(limit, 200))}
+    if kind:
+        params["kind"] = kind
+    return await _hive_tools_request("GET", "/training/runs", params=params)
+
+
+@app.post("/api/training/curate")
+async def api_training_curate(request: Request, user: dict = Depends(require_auth)):
+    """Run a curation pass. Writes verdicts in place; never deletes rows."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    result = await _hive_tools_request(
+        "POST",
+        "/training/curate",
+        json_body=body,
+        timeout=_TRAINING_LONG_TIMEOUT_SECONDS,
+    )
+    log_event(log, "training.curate.requested", **_actor_fields(user), options=body)
+    return result
+
+
+@app.post("/api/training/export")
+async def api_training_export(request: Request, user: dict = Depends(require_auth)):
+    """Write train/eval JSONL from kept rows, with credentials redacted."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    result = await _hive_tools_request(
+        "POST",
+        "/training/export",
+        json_body=body,
+        timeout=_TRAINING_LONG_TIMEOUT_SECONDS,
+    )
+    log_event(log, "training.export.requested", **_actor_fields(user), options=body)
+    return result
+
+
+@app.post("/api/training/train")
+async def api_training_train(request: Request, user: dict = Depends(require_auth)):
+    """Plan a fine-tune, or launch one when the caller sets dry_run false."""
+    body = await request.json()
+    if not isinstance(body, dict) or not str(body.get("train_file") or "").strip():
+        raise HTTPException(status_code=400, detail="train_file is required")
+    result = await _hive_tools_request("POST", "/training/train", json_body=body)
+    log_event(
+        log,
+        "training.train.requested",
+        **_actor_fields(user),
+        dry_run=bool(body.get("dry_run", True)),
+    )
+    return result
+
+
+@app.post("/api/training/deploy")
+async def api_training_deploy(request: Request, user: dict = Depends(require_auth)):
+    """Serve a trained adapter through Ollama, or start the merge first."""
+    body = await request.json()
+    if not isinstance(body, dict) or not str(body.get("adapter_dir") or "").strip():
+        raise HTTPException(status_code=400, detail="adapter_dir is required")
+    if not str(body.get("name") or "").strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    result = await _hive_tools_request(
+        "POST",
+        "/training/deploy",
+        json_body=body,
+        timeout=_TRAINING_LONG_TIMEOUT_SECONDS,
+    )
+    log_event(
+        log,
+        "training.deploy.requested",
+        **_actor_fields(user),
+        model_name=body.get("name"),
+        quantization=body.get("quantization"),
+    )
+    return result
+
+
+@app.post('/api/minds/{mind_id}/rename')
+async def api_mind_rename(mind_id: str, request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, 'Request body must be an object')
+    try:
+        result = await mind_rename.request_rename(
+            mind_id, body.get('name'), user, route_access.acting_key())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse(result, status_code=202)
+
+
+@app.get('/api/minds/{mind_id}/rename')
+async def api_mind_rename_status(mind_id: str, user: dict = Depends(require_auth)):
+    operation = mind_rename.latest(mind_id)
+    return mind_rename.public(operation) if operation else {'status': 'none'}
+
+
+@app.post('/api/minds/{mind_id}/rename/recover')
+async def api_mind_rename_recover(mind_id: str, user: dict = Depends(require_auth)):
+    operation = mind_rename.latest(mind_id)
+    if not operation:
+        raise HTTPException(404, 'Rename not found')
+    mind_rename.kick(operation['operation_id'], route_access.acting_key())
+    return mind_rename.public(operation)
+
+
+@app.post('/api/minds/{mind_id}/rename/cancel')
+async def api_mind_rename_cancel(mind_id: str, user: dict = Depends(require_auth)):
+    operation = mind_rename.latest(mind_id)
+    if not operation:
+        raise HTTPException(404, 'Rename not found')
+    try:
+        return await mind_rename.cancel(operation['operation_id'], route_access.acting_key())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post("/api/minds/{name}/restart")
+async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
+    try:
+        configuration = local_runtime_configuration(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    deployment = str(configuration.get("deployment") or "container")
+    if deployment != "container":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This Mind runs as {deployment}, not a container. "
+                "Restart it on its host to activate the new model."
+            ),
+        )
+    try:
+        project_path = mind_mounts.hive_mind_project_path()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if await provider_data.apply_pending_url(name):
+        result = await _start_mind_container(name, user)
+        return {"status": "success" if result["started"] else "pending", **result}
+    result = await _hive_tools_request(
+        "POST",
+        "/docker/restart",
+        params={
+            "path": project_path,
+            "service": name,
+        },
+        # Held by the tools for a person's yes, up to 110 seconds.
+        timeout=310.0,
+    )
+    await console_access.record_operation_from(result, user)
+    log_event(log, "mind.restart.requested", **_actor_fields(user), mind_name=name)
+    return result
+
+
+@app.get("/api/operations/{request_id}")
+async def api_operation_status(
+    request_id: str, user: dict = Depends(require_auth)
+):
+    del user
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,100}", request_id):
+        raise HTTPException(status_code=400, detail="Invalid operation ID")
+    return await _hive_tools_request("GET", f"/hitl/{request_id}")
+
+
+async def _capability_node_specs() -> list[dict]:
+    voice_urls = _voice_server_urls()
+    proxy_installation = inference_proxy_status()
+    tools_installation = hive_tools_install_status()
+    return [
+        {
+            "id": "hive-tools",
+            "name": "Hive Tools",
+            "kind": "Action gateway",
+            "description": "Approval-aware access to privileged actions and external systems.",
+            "endpoint": _hive_tools_base_url(),
+            "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(os.getenv("HIVE_TOOLS_URL")),
+            # Not installed from here: the source is hive-mind's own
+            # modules/hive-tools, read-only, and nothing is fetched.
+            "installable": True,
+            "bundled": True,
+            "installed": tools_installation["installed"],
+            "installing": False,
+            "repository": tools_installation["repository"],
+            "path": tools_installation["path"],
+            "placement_note": HIVE_TOOLS_PLACEMENT_NOTE,
+            "configure_url": _hive_tools_console_url(),
+            "configure_label": "Configure",
+            "configure_hint": (
+                "Set EDGE_HIVE_TOOLS_URL in the Hive's .env to an address your "
+                "browser can reach, then recreate the Hive container, to link "
+                "straight to the Hive Tools console from here."
+            ),
+            "access": "Operator policy and approval gates",
+            "consumers": "Authorized operator minds",
+            "icon": "shield-check",
+        },
+        {
+            "id": "inference-proxy",
+            "name": "Inference Proxy",
+            "kind": "Inference gateway",
+            "description": "One private endpoint for upstream models, issued client keys, routing, and usage accounting.",
+            "endpoint": await get_capability_endpoint("inference-proxy")
+            or os.getenv("INFERENCE_PROXY_URL")
+            or "http://inference-proxy:8888",
+            "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(
+                await get_capability_endpoint("inference-proxy")
+                or os.getenv("INFERENCE_PROXY_URL")
+            ),
+            "configurable": True,
+            "installable": True,
+            "installed": proxy_installation["installed"],
+            "installing": proxy_installation["installing"],
+            "repository": proxy_installation["repository"],
+            "path": proxy_installation["path"],
+            "access": "Proxy-issued client keys",
+            "consumers": "Minds and applications using hosted models",
+            "icon": "waypoints",
+        },
+        {
+            "id": "ollama",
+            "name": "Ollama",
+            "kind": "Inference",
+            "description": "Local model inference supplied without embedding model infrastructure in a mind.",
+            "endpoint": await get_capability_endpoint("ollama")
+            or os.getenv("OLLAMA_URL")
+            or os.getenv("OLLAMA_BASE_URL")
+            or "",
+            "health_path": "/api/tags",
+            "configurable": True,
+            "access": "Network-restricted model API",
+            "consumers": "Minds configured for local inference",
+            "icon": "cpu",
+        },
+        {
+            "id": "voice-chatterbox",
+            "name": "Chatterbox",
+            "kind": "Voice",
+            "description": "Reference-voice synthesis for minds assigned to Chatterbox.",
+            "endpoint": voice_urls["chatterbox"],
+            "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(os.getenv("CHATTERBOX_VOICE_URL")),
+            "access": "Hive network",
+            "consumers": "Minds with Chatterbox voice assignment",
+            "icon": "audio-lines",
+        },
+        {
+            "id": "voice-kokoro",
+            "name": "Kokoro",
+            "kind": "Voice",
+            "description": "Lightweight speech synthesis for minds assigned to Kokoro.",
+            "endpoint": voice_urls["kokoro"],
+            "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(os.getenv("KOKORO_VOICE_URL")),
+            "access": "Hive network",
+            "consumers": "Minds with Kokoro voice assignment",
+            "icon": "audio-waveform",
+        },
+        {
+            "id": "pihole",
+            "name": "Pi-hole",
+            "kind": "Network service",
+            "description": "Network-level DNS filtering and operational visibility.",
+            "endpoint": await get_capability_endpoint("pihole")
+            or os.getenv("PIHOLE_URL")
+            or "",
+            "health_path": "/api/auth",
+            "configurable": True,
+            "accepted_statuses": {401},
+            "authentication_required_statuses": {401},
+            "access": "Administrative network service",
+            "consumers": "Operators and approved automations",
+            "icon": "shield",
+        },
+    ]
+
+
+async def _capability_node_data() -> dict:
+    tools = hive_tools_status()
+    nodes: list[dict] = []
+    probes = []
+    for spec in await _capability_node_specs():
+        node = dict(spec)
+        endpoint = str(node.pop("endpoint") or "").rstrip("/")
+        health_path = str(node.pop("health_path") or "")
+        auto_discover = bool(node.pop("auto_discover", False))
+        accepted_statuses = set(node.pop("accepted_statuses", set()))
+        authentication_required_statuses = set(
+            node.pop("authentication_required_statuses", set())
+        )
+        explicitly_configured = bool(node.pop("configured", bool(endpoint)))
+        installed = node.get("installed")
+        configured = bool(endpoint) and (explicitly_configured or installed is True)
+        if endpoint and (configured or auto_discover):
+            probes.append(
+                (
+                    len(nodes),
+                    _service_health(
+                        f"{endpoint}{health_path}",
+                        service_name=node["name"],
+                        repair_action=(
+                            f"Check the {node['name']} endpoint and service, then retry."
+                        ),
+                        accepted_statuses=accepted_statuses,
+                        authentication_required_statuses=authentication_required_statuses,
+                    ),
+                )
+            )
+            health = None
+        else:
+            health = {
+                "reachable": False,
+                "ready": False,
+                "detail": "Not configured",
+                "message": f"{node['name']} is not configured for this Hive.",
+                "action": f"Configure the {node['name']} endpoint to manage it here.",
+            }
+        node.update(
+            {
+                "configured": configured,
+                "installed": installed,
+                "endpoint": endpoint or None,
+                "health": health,
+            }
+        )
+        if node["id"] == "hive-tools":
+            # `path` stays the host path from the spec — the mount point this
+            # container sees is not something the operator can act on.
+            node["capabilities"] = tools.get("capabilities", [])
+        nodes.append(node)
+    if probes:
+        results = await asyncio.gather(*(probe for _, probe in probes))
+        for (node_index, _), health in zip(probes, results, strict=True):
+            node = nodes[node_index]
+            if health["reachable"]:
+                node["configured"] = True
+                node["health"] = health
+            elif node["configured"]:
+                node["health"] = health
+            else:
+                node["health"] = {
+                    "reachable": False,
+                    "ready": False,
+                    "detail": "Not configured",
+                    "message": f"{node['name']} is not configured for this Hive.",
+                    "action": f"Configure the {node['name']} endpoint to manage it here.",
+                }
+    return {
+        "summary": {
+            "total": len(nodes),
+            "configured": sum(bool(node["configured"]) for node in nodes),
+            "healthy": sum(
+                bool(node["health"].get("ready", node["health"]["reachable"]))
+                for node in nodes
+            ),
+            "attention": sum(
+                bool(
+                    node["configured"]
+                    and not node["health"].get(
+                        "ready", node["health"]["reachable"]
+                    )
+                )
+                for node in nodes
+            ),
+        },
+        "nodes": nodes,
+    }
+
+
+def _add_session_activity(registry: list[dict], sessions: list[dict]) -> list[dict]:
+    """Add real conversation activity without treating registration as a heartbeat."""
+    session_activity: dict[str, dict] = {}
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        mind_id = str(session.get("mind_id") or "")
+        if not mind_id:
+            continue
+        raw_timestamp = session.get("last_active") or session.get("created_at")
+        timestamp: float | None = None
+        if isinstance(raw_timestamp, (int, float, str)):
+            with suppress(ValueError):
+                timestamp = float(raw_timestamp)
+        activity = session_activity.setdefault(
+            mind_id, {"last_activity": None, "active_session_count": 0}
+        )
+        if timestamp is not None and (
+            activity["last_activity"] is None or timestamp > activity["last_activity"]
+        ):
+            activity["last_activity"] = timestamp
+        if session.get("status") in {"active", "running"}:
+            activity["active_session_count"] += 1
+
+    enriched = []
+    for mind in registry:
+        row = dict(mind)
+        mind_activity = session_activity.get(
+            str(row.get("id") or "")
+        ) or session_activity.get(str(row.get("name") or ""))
+        row["last_activity"] = mind_activity["last_activity"] if mind_activity else None
+        row["active_session_count"] = (
+            mind_activity["active_session_count"] if mind_activity else 0
+        )
+        row["activity_status"] = "active" if row["active_session_count"] else "registered"
+        enriched.append(row)
+    return enriched
+
+
+def _add_session_mind_names(
+    sessions: list[dict], registry: list[dict]
+) -> list[dict]:
+    """Add display names to sessions without replacing their routing IDs."""
+    names: dict[str, str] = {}
+    for mind in registry:
+        name = str(mind.get("name") or "").strip()
+        mind_id = str(mind.get("id") or "").strip()
+        if not name:
+            continue
+        names[name] = name
+        if mind_id:
+            names[mind_id] = name
+
+    return [
+        {
+            **session,
+            "mind_name": names.get(str(session.get("mind_id") or ""), "Unknown mind"),
+        }
+        for session in sessions
+    ]
+
+
+async def _service_health(
+    url: str,
+    *,
+    headers: dict | None = None,
+    service_name: str = "Service",
+    repair_action: str = "Check the service configuration and retry.",
+    accepted_statuses: set[int] | None = None,
+    authentication_required_statuses: set[int] | None = None,
+) -> dict:
+    """Best-effort health probe — used purely for status display, never gates a route."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(url, headers=headers or {})
+            accepted = accepted_statuses or set()
+            authentication_required = authentication_required_statuses or set()
+            if resp.status_code not in accepted:
+                resp.raise_for_status()
+            try:
+                detail = resp.json() if resp.content else {}
+            except ValueError:
+                detail = {
+                    "content_type": resp.headers.get("content-type", ""),
+                    "response": resp.text[:300],
+                }
+            needs_authentication = resp.status_code in authentication_required
+            return {
+                "reachable": True,
+                "ready": not needs_authentication,
+                "authentication_required": needs_authentication,
+                "endpoint": url,
+                "status_code": resp.status_code,
+                "detail": detail,
+                "message": (
+                    f"{service_name} responded, but administrative authentication is required."
+                    if needs_authentication
+                    else f"{service_name} responded normally."
+                ),
+                "action": (
+                    f"Authenticate with {service_name} to enable administrative controls."
+                    if needs_authentication
+                    else "No action is required."
+                ),
+            }
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        try:
+            detail = response.json()
+        except ValueError:
+            detail = response.text[:300]
+        return {
+            "reachable": False,
+            "ready": False,
+            "endpoint": url,
+            "status_code": response.status_code,
+            "detail": detail,
+            "message": f"{service_name} returned HTTP {response.status_code}.",
+            "action": repair_action,
+        }
+    except Exception as exc:
+        return {
+            "reachable": False,
+            "ready": False,
+            "endpoint": url,
+            "detail": str(exc),
+            "message": f"{service_name} could not be reached: {exc}",
+            "action": repair_action,
+        }
+
+
+@app.get("/api/settings/hive-tools")
+async def api_settings_hive_tools(user: dict = Depends(require_auth)):
+    del user
+    status = hive_tools_status()
+    status["container_health"] = await _service_health(
+        f"{_hive_tools_base_url()}/health",
+        service_name="Hive Tools",
+        repair_action="Start the Hive Tools service, then retry.",
+    )
+    status["remote_configured"] = hive_tools_install_status()["installed"]
+    return status
+
+
+def _voice_server_urls() -> dict[str, str]:
+    return {
+        "chatterbox": os.getenv("CHATTERBOX_VOICE_URL") or "http://hive-mind-voice:8422",
+        "kokoro": os.getenv("KOKORO_VOICE_URL") or "http://hive-mind-voice-kokoro:8422",
+    }
+
+
+@app.get("/api/settings/voice")
+async def api_settings_voice(user: dict = Depends(require_auth)):
+    del user
+    server_urls = _voice_server_urls()
+    servers = {
+        name: await _service_health(f"{url}/health") for name, url in server_urls.items()
+    }
+    return {"servers": servers}
+
+
+@app.get("/api/settings/downloads")
+async def api_settings_downloads(user: dict = Depends(require_auth)):
+    del user
+    return {"downloads": list_downloads()}
+
+
+@app.get("/api/settings/credentials")
+async def api_settings_credentials(user: dict = Depends(require_auth)):
+    """Every credential and every holder of one, with no live check run.
+
+    Deliberately without the checks: this is what the operator sees first,
+    and a listing that waited on a mind that is down — or on GitHub, once per
+    row — would hang the page it is the whole content of. Each row carries
+    whatever its last check found and how long ago, and the page asks for the
+    rest per row.
+
+    `registry` is reported separately because a hive whose broker cannot be
+    read produces no per-mind rows at all, and a credentials page with no
+    holders on it looks exactly like a credentials page with nothing wrong.
+    """
+    del user
+    try:
+        raw = await _gateway_json("/broker/minds")
+        minds = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+        registry = "ok"
+    except Exception:
+        minds, registry = [], "unreadable"
+    # The holder rows come from the services' own tables, not from a list
+    # written into this console: the gateway has twenty-one holders and the
+    # memory store nine, the two sets differ, and a copy here is a list that
+    # goes stale in silence — which is how a holder is missed and then refused
+    # the moment the service it answers to comes up.
+    holders: list[dict] = []
+    holder_errors: dict[str, str] = {}
+    # The gateway, the memory store and the tools read one record of keys, so
+    # it is listed once (under the gateway), not three times.
+    services = [s for s in holder_credentials.SERVICES.values()
+                if s.key in ("comms", "proxy")]
+    # Together, not one after the other: two services that hang would
+    # otherwise hold the page for the sum of their timeouts.
+    answers = await asyncio.gather(
+        *(holder_credentials.holder_rows(service) for service in services),
+        return_exceptions=True,
+    )
+    for service, answer in zip(services, answers):
+        if isinstance(answer, BaseException):
+            holder_errors[service.key] = str(answer)
+        else:
+            holders.extend(answer)
+    return {
+        "credentials": credential_registry.credential_summaries(minds),
+        "rows": credential_registry.build_rows(minds),
+        "holders": holders,
+        "holder_errors": holder_errors,
+        "registry": registry,
+        "check_ttl_seconds": credential_registry.CHECK_TTL_S,
+    }
+
+
+@app.post("/api/settings/holders/{service}/{holder}/check")
+async def api_settings_holder_check(
+    service: str, holder: str, user: dict = Depends(require_auth)
+):
+    """One row's live status, asked for per row.
+
+    Not folded into the listing: the listing is the whole content of the page
+    and must not wait on a service that is down, once per holder, for thirty
+    holders.
+    """
+    del user
+    target = holder_credentials.SERVICES.get(service)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {service!r}")
+    role = str((await _holder_role(target, holder)) or "")
+    return {
+        "service": service,
+        "holder": holder,
+        **await holder_credentials.check(target, holder, role=role),
+    }
+
+
+async def _holder_role(service, holder: str) -> str | None:
+    """The role the service itself reports for this holder.
+
+    Asked rather than taken from the page: what a value may be presented to
+    follows from the role, and a page that could name it would be a page that
+    could change the answer.
+    """
+    try:
+        rows = await holder_credentials.list_holders(service)
+    except (holder_credentials.MintRefused, httpx.HTTPError):
+        return None
+    wanted = holder.strip().lower()
+    for row in rows:
+        if str(row.get("holder", "")).lower() == wanted:
+            return str(row.get("role") or "")
+    return None
+
+
+@app.post("/api/settings/holders/{service}/{holder}/rotate")
+async def api_settings_holder_rotate(
+    service: str, holder: str, user: dict = Depends(require_auth)
+):
+    """Issue one holder a new value for one service, and nobody else.
+
+    A `Stranded` rotation is a 500 rather than a 400: a 400 reads as "your
+    request was wrong, nothing happened", and the one thing this failure
+    guarantees is that something happened.
+    """
+    target = holder_credentials.SERVICES.get(service)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {service!r}")
+    try:
+        result = await holder_credentials.rotate(target, holder)
+    except holder_credentials.Stranded as exc:
+        log_event(
+            log, "credential.holder.stranded", **_actor_fields(user),
+            service=service, holder=holder, restored=exc.restored, detail=str(exc),
+        )
+        credential_registry.forget_all()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except holder_credentials.MintUncertain as exc:
+        # 503, because the one thing the operator must not read is "nothing
+        # happened" — the mint may have landed and nothing was written.
+        log_event(
+            log, "credential.holder.uncertain", **_actor_fields(user),
+            service=service, holder=holder, detail=str(exc),
+        )
+        credential_registry.forget_all()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.holder.rotated", **_actor_fields(user),
+        service=service, holder=holder, file=result["file"],
+        env_key=result["env_key"], restart_target=result["restart_target"],
+    )
+    # This holder's last check is now about a value that no longer exists.
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/holders/{service}/{holder}/revoke")
+async def api_settings_holder_revoke(
+    service: str, holder: str, user: dict = Depends(require_auth)
+):
+    """Kill one holder's credential. The action that belongs to a holder this
+    console cannot write a new value for."""
+    target = holder_credentials.SERVICES.get(service)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {service!r}")
+    try:
+        result = await holder_credentials.revoke(target, holder)
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.holder.revoked", **_actor_fields(user),
+        service=service, holder=holder, revoked=result["revoked"],
+    )
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/credentials/{key}/check")
+async def api_settings_credentials_check(
+    key: str, payload: dict, user: dict = Depends(require_auth)
+):
+    """Take one row's live check and remember it.
+
+    One row per call, because the page decides which rows are worth asking
+    about and how many at once — and because a single route that checked
+    everything would be one request the operator cannot cancel, against as
+    many services as the hive has.
+    """
+    del user
+    holder = str((payload or {}).get("holder") or "").strip()
+    if not holder:
+        raise HTTPException(status_code=400, detail="a holder is required")
+    if not credential_registry.is_declared(key):
+        # Refused before anything is remembered: the key arrives on a URL,
+        # and an entry per invented name is a dictionary that grows for as
+        # long as this console is up.
+        raise HTTPException(status_code=404, detail="no such credential")
+    if credential_registry._per_mind(key) is not None:
+        # A broker blip must not be remembered as "this holder is not in the
+        # registry" for every mind at once. `_broker_minds_safe` turns any
+        # failure into an empty list, which here would read as a hive with
+        # nobody registered — a confident sentence, false, with nothing on
+        # screen attributing it to comms.
+        try:
+            raw = await _gateway_json("/broker/minds")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="the mind registry could not be read, so this holder "
+                       "could not be asked",
+            ) from exc
+        minds = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    else:
+        minds = []
+    return await credential_registry.check(key, holder, minds)
+
+
+@app.put("/api/minds/{name}/github-token")
+async def api_mind_github_token_set(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Hand this Mind a new GitHub token for it to verify and store.
+
+    The Mind writes it, because the value has to land where that Mind's own
+    `git` and `gh` look — a per-mind keyring key in the stack, its own `.env`
+    on an edge host — and this console can see neither.
+
+    The Mind verifies against GitHub before storing, so a token refused there
+    leaves the working one in place. The audit line records which Mind and
+    what came of it; the value never enters a log, a response, or an
+    exception message.
+    """
+    body = await request.json()
+    token = str((body or {}).get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="A GitHub token is required")
+    gateway_url = await _mind_gateway_url(name)
+    try:
+        state = await mind_runtime.push_github_token(gateway_url, token)
+    except HTTPException as exc:
+        log_event(
+            log, "mind.github_token.refused", level=logging.WARNING,
+            **_actor_fields(user), mind=name, status=exc.status_code,
+        )
+        raise
+    log_event(
+        log, "mind.github_token.updated", **_actor_fields(user), mind=name,
+        login=str(state.get("login") or ""), where=str(state.get("where") or ""),
+    )
+    # The row the page redraws comes from this, not from a second round trip:
+    # the Mind just verified, and asking again would spend another GitHub call
+    # to learn what it already said.
+    credential_registry.remember(
+        "mind_github_token", name, status=credential_registry.WORKING,
+        present=True, names=str(state.get("login") or ""),
+        where=str(state.get("where") or ""),
+        preview=str(state.get("preview") or ""),
+        # An edge mind read its environment at boot and keeps that value until
+        # it is restarted, so the row says so rather than reading Working over
+        # a token nothing has loaded. The alert said it; the row did not.
+        detail=(
+            "stored — this mind keeps the value it booted with until it is restarted"
+            if state.get("restart_required")
+            else ""
+        ),
+    )
+    return {
+        "saved": True,
+        "stored": True,
+        "accepted": True,
+        "login": str(state.get("login") or ""),
+        "where": str(state.get("where") or ""),
+        "configured": state.get("configured") or [],
+        # `git` reads its file per invocation and a newly spawned harness
+        # inherits the new value, but a conversation already running kept the
+        # one it booted with — `gh` prefers that variable over its own hosts
+        # file. Said here rather than left for the operator to discover when
+        # a push in an open session authenticates as the previous account.
+        "note": (
+            "git has it now, and so will the next harness this mind spawns. A "
+            "conversation already running keeps the token it started with."
+            if not state.get("restart_required")
+            else ""
+        ),
+        # `git` and `gh` read their files per invocation, so a container mind
+        # needs nothing bounced. An edge mind read its environment at boot.
+        "restart_required": bool(state.get("restart_required")),
+    }
+
+
+@app.post("/api/settings/credentials/{key}/rotate")
+async def api_settings_credentials_rotate(key: str, user: dict = Depends(require_auth)):
+    try:
+        result = rotate_credential(key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.rotated", **_actor_fields(user),
+        credential=result["key"], written_to=[w["file"] for w in result["written"]],
+        complete=result["complete"],
+        skipped=[r["file"] for r in result["locations"] if not r["written"]],
+    )
+    # Whatever any holder's last check found is now about a value that no
+    # longer exists, and a stale "working" beside a freshly rotated secret is
+    # the one thing on this page nobody should believe.
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/credentials/github_pat/set")
+async def api_settings_credentials_set_github_pat(
+    payload: dict, user: dict = Depends(require_auth)
+):
+    try:
+        result = set_github_pat(str(payload.get("token", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.set", **_actor_fields(user),
+        credential=result["key"], written_to=[w["file"] for w in result["written"]],
+        complete=result["complete"],
+        skipped=[r["file"] for r in result["locations"] if not r["written"]],
+    )
+    return result
+
+
+@app.get("/downloads/{filename}")
+async def download_asset(filename: str, user: dict = Depends(require_auth)):
+    del user
+    path = resolve_download_path(filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(path, filename=filename)
+
+
+async def _mind_name_is_taken(name: str) -> bool:
+    """A name is taken if the broker knows it or the scaffold already exists.
+    Checking only the broker would happily overwrite an unregistered mind."""
+    broker_minds = await _broker_minds_safe()
+    if any(
+        isinstance(m, dict) and (m.get("name") or "").lower() == name
+        for m in broker_minds
+    ):
+        return True
+    try:
+        return internal_mind_exists(name)
+    except ValueError:
+        return False
+
+
+@app.get("/api/settings/new-mind/check-name")
+async def api_settings_check_mind_name(name: str, user: dict = Depends(require_auth)):
+    """Name availability, checked against the broker and the minds/ tree."""
+    del user
+    normalized = name.strip().lower()
+    taken = await _mind_name_is_taken(normalized)
+    return {"name": normalized, "available": bool(normalized) and not taken}
+
+
+
+# ---------------------------------------------------------------------------
+# Design sessions
+# ---------------------------------------------------------------------------
+DESIGN_PREFIX = "/api/design"
+
+
+async def require_design_writer(request: Request) -> dict:
+    """Daniel's browser login, or the Mind's own bearer. Nothing else.
+
+    Applied to every design route including the reads: a design session
+    carries source text pulled off Daniel's disks. The bearer
+    (a mind's own key, console_access.a_minds_key) is verified by the route table, which
+    refuses a wrong one outright; this only reads which of the two it was.
+    """
+    if route_access.bearer_of(request) == console_access.DESIGN:
+        return {"sub": "mind", "via": "bearer"}
+    user = await get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return dict(user, via="cookie")
+
+
+def _design_error(exc: Exception) -> HTTPException:
+    """One mapping, so every design route refuses in the same shape."""
+    if isinstance(exc, design_data.DesignNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, design_data.DesignUnknownReference):
+        # The caller named a Mind or a conversation the hive does not hold.
+        # A refused input, not a fault here, so it must not read as a 500.
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, design_data.DesignConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, design_data.DesignRefused):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/design", response_class=HTMLResponse)
+async def design_index(request: Request, user: dict = Depends(require_auth)):
+    del user
+    return await _render_template(request, "design_list.html", path="/design")
+
+
+@app.get("/design/{design_id}", response_class=HTMLResponse)
+async def design_detail(
+    design_id: str, request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    try:
+        await design_data.get_design_session(design_id)
+    except design_data.DesignNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return await _render_template(
+        request, "design_detail.html", path="/design", design_id=design_id
+    )
+
+
+@app.get(f"{DESIGN_PREFIX}/sessions")
+async def api_design_list(actor: dict = Depends(require_design_writer)):
+    del actor
+    rows = []
+    for record in await design_data.list_design_sessions():
+        rows.append(
+            {
+                "id": record["id"],
+                "title": record["title"],
+                "conversation_id": record["conversation_id"],
+                "surface": record["surface"],
+                "updated_at": record["updated_at"],
+                "counts": {page: len(record[page]) for page in design_data.PAGES},
+            }
+        )
+    return {"sessions": rows}
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions")
+async def api_design_create(
+    payload: dict, actor: dict = Depends(require_design_writer)
+):
+    try:
+        record = await design_data.create_design_session(
+            str(payload.get("title") or ""),
+            conversation_id=payload.get("conversation_id"),
+            surface=payload.get("surface"),
+            mind_id=payload.get("mind_id"),
+            repos=payload.get("repos") or [],
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    log_event(log, "design.created", **_actor_fields(actor), design_id=record["id"])
+    return record
+
+
+@app.get(f"{DESIGN_PREFIX}/sessions/{{design_id}}")
+async def api_design_get(design_id: str, actor: dict = Depends(require_design_writer)):
+    del actor
+    try:
+        record = await design_data.get_design_session(design_id)
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    return dict(
+        record,
+        pages={page: design_data.ordered_items(record, page)
+               for page in design_data.PAGES},
+        gates={page: await design_data.can_advance(design_id, page)
+               for page in design_data.PAGES},
+    )
+
+
+@app.delete(f"{DESIGN_PREFIX}/sessions/{{design_id}}")
+async def api_design_delete(
+    design_id: str, actor: dict = Depends(require_design_writer)
+):
+    try:
+        await design_data.delete_design_session(design_id)
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    log_event(log, "design.deleted", **_actor_fields(actor), design_id=design_id)
+    return {"deleted": True, "id": design_id}
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/attach")
+async def api_design_attach(
+    design_id: str, payload: dict, actor: dict = Depends(require_design_writer)
+):
+    del actor
+    try:
+        record = await design_data.attach_design_session(
+            design_id,
+            payload.get("conversation_id"),
+            surface=payload.get("surface"),
+            mind_id=payload.get("mind_id"),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    # Anything submitted while nothing was attached is owed to this
+    # conversation. Without this, "stored and read when next attached" is a
+    # promise nothing keeps: re-attaching delivers none of it.
+    _start_design_delivery(
+        str(actor.get("username") or "").lower(), bool(actor.get("is_admin")),
+        route_access.acting_key())
+    return record
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/pages/{{page}}/publish")
+async def api_design_publish(
+    design_id: str, page: str, payload: dict,
+    actor: dict = Depends(require_design_writer),
+):
+    del actor
+    try:
+        return await design_data.publish_page(
+            design_id,
+            page,
+            payload.get("items") or {},
+            revision=payload.get("revision"),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/pages/{{page}}/submit")
+async def api_design_submit(
+    design_id: str, page: str, payload: dict,
+    actor: dict = Depends(require_design_writer),
+):
+    try:
+        record = await design_data.submit_page(
+            design_id,
+            page,
+            items=payload.get("items") or {},
+            action=str(payload.get("action") or "feedback"),
+            revision=payload.get("revision"),
+            submitted_by=str(actor.get("username") or ""),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    # Detached: the send adopts the conversation and waits out a whole model
+    # turn, and the browser must not sit on that. The submission is already
+    # stored, so a delivery that fails is retried rather than lost.
+    #
+    # The handle is kept until it finishes. A bare `create_task` holds no
+    # strong reference, and a task collected mid-send loses the submission
+    # exactly as silently as no task at all.
+    _start_design_delivery(
+        str(actor.get("username") or "").lower(), bool(actor.get("is_admin")),
+        route_access.acting_key())
+    return record
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/pages/{{page}}/accept")
+async def api_design_accept(
+    design_id: str, page: str, payload: dict,
+    actor: dict = Depends(require_design_writer),
+):
+    try:
+        record = await design_data.accept_page(
+            design_id, page, revision=payload.get("revision"),
+            submitted_by=str(actor.get("username") or ""),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    # Detached and handle-kept, for the reasons the submit route gives: the
+    # send adopts the conversation and waits out a whole model turn, and a
+    # bare create_task can be collected mid-send.
+    _start_design_delivery(
+        str(actor.get("username") or "").lower(), bool(actor.get("is_admin")),
+        route_access.acting_key())
+    return record
+
+
+@app.post(f"{DESIGN_PREFIX}/trim-graph")
+async def api_design_trim_graph(
+    payload: dict, actor: dict = Depends(require_design_writer)
+):
+    del actor
+    nodes = payload.get("nodes") or []
+    return {
+        "rows": design_graph.trim_call_graph(nodes),
+        "entry_points_without_callers": design_graph.entry_points_without_callers(nodes),
+    }
+
+
+@app.get(f"{DESIGN_PREFIX}/symbols")
+async def api_design_symbol(
+    mind: str, path: str, name: str, repo: str = "", design_id: str = "",
+    actor: dict = Depends(require_design_writer),
+):
+    """Resolve a function through the Mind whose disk it lives on.
+
+    The repository is named, never inferred. A Mind asked for a bare name
+    resolves against whichever checkout it happens to have declared first,
+    which on a host holding three of them returns real source from the wrong
+    one — with `resolved: true` and a line span that checks out.
+    """
+    del actor
+    if not repo and design_id:
+        targets = (await design_data.get_design_session(design_id))["repos"]
+        if len(targets) == 1:
+            repo = targets[0]
+    if not repo:
+        raise HTTPException(
+            status_code=400,
+            detail="Name the repository — this host holds more than one checkout",
+        )
+    gateway_url = await _mind_gateway_url(mind)
+    return await mind_symbols.resolve(gateway_url, repo, path, name)
+
+
+@app.get(f"{DESIGN_PREFIX}/symbol-roots")
+async def api_design_symbol_roots(
+    mind: str, actor: dict = Depends(require_design_writer)
+):
+    del actor
+    gateway_url = await _mind_gateway_url(mind)
+    return await mind_symbols.roots(gateway_url)
+
+
+@app.put("/api/minds/{name}/owner")
+async def api_mind_owner_set(name: str, request: Request, user: dict = Depends(require_auth)):
+    """Move a Mind to another user. Admin-only: comms holds the owner and
+    accepts a change from the admin token alone."""
+    body = await _json_object(request)
+    mind = route_access.find_mind(await _broker_minds_safe(), name)
+    if mind is None or not mind.get("id"):
+        raise HTTPException(status_code=404, detail="That Mind is not registered")
+    owner = await _new_mind_owner({"owner": body.get("owner")}, {})
+    mind_id = str(mind["id"])
+    result = await _gateway_request(
+        "PUT",
+        f"/broker/minds/{urllib.parse.quote(mind_id, safe='')}/owner",
+        json_body={"owner": owner}
+    )
+    log_event(
+        log, "mind.owner.changed", **_actor_fields(user), mind_name=mind.get("name"),
+        mind_id=mind_id, previous_owner=route_access.owner_of(mind), owner=owner,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Users and groups (admin)
+# ---------------------------------------------------------------------------
+# Every route here is admin-only in console_access.TABLE. The store does the
+# work — the hive's own account store — and its refusals (unknown user, duplicate, the last admin) come back as
+# the status the store named.
+
+
+async def _store_call(function, *args, **kwargs):
+    try:
+        return await function(*args, **kwargs)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+def _optional_text(body: dict, key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{key} must be text")
+    return value
+
+
+@app.get("/api/admin/users")
+async def api_admin_users(user: dict = Depends(require_auth)):
+    del user
+    account_store = auth.get_store()
+    users, groups, bound = await asyncio.gather(
+        _store_call(account_store.list_users),
+        _store_call(account_store.list_groups),
+        sso.bound_usernames(sso.MICROSOFT),
+    )
+    for row in users:
+        row["microsoft_bound"] = row["username"] in bound
+    return {"users": users, "groups": groups, "backend": "builtin"}
+
+
+@app.post("/api/admin/users", status_code=201)
+async def api_admin_user_create(request: Request, user: dict = Depends(require_auth)):
+    body = await _json_object(request)
+    temp_password = _optional_text(body, "temp_password") or None
+    created = await _store_call(
+        auth.get_store().create_user,
+        str(body.get("username") or ""),
+        email=_optional_text(body, "email") or None,
+        domain_account=_optional_text(body, "domain_account") or None,
+        temp_password=temp_password,
+    )
+    log_event(
+        log, "auth.user.created", **_actor_fields(user),
+        username=created["username"], with_password=temp_password is not None,
+    )
+    return created
+
+
+@app.patch("/api/admin/users/{username}")
+async def api_admin_user_update(
+    username: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await _json_object(request)
+    disabled = body.get("disabled")
+    if disabled is not None and not isinstance(disabled, bool):
+        raise HTTPException(status_code=400, detail="disabled must be true or false")
+    email = _optional_text(body, "email")
+    account_store = auth.get_store()
+    before = (await _store_call(account_store.get_user, username)
+              if email is not None else None)
+    updated = await _store_call(
+        account_store.update_user,
+        username,
+        email=email,
+        disabled=disabled,
+    )
+    if before is not None and (before.get("email") or "").lower() != (
+        updated.get("email") or ""
+    ).lower():
+        # The Microsoft binding was made on the old address.
+        await sso.unbind(sso.MICROSOFT, updated["username"])
+    log_event(
+        log, "auth.user.updated", **_actor_fields(user), username=updated["username"],
+        disabled=updated["disabled"], email_changed="email" in body,
+    )
+    return updated
+
+
+@app.delete("/api/admin/users/{username}/microsoft", status_code=204)
+async def api_admin_user_microsoft_unbind(username: str, user: dict = Depends(require_auth)):
+    """Forget the Microsoft identity an account is bound to; its next
+    Microsoft sign-in selects it by email again."""
+    target = await _store_call(auth.get_store().get_user, username)
+    await sso.unbind(sso.MICROSOFT, target["username"])
+    log_event(
+        log, "auth.user.microsoft_unbound", **_actor_fields(user), username=target["username"]
+    )
+    return Response(status_code=204)
+
+
+@app.post("/api/sign-ins/end")
+async def api_end_my_sign_ins(user: dict = Depends(require_auth)):
+    """A person ends every sign-in of their own, on every device."""
+    ended = await _store_call(auth.get_store().end_all_sign_ins, user["username"])
+    log_event(log, "auth.sign_ins.ended", **_actor_fields(user),
+              username=user["username"], ended=ended)
+    response = JSONResponse({"ended": ended})
+    clear_session_cookie(response)
+    return response
+
+
+@app.post("/api/admin/users/{username}/sign-ins/end")
+async def api_admin_user_end_sign_ins(username: str,
+                                      user: dict = Depends(require_auth)):
+    """An administrator ends every sign-in of anyone."""
+    target = await _store_call(auth.get_store().get_user, username)
+    ended = await _store_call(auth.get_store().end_all_sign_ins,
+                              target["username"])
+    log_event(log, "auth.sign_ins.ended", **_actor_fields(user),
+              username=target["username"], ended=ended)
+    return {"ended": ended}
+
+
+@app.post("/api/admin/users/{username}/reset")
+async def api_admin_user_reset(
+    username: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await _json_object(request)
+    updated = await _store_call(
+        auth.get_store().reset_password, username, _optional_text(body, "temp_password") or ""
+    )
+    log_event(log, "auth.user.reset", **_actor_fields(user), username=updated["username"])
+    return updated
+
+
+@app.get("/api/admin/groups")
+async def api_admin_groups(user: dict = Depends(require_auth)):
+    del user
+    return {"groups": await _store_call(auth.get_store().list_groups)}
+
+
+@app.post("/api/admin/groups", status_code=201)
+async def api_admin_group_create(request: Request, user: dict = Depends(require_auth)):
+    body = await _json_object(request)
+    group = await _store_call(auth.get_store().create_group, str(body.get("name") or ""))
+    log_event(log, "auth.group.created", **_actor_fields(user), group=group["name"])
+    return group
+
+
+@app.put("/api/admin/groups/{group}/members/{username}", status_code=204)
+async def api_admin_group_member_add(
+    group: str, username: str, user: dict = Depends(require_auth)
+):
+    await _store_call(auth.get_store().add_member, group, username)
+    log_event(log, "auth.group.member_added", **_actor_fields(user), group=group, username=username)
+    return Response(status_code=204)
+
+
+@app.delete("/api/admin/groups/{group}/members/{username}", status_code=204)
+async def api_admin_group_member_remove(
+    group: str, username: str, user: dict = Depends(require_auth)
+):
+    await _store_call(auth.get_store().remove_member, group, username)
+    log_event(
+        log, "auth.group.member_removed", **_actor_fields(user), group=group, username=username
+    )
+    return Response(status_code=204)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/settings/features")
+async def api_features(user: dict = Depends(require_auth)):
+    return {"enabled": await features.enabled(user)}
+
+
+@app.put("/api/settings/features")
+async def api_features_save(body: dict, user: dict = Depends(require_auth)):
+    return {"enabled": await features.save(user, body)}
+
+
+@app.get("/hive-errors", response_class=HTMLResponse)
+async def hive_errors_page(request: Request):
+    return await _console_page(request, "hive_errors.html")
+
+
+@app.get("/api/hive-errors")
+async def api_hive_errors(user: dict = Depends(require_auth)):
+    del user
+    targets = []
+    withheld = []
+    # The gateway and the memory store are asked with the signed-in
+    # administrator's own key (stories 905, 906).
+    gateway_headers = await _person_headers_or_none()
+    for name, url, headers in [
+        ("Hive Comms", _gateway_base_url(), gateway_headers),
+        ("Lucent", _lucent_base_url(), gateway_headers),
+    ]:
+        targets.append({"name": name, "url": url, "headers": headers})
+    # A failed registry read must stay visible rather than reporting zero minds.
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            response = await client.get(_gateway_base_url().rstrip('/') + '/broker/minds', headers=await _person_headers())
+            response.raise_for_status()
+            minds = response.json()
+        if not isinstance(minds, list):
+            raise ValueError("Invalid mind registry")
+        for mind in minds:
+            if isinstance(mind, dict) and mind.get("gateway_url"):
+                name = mind.get("name") or "Mind"
+                # Each mind is asked through the gateway as the signed-in
+                # person (story 900); a mind that person may not change
+                # reports as withheld with the sentence.
+                targets.append({"name": name, "url": mind["gateway_url"], "headers": {},
+                                "through": mind_runtime.send})
+    except Exception:
+        minds = None
+    for name, variable in [("Voice (Chatterbox)", "CHATTERBOX_VOICE_URL"), ("Voice (Kokoro)", "KOKORO_VOICE_URL"),
+                           ("Terminal site", "HIVE_TERMINAL_URL"), ("Hive Tools", "HIVE_TOOLS_URL")]:
+        if os.getenv(variable):
+            targets.append({"name": name, "url": os.environ[variable], "headers": {}, "feed": False})
+    report = await hive_errors.collect(targets, recent_errors())
+    report["components"].extend(withheld)
+    try:
+        await store.get_auth_setting('diagnostics.health')
+        report['components'].append({'name': 'PostgreSQL', 'status': 'health-only', 'errors': [],
+                                     'detail': 'Database query succeeded; database server logs are not exposed.'})
+    except Exception:
+        report['components'].append({'name': 'PostgreSQL', 'status': 'error', 'errors': [],
+                                     'detail': 'Database query failed.'})
+    if minds is None:
+        report["components"].append({"name": "Mind registry", "status": "unreachable", "errors": [],
+                                     "detail": "Could not discover minds; mind diagnostics are incomplete."})
+    return report
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    import config
+
+    uvicorn.run(app, host=config.HOST, port=config.PORT, log_config=None, access_log=False)

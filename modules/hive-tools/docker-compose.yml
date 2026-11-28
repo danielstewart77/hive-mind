@@ -1,0 +1,146 @@
+# This folder is modules/hive-tools of hive-mind. The project name is pinned:
+# it used to come from the folder's name, and the folder is now one of
+# hive-mind's modules, so any other name would be a second project beside the
+# running one, with its own (empty) volumes. Service, container, port and the
+# volume names are unchanged. Brought up on its own, never with another
+# service: `deploy.sh` here builds and starts it and nothing else.
+#
+# Where the tools keep what is secret or theirs: HIVE_TOOLS_STATE_DIR, default
+# ~/.config/hive-tools, holding `.env`, `credentials/` and `data/`. It is
+# outside hive-mind's checkout on purpose. Minds and bots mount the checkout
+# (or the dev root it sits in), so anything inside it is theirs to read; the
+# tools' sign-in secrets, Google tokens and token store must not be. A
+# HIVE_DATA_DIR left in an old .env is ignored.
+name: hive-tools
+
+services:
+  hive-tools:
+    build:
+      # deploy.sh runs this file from an export of the committed tree, so the
+      # image is built from a commit and not from files a mind that mounts
+      # the checkout could have edited.
+      context: .
+      additional_contexts:
+        # The access layer is hive-mind's own modules/hive-data, a second
+        # build context beside this folder in the same checkout.
+        hive_data: ../hive-data
+    container_name: hive-tools
+    env_file: ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/.env
+    # A call held open for a person's yes is lost when the container stops,
+    # and its request is closed at the next start; nothing is replayed.
+    stop_grace_period: 30s
+    ports:
+      - "9421:9421"
+    volumes:
+      - ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/credentials:/app/credentials:ro
+      # The one hive service that holds the host's Docker socket (root-
+      # equivalent on the host). No other compose file in hive-mind may.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HIVE_TOOLS_STATE_DIR:-${HOME}/.config/hive-tools}/data:/app/data
+      - ${HOST_DEV_DIR:?set HOST_DEV_DIR in .env}:${HOST_DEV_DIR}:ro
+      # The training pipeline writes curation verdicts back onto
+      # training_turns.db, appends to the run ledger, and drops exported
+      # JSONL beside them. Same host path as the read-only mount above,
+      # re-mounted read-write and scoped to that one directory so the
+      # blast radius of "hive-tools can write into hive_mind" stays legible.
+      - ${HIVE_MIND_DIR:?set HIVE_MIND_DIR in .env}/data:${HIVE_MIND_DIR}/data:rw
+    # The fine-tune planner decides whether a run can start by asking
+    # nvidia-smi how much VRAM is free. Without the nvidia runtime that
+    # binary does not exist in here, every plan comes back "no GPU visible",
+    # and the Launch button can never do anything. `utility` injects the
+    # management library and nvidia-smi only — no CUDA runtime, because
+    # nothing in this container computes; the trainer container it starts is
+    # the one that gets the whole GPU.
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=utility
+      # Handed to docker run when a fine-tune launches, so it has to be the
+      # path as the host sees it. Left unset, this container would derive
+      # one from its own home directory, Docker would create that on the
+      # host, and every run would re-download the base model.
+      - HF_HOME=${HF_HOME:?set HF_HOME in .env}
+    # The inference proxy runs as a host process, and deploy pushes a trained
+    # adapter to the Ollama on the machine that trained it — this host. Both
+    # are reached through the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - hivemind
+      - sms-private
+
+  sms-gateway-db:
+    image: mariadb:lts
+    container_name: sms-gateway-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${SMS_GATEWAY_DB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=sms
+      - MYSQL_USER=sms
+      - MYSQL_PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - sms-gateway-db-data:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      - sms-private
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sms-gateway:
+    image: capcom6/sms-gateway:latest
+    container_name: sms-gateway
+    environment:
+      - HTTP__LISTEN=0.0.0.0:3000
+      - DATABASE__HOST=sms-gateway-db
+      - DATABASE__PORT=3306
+      - DATABASE__USER=sms
+      - DATABASE__PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - DATABASE__DATABASE=sms
+      - GATEWAY__MODE=private
+      - GATEWAY__PRIVATE_TOKEN=${SMS_GATEWAY_PRIVATE_TOKEN}
+      - JWT__SECRET=${SMS_GATEWAY_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - sms-private
+    depends_on:
+      sms-gateway-db:
+        condition: service_healthy
+
+  sms-gateway-worker:
+    image: capcom6/sms-gateway:latest
+    container_name: sms-gateway-worker
+    command: ["/app/app", "worker"]
+    environment:
+      - HTTP__LISTEN=0.0.0.0:3000
+      - DATABASE__HOST=sms-gateway-db
+      - DATABASE__PORT=3306
+      - DATABASE__USER=sms
+      - DATABASE__PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - DATABASE__DATABASE=sms
+      - GATEWAY__MODE=private
+      - GATEWAY__PRIVATE_TOKEN=${SMS_GATEWAY_PRIVATE_TOKEN}
+      - JWT__SECRET=${SMS_GATEWAY_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - sms-private
+    depends_on:
+      sms-gateway-db:
+        condition: service_healthy
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind
+  sms-private:
+    external: true
+    name: sms-private
+
+volumes:
+  sms-gateway-db-data:
+    # Pinned to what the folder-name project already made.
+    name: hive-tools_sms-gateway-db-data

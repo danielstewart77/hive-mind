@@ -226,7 +226,7 @@ class TestWritingASetting:
 
 @pytest.fixture()
 def client(dsh_file, monkeypatch):
-    monkeypatch.setenv("MIND_ADMIN_TOKEN", "s3cret")
+    monkeypatch.setenv("MIND_KEY", "s3cret")
     app = FastAPI()
     runtime_api.install_runtime_routes(
         app, path=dsh_file, mind_id="mind-1", log=logging.getLogger("test")
@@ -237,7 +237,7 @@ def client(dsh_file, monkeypatch):
 def _admin_less(dsh_file, monkeypatch, **held):
     """A mind's settings routes as a mind made from the console has them: no
     admin token of any kind in its environment, only what `held` gives it."""
-    for variable in ("MIND_ADMIN_TOKEN", "COMMS_ADMIN_BEARER_TOKEN", "COMMS_BEARER_TOKEN"):
+    for variable in ("MIND_KEY", "COMMS_BEARER_TOKEN"):
         monkeypatch.delenv(variable, raising=False)
     for variable, value in held.items():
         monkeypatch.setenv(variable, value)
@@ -282,7 +282,6 @@ class TestAMindThatHoldsNoAdminToken:
         from starlette.requests import Request
 
         _admin_less(dsh_file, monkeypatch, COMMS_BEARER_TOKEN="this-minds-own-key")  # secret-guard: allow
-        runtime_api._token_cache.clear()
 
         def asked_with(bearer):
             return runtime_api.authorize_gateway(
@@ -295,6 +294,7 @@ class TestAMindThatHoldsNoAdminToken:
 
     def test_it_refuses_any_other_key_and_saves_nothing(self, dsh_file, monkeypatch):
         client = _admin_less(dsh_file, monkeypatch, COMMS_BEARER_TOKEN="this-minds-own-key")  # secret-guard: allow
+
 
         refused = client.patch(
             "/runtime/settings",

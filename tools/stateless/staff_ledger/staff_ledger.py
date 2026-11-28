@@ -50,7 +50,7 @@ try:
 except ImportError as exc:  # a hive-data with no ledger module: named below
     staff = None
     # Kept, because the same ImportError is also a dependency the image
-    # never installed, and "pull hive-data" does not fix that one.
+    # never installed, and updating the checkout does not fix that one.
     _STAFF_UNIMPORTABLE = f" (importing it raised {exc!r})"
 
 #: The status a task opens in unless told otherwise.
@@ -125,9 +125,9 @@ def _level(command: str) -> None:
         where = getattr(hive_data, "__file__", None) or "an unknown path"
         raise HiveDataBehind(
             f"hive_data at {where} is behind this ledger tool: it has no "
-            f"{', '.join(absent)}{_STAFF_UNIMPORTABLE}. Bring hive-data level "
-            "with the hive_mind "
-            "checkout this tool came from; a container that bakes its own "
+            f"{', '.join(absent)}{_STAFF_UNIMPORTABLE}. Bring modules/hive-data "
+            "level with the hive_mind "
+            "checkout this tool came from (it is in that checkout); a container that bakes its own "
             "copy needs the host's mounted over it, or a rebuild.")
 
 

@@ -2,6 +2,8 @@ services:
   example:
     build:
       context: ../../..
+      additional_contexts:
+        hive_surfaces: ../../../modules/hive-surfaces
     container_name: hive-mind-example
     init: true
     working_dir: /usr/src/app
@@ -13,9 +15,16 @@ services:
       - HIVE_PROJECT_DIR=/usr/src/app
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
       - COMMS_URL=http://hive-comms:8424
-      # A mind re-registers from its own runtime.yaml on every start, and
-      # POST /broker/minds is an admin route.
-      - COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}
+      # This mind's one key, the value its owner pasted when it was made, is a
+      # FILE in a folder of its own (mounted read-only below, outside this
+      # checkout): the mind reads it at each request and sets every per-service
+      # name its harnesses and hooks read from it, so a replaced key needs no
+      # restart. A mind with no key file started on the per-service values it
+      # had before (the transition).
+      - MIND_KEY_FILE=/run/mind-key/key
+      # A mind re-registers from its own runtime.yaml on every start with its
+      # own key; the gateway accepts that for its own row. No hive-wide
+      # administrator key is ever given to a mind.
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       # Which keyring entry holds this mind's Telegram token. The mind's own
       # surface container names the same key; a backend that named none would
@@ -24,7 +33,9 @@ services:
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=EXAMPLE_TELEGRAM_BOT_TOKEN
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
-      - KEY_RING=/usr/src/app/data/keyring
+      # Its own keyring, in its own folder: the install's shared one holds
+      # other minds' secrets and is not mounted here.
+      - KEY_RING=/usr/src/app/minds/example/data/keyring
       # This mind's own GitHub token, under a name no other mind uses.
       # Every mind here resolves the same keyring file, separated only by
       # key name, so a mind falling back to the default would store its
@@ -46,9 +57,26 @@ services:
       - CODEX_HOME=/usr/src/app/minds/example/.codex
       - DSH_HOME=/usr/src/app/minds/example/.dsh
     volumes:
-      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
+      # A mind that does not hold the operator role (feature 834, requirement
+      # 33) sees the code read-only, its own folder and its own key folder, and
+      # nothing that is a secret: no settings file, no other mind's folder, no
+      # shared keyring, no other key folder, no administrator credential. An
+      # operator mind may be given whatever its operator chooses; this file is
+      # the one for every other mind.
+      #
+      # The code is a clean clone of the repository, never the folder that
+      # holds the settings file: HOST_CODE_DIR, which the installer sets to its
+      # own clone (`repos/hive-mind`) and a hand-kept machine sets to a clone it
+      # keeps beside the install. A mind that works on the hive's own code still
+      # has all of it, without the secrets. The minds folder of that clone needs
+      # an empty `minds/<this mind>` for the next line to land on.
+      # `tools/stateless/mind_mounts/mind_mounts.py check` lists any mind on a
+      # machine whose own copy of this file reaches a secret.
+      - ${HOST_CODE_DIR:?set HOST_CODE_DIR to a clean clone of the repository}:/usr/src/app:ro
+      - ${HOST_PROJECT_DIR:-.}/minds/example:/usr/src/app/minds/example:rw
       - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
+      # This mind's own key folder and no other mind's.
+      - ${HOST_KEY_DIR:?set HOST_KEY_DIR to a folder outside the checkout}/example:/run/mind-key:ro
       # The dsh harness tree, read-only: a launcher must not rewrite the tree
       # it boots from.
       - ${HOST_DSH_DIR:-/opt/dsh}:/opt/dsh:ro
@@ -59,6 +87,10 @@ services:
       # exec, which Docker's tmpfs default is not: dsh's native loader dlopens
       # a copy of its addon from /tmp (see CLAUDE.md, "What a dsh mind needs").
       - /tmp:exec,mode=1777
+      # The modules hold the console's and terminal's .env and data/, the tools
+      # .env and credentials: not a mind's to read (see the installer's masks).
+      - /usr/src/app/modules:ro
+      - /usr/src/app/.git/modules:ro
     # One mind server runs claude, codex and dsh, and routes each conversation
     # to the harness it names; runtime.yaml's `harness` is only the default.
     command: ["/opt/venv/bin/python3", "-m", "minds.mind_server"]

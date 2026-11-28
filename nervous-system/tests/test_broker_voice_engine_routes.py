@@ -9,6 +9,7 @@ crossing the boundary, dropping the field from either request model left all
 
 from __future__ import annotations
 
+from comms_broker_pg import admin_person_key  # noqa: E402
 import importlib
 
 import pytest
@@ -29,7 +30,7 @@ GRILL_ADMIN = "admin-bearer"  # secret-guard: allow
 
 @pytest.fixture
 def app_client(monkeypatch, broker_db):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    admin_person_key("admin-bearer")
 
     from comms import server as server_module
 

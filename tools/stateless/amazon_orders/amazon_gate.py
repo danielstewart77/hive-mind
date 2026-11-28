@@ -149,7 +149,7 @@ def main() -> int:
     parser.add_argument("--now", help="ISO timestamp to evaluate as (testing)")
     args = parser.parse_args()
 
-    token = os.environ.get("HIVE_TOOLS_TOKEN", "")
+    token = os.environ.get("MIND_KEY", "") or os.environ.get("HIVE_TOOLS_TOKEN", "")
     if not token:
         try:
             import keyring

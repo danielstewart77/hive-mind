@@ -165,13 +165,14 @@ async def idle_drain(session: dict, buffer: list[dict]) -> None:
                 )
 
 
-def make_proactive_router(buffer: list[dict], token: str | None) -> APIRouter:
+def make_proactive_router(buffer: list[dict], token) -> APIRouter:
     """Return a FastAPI router exposing ``GET /proactive``.
 
     The endpoint drains ``buffer`` (pop-all) and returns the items as JSON. It
-    is protected with ``token``, which is this mind's own credential — the
-    surface is handed the same value through ``MIND_PROACTIVE_TOKEN`` and
-    presents it here. It used to be described as "the token the backend
+    is protected with ``token`` (a value, or a function read at each request),
+    which is the mind's own key: the bot serves this one mind and presents the
+    same key it presents to the gateway, read from the mind's key folder. A
+    mind started the old way falls back to what it was started with. It used to be described as "the token the backend
     already trusts", meaning the one gateway token every caller in the stack
     shared; once each holder got its own, a bot presenting the gateway token
     it holds was refused on every poll. When ``token`` is falsy the endpoint
@@ -182,8 +183,9 @@ def make_proactive_router(buffer: list[dict], token: str | None) -> APIRouter:
 
     @router.get("/proactive")
     async def proactive(authorization: str | None = Header(default=None)):  # noqa: ANN202
-        if token:
-            expected = f"Bearer {token}"
+        wanted = token() if callable(token) else token
+        if wanted:
+            expected = f"Bearer {wanted}"
             if authorization != expected:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         # Pop-all: hand the buffered items to the caller and empty the buffer.

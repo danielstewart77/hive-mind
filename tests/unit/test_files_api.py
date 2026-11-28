@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from minds import runtime_api
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -44,7 +45,7 @@ def _build(monkeypatch, tmp_path, harness: str):
     monkeypatch.setenv("MIND_NAME", "example")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("MIND_ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.setenv("MIND_KEY", ADMIN_TOKEN)
     monkeypatch.setattr(skills_api, "PROJECT_DIR", project, raising=True)
 
     app = FastAPI()
@@ -236,7 +237,8 @@ def test_a_path_outside_the_tree_reads_nothing_and_writes_nothing(mind):
 
 # 8. Saving requires the admin credential; without it the save is refused
 #    and the file is left alone.
-def test_every_files_route_requires_the_admin_bearer(mind):
+def test_every_files_route_requires_the_admin_bearer(mind, monkeypatch):
+
     client, home, _ = mind
     (home / "hooks" / "prose_reminder.sh").write_text("original\n")
 

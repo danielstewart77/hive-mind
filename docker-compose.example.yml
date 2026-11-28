@@ -24,12 +24,15 @@ services:
     build:
       context: ./nervous-system
       additional_contexts:
-        # The access layer lives in its own repository and is private, so it
-        # arrives as a second build context rather than as a git install
-        # needing a credential in the build. Defaulted rather than `:?`:
-        # compose parses this whole file for every command, so a required
-        # variable here would refuse to start every other service too.
-        hive_data: ${HIVE_DATA_DIR:-../hive-data}
+        # The data package is this repository's own modules/hive-data. It is
+        # a named context rather than a path inside `./nervous-system`'s
+        # context, which cannot see a folder above it; and rather than a
+        # line in the root .dockerignore, which keeps the whole of modules/
+        # out of the mind image and is not read for a named context. No
+        # variable picks the folder: an old HIVE_DATA_DIR in .env points at a
+        # sibling checkout that can be a different schema revision from this
+        # code, so it is ignored. Delete it.
+        hive_data: ./modules/hive-data
     container_name: hive-lucent
     init: true
     restart: unless-stopped
@@ -94,8 +97,9 @@ services:
       context: ./nervous-system
       dockerfile: comms/Dockerfile
       additional_contexts:
-        # The access layer, from its own checkout; comms installs it at build.
-        hive_data: ${HIVE_DATA_DIR:-../hive-data}
+        # The data package from this repository's modules/hive-data (see
+        # lucent above); comms installs it at build.
+        hive_data: ./modules/hive-data
     container_name: hive-comms
     init: true
     restart: unless-stopped
@@ -134,12 +138,13 @@ services:
       # two move together.
       #
       # Read-only: the container must never write to the host's source tree.
+      # The folder is this checkout's modules/hive-data/hive_data.
       # The pip install stays for the dependencies and the metadata; only the
       # package directory is overlaid, schema/steps included, so a new
       # migration is present to run rather than needing a rebuild first.
       # Having the code and having the schema are still two steps —
       # `python -m hive_data.migrate check` reports the gap.
-      - ${HIVE_DATA_DIR:-../hive-data}/hive_data:/usr/local/lib/python3.12/site-packages/hive_data:ro
+      - ./modules/hive-data/hive_data:/usr/local/lib/python3.12/site-packages/hive_data:ro
 
   # ─────────────────────────────────────────────────────────────
   # Voice server — STT + TTS for any surface that wants voice.
@@ -162,6 +167,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+      # Hide the modules from a container that mounts the whole checkout: the
+      # console's and the terminal's .env and data/, the tools .env and
+      # credentials sit under modules/ and are no mind's or bot's to read.
+      # The history of every module lives in .git/modules; same mask.
+      - /usr/src/app/modules:ro
+      - /usr/src/app/.git/modules:ro
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
       - whisper-cache:/home/hivemind/.cache
@@ -203,6 +214,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+      # Hide the modules from a container that mounts the whole checkout: the
+      # console's and the terminal's .env and data/, the tools .env and
+      # credentials sit under modules/ and are no mind's or bot's to read.
+      # The history of every module lives in .git/modules; same mask.
+      - /usr/src/app/modules:ro
+      - /usr/src/app/.git/modules:ro
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
       - kokoro-cache:/home/hivemind/.cache
@@ -235,7 +252,11 @@ services:
   # mind's bot token.
   # ─────────────────────────────────────────────────────────────
   telegram-bot:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The surfaces are this repository's own modules/hive-surfaces.
+        hive_surfaces: ./modules/hive-surfaces
     container_name: hive-mind-telegram
     init: true
     working_dir: /usr/src/app
@@ -255,6 +276,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+      # Hide the modules from a container that mounts the whole checkout: the
+      # console's and the terminal's .env and data/, the tools .env and
+      # credentials sit under modules/ and are no mind's or bot's to read.
+      # The history of every module lives in .git/modules; same mask.
+      - /usr/src/app/modules:ro
+      - /usr/src/app/.git/modules:ro
     environment:
       - HIVE_MIND_SERVER_URL=http://hive-comms:8424
       # The name the surfaces core actually reads. Its default is
@@ -335,7 +362,11 @@ services:
   # Example Discord bot.
   # ─────────────────────────────────────────────────────────────
   discord-bot:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The surfaces are this repository's own modules/hive-surfaces.
+        hive_surfaces: ./modules/hive-surfaces
     container_name: hive-mind-discord
     init: true
     working_dir: /usr/src/app
@@ -355,6 +386,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+      # Hide the modules from a container that mounts the whole checkout: the
+      # console's and the terminal's .env and data/, the tools .env and
+      # credentials sit under modules/ and are no mind's or bot's to read.
+      # The history of every module lives in .git/modules; same mask.
+      - /usr/src/app/modules:ro
+      - /usr/src/app/.git/modules:ro
     environment:
       - HIVE_MIND_SERVER_URL=http://hive-comms:8424
       # The name the surfaces core actually reads. Its default is

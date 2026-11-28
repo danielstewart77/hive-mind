@@ -213,6 +213,7 @@ def test_services_build_from_hive_minds_modules_and_minds_cannot_read_them(tmp_p
 
     builds = {name: svc["build"]["context"] for name, svc in services.items() if "build" in svc}
     assert builds["hive-tools"] == str(modules / "hive-tools")
+    assert services["hive-tools"]["build"]["additional_contexts"]["hive_data"] == str(modules / "hive-data")
     assert builds[compose.CONSOLE] == str(modules / "hive")
     assert builds[compose.TERMINAL] == str(modules / "terminal")
     assert builds["inference-proxy"] == str(modules / "inference-proxy")
@@ -244,8 +245,6 @@ def test_the_console_can_make_a_mind_on_an_installed_hive_and_a_rerun_keeps_it(t
     written = {line.split("=", 1)[0]: line.split("=", 1)[1].strip("'")
                for line in home.env_file.read_text().splitlines() if "=" in line}
     assert written["HOST_PROJECT_DIR"] == str(home.root)
-    for credential in ("COMMS_ADMIN_BEARER_TOKEN", "LUCENT_ADMIN_BEARER_TOKEN"):
-        assert env[credential], credential
 
     # Its folder and its line in the stack: under a mount the console may
     # write, in a list that starts empty.

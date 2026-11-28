@@ -36,6 +36,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from core import mind_key
 from minds.harness.empty_turn_diagnostic import compose_empty_turn_diagnostic
 from minds.pty_attach import (
     PtyUnavailable,
@@ -65,7 +66,7 @@ RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
 NAME: str = RUNTIME["name"]
 MIND_ID: str = RUNTIME["mind_id"]
 PROVIDER: str = RUNTIME["provider"]
-RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
+RUNTIME_ENV: dict[str, Any] = mind_key.runtime_env(RUNTIME.get("env", {}) or {})
 
 NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
@@ -320,7 +321,7 @@ def _report_thread(session_id: str, thread_id: str) -> None:
         log.warning("Cannot report codex thread %s for session %s: COMMS_URL unset",
                     thread_id, session_id)
         return
-    token = os.environ.get("COMMS_BEARER_TOKEN", "")
+    token = mind_key.resolve(os.environ, "COMMS_BEARER_TOKEN")
     request = urllib.request.Request(
         f"{base_url}/sessions/{session_id}/harness-state",
         data=json.dumps({"harness_sid": thread_id}).encode(),
@@ -446,7 +447,7 @@ def _role_guard(env: dict[str, str], timeout: float = 10.0) -> tuple[list[str], 
     """
     return role_guard.prepare_codex(
         CODEX_HOME, env.get("MIND_ID") or MIND_ID,
-        env.get("COMMS_URL", ""), env.get("COMMS_BEARER_TOKEN", ""), timeout=timeout,
+        env.get("COMMS_URL", ""), mind_key.resolve(env, "COMMS_BEARER_TOKEN"), timeout=timeout,
         # Story 10.18.15: the hooks and skills its roles name arrive here,
         # before config.toml is read for the hooks carried into the spawn.
         on_grants=lambda grants: role_files.provision("codex", CODEX_HOME, grants, log=log,
@@ -727,7 +728,8 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
 
     log.info("%s session %s: spawning codex turn (thread=%s)", NAME, sid, thread_id or "new")
 
-    env = os.environ.copy()
+    mind_key.refresh()
+    env = mind_key.snapshot()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     env["CODEX_HOME"] = str(CODEX_HOME)
     # The gateway's own row id for this conversation. A mind's `/end-session`

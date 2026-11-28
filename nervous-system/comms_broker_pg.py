@@ -149,3 +149,82 @@ async def put_credential_row(
         "VALUES ($1, $2, $3, $4, 0, $5)",
         holder, username, role, token_sha, revoked_at,
     )
+
+
+async def _make_admin_person(token: str, username: str) -> None:
+    from comms import user_access
+
+    await execute(
+        "INSERT INTO core.users (username, password_hash, created_at) "
+        "VALUES ($1, 'x', 0) ON CONFLICT DO NOTHING", username)
+    await execute(
+        "INSERT INTO core.groups (name, created_at) VALUES ('admins', 0) "
+        "ON CONFLICT DO NOTHING")
+    await execute(
+        "INSERT INTO core.group_members (group_name, user_id) "
+        "SELECT 'admins', id FROM core.users WHERE username = $1 "
+        "ON CONFLICT DO NOTHING", username)
+    await execute(
+        "INSERT INTO core.credentials (holder, username, role, token_sha, "
+        "created_at) VALUES ($1, $1, $2, $3, 0) ON CONFLICT DO NOTHING",
+        username, user_access.USER_KEY, user_access.digest(token))
+
+
+async def aadmin_person_key(token: str, username: str = "root-admin") -> str:
+    """`admin_person_key` for a test already running on a loop."""
+    await _make_admin_person(token, username)
+    return token
+
+
+def admin_person_key(token: str, username: str = "root-admin") -> str:
+    """An administrator's own key, as setup: a person, in the admins group,
+    holding `token` as their one key. The gateway has no credential of its own
+    for an administrator, so a test that needs one makes the person.
+
+    Synchronous, on a loop of its own that is never installed as the current
+    one (`asyncio.run` would leave the thread with none, which breaks a test
+    that drives the app on the loop it opened its pool on). Returns the token."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_make_admin_person(token, username))
+    finally:
+        loop.close()
+    return token
+
+
+def service_key(token: str, holder: str = "test-service") -> str:
+    """A service holder's key, as setup, for the routes the mind machinery
+    drives. Same loop handling as `admin_person_key`. Returns the token."""
+    from comms import user_access
+
+    async def make() -> None:
+        await execute(
+            "INSERT INTO core.credentials (holder, username, role, token_sha, "
+            "created_at) VALUES ($1, 'daniel', $2, $3, 0) ON CONFLICT DO NOTHING",
+            holder, user_access.SERVICE, user_access.digest(token))
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(make())
+    finally:
+        loop.close()
+    return token
+
+
+def mind_key(token: str, holder: str = "ada", username: str = "daniel") -> str:
+    """A mind's own key, as setup, for the routes only a mind reaches. Same
+    loop handling as `admin_person_key`. Returns the token."""
+    from comms import user_access
+
+    async def make() -> None:
+        await execute(
+            "INSERT INTO core.credentials (holder, username, role, token_sha, "
+            "created_at) VALUES ($1, $2, $3, $4, 0) ON CONFLICT DO NOTHING",
+            holder, username, user_access.MIND, user_access.digest(token))
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(make())
+    finally:
+        loop.close()
+    return token

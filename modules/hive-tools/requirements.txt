@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+aiohttp
+httpx
+google-api-python-client
+google-auth
+google-auth-oauthlib
+# The access layer's own dependency, declared here so this image's
+# resolver sees it beside everything else; the package itself arrives as a
+# build context because its repository is private.
+asyncpg>=0.29
+python-multipart
+playwright==1.64.1
+pytest
+mypy
+PyYAML
+ruff

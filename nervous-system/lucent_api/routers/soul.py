@@ -8,9 +8,9 @@ that the service token is accepted here — and the second of those is the
 bug this whole boundary exists to remove.
 
 The soul routes are deliberately outside the graph's owner partition, and
-they answer to exactly two kinds of value. `LUCENT_SOUL_BEARER_TOKEN` is the
-console's, held by the hive site alone for the operator's direct edits, and
-reaches every soul. A mind's own lucent credential — the per-holder value its
+they answer to exactly two kinds of key. A person's own key (an administrator's
+reaches every soul, anyone else's the souls of the minds they own) is what the
+hive site presents for a direct edit; the store holds no soul credential of its own. A mind's own lucent credential — the per-holder value its
 `LUCENT_BEARER_TOKEN` carries, resolved exactly as `require_holder` resolves
 it — reaches that mind's own soul and no other: read, write and history
 alike. Every mind can therefore reach this door, and none can reach another
@@ -39,7 +39,7 @@ import hive_data
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from lucent_api.auth import SoulCaller, require_soul_caller
+from lucent_api.auth import SoulCaller, person_may_edit_soul, require_soul_caller
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +128,15 @@ class SoulWriteBody(BaseModel):
     allow_shrink: bool = False
 
 
+async def _refuse_a_person_who_may_not(who: SoulCaller, name: str) -> None:
+    if not await person_may_edit_soul(who, name):
+        raise HTTPException(403, {
+            "ok": False, "code": "not_your_mind",
+            "detail": "a person edits the soul of a mind they own; "
+                      "an administrator, any",
+        })
+
+
 @router.get("")
 async def soul_get(
     name: str, who: SoulCaller = Depends(require_soul_caller)
@@ -135,6 +144,7 @@ async def soul_get(
     """Return a mind's soul as it stands in the graph."""
     from lucent_api.soul import soul_read
 
+    await _refuse_a_person_who_may_not(who, name)
     try:
         return _decode(await soul_read(name=name, own=who.own))
     except hive_data.HiveDataError as refused:
@@ -159,6 +169,7 @@ async def soul_post(
     """
     from lucent_api.soul import soul_write
 
+    await _refuse_a_person_who_may_not(who, body.name)
     if not who.is_console and body.actor != "mind":
         raise HTTPException(403, {
             "ok": False, "code": "actor_refused",
@@ -192,6 +203,7 @@ async def soul_history_get(
     """Return recorded changes to a mind's soul, newest first."""
     from lucent_api.soul import soul_history
 
+    await _refuse_a_person_who_may_not(who, name)
     try:
         return _decode(await soul_history(
             name=name, limit=limit, own=who.own))

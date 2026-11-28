@@ -378,10 +378,10 @@ def _gateway_request(path: str, *, payload: dict | None = None,
     """The request for one call to the gateway from inside the chief's
     container, and the timeout to make it with. Nothing is sent here."""
     url = (os.environ.get("COMMS_URL") or "").strip().rstrip("/")
-    token = (os.environ.get("COMMS_ADMIN_BEARER_TOKEN") or "").strip()
+    token = (os.environ.get("MIND_KEY") or os.environ.get("COMMS_BEARER_TOKEN") or "").strip()
     if not url or not token:
-        raise Refused("COMMS_URL and COMMS_ADMIN_BEARER_TOKEN are not set in "
-                      "this container")
+        raise Refused("COMMS_URL and the chief's own key (MIND_KEY) are not set "
+                      "in this container")
     request = urllib.request.Request(
         f"{url}{path}",
         data=None if payload is None else json.dumps(payload).encode(),
@@ -389,6 +389,16 @@ def _gateway_request(path: str, *, payload: dict | None = None,
                  "Content-Type": "application/json"},
         method="GET" if payload is None else "POST")
     return request, timeout
+
+
+def _refused_key(path: str, exc: BaseException) -> str | None:
+    """The one-line refusal when the gateway answers 401 to the chief's key.
+
+    No second credential is tried: the chief is put right by pasting or
+    restoring its own key, not by anything this tool holds."""
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+        return f"GET {path}: this mind's key was refused"
+    return None
 
 
 def _gateway_check(since: float | None) -> dict:
@@ -400,6 +410,9 @@ def _gateway_check(since: float | None) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as answer:
             return json.loads(answer.read().decode())
     except (urllib.error.URLError, OSError, ValueError) as exc:
+        refused = _refused_key("/minds/{id}/wake-state", exc)
+        if refused:
+            raise Refused(refused) from None
         raise Refused(f"the gateway did not answer: {exc}") from None
 
 
@@ -516,7 +529,7 @@ def preflight(run: Run, build: bool) -> tuple[str, str]:
                      "everything the ledger tool calls", not behind,
                      behind or "nothing missing"):
         raise Refused(f"hive_data at {source} is behind the ledger tool "
-                      f"({'; '.join(behind)}); pull hive-data on the host")
+                      f"({'; '.join(behind)}); pull hive-mind on the host (modules/hive-data is in it)")
     return source, image
 
 
@@ -702,7 +715,9 @@ def _deliver_inside(text: str) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as answer:
             live = json.loads(answer.read().decode())
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return {"delivered": False, "error": f"the gateway did not answer: {exc}"}
+        refused = _refused_key("/sessions/live", exc)
+        return {"delivered": False,
+                "error": refused or f"the gateway did not answer: {exc}"}
     session = target_session(live, mind_id)
     if session is None:
         return {"delivered": False,
@@ -815,7 +830,7 @@ def recreate(record: Run, build: bool, deadline: float,
             record.state("waiting for idle")
             wait(record, max(0.0, ends - clock()))
             # Again after the wait: it can be hours, and a peer can move the
-            # host's hive-data checkout in that time.
+            # host's hive-mind checkout in that time.
             behind = probe_image(image, source)
             if not record.check("hive_data still level at the recreate",
                                 not behind, behind or "nothing missing"):

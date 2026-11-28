@@ -75,17 +75,21 @@ absent on exactly the routes that matter.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 import hive_data
 from hive_data import broker_ops, core
 from starlette.routing import BaseRoute
 from starlette.types import Receive, Scope, Send
+
+log = logging.getLogger("hive-mind.user_access")
 
 # The store not answering, as opposed to answering no.
 _STORE_DOWN = (
@@ -111,8 +115,14 @@ SCOPED = "scoped"
 OWNER = "owner"
 #: The admin token only.
 ADMIN = "admin"
+#: A change to one mind, asked with a person's key or a mind's key and nothing
+#: else (feature 834, requirement 24). The gate resolves the caller with a
+#: person's key admitted and refuses the admin credential, a service holder
+#: and anything unrecognised; the handler decides whether this caller may
+#: change that mind.
+CHANGE = "change"
 
-_KINDS = frozenset({PUBLIC, MACHINE, SCOPED, OWNER, ADMIN})
+_KINDS = frozenset({PUBLIC, MACHINE, SCOPED, OWNER, ADMIN, CHANGE})
 
 WEBSOCKET = "WS"
 
@@ -132,6 +142,15 @@ class Rule:
     kind: str
     #: For `OWNER`: the path parameter naming the session.
     param: str | None = None
+    #: True when a person's own key is also taken on this route (feature 834,
+    #: story 905: everything a signed-in person does reaches the gateway with
+    #: that person's key). `OWNER` and `SCOPED` routes take it always. On an
+    #: `ADMIN` route it admits only a person who is an administrator.
+    person: bool = False
+    #: For a person-taking `ADMIN` route that the owner of a mind may also
+    #: use: the path parameter naming the mind. A person who is not an
+    #: administrator passes only when they own that mind.
+    mind_param: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -201,7 +220,13 @@ def _route_methods(route: BaseRoute) -> list[str]:
 MIND = "mind"
 SERVICE = "service"
 PERSON = "person"
-ROLES = (MIND, SERVICE, PERSON)
+#: A person's own key, kept by the console and shown to nobody (feature 834,
+#: requirement 19). It names the person as holder and username and opens
+#: nothing at this gateway: `resolve_caller` gives it no standing on any route,
+#: so a copy that leaks cannot read a conversation. Its one use is the change
+#: route that forwards a change to a mind (`caller_may_change`).
+USER_KEY = "user"
+ROLES = (MIND, SERVICE, PERSON, USER_KEY)
 
 #: Roles that may reach the routes the mind machinery drives.
 MACHINE_ROLES = (MIND, SERVICE)
@@ -218,6 +243,9 @@ class Credential:
     holder: str
     username: str
     role: str
+    #: When this key stops working, for a key made at one sign-in; None for a
+    #: long-lived key.
+    ends_at: float | None = None
 
 
 def digest(token: str) -> str:
@@ -225,6 +253,25 @@ def digest(token: str) -> str:
     down in the form it arrived in, so a reader of the table cannot present
     what it finds there."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+#: The label the credential shown to a mind is made under. The same value is
+#: in `core/mind_key.py` (the mind's side), and a test holds the two together.
+GATEWAY_CREDENTIAL_LABEL = b"hive-mind: what the gateway shows this mind, v1"
+
+
+def gateway_credential(mind_key_value: str) -> str:
+    """What this gateway shows a mind on every call: made from the mind's key.
+
+    HMAC-SHA256 of a fixed label under the key. It cannot be turned back into
+    the key, and it is not the `digest` kept to recognise the key, so what a
+    reader of the credentials table finds opens nothing here, and this value
+    presented as a key is no key of any holder. Worked out when the key is
+    seen (a mind registering with it, the key being replaced) and kept in
+    `core.minds.session_token`; the raw key is never kept.
+    """
+    return hmac.new(str(mind_key_value).strip().encode("utf-8"),
+                    GATEWAY_CREDENTIAL_LABEL, hashlib.sha256).hexdigest()
 
 
 def normalize_holder(name: object) -> str:
@@ -268,6 +315,14 @@ async def put_credential(
         )
     if role not in ROLES:
         raise ValueError(f"unknown credential role: {role!r}")
+    if role == USER_KEY:
+        # A person's key is held under the person's own name, so "the key of
+        # the user who owns this mind" is one lookup, and never under the name
+        # of a mind, whose row it would take over.
+        if key != name:
+            raise ValueError("a user's key is held under that user's own name")
+        if await _is_registered_mind(key):
+            raise ValueError(f"{key!r} is a mind, not a user")
     sha = digest(token)
     clash = await broker_ops.holder_of_digest(sha)
     if clash is not None and clash != key:
@@ -279,10 +334,23 @@ async def put_credential(
         raise ValueError(_held_by(clash))
     now = time.time()
     try:
-        await core.upsert_credential(
-            holder=key, username=name, role=role, token_sha=sha,
-            created_at=now, revoked_at=None,
-        )
+        # One unit: the key and what the gateway shows the mind (made from it)
+        # change together or not at all, so a failure between the two cannot
+        # leave the mind refusing the gateway with the new key live.
+        async with hive_data.transaction() as unit:
+            await core.upsert_credential(
+                holder=key, username=name, role=role, token_sha=sha,
+                created_at=now, revoked_at=None, unit=unit,
+            )
+            if role == MIND:
+                # The mind's key was just replaced (or made): the next call
+                # carries the value made from the new key and the old one is
+                # refused, with no step by a person.
+                known = await core.get_mind_by_id_or_name(key, unit=unit)
+                if known is not None:
+                    await broker_ops.update_mind(
+                        known["mind_id"], unit=unit,
+                        session_token=gateway_credential(token))
     except hive_data.Conflict as exc:
         # The same value minted for another holder between the check and the
         # write. Still a sentence, not a 500.
@@ -311,6 +379,20 @@ async def revoke_credential(holder: str) -> bool:
     return result["rows"] > 0
 
 
+async def remove_mind_credential(holder: str) -> bool:
+    """Delete a mind's credential row outright, freeing its digest.
+
+    For a creation that failed and a mind that was deleted. A revoked row
+    keeps the digest and refuses it to every other holder for good; a key
+    cut off from a mind stays revoked, but one that never made a mind, or
+    belongs to one that is gone, must be pasteable again. Only a row typed
+    `mind` is removed.
+    """
+    key = normalize_holder(holder)
+    result = await broker_ops.delete_mind_credential(key)
+    return result["rows"] > 0
+
+
 async def credential_for_token(token: str) -> Credential | None:
     """The holder a presented credential belongs to, or None.
 
@@ -331,7 +413,43 @@ async def credential_for_token(token: str) -> Credential | None:
         holder=normalize_holder(row["holder"]),
         username=normalize_username(row["username"]),
         role=str(row["role"] or PERSON),
+        ends_at=row.get("ends_at"),
     )
+
+
+#: How often a connection held open on a sign-in's key asks whether the key
+#: still stands. Under a minute, so a terminal is closed within a minute of
+#: the key ending.
+SIGN_IN_RECHECK_SECONDS = 30.0
+
+
+def sign_in_recheck_seconds() -> float:
+    try:
+        value = float(os.environ.get("COMMS_SIGN_IN_RECHECK_SECONDS", ""))
+    except ValueError:
+        return SIGN_IN_RECHECK_SECONDS
+    return min(value, 60.0) if value > 0 else SIGN_IN_RECHECK_SECONDS
+
+
+async def sign_in_still_stands(key_digest: str) -> bool:
+    """Whether the key with this scramble is still accepted, read now."""
+    try:
+        return await core.credential_for_token(key_digest) is not None
+    except _STORE_DOWN:
+        # The store not answering says nothing about the key: keep the
+        # connection and ask again next time round.
+        return True
+
+
+async def watch_sign_in(caller: "Caller") -> None:
+    """Returns when the sign-in this caller came in with has ended; never for
+    a caller whose key does not end. For a connection that stays open."""
+    if not caller.sign_in_digest:
+        await asyncio.Event().wait()
+    while True:
+        await asyncio.sleep(sign_in_recheck_seconds())
+        if not await sign_in_still_stands(caller.sign_in_digest):
+            return
 
 
 async def user_for_token(token: str) -> str | None:
@@ -394,6 +512,15 @@ class Caller:
     #: True when the caller reaches every conversation: the admin token, or
     #: the shared token on a hive that has named no primary user.
     unscoped: bool = False
+    #: True when the caller is a person's key and that person is an
+    #: administrator, read from the hive database on this request (feature
+    #: 834, story 905). It reaches what the admin credential reaches on the
+    #: routes that take a person's key, as that person and nobody else.
+    person_admin: bool = False
+    #: The scramble of the key, set only when the caller came in with a
+    #: sign-in's key (one that ends). A connection held open on such a key is
+    #: closed when the key ends (feature 834, requirement 41).
+    sign_in_digest: str = ""
 
     @property
     def recognised(self) -> bool:
@@ -417,7 +544,7 @@ class Caller:
         )
 
     def sees_everything(self) -> bool:
-        return self.is_admin or self.unscoped
+        return self.is_admin or self.unscoped or self.person_admin
 
 
 def bearer_of(scope: Scope) -> str:
@@ -428,16 +555,16 @@ def bearer_of(scope: Scope) -> str:
     return ""
 
 
-async def resolve_caller(token: str) -> Caller:
+async def resolve_caller(token: str, *, allow_person_key: bool = False) -> Caller:
     """Turn a presented bearer into a caller.
 
-    The admin credential is checked first, because the console and the
-    operator must keep a way into a wedged conversation whatever else is
-    configured, and because it is the one credential that stands for every
-    holder at once — the console serves whoever is logged in and does its own
-    filtering from that session.
+    `allow_person_key` is for the one route class that takes a person's key
+    (`CHANGE`); everywhere else a person's key resolves to nobody.
 
-    Everything else resolves out of the credentials table and nowhere else.
+    No credential of the gateway's own stands for every holder: an
+    administrator is a person's key whose person is an administrator.
+
+    Everything resolves out of the credentials table and nowhere else.
     The shared `COMMS_BEARER_TOKEN` is deliberately absent: one value that
     every mind, every surface bot and two boxes in the boys' bedrooms all
     presented is a value whose theft is indistinguishable from its use, and
@@ -450,17 +577,34 @@ async def resolve_caller(token: str) -> Caller:
     serving every route open while it works that out is how a hive stays
     green for a week with its front door off its hinges.
     """
-    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
     if not token:
         return Caller()
-    if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
-        return Caller(is_admin=True, is_service=True, unscoped=True)
     found = await credential_for_token(token)
     if not found:
+        return Caller()
+    if found.role == USER_KEY:
+        if allow_person_key:
+            person = await _person_caller(found)
+            if found.ends_at is not None and person.username:
+                person = replace(person, sign_in_digest=digest(token))
+            return person
+        # A person's key for their minds' settings opens no route here.
         return Caller()
     return Caller(
         username=found.username, holder=found.holder, role=found.role
     )
+
+
+async def _person_caller(found) -> Caller:
+    """A person's key as a caller: that person, and whether they are an
+    administrator, both read from the hive database on this request. A person
+    whose account is disabled is nobody."""
+    row = await _live_user_row(found.username)
+    if row is not None and row["disabled_at"] is not None:
+        return Caller()
+    admin = await person_is_administrator(found.username)
+    return Caller(username=found.username, holder=found.holder, role=USER_KEY,
+                  person_admin=admin)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +633,110 @@ async def owner_of_mind(mind_id: str) -> str | None:
     if not row:
         return None
     return normalize_username(row["owner"]) or None
+
+
+#: The role slug the hive records for an operator mind (the same slug the
+#: console's role pages and `GET /roles/operator/holders` use).
+OPERATOR_ROLE = "operator"
+
+
+async def is_operator_mind(holder: str) -> bool:
+    """Whether the mind this holder names holds the operator role right now.
+
+    Read from the roles tables on every call, never cached: a role taken away
+    on the console makes the mind's key an ordinary mind's key on its next
+    request (feature 834, requirement 20).
+    """
+    from hive_data import roles
+
+    try:
+        row = await core.get_mind_by_id_or_name(str(holder or "").strip())
+        if not row:
+            return False
+        return any(r["slug"] == OPERATOR_ROLE
+                   for r in await roles.roles_of(row["mind_id"]))
+    except Exception:  # noqa: BLE001 - an unreadable role is no operator (fail closed)
+        log.warning("operator role could not be read; treated as not an operator",
+                    exc_info=True)
+        return False
+
+
+async def operator_may_change(operator_holder: str, target: str) -> bool:
+    """Whether an operator mind may change this other mind's settings.
+
+    The smallest safe reading (Cypher, requirement 20): only a mind owned by
+    the same person as the operator mind, as the registry records it. Never
+    another person's mind, never an ownerless one, the mind itself passes trivially (its own key already speaks for it).
+    """
+    if not await is_operator_mind(operator_holder):
+        return False
+    mine = await owner_of_mind(operator_holder)
+    theirs = await owner_of_mind(target)
+    return bool(mine and theirs and mine == theirs)
+
+
+ADMINS_GROUP = "admins"
+
+
+async def _live_user_row(username: str):
+    name = normalize_username(username)
+    if not name:
+        return None
+    for row in await core.list_users():
+        if normalize_username(row["username"]) == name:
+            return row
+    return None
+
+
+async def person_is_administrator(username: str) -> bool:
+    """Whether this person is in the admins group, read from the hive database
+    on this call (feature 834, requirement 32). A person with no row, a
+    disabled one, or a database that cannot be read is not an administrator."""
+    name = normalize_username(username)
+    if not name:
+        return False
+    try:
+        for row in await core.list_users():
+            if normalize_username(row["username"]) == name:
+                if row["disabled_at"] is not None:
+                    return False
+                return ADMINS_GROUP in await core.groups_of(row["id"])
+    except _STORE_DOWN:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable group is no administrator (fail closed)
+        log.warning("admins group could not be read; treated as not an administrator",
+                    exc_info=True)
+    return False
+
+
+async def caller_may_change(caller: Caller, target: dict) -> bool:
+    """Whether this caller may change this mind (requirement 24).
+
+    A person who is an administrator: any mind. Any other person: a mind they
+    own (an ownerless mind follows the conversation rule and answers to the
+    primary user). An operator mind: a mind owned by the same person as
+    itself. An ordinary mind: itself only. Everything read on this call.
+    """
+    holder = normalize_holder(caller.holder)
+    if caller.role == USER_KEY:
+        # A person whose account is disabled changes nothing, whatever their
+        # key still says; a person with no account row (a hive that records
+        # people elsewhere) is judged on ownership alone.
+        row = await _live_user_row(caller.username)
+        if row is not None and row["disabled_at"] is not None:
+            return False
+        if await person_is_administrator(caller.username):
+            return True
+        owner = normalize_username(target.get("owner"))
+        if owner:
+            return owner == caller.username
+        return caller.username == primary_user()
+    if caller.role == MIND:
+        names = {normalize_holder(target.get("mind_id")), normalize_holder(target.get("name"))}
+        if holder in names:
+            return True
+        return await operator_may_change(holder, str(target.get("mind_id") or ""))
+    return False
 
 
 async def owns_mind(caller: Caller, mind_id: str) -> bool:
@@ -682,8 +930,9 @@ class UserAccess:
             # this must never do, so it refuses rather than passing through.
             await self._refuse(scope, receive, send, 503, b'{"detail":"starting"}')
             return
+        takes_person = (rule.person or rule.kind in (OWNER, SCOPED, CHANGE))
         try:
-            caller = await resolve_caller(bearer_of(scope))
+            caller = await resolve_caller(bearer_of(scope), allow_person_key=takes_person)
         except _STORE_DOWN:
             # A database that did not answer is not a bad credential and not
             # a server bug: every authenticated request and websocket
@@ -691,17 +940,22 @@ class UserAccess:
             await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
             return
         if rule.kind == ADMIN:
-            if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
-                # The same sentence `require_admin_bearer` gives. A 401 here
-                # would send the operator to check a credential when the
-                # problem is one unset variable.
-                await self._refuse(
-                    scope, receive, send, 503,
-                    b'{"detail":"Admin endpoints disabled: '
-                    b'COMMS_ADMIN_BEARER_TOKEN unset"}',
-                )
+            if not (rule.person and caller.person_admin):
+                if not (rule.person and rule.mind_param and caller.role == USER_KEY
+                        and await self._person_owns(caller, params.get(rule.mind_param) or "")):
+                    await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
+                    return
+        elif rule.kind == CHANGE:
+            # A person's key or a mind's key, and nothing else. The admin
+            # credential and every service holder are refused here: no
+            # credential of the hive's own may stand for anyone.
+            try:
+                caller = await resolve_caller(bearer_of(scope), allow_person_key=True)
+            except _STORE_DOWN:
+                await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
                 return
-            if not caller.is_admin:
+            if (caller.is_admin or caller.is_service or caller.unscoped
+                    or caller.role not in (MIND, USER_KEY) or not caller.holder):
                 await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
                 return
         elif rule.kind == MACHINE:
@@ -709,7 +963,7 @@ class UserAccess:
             # or by mind, so there is no conversation for an owner check to
             # scope — admitting a person's credential here would hand them
             # every conversation on the hive through the back of the house.
-            if not caller.is_machine:
+            if not caller.is_machine and not (rule.person and caller.role == USER_KEY):
                 await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
                 return
         elif not caller.recognised:
@@ -732,6 +986,15 @@ class UserAccess:
                 return
         scope[CALLER_SCOPE_KEY] = caller
         await self._app(scope, receive, send)
+
+    async def _person_owns(self, caller: Caller, mind: str) -> bool:
+        """Whether this person may change the mind named: its owner (an
+        ownerless mind answers to the primary user)."""
+        try:
+            row = await core.get_mind_by_id_or_name(str(mind or "").strip())
+        except _STORE_DOWN:
+            raise
+        return row is not None and await caller_may_change(caller, dict(row))
 
     def _match(self, scope: Scope):
         from starlette.routing import Match  # noqa: PLC0415

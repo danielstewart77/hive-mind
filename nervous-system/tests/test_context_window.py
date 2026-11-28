@@ -14,6 +14,7 @@ gateway wrote and the requests it sent.
 """
 from __future__ import annotations
 
+from comms_broker_pg import service_key  # noqa: E402
 import asyncio
 import json
 import subprocess
@@ -241,7 +242,7 @@ def _text(events) -> str:
 # ---------------------------------------------------------------------------
 
 def test_a_context_report_persists_every_figure_it_carries(comms_db, monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    service_key(GRILL_ADMIN)
     from comms import server as server_module
     import importlib
     importlib.reload(server_module)
@@ -809,7 +810,7 @@ def test_goal_rounds_reach_the_mind_through_the_message_route(comms_db, monkeypa
     import importlib
     from comms import server as server_module
 
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    service_key(GRILL_ADMIN)
     importlib.reload(server_module)
     mind = Mind()
     with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
@@ -1688,7 +1689,7 @@ def test_session_memory_gives_way_before_recent_memory(comms_db):
 
 
 def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(comms_db, monkeypatch):
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
+    service_key(GRILL_ADMIN)
     import importlib
     from comms import server as server_module
     importlib.reload(server_module)

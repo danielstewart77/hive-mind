@@ -29,7 +29,7 @@ ADMIN = {"Authorization": "Bearer s3cret"}
 
 @pytest.fixture()
 def client(monkeypatch):
-    monkeypatch.setattr(runtime_api, "admin_token", lambda: "s3cret")
+    monkeypatch.setattr(runtime_api, "_own_key", lambda: "s3cret")
     app = FastAPI()
     surface_token_api.install_surface_token_routes(
         app, mind_id="cypher-uuid", log=configure_logging("test"),
@@ -96,7 +96,7 @@ class TestSettingIt:
     ) -> None:
         """503, like every other write route on a mind: an unconfigured guard
         is not an absent one."""
-        monkeypatch.setattr(runtime_api, "admin_token", lambda: "")
+        monkeypatch.setattr(runtime_api, "_own_key", lambda: "")
 
         response = client.put("/surface-token", json={"token": GOOD}, headers=ADMIN)
 

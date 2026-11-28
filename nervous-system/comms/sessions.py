@@ -51,6 +51,21 @@ class MindCallFailed(RuntimeError):
     """
 
 
+async def _mind_is_cut_off(mind_id: str) -> bool:
+    """Whether this mind's one key has been cut off (its credential row is
+    revoked). A mind with no row yet is not cut off, only not known."""
+    row = await core.get_mind_by_id_or_name(mind_id)
+    if row is None:
+        return False
+    for holder in (str(row["name"] or "").strip().lower(), str(row["mind_id"] or "").strip().lower()):
+        if not holder:
+            continue
+        credential = await core.get_credential(holder)
+        if credential is not None and credential.get("revoked_at"):
+            return True
+    return False
+
+
 class MindRefusedCredential(MindCallFailed):
     """A mind answered, and rejected the credential this gateway presented.
 
@@ -4639,10 +4654,12 @@ class SessionManager:
     async def mind_auth_headers(self, mind_id: str | None) -> dict[str, str]:
         """The credential this gateway presents when it calls that mind.
 
-        Empty when the broker holds no token for the mind — one running a
-        build that predates this has nothing to check, which is what lets the
-        fleet move a machine at a time. The admin token is deliberately not a
-        fallback: it unlocks `PATCH /runtime`, the skills write-back and the
+        What the gateway shows the mind is made from the mind's one key
+        (`user_access.gateway_credential`) and kept as that calculated value,
+        never the key. Empty when the broker holds none for the mind — one
+        running a build that predates this has nothing to check, which is what
+        lets the fleet move a machine at a time. A mind whose key was cut off
+        is not called. The admin token is deliberately not a fallback: it unlocks `PATCH /runtime`, the skills write-back and the
         file editor, and putting it on the wire for every chat turn would make
         a routine path carry the credential that owns the machine.
         """
@@ -4650,6 +4667,7 @@ class SessionManager:
             return {}
         try:
             token = await core.mind_session_token(mind_id)
+            cut_off = await _mind_is_cut_off(mind_id)
         except Exception as exc:
             # Not `{}`. An uncredentialed call gets a 401 whose handler tells
             # the operator to re-register the mind — a remedy aimed at the
@@ -4659,6 +4677,11 @@ class SessionManager:
                 f"could not read mind {mind_id}'s credential from the broker: "
                 f"{exc}"
             ) from exc
+        if cut_off:
+            # Its key was cut off on purpose: it is not called, and the
+            # gateway does not show it a credential made from a dead key.
+            raise MindCallFailed(
+                f"mind {mind_id}'s key has been cut off, so it is not called")
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     async def _mind_auth_headers_for_session(
@@ -4901,60 +4924,25 @@ class SessionManager:
             )
         return data["rotated"]
 
-    async def _mind_operator_credentials(
-        self, mind_id: str, mind_row: dict | None
-    ) -> list[dict[str, str]]:
-        """What the gateway presents on a mind's `/models`, `/harnesses`,
-        `/handover` and `/skills/check`, in the order it tries them.
-
-        That mind's own session credential first. The hive's admin credential
-        follows only for a mind owned by `config.admin_credential_owner()`:
-        it opens every person's conversations, and anything at the address a
-        mind registered - which a mind may change with its own credential -
-        receives what is sent there (DECIDED 2026-11-15, Daniel: a mind not
-        owned by him never reaches his credentials). It is the fallback for
-        his minds still running code that accepts only the admin credential
-        on these routes. A mind with neither is called with no credential
-        and refuses.
-        """
-        from comms.config import admin_credential_owner
-
-        # Its own credential, or none when it registered none: either way
-        # the admin credential is only ever a second try after a refusal.
-        tried = [await self.mind_auth_headers(mind_id)]
-        owner = str((mind_row or {}).get("owner") or "").strip().lower()
-        trusted = admin_credential_owner()
-        admin = os.environ.get("MIND_ADMIN_TOKEN") or os.environ.get(
-            "COMMS_ADMIN_BEARER_TOKEN", ""
-        )
-        if admin and trusted and owner == trusted:
-            tried.append({"Authorization": f"Bearer {admin}"})
-        return tried
-
     async def _mind_operator_call(
         self, mind_id: str, mind_row: dict | None, method: str, url: str, **kwargs
     ) -> tuple[int, str]:
-        """One call to a mind's operator route; its status and body text.
+        """One call to a mind's `/models`, `/harnesses`, `/handover` or
+        `/skills/check`; its status and body text.
 
-        A refusal (401 or 503) moves on to the next credential, and the last
-        answer is returned whatever it is.
+        Made with that mind's own session credential and nothing else. A
+        refusal is returned as a refusal: the gateway holds no hive-wide key to
+        try next, and anything at the address a mind registered - which a mind
+        may change with its own credential - would receive it. A mind that
+        refuses its credential is put right for that one mind (paste or
+        replace its key), not worked around here.
         """
         import aiohttp
 
-        status, text = 0, ""
-        tried = await self._mind_operator_credentials(mind_id, mind_row)
-        for attempt, headers in enumerate(tried):
-            if attempt:
-                # Logged, so it is visible which of the owner's minds still
-                # need the admin credential and when the setting can go.
-                log_event(log, "mind.admin_credential.fallback", level=logging.WARNING,
-                          mind_id=mind_id, url=url, refused=status)
-            async with aiohttp.ClientSession() as http:
-                async with getattr(http, method)(url, headers=headers, **kwargs) as resp:
-                    status, text = resp.status, await resp.text()
-            if status not in (401, 503):
-                break
-        return status, text
+        headers = await self.mind_auth_headers(mind_id)
+        async with aiohttp.ClientSession() as http:
+            async with getattr(http, method)(url, headers=headers, **kwargs) as resp:
+                return resp.status, await resp.text()
 
     async def mind_models(self, mind_id: str, harness: str | None = None) -> list[dict]:
         """What a mind reports it may run, asked of the mind.

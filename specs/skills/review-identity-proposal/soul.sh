@@ -27,7 +27,7 @@ set -uo pipefail
 
 PROPOSAL_DIR="${SOUL_PROPOSAL_DIR:-${AUTO_REMEMBER_LOG_DIR:-${HIVE_PROJECT_DIR:-$HOME}/data/auto-remember}/soul-proposals}"
 LUCENT="${LUCENT_URL_SELF:-${LUCENT_URL:-}}"
-TOKEN="${LUCENT_BEARER_TOKEN:-}"
+TOKEN="${MIND_KEY:-${LUCENT_BEARER_TOKEN:-}}"
 NAME="${MIND_NAME:-}"
 NAME="$(printf '%s' "${NAME^}")"
 
@@ -40,7 +40,7 @@ api() {  # method path [body]
     # proposal it has already decided.
     [ -n "$LUCENT" ] || die "LUCENT_URL_SELF is not set"
     [ -n "$NAME" ]   || die "MIND_NAME is not set"
-    [ -n "$TOKEN" ]  || die "LUCENT_BEARER_TOKEN is not set; it is this mind's own lucent key"
+    [ -n "$TOKEN" ]  || die "MIND_KEY is not set; it is this mind's one key"
     if [ -n "$body" ]; then
         curl -sS -m 30 -X "$method" "$LUCENT$path" \
             -H "Authorization: Bearer $TOKEN" \

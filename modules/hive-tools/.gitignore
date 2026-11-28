@@ -1,0 +1,31 @@
+# Secrets — whole directories, not extensions, so a stray file can't slip in
+.env
+.env.*
+!.env.example
+credentials/
+data/
+
+# Keys and dumps
+*.pem
+*.key
+*.p12
+*.pkcs12
+id_rsa*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Editor junk
+.DS_Store

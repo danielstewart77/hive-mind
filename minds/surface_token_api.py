@@ -43,7 +43,7 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         surface has one that works, and which bot it belongs to, so they can
         see it is the mind they meant.
         """
-        refusal = authorize_admin(request)
+        refusal = await authorize_admin(request)
         if refusal is not None:
             return refusal
         try:
@@ -74,7 +74,7 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         reads as an outage. Storing it does not touch the running surface,
         which read its token at startup and keeps it until recreated.
         """
-        refusal = authorize_admin(request)
+        refusal = await authorize_admin(request)
         if refusal is not None:
             return refusal
         body = await request.json()

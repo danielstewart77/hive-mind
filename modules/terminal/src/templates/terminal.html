@@ -1,0 +1,2340 @@
+{% extends "layout.html" %}
+{% block content %}
+<link rel="stylesheet" href="{{ request.url_for('static', path='vendor/xterm/xterm.css') }}">
+<main class="terminal-page">
+    <div class="term-app" id="term-app" data-view="list" data-rail="expanded">
+        <!-- ── Sessions list (the "agents" rail) ────────────────────── -->
+        <section class="term-list-view" id="term-list-view">
+            <header class="term-list-head">
+                <button id="term-rail-collapse" class="term-icon-btn term-rail-btn" type="button"
+                        title="collapse agents sidebar" aria-label="collapse agents sidebar">«</button>
+                <h1 class="term-list-title">Agents</h1>
+                <div class="term-seg" role="tablist" aria-label="session filter">
+                    <button id="term-tab-active" class="term-seg-btn is-active" type="button"
+                            role="tab" aria-selected="true" data-filter="active">Active</button>
+                    <button id="term-tab-suspended" class="term-seg-btn" type="button"
+                            role="tab" aria-selected="false" data-filter="suspended">Suspended</button>
+                </div>
+                <button id="term-new" class="term-action-btn" type="button" title="start a new session">+ new</button>
+                <button id="term-refresh" class="term-action-btn" type="button" title="refresh session list">↻</button>
+            </header>
+            <div id="term-new-menu" class="term-new-menu" hidden aria-label="pick a mind"></div>
+            <div id="term-list" class="term-list" aria-live="polite"></div>
+            <p id="term-list-empty" class="term-list-empty" hidden>No sessions.</p>
+        </section>
+
+        <!-- ── Stage: the Brady-Bunch grid of attached terminals ────── -->
+        <section class="term-stage" id="term-stage">
+            <button id="term-rail-expand" class="term-rail-expand" type="button" hidden
+                    title="show agents sidebar" aria-label="show agents sidebar">agents »</button>
+            <div id="term-grid" class="term-grid" data-count="0"></div>
+            <p id="term-grid-empty" class="term-grid-empty">Select a session from the list to open it here.</p>
+        </section>
+    </div>
+    <div class="term-mobile-toolbar" id="term-mobile-toolbar" aria-label="terminal keys">
+        <button type="button" data-seq="&#x1b;">Esc</button>
+        <button type="button" data-seq="&#x09;">Tab</button>
+        <button type="button" data-seq="&#x03;">Ctrl+C</button>
+        <button type="button" data-scroll="-1" aria-label="scroll back a page">PgUp</button>
+        <button type="button" data-scroll="1" aria-label="scroll forward a page">PgDn</button>
+        <button type="button" data-seq="&#x1b;[D">&larr;</button>
+        <button type="button" data-seq="&#x1b;[A">&uarr;</button>
+        <button type="button" data-seq="&#x1b;[B">&darr;</button>
+        <button type="button" data-seq="&#x1b;[C">&rarr;</button>
+        <button type="button" data-seq="&#x0d;">&crarr;</button>
+    </div>
+</main>
+
+<script src="{{ request.url_for('static', path='vendor/xterm/xterm.js') }}"></script>
+<script src="{{ request.url_for('static', path='vendor/xterm/addon-fit.js') }}"></script>
+<script src="{{ request.url_for('static', path='vendor/xterm/addon-webgl.js') }}"></script>
+<script src="{{ request.url_for('static', path='terminal-routing.js') }}?v={{ asset_versions['terminal-routing.js'] }}"></script>
+<script>
+(function () {
+    "use strict";
+
+    // Interactive pty terminals (raw bytes over WS into `claude --resume`,
+    // see src/backlog/web-terminal-interface.md) inside the session-manager
+    // shell: agents rail, tile grid, per-session labels, TTS speaker. The
+    // speaker rides the watch-only /api/console SSE stream — assistant text
+    // is not recoverable from raw pty bytes.
+    const termApp = document.getElementById("term-app");
+    const listEl = document.getElementById("term-list");
+    const listEmpty = document.getElementById("term-list-empty");
+    const gridEl = document.getElementById("term-grid");
+    const gridEmpty = document.getElementById("term-grid-empty");
+    const refreshBtn = document.getElementById("term-refresh");
+    const newBtn = document.getElementById("term-new");
+    const newMenu = document.getElementById("term-new-menu");
+    const tabActive = document.getElementById("term-tab-active");
+    const tabSuspended = document.getElementById("term-tab-suspended");
+    const railCollapseBtn = document.getElementById("term-rail-collapse");
+    const railExpandBtn = document.getElementById("term-rail-expand");
+    const toolbar = document.getElementById("term-mobile-toolbar");
+
+    const REATTACH_WINDOW_MS = 30000;
+    const isWide = () => window.matchMedia("(min-width: 860px)").matches;
+
+    let currentFilter = "active";
+    let lastRows = [];          // flat rows from /api/terminal/sessions
+    const openPanels = new Map(); // sessionId -> panel
+    let focusedPanel = null;
+
+    // Whether opening a tile puts the cursor in the pane.
+    //
+    // A phone re-raises its soft keyboard for a focused editable on any later
+    // tap anywhere on the page, so a tile that focuses its own hidden
+    // textarea on open turns every subsequent tap into a keyboard — PgUp
+    // included, which only scrolls and sends nothing. Withholding that
+    // automatic focus is what keeps the keyboard down; a tap on the pane
+    // still focuses it, because xterm focuses its own textarea on a tap.
+    //
+    // The gate is the pointer alone and never the width — see
+    // TerminalRouting.paneTakesFocusOnOpen.
+    const coarsePointerMedia = window.matchMedia("(hover: none) and (pointer: coarse)");
+    function paneTakesCursor() {
+        return TerminalRouting.paneTakesFocusOnOpen({
+            coarsePointer: coarsePointerMedia.matches,
+        });
+    }
+
+    const contrastText = TerminalRouting.contrastText;
+    // only the focused tile paints its whole header bar; refresh both the
+    // outgoing and incoming panel so the color follows focus, not just labels
+    function setFocusedPanel(panel) {
+        if (focusedPanel === panel) return;
+        const prev = focusedPanel;
+        focusedPanel = panel;
+        if (prev && prev.refreshLabel) prev.refreshLabel();
+        if (panel && panel.refreshLabel) panel.refreshLabel();
+    }
+
+    // ── open-set persistence (restore the grid across reloads) ─────
+    // The URL fragment is the primary record — it survives a refresh in a
+    // per-tab, shareable way and rides through the proxy untouched (see
+    // TerminalRouting.parseOpenFragment). localStorage stays as a warm
+    // cache and the pre-fragment migration source.
+    function writeOpenFragment(ids) {
+        const frag = TerminalRouting.formatOpenFragment(ids);
+        const url = location.pathname + location.search + frag;
+        try { history.replaceState(null, "", url); } catch (e) {}
+    }
+    function saveOpenSet() {
+        const ids = Array.from(openPanels.keys());
+        try { localStorage.setItem("term-open", JSON.stringify(ids)); } catch (e) {}
+        writeOpenFragment(ids);
+    }
+    function recalledOpenSet() {
+        // Fragment wins; fall back to the localStorage cache for a tab that
+        // was opened before the fragment existed.
+        const fromUrl = TerminalRouting.parseOpenFragment(location.hash);
+        if (fromUrl.length) return fromUrl;
+        try { return JSON.parse(localStorage.getItem("term-open") || "[]") || []; } catch (e) { return []; }
+    }
+
+    // ── per-session labels (custom name + color), server-backed ──────
+    // Stored via /api/terminal/labels so names and colors follow the user
+    // across devices; localStorage is only a warm-start cache (and the
+    // migration source for labels created before the server store).
+    const LABEL_COLORS = ["#4ee8fc", "#4ee88a", "#c9a84c", "#e0724e", "#b06ee0", "#e05c8a", "#7e93a8"];
+    // further grid rows below the defaults: saturated / muted / grayscale
+    const EXTRA_COLOR_ROWS = [
+        ["#ff5c5c", "#ff8a3d", "#ffce42", "#c9e34e", "#5ce87a", "#3de0c0", "#3db6e8", "#5c8aff", "#9a5cff", "#e05cd0", "#ff5ca0"],
+        ["#e0a8a8", "#e0c2a8", "#e0d8a8", "#c2e0a8", "#a8e0b8", "#a8d8e0", "#a8b8e0", "#c2a8e0", "#e0a8d8", "#e0a8b8", "#c9a8e0"],
+        ["#ffffff", "#d8dee4", "#b0bcc6", "#8898a6", "#5c7284", "#3d5266", "#1e3448", "#0b1724"],
+    ];
+    let labelsCache = (function () {
+        try { return JSON.parse(localStorage.getItem("term-labels") || "{}") || {}; } catch (e) { return {}; }
+    })();
+    function cacheLabelsLocally() {
+        try { localStorage.setItem("term-labels", JSON.stringify(labelsCache)); } catch (e) {}
+    }
+    // Only the fields the user actually changed. Sending both every time means
+    // a tab working from a minutes-stale cache overwrites the colour another
+    // tab just set while the user was only editing a name.
+    //
+    // A failed write reverts the cache and repaints. This used to be
+    // fire-and-forget with an empty catch, so an unreachable store left the
+    // new name on screen, stored nothing, and said nothing — a tile showing a
+    // name the system of record does not hold, which is the entire class of
+    // bug this change exists to close.
+    async function pushLabel(id, patch, previous) {
+        let ok = false;
+        try {
+            const resp = await fetch("/api/terminal/labels/" + encodeURIComponent(id), {
+                method: "PUT", credentials: "same-origin",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(patch),
+            });
+            ok = resp.ok;
+        } catch (e) { ok = false; }
+        if (ok) return;
+        if (previous && (previous.name || previous.color)) labelsCache[id] = previous;
+        else delete labelsCache[id];
+        cacheLabelsLocally();
+        renderCards(lastRows);
+        openPanels.forEach(function (p) { p.refreshLabel(); });
+    }
+    // The server's copy is the record; this browser's is a warm-start cache
+    // so the first paint is not unlabelled. Read on every poll, not once at
+    // boot — a tab left open on one device has no other way to learn about a
+    // name set on another, and a tab is left open for days.
+    //
+    // `no-store`, because the response carries no cache directive of its own
+    // and a heuristically-cached one is indistinguishable from a current one:
+    // a stale read used to look like the server had lost labels it still
+    // held.
+    async function syncLabelsFromServer() {
+        let server = null;
+        try {
+            const resp = await fetch("/api/terminal/labels", {
+                credentials: "same-origin", cache: "no-store",
+            });
+            if (resp.ok) server = await resp.json();
+        } catch (e) {}
+        if (!server || typeof server !== "object") return;
+        // Nothing changed on the great majority of polls, and repainting
+        // anyway rebuilds the whole rail twice a minute under whatever the
+        // user is doing in it.
+        const next = JSON.stringify(server);
+        if (next === JSON.stringify(labelsCache)) return;
+        // Replaced, not merged. Merging keeps a label this browser holds and
+        // the server does not, which is exactly what a rename or a delete on
+        // another device looks like from here.
+        labelsCache = server;
+        cacheLabelsLocally();
+        renderCards(lastRows);
+        openPanels.forEach(function (p) { p.refreshLabel(); });
+    }
+    function getLabel(id) {
+        if (!id) return {};
+        const l = labelsCache[id];
+        return (l && typeof l === "object") ? l : {};
+    }
+    function setLabel(id, patch) {
+        if (!id) return;
+        const cur = (labelsCache[id] && typeof labelsCache[id] === "object") ? labelsCache[id] : {};
+        const next = Object.assign({}, cur, patch);
+        if (!next.name && !next.color) delete labelsCache[id]; else labelsCache[id] = next;
+        cacheLabelsLocally();
+        pushLabel(id, patch, cur);
+    }
+    // ── compose drafts ────────────────────────────────────────────
+    // One key per session, not one JSON blob for all of them. The labels
+    // cache reads its blob once at boot and writes the whole thing back, so
+    // two tabs each holding their own copy overwrite each other's sessions;
+    // for a name that is a nuisance, for a message the user is halfway
+    // through typing it is their words gone. Per-key writes touch only the
+    // session being typed into, and an ended session's draft is removed
+    // rather than left to grow the blob forever.
+    function draftKey(id) { return "term-draft:" + id; }
+    function getDraft(id) {
+        if (!id) return "";
+        try { return localStorage.getItem(draftKey(id)) || ""; } catch (e) { return ""; }
+    }
+    function setDraft(id, text) {
+        if (!id) return;
+        try {
+            if (text) localStorage.setItem(draftKey(id), text);
+            else localStorage.removeItem(draftKey(id));
+        } catch (e) {}
+    }
+    // A draft outlives the tile that wrote it, on purpose — but only as long
+    // as the session it was written to. A session ended from Telegram or the
+    // CLI closes with no tile watching, so nothing would ever drop its key,
+    // and every quota-bound write in this file shares one budget: once drafts
+    // have filled it, labels and the open set silently stop persisting too.
+    // The session list is the authority on what still exists.
+    function pruneDrafts(rows) {
+        const live = {};
+        rows.forEach(function (r) { if (r && r.id) live[r.id] = true; });
+        // Any open tile's session counts as live whatever the listing says —
+        // a tile can be attached before the listing has caught up.
+        openPanels.forEach(function (p, id) { live[id] = true; });
+        let keys;
+        try { keys = Object.keys(localStorage); } catch (e) { return; }
+        keys.forEach(function (k) {
+            if (k.indexOf("term-draft:") !== 0) return;
+            if (live[k.slice("term-draft:".length)]) return;
+            try { localStorage.removeItem(k); } catch (e) {}
+        });
+    }
+
+    // ── shared content helpers (assistant text out of console SSE) ──
+    function flattenContent(v) {
+        if (v == null) return "";
+        if (typeof v === "string") return v;
+        if (Array.isArray(v)) return v.map(flattenContent).join("");
+        if (typeof v === "object") {
+            if (typeof v.text === "string") return v.text;
+            if (v.content != null) return flattenContent(v.content);
+            return "";
+        }
+        return String(v);
+    }
+    function extractText(event) {
+        const v = event.content || event.delta || event.text ||
+            (event.message && (event.message.content || event.message.text)) || "";
+        return flattenContent(v);
+    }
+
+    function wsUrl(sessionId, cols, rows) {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        return proto + "//" + location.host + "/api/terminal/attach/" + encodeURIComponent(sessionId) +
+            "?cols=" + encodeURIComponent(cols || 80) + "&rows=" + encodeURIComponent(rows || 24);
+    }
+
+    // ── one live session, rendered as an xterm tile ────────────────
+    function createPanel(session) {
+        let sessionId = session.id;
+        let mindId = session.mind_id || null;
+        let mindName = session.mind_name || null;
+        let attachState = "connecting…";
+
+        const el = document.createElement("section");
+        el.className = "term-panel";
+        el.dataset.sessionId = sessionId;
+        el.innerHTML =
+            '<header class="term-panel-head">' +
+                '<button class="term-panel-back term-icon-btn" type="button" title="back to sessions" aria-label="back to sessions">‹</button>' +
+                '<span class="term-panel-dot" hidden aria-hidden="true"></span>' +
+                '<span class="term-panel-info">…</span>' +
+                '<button class="term-panel-rename term-action-btn" type="button" title="rename / recolor this session" aria-label="rename this session">✎</button>' +
+                '<button class="term-panel-mic term-action-btn" type="button" title="speak into this terminal" aria-label="voice input" aria-pressed="false">🎙</button>' +
+                '<button class="term-panel-speaker term-action-btn" type="button" title="toggle voice playback" aria-pressed="false">speaker off</button>' +
+                '<button class="term-panel-suspend term-action-btn term-action-btn-danger" type="button" ' +
+                    'title="suspend this session and keep its conversation">suspend</button>' +
+                '<button class="term-panel-end term-action-btn term-action-btn-danger" type="button" ' +
+                    'title="end this conversation for good">end</button>' +
+                '<button class="term-panel-close term-action-btn" type="button" title="remove from grid" aria-label="remove from grid">✕</button>' +
+            '</header>' +
+            '<div class="term-rename-pop" hidden>' +
+                '<div class="term-rename-row">' +
+                    '<input type="text" class="term-rename-input" maxlength="40" placeholder="session name" aria-label="session name">' +
+                    '<div class="term-rename-actions">' +
+                        '<button type="button" class="term-action-btn term-rename-clear">clear</button>' +
+                        '<button type="button" class="term-action-btn term-rename-save">save</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="term-color-grid" role="group" aria-label="session color">' +
+                    '<div class="term-color-grid-swatches"></div>' +
+                    '<div class="term-color-grid-custom">' +
+                        '<input type="color" class="term-color-input" aria-label="custom color">' +
+                        '<span class="term-color-custom-label">custom</span>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+            '<div class="term-rotated" hidden>' +
+                '<div class="term-rotated-head">' +
+                    '<span class="term-rotated-title">This session rotated. Here is where it left off.</span>' +
+                    '<button type="button" class="term-rotated-close term-icon-btn" title="dismiss" aria-label="dismiss">✕</button>' +
+                '</div>' +
+                '<div class="term-rotated-body"></div>' +
+            '</div>' +
+            '<div class="term-xterm"></div>' +
+            // The compose box. A phone keyboard's autocorrect, prediction and
+            // voice typing all work by rewriting text already in the field —
+            // and xterm forwards that field to the pty keystroke by
+            // keystroke, so every correction re-sends a region the pty
+            // already has. That is the duplicated-sentence report. Here
+            // nothing reaches the pty until the arrow, so there is no
+            // already-sent region for the keyboard to rewrite.
+            //
+            // A real textarea, so the keyboard's own intelligence applies:
+            // xterm's helper textarea carries autocorrect="off" and is
+            // emptied after every burst, which is what makes suggestions
+            // impossible in the pane itself.
+            '<div class="term-compose" hidden>' +
+                '<textarea class="term-compose-input" rows="2" maxlength="8000" ' +
+                    'autocorrect="on" autocapitalize="sentences" spellcheck="true" ' +
+                    'enterkeyhint="enter" ' +
+                    'placeholder="message — return adds a line, arrow sends" ' +
+                    'aria-label="compose a message"></textarea>' +
+                '<button type="button" class="term-compose-send" title="send" aria-label="send">&#10148;</button>' +
+            '</div>';
+
+        const panelHead = el.querySelector(".term-panel-head");
+        const headControls = Array.from(el.querySelectorAll(".term-panel-head button, .term-panel-head .term-panel-info"));
+        const info = el.querySelector(".term-panel-info");
+        const xtermEl = el.querySelector(".term-xterm");
+        const micBtn = el.querySelector(".term-panel-mic");
+        const speakerBtn = el.querySelector(".term-panel-speaker");
+        const suspendBtn = el.querySelector(".term-panel-suspend");
+        const endBtn = el.querySelector(".term-panel-end");
+        const closeBtn = el.querySelector(".term-panel-close");
+        const backBtn = el.querySelector(".term-panel-back");
+        const renameBtn = el.querySelector(".term-panel-rename");
+        const renamePop = el.querySelector(".term-rename-pop");
+        const renameInput = el.querySelector(".term-rename-input");
+        const renameSave = el.querySelector(".term-rename-save");
+        const renameClear = el.querySelector(".term-rename-clear");
+        const headDot = el.querySelector(".term-panel-dot");
+        const colorGridSwatches = el.querySelector(".term-color-grid-swatches");
+        const colorInput = el.querySelector(".term-color-input");
+        const composeEl = el.querySelector(".term-compose");
+        const composeInput = el.querySelector(".term-compose-input");
+        const composeSend = el.querySelector(".term-compose-send");
+        const rotatedEl = el.querySelector(".term-rotated");
+        const rotatedBody = el.querySelector(".term-rotated-body");
+        const rotatedClose = el.querySelector(".term-rotated-close");
+
+        const term = new window.Terminal({
+            convertEol: true,
+            cursorBlink: true,
+            fontSize: 14,
+            scrollback: 5000,
+            theme: { background: "#080f18", foreground: "#dce8f0", cursor: "#c9a84c" },
+        });
+        const fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+
+        // A request waiting on a person's yes comes with a link to the hive
+        // site's approval page; make it open there. Only that page's path is
+        // matched, and the link carries nothing but the request's identifier.
+        term.registerLinkProvider({
+            provideLinks: function (y, callback) {
+                const line = term.buffer.active.getLine(y - 1);
+                if (!line) { callback(undefined); return; }
+                const text = line.translateToString(true);
+                const found = [];
+                const pattern = /(?:https?:\/\/[^\s"')]+)?\/approvals\/[0-9a-fA-F-]{8,}/g;
+                let m;
+                while ((m = pattern.exec(text)) !== null) {
+                    const uri = m[0];
+                    found.push({
+                        range: { start: { x: m.index + 1, y: y }, end: { x: m.index + uri.length + 1, y: y } },
+                        text: uri,
+                        activate: function () { window.open(uri, "_blank", "noopener"); },
+                    });
+                }
+                callback(found.length ? found : undefined);
+            },
+        });
+
+        // window's "resize" event alone misses layout changes that don't
+        // resize the window itself -- a foldable unfolding, an on-screen
+        // keyboard opening, or this tile's own container changing shape
+        // when the rail collapses. Watch the tile's actual box instead.
+        let fitRaf = null;
+        function scheduleFit() {
+            if (fitRaf) return;
+            fitRaf = requestAnimationFrame(function () { fitRaf = null; doFit(); });
+        }
+        const resizeObserver = new ResizeObserver(scheduleFit);
+        // The attach URL's cols/rows become the pty's spawn geometry, so the
+        // measurement has to happen before the socket opens. A tile mounted
+        // into a stage that hasn't been laid out yet — which on mobile is
+        // every tile, since the rail is showing when you tap a card — has a
+        // zero-sized box, FitAddon's proposeDimensions declines to guess,
+        // and xterm silently keeps its 80x24 default. The TUI then paints
+        // its first screen for a terminal nearly twice the width of the
+        // phone showing it. Wait for a real box, then measure, then attach.
+        function fitWhenSized(done, attempts) {
+            const n = attempts || 0;
+            if (xtermEl.clientWidth > 0 && xtermEl.clientHeight > 0) {
+                try { fitAddon.fit(); } catch (e) {}
+                done();
+            } else if (n >= 60) {
+                done();  // ~1s of frames; attach at the default rather than never
+            } else {
+                requestAnimationFrame(function () { fitWhenSized(done, n + 1); });
+            }
+        }
+        // xterm paints only the rows it has marked dirty, so a repaint the
+        // browser never performed is never retried: the buffer behind the
+        // stale glyphs is already correct, and no later write touches those
+        // rows again. That is the shape of the artifacts on this terminal —
+        // garbage that survives indefinitely, and comes back correct the
+        // moment a selection forces those rows to re-render. Every moment
+        // where an invalidation is known to get dropped (a grid change, a
+        // return from a backgrounded tab whose rAF was throttled, a tile
+        // being clicked into) ends with the whole viewport repainted from
+        // the buffer. refresh() walks the visible rows only, so it costs a
+        // fraction of the fit that usually precedes it.
+        let repaints = 0;
+        function repaint() {
+            repaints++;
+            try { term.refresh(0, term.rows - 1); } catch (e) {}
+        }
+        // Text scrolling up is the moment an invalidation is most likely to
+        // go missing, so every scroll ends in a repaint. Coalesced onto a
+        // frame rather than fired per line: a build log scrolls hundreds of
+        // lines a second and repainting each one would stall the tab, while
+        // one repaint per frame is visually indistinguishable — the screen
+        // cannot show more than a frame's worth of scrolling anyway.
+        let repaintRaf = null;
+        function scheduleRepaint() {
+            if (repaintRaf) return;
+            repaintRaf = requestAnimationFrame(function () {
+                repaintRaf = null;
+                repaint();
+            });
+        }
+        // Scroll alone is not the trigger. onScroll fires when lines move
+        // into scrollback, and the thing on the other end of this socket is
+        // tmux — which lives in the alternate screen buffer, where nothing
+        // ever scrolls into scrollback and a full-screen app simply redraws
+        // in place. Hooking scroll only would leave the repaint dead for
+        // every session anyone actually opens. New output is the real
+        // signal, and onWriteParsed carries it for both buffers. It cannot
+        // feed itself the way a render hook would: refresh() repaints, it
+        // does not write.
+        term.onScroll(scheduleRepaint);
+        term.onWriteParsed(scheduleRepaint);
+
+        // The renderer is the other half. xterm's default DOM renderer
+        // paints the grid as a few thousand row divs and cell spans, and
+        // the artifacts here are invalidations the browser drops somewhere
+        // across that tree. WebGL collapses the whole grid into a single
+        // canvas: one composited layer with no per-row elements to lose
+        // track of, and no sub-cell slack outside a painted surface for the
+        // stale strips either side of the grid to live in. It also costs
+        // less under exactly the heavy scrolling that provokes the bug.
+        // The addon attaches to a live screen, so this runs after open().
+        let webgl = null;
+        function loadRenderer() {
+            if (!window.WebglAddon) return;
+            try {
+                const addon = new window.WebglAddon.WebglAddon();
+                // A lost context leaves the canvas blank for good. Dropping
+                // the addon returns xterm to its built-in DOM renderer —
+                // slower and artifact-prone, but readable, and the paint
+                // sweep that guards that renderer comes back with it.
+                addon.onContextLoss(function () {
+                    try { addon.dispose(); } catch (e) {}
+                    webgl = null;
+                    repaint();
+                });
+                term.loadAddon(addon);
+                webgl = addon;
+            } catch (e) {
+                webgl = null;   // no WebGL here; the DOM renderer still works
+            }
+        }
+        // What the terminal believes is on screen, straight out of the
+        // buffer. Under WebGL there is no DOM to read a tile back from and
+        // selecting the canvas gives you nothing, so this is how a garbled
+        // tile gets read without touching it.
+        function screenText() {
+            const buf = term.buffer.active;
+            const out = [];
+            for (let y = 0; y < term.rows; y++) {
+                const line = buf.getLine(buf.viewportY + y);
+                out.push(line ? line.translateToString(true) : "");
+            }
+            return out.join("\n");
+        }
+        // Garbage on screen has exactly two possible homes, and they need
+        // opposite fixes. Either xterm painted the wrong thing into the DOM,
+        // or the DOM is right and the pixels under it are stale — a
+        // compositor that dropped an invalidation, a remoting layer that
+        // lost a tile. Reading the screen can't tell them apart, and
+        // selecting the text destroys the evidence by forcing a repaint.
+        // Comparing each painted row against the buffer it was rendered
+        // from can: a row that disagrees is xterm's fault, and a screen full
+        // of garbage over rows that all agree is not.
+        // Only the DOM renderer has rows to compare; under WebGL there is
+        // one canvas and nothing to read back, which is the point of it.
+        function paintCheck() {
+            const rows = xtermEl.querySelector(".xterm-rows");
+            if (!rows) return null;
+            const buf = term.buffer.active;
+            const out = {rows: term.rows, drift: 0, samples: []};
+            for (let y = 0; y < term.rows && y < rows.children.length; y++) {
+                const line = buf.getLine(buf.viewportY + y);
+                const want = (line ? line.translateToString(true) : "").replace(/\s+$/, "");
+                const got = (rows.children[y].textContent || "").replace(/\s+$/, "");
+                if (want !== got) {
+                    out.drift++;
+                    if (out.samples.length < 3) out.samples.push({row: y, buffer: want, dom: got});
+                }
+            }
+            return out;
+        }
+        function doFit() {
+            const before = term.cols + "x" + term.rows;
+            try { fitAddon.fit(); } catch (e) {}
+            if (term.cols + "x" + term.rows !== before) { sendResize(); repaint(); }
+        }
+
+        let ws = null;
+        let destroyed = false;
+        let deliberateClose = false;
+        let reattachTimer = null;
+        let reattachStartedAt = 0;
+        let reattachAttempts = 0;   // consecutive failed attaches; reset on a live socket
+        let lastRecvAt = 0;         // ms of the last byte in; feeds the stale-socket watchdog
+        let socketOpenedAt = 0;     // ms the live socket opened; how long it held decides the backoff
+        let staleTimer = null;      // watchdog interval; catches a half-open (zombie) socket
+        let standingDown = false;   // stopped trying on purpose; the state text is a reconnect button
+        // The pty end sends a keepalive every 5s. Three missed beats is a
+        // zombie; a foreground return with even one missed beat reattaches
+        // eagerly, since that's the exact moment a rotation's socket died.
+        const STALE_MS = 15000;
+        const FOREGROUND_STALE_MS = 6000;
+        // A socket that held this long was a working attach; anything
+        // shorter keeps its place in the backoff.
+        const STABLE_SOCKET_MS = 10000;
+        // Roughly 25s of backed-off retries before the tile stops trying.
+        const MAX_ATTACH_ATTEMPTS = 6;
+
+        function setInfo() {
+            const label = getLabel(sessionId);
+            const base = mindName || (mindId || "").slice(0, 8);
+            const nm = (label.name || "").trim();
+            info.textContent = (nm || base) + " · " + attachState;
+            info.title = nm ? nm + " · " + base : base;
+            // Every state change funnels through here — setAttachState and
+            // stopWith both end in setInfo — so this is the one hook the box
+            // needs to follow the tile.
+            syncComposeLock();
+        }
+        function setAttachState(state) {
+            attachState = state;
+            standingDown = false;
+            info.classList.remove("is-stopped");
+            setInfo();
+        }
+        // A rotation respawns the pane, which takes its screen and scrollback
+        // with it — the terminal goes blank on a conversation that was
+        // mid-flow. This is the only account of what was on it. It sits beside
+        // the terminal rather than in it: the harness owns that pane, runs on
+        // the alternate screen, and repaints over anything written there.
+        // textContent throughout — the body is verbatim conversation text and
+        // is never markup.
+        function showRotated(exchange) {
+            const ex = exchange || {};
+            rotatedBody.textContent = "";
+            [["you", ex.user], ["reply", ex.assistant]].forEach(function (pair) {
+                const text = (pair[1] || "").trim();
+                if (!text) return;
+                const label = document.createElement("div");
+                label.className = "term-rotated-label";
+                label.textContent = pair[0];
+                const body = document.createElement("div");
+                body.className = "term-rotated-text";
+                body.textContent = text;
+                rotatedBody.appendChild(label);
+                rotatedBody.appendChild(body);
+            });
+            // A rotation with nothing recorded before it still gets the
+            // banner: the blank pane is the thing being explained, and a
+            // heading over an empty box reads as a load that failed.
+            rotatedEl.hidden = false;
+            doFit();
+        }
+        rotatedClose.addEventListener("click", function () {
+            rotatedEl.hidden = true;
+            rotatedBody.textContent = "";
+            doFit();
+            // Dismissing a banner is not a request to type. On a phone this
+            // focus does land (the stage is up by the time a banner can be
+            // closed), so it is one of the paths that raises the keyboard
+            // over a conversation the user is only reading.
+            if (paneTakesCursor()) term.focus();
+        });
+        // A tile that has stopped trying — evicted by another window, refused
+        // by the mind, or out of reattach window — must still have a way
+        // back, or the only cure is reloading the page. The state text
+        // becomes the button.
+        function stopWith(state) {
+            attachState = state + " — tap to reconnect";
+            standingDown = true;
+            info.classList.add("is-stopped");
+            setInfo();
+            standDownMic();
+        }
+        info.addEventListener("click", function () {
+            if (standingDown) { reattachAttempts = 0; attach(); }
+        });
+
+        // ── custom name + color ───────────────────────────────────
+        let editSelectedColor = "";
+        function applyLabel() {
+            const label = getLabel(sessionId);
+            setInfo();
+            const color = label.color || "";
+            el.style.borderLeft = color ? "3px solid " + color : "";
+            // the focused tile paints its whole header bar so the selected
+            // terminal matches its painted card in the rail; unfocused
+            // tiles keep the thin left-edge indicator + header dot
+            const isFocused = focusedPanel === panel;
+            if (color && isFocused) {
+                const fg = contrastText(color);
+                panelHead.style.background = color;
+                headControls.forEach(function (node) { node.style.color = fg; });
+                headDot.hidden = true;
+            } else {
+                panelHead.style.background = "";
+                headControls.forEach(function (node) { node.style.color = ""; });
+                headDot.style.background = color;
+                headDot.hidden = !color;
+            }
+            renderCards(lastRows);
+        }
+        function buildSwatch(container, c) {
+            const sw = document.createElement("button");
+            sw.type = "button";
+            sw.className = "term-swatch";
+            sw.style.background = c;
+            sw.dataset.color = c;
+            sw.setAttribute("aria-label", "color " + c);
+            sw.addEventListener("click", function () {
+                editSelectedColor = (editSelectedColor === c) ? "" : c;
+                markSwatches();
+            });
+            container.appendChild(sw);
+        }
+        function buildSwatches() {
+            colorGridSwatches.innerHTML = "";
+            [LABEL_COLORS].concat(EXTRA_COLOR_ROWS).forEach(function (row) {
+                const rowEl = document.createElement("div");
+                rowEl.className = "term-color-grid-row";
+                row.forEach(function (c) { buildSwatch(rowEl, c); });
+                colorGridSwatches.appendChild(rowEl);
+            });
+        }
+        function markSwatches() {
+            el.querySelectorAll(".term-swatch[data-color]").forEach(function (sw) {
+                sw.classList.toggle("is-selected", sw.dataset.color === editSelectedColor);
+            });
+            colorInput.value = /^#[0-9a-f]{6}$/i.test(editSelectedColor) ? editSelectedColor : "#4ee8fc";
+        }
+        colorInput.addEventListener("input", function () {
+            editSelectedColor = colorInput.value;
+            markSwatches();
+        });
+        // What the dialog opened holding, so commit can tell what the user
+        // actually touched. Sending both fields every time defeats the partial
+        // write: the colour it would send comes from `labelsCache`, which on a
+        // phone that has not polled recently is minutes old — so changing a name
+        // here would overwrite a colour set at another device with a stale one.
+        let renameOpenedWith = {name: "", color: ""};
+        function openRename() {
+            const label = getLabel(sessionId);
+            renameInput.value = label.name || "";
+            editSelectedColor = label.color || "";
+            renameOpenedWith = {name: label.name || "", color: label.color || ""};
+            markSwatches();
+            renamePop.hidden = false;
+            renameInput.focus();
+            renameInput.select();
+        }
+        function closeRename() { renamePop.hidden = true; }
+        function commitRename() {
+            const patch = {};
+            const name = renameInput.value.trim();
+            if (name !== renameOpenedWith.name) patch.name = name;
+            if (editSelectedColor !== renameOpenedWith.color) patch.color = editSelectedColor;
+            if (Object.keys(patch).length) setLabel(sessionId, patch);
+            closeRename();
+            applyLabel();
+        }
+        buildSwatches();
+        renameBtn.addEventListener("click", function () {
+            if (renamePop.hidden) openRename(); else closeRename();
+        });
+        renameSave.addEventListener("click", commitRename);
+        renameClear.addEventListener("click", function () {
+            setLabel(sessionId, {name: "", color: ""});
+            closeRename();
+            applyLabel();
+        });
+        renameInput.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+            else if (e.key === "Escape") { e.preventDefault(); closeRename(); }
+        });
+
+        // ── TTS speaker (assistant text via the console SSE stream) ──
+        const audioEl = new Audio();
+        audioEl.preload = "auto";
+        let speakerOn = false;
+        let ttsSource = null;
+        let ttsBuffer = "";
+        let ttsFlushTimer = null;
+        let ttsPlaying = false;
+        const ttsQueue = [];
+
+        function loadSpeakerPref() {
+            try { return localStorage.getItem("term-speaker:" + (mindName || "default")) === "on"; }
+            catch (e) { return false; }
+        }
+        function saveSpeakerPref(on) {
+            try { localStorage.setItem("term-speaker:" + (mindName || "default"), on ? "on" : "off"); } catch (e) {}
+        }
+        function setSpeakerLabel() {
+            speakerBtn.textContent = speakerOn ? "speaker on" : "speaker off";
+            speakerBtn.setAttribute("aria-pressed", speakerOn ? "true" : "false");
+            speakerBtn.classList.toggle("term-speaker-on", speakerOn);
+        }
+        function scheduleTtsFlush() {
+            if (ttsFlushTimer) clearTimeout(ttsFlushTimer);
+            ttsFlushTimer = setTimeout(flushTtsNow, 1500);
+        }
+        async function flushTtsNow() {
+            if (ttsFlushTimer) { clearTimeout(ttsFlushTimer); ttsFlushTimer = null; }
+            const text = TerminalRouting.speakable(ttsBuffer);
+            ttsBuffer = "";
+            if (!speakerOn || !text) return;
+            try {
+                const resp = await fetch("/api/terminal/tts", {
+                    method: "POST", credentials: "same-origin",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({text: text, voice_id: mindName || "default"}),
+                });
+                if (!resp.ok) return;
+                const blob = await resp.blob();
+                ttsQueue.push(URL.createObjectURL(blob));
+                playNextTtsClip();
+            } catch (err) {}
+        }
+        function playNextTtsClip() {
+            if (ttsPlaying) return;
+            const url = ttsQueue.shift();
+            if (!url) return;
+            ttsPlaying = true;
+            audioEl.src = url;
+            audioEl.play().catch(function () { ttsPlaying = false; URL.revokeObjectURL(url); });
+            audioEl.onended = function () {
+                URL.revokeObjectURL(url);
+                ttsPlaying = false;
+                playNextTtsClip();
+            };
+        }
+        function openTtsStream() {
+            closeTtsStream();
+            ttsSource = new EventSource("/api/console/" + encodeURIComponent(sessionId) + "/stream");
+            ttsSource.onmessage = function (msg) {
+                let event;
+                try { event = JSON.parse(msg.data); } catch (e) { return; }
+                if (event.type === "assistant") {
+                    const chunk = extractText(event);
+                    if (chunk) {
+                        ttsBuffer += chunk;
+                        // A terminal's prose arrives one whole block at a
+                        // time, so there is nothing to wait for. The delay
+                        // below exists for the chat path, which streams
+                        // partial deltas and needs a gap to tell a finished
+                        // sentence from a paused one.
+                        if (event.block_complete) flushTtsNow();
+                        else scheduleTtsFlush();
+                    }
+                } else if (event.type === "user" || event.type === "result") {
+                    flushTtsNow();
+                }
+            };
+            // EventSource retries on its own; a dead session just stays silent.
+        }
+        function closeTtsStream() {
+            if (ttsSource) { ttsSource.close(); ttsSource = null; }
+        }
+        function stopTtsPlayback() {
+            ttsBuffer = "";
+            if (ttsFlushTimer) { clearTimeout(ttsFlushTimer); ttsFlushTimer = null; }
+            ttsQueue.forEach(function (u) { URL.revokeObjectURL(u); });
+            ttsQueue.length = 0;
+            try { audioEl.pause(); audioEl.src = ""; } catch (e) {}
+            ttsPlaying = false;
+        }
+        speakerOn = loadSpeakerPref();
+        setSpeakerLabel();
+        if (speakerOn) openTtsStream();
+        speakerBtn.addEventListener("click", function () {
+            speakerOn = !speakerOn;
+            saveSpeakerPref(speakerOn);
+            setSpeakerLabel();
+            if (speakerOn) openTtsStream();
+            else { closeTtsStream(); stopTtsPlayback(); }
+        });
+
+        // ── mic (whisper via the stt proxy, typed into this pane) ────
+        // Three states past idle, and every path out of them releases the
+        // device: a MediaStreamTrack left live keeps the browser's recording
+        // indicator lit for the life of the tab.
+        //
+        // The transcript is typed, never submitted. Whisper runs without a
+        // VAD gate and will happily return "Thank you." for a room's worth
+        // of silence, so the last word on whether it heard you right is
+        // always the user's own Enter.
+        const MIC_MAX_MS = 120000;    // an unattended recording ends itself
+        const MIC_ERROR_MS = 2000;    // how long the red flash sits
+        const MIC_STT_MS = 60000;     // a round trip that never answers still ends
+        // How much speech goes into one transcription. Whisper is a batch
+        // model: nothing comes back until a recording is closed, so a
+        // capture that closes only when the user stops talking shows
+        // nothing on screen for as long as they talk. The recorder is
+        // therefore cycled — closed and reopened on the same live stream —
+        // every interval, and each closed segment is transcribed on its
+        // own while the next one records. The interval is the visible lag,
+        // and also the width of the window whisper has to work out a word
+        // straddling a boundary, so it is seconds rather than milliseconds.
+        const MIC_SEGMENT_MS = 4000;
+        let micState = "idle";       // idle | recording | working
+        let micRecorder = null;
+        let micStream = null;
+        let micCapTimer = null;
+        let micErrTimer = null;
+        let micSegTimer = null;
+        // One capture owns one generation. Every asynchronous continuation —
+        // a resolving getUserMedia, a queued onstop, a fetch in flight —
+        // carries the generation it started under and does nothing if a
+        // later tap or an abandonment has since moved it on. A state check
+        // cannot do this job: state returns to "idle" between captures, so a
+        // stale continuation finds exactly the state it started in.
+        let micRun = 0;
+        // Segments of the capture now running. `micSeqNext` numbers them as
+        // they are recorded and `micEmitNext` is the one the pane is waiting
+        // for, which is what keeps speech in spoken order: whisper answers a
+        // short segment faster than a long one, so the second half of a
+        // sentence routinely comes back first. `micPending` counts segments
+        // recorded but not yet answered, and is what tells a stopped capture
+        // it is finally finished.
+        let micSeqNext = 0;
+        let micEmitNext = 0;
+        let micPending = 0;
+        let micResults = {};
+        let micTypedAny = false;
+        let micStopping = false;
+        let micSpokenTo = null;
+
+        function setMicState(next) {
+            micState = next;
+            if (micErrTimer) { clearTimeout(micErrTimer); micErrTimer = null; }
+            micBtn.classList.toggle("is-recording", next === "recording");
+            micBtn.classList.toggle("is-working", next === "working");
+            micBtn.classList.remove("is-error");
+            micBtn.setAttribute("aria-pressed", next === "recording" ? "true" : "false");
+            micBtn.title = next === "recording" ? "stop and transcribe"
+                : next === "working" ? "transcribing…"
+                : "speak into this terminal";
+        }
+        // Give the keyboard back to the pane — but only when the mic button
+        // still holds it. A transcript that lands after the user has clicked
+        // into another tile would otherwise drag focus back here mid-sentence
+        // and split their typing across two ptys.
+        function restoreMicFocus() {
+            if (destroyed) return;
+            // Never out of the compose box. On a landscape phone or a tablet
+            // both the mic and the box are on screen at once, and pulling
+            // focus to the pane there closes the soft keyboard on a
+            // half-written message.
+            if (document.activeElement === composeInput) return;
+            if (el.contains(document.activeElement)) term.focus();
+        }
+        function micFailed() {
+            setMicState("idle");
+            micBtn.classList.add("is-error");
+            micErrTimer = setTimeout(function () {
+                micErrTimer = null;
+                micBtn.classList.remove("is-error");
+            }, MIC_ERROR_MS);
+            // Every error path ends on the button, so without this the Enter
+            // meant to retry the typed line re-arms the microphone instead.
+            restoreMicFocus();
+        }
+        // Idempotent, and safe against a recorder the browser already
+        // stopped for us — backgrounding a tab ends the track, and stop()
+        // on an inactive recorder throws.
+        function releaseMic() {
+            if (micCapTimer) { clearTimeout(micCapTimer); micCapTimer = null; }
+            if (micSegTimer) { clearTimeout(micSegTimer); micSegTimer = null; }
+            if (micRecorder) {
+                try { if (micRecorder.state !== "inactive") micRecorder.stop(); } catch (e) {}
+                micRecorder = null;
+            }
+            if (micStream) {
+                try { micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+                micStream = null;
+            }
+        }
+        // Drop a capture on the floor: the device goes back, the audio is
+        // discarded, and the generation moves on so the stop event this
+        // very call is about to queue transcribes nothing. Stopping a
+        // recorder is not cancelling it — onstop still fires, and without
+        // the bump the words of a recording the user cancelled arrive in
+        // the pane seconds later. Segments already answered but not yet
+        // typed go with it, for the same reason.
+        function abandonMicCapture() {
+            micRun += 1;
+            micResults = {};
+            micSeqNext = 0;
+            micEmitNext = 0;
+            micPending = 0;
+            micTypedAny = false;
+            micStopping = false;
+            micSpokenTo = null;
+            releaseMic();
+        }
+        // The pane has stopped taking input — suspended from another surface,
+        // ended, evicted. Holding the device through that leaves the
+        // browser's recording indicator lit on a tile that can no longer
+        // receive a word of what it is hearing.
+        // Only a live capture: past the stop the device is already back, and
+        // the words are owed an answer. A transcript that returns to a tile
+        // with no socket left has to reach the error state rather than be
+        // dropped here, which is the whole point of that state existing.
+        function standDownMic() {
+            if (micState !== "recording") return;
+            abandonMicCapture();
+            setMicState("idle");
+        }
+        // Open a recorder on the live stream and claim the next sequence
+        // number for what it is about to capture. The number is taken here,
+        // at the start of the segment, because that is the order the words
+        // were spoken in — taking it when the audio is uploaded would order
+        // the pane by whichever segment the browser finished encoding first.
+        function startMicSegment(run) {
+            let rec;
+            try {
+                rec = new window.MediaRecorder(micStream);
+            } catch (e) {
+                return null;
+            }
+            const seq = micSeqNext++;
+            const spokenTo = micSpokenTo;
+            let chunks = [];
+            let handed = false;
+            // onstop can arrive twice — once for the cycle that closed this
+            // recorder, once for a release that stopped it again — and the
+            // second arrival would upload an emptied buffer and type a
+            // stray transcript of silence into the pane.
+            function hand() {
+                if (handed) return;
+                handed = true;
+                const captured = chunks;
+                chunks = [];
+                transcribeMicSegment(run, seq, captured, rec.mimeType, spokenTo);
+            }
+            rec.ondataavailable = function (ev) {
+                if (ev && ev.data) chunks.push(ev.data);
+            };
+            rec.onstop = hand;
+            // The recorder reporting its own failure is not an exception —
+            // it arrives here, with the device still held. The segment is
+            // still owed an answer, so it is handed on with whatever it
+            // managed to capture rather than left counted and unresolved.
+            rec.onerror = function () {
+                if (run !== micRun) return;
+                hand();
+            };
+            micPending += 1;
+            try {
+                rec.start();
+            } catch (e) {
+                // Nothing was captured and nothing will be. Give the
+                // sequence number straight back to the queue, or every
+                // later segment waits behind a number that never resolves.
+                deliverMicSegment(run, seq, "");
+                return null;
+            }
+            return rec;
+        }
+        // Close the segment now recording and open the next one on the same
+        // stream. The device is never released between the two, so the gap
+        // is the few milliseconds the browser takes to construct a recorder.
+        function cycleMicSegment() {
+            micSegTimer = null;
+            if (micState !== "recording") return;
+            const run = micRun;
+            const closing = micRecorder;
+            micRecorder = null;
+            try {
+                if (closing && closing.state !== "inactive") closing.stop();
+            } catch (e) {}
+            if (run !== micRun) return;
+            const next = startMicSegment(run);
+            if (!next) {
+                // The stream can no longer be recorded — unplugged, revoked.
+                // What is already captured is still owed to the pane, so
+                // this ends the capture the way the second tap does rather
+                // than throwing the answers away.
+                finishMicCapture();
+                return;
+            }
+            micRecorder = next;
+            micSegTimer = setTimeout(cycleMicSegment, MIC_SEGMENT_MS);
+        }
+        async function startMicCapture() {
+            const media = navigator.mediaDevices;
+            if (!media || !media.getUserMedia || typeof window.MediaRecorder !== "function") {
+                micFailed();
+                return;
+            }
+            const run = ++micRun;
+            let stream;
+            try {
+                stream = await media.getUserMedia({audio: true});
+            } catch (e) {
+                if (run === micRun) micFailed();   // denied, or no input device at all
+                return;
+            }
+            // A tile torn down while the permission prompt was up, or a tap
+            // that superseded this one while it was up, must not come back
+            // holding a live microphone.
+            if (destroyed || run !== micRun || micState !== "idle") {
+                try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+                return;
+            }
+            micStream = stream;
+            micResults = {};
+            micSeqNext = 0;
+            micEmitNext = 0;
+            micPending = 0;
+            micTypedAny = false;
+            micStopping = false;
+            // Which conversation this is being spoken to. The tile can be
+            // repointed mid-capture, and words meant for the one being left
+            // must not land in another.
+            micSpokenTo = sessionId;
+            // start() throws in its own right — the device can disappear
+            // between getUserMedia resolving and the recorder claiming it —
+            // and an unwrapped throw here leaves the microphone live with
+            // the button showing nothing at all.
+            const first = startMicSegment(run);
+            if (!first) {
+                abandonMicCapture();
+                micFailed();
+                return;
+            }
+            micRecorder = first;
+            setMicState("recording");
+            micSegTimer = setTimeout(cycleMicSegment, MIC_SEGMENT_MS);
+            micCapTimer = setTimeout(function () {
+                micCapTimer = null;
+                if (micState === "recording") finishMicCapture();
+            }, MIC_MAX_MS);
+        }
+        // End the capture: close the segment in progress, give the device
+        // back, and wait for the answers still owed. The button reads as
+        // working from here, which is the only stretch in which it does —
+        // during the recording the segments upload behind a button that
+        // goes on saying it is recording, because it is.
+        function finishMicCapture() {
+            if (micState !== "recording") return;
+            micStopping = true;
+            setMicState("working");
+            // Closing the recorder hands its audio on; releaseMic would do
+            // that too, but it also drops the stream, and the order matters
+            // only in that both must happen before the drain check below.
+            releaseMic();
+            drainMicSegments(micRun);
+        }
+        // Type every answered segment that is next in line, and stop at the
+        // first gap. A segment answered out of order waits in `micResults`
+        // until the ones before it have been typed.
+        function drainMicSegments(run) {
+            if (run !== micRun) return;
+            while (Object.prototype.hasOwnProperty.call(micResults, micEmitNext)) {
+                const text = micResults[micEmitNext];
+                delete micResults[micEmitNext];
+                micEmitNext += 1;
+                if (!text) continue;
+                if (destroyed || sessionId !== micSpokenTo) {
+                    // The tile is gone or now holds a different conversation.
+                    // Everything still in flight is owed to a session that
+                    // is no longer here, so the capture is dropped whole.
+                    const hadTyped = micTypedAny;
+                    abandonMicCapture();
+                    if (!hadTyped) micFailed();
+                    return;
+                }
+                // sendRaw drops bytes when the socket isn't open — a stood-down
+                // tile looks entirely normal, so a silent drop reads as a flaky
+                // microphone rather than a dead terminal.
+                // A space between segments and none before the first: the
+                // pane is a command line, and a leading space is a character
+                // the user did not speak.
+                if (sendRaw(micTypedAny ? " " + text : text)) micTypedAny = true;
+            }
+            if (micStopping && micPending <= 0) {
+                micStopping = false;
+                // Nothing typed at all, from a capture that ran to its end:
+                // every segment failed, came back empty, or could not be
+                // delivered. That is the error the flash is for. A single
+                // segment lost mid-recording is not — the words around it
+                // still arrived, and a red flash over a live recording says
+                // the microphone stopped when it did not.
+                if (micTypedAny) {
+                    setMicState("idle");
+                    // Without this the button still holds the keyboard, and
+                    // the Enter meant to submit re-arms the mic instead.
+                    restoreMicFocus();
+                } else {
+                    micFailed();
+                }
+            }
+        }
+        function deliverMicSegment(run, seq, text) {
+            if (run !== micRun) return;
+            micResults[seq] = text;
+            micPending -= 1;
+            drainMicSegments(run);
+        }
+        async function transcribeMicSegment(run, seq, chunks, mimeType, spokenTo) {
+            if (run !== micRun) return;
+            const type = mimeType || "audio/webm";
+            const blob = new Blob(chunks, {type: type});
+            if (!blob.size) { deliverMicSegment(run, seq, ""); return; }
+            const form = new FormData();
+            // The voice server picks its decode path off the name as well as
+            // the type, so a container named wrong is a container decoded
+            // wrong. Firefox records Ogg where Chrome records WebM.
+            const ext = type.indexOf("mp4") >= 0 ? "mp4"
+                : type.indexOf("ogg") >= 0 ? "ogg"
+                : "webm";
+            form.append("file", blob, "audio." + ext);
+            let text = "";
+            // A refusal answers; a blackholed connection does not. Without a
+            // deadline the button sits in the working state until the tile is
+            // closed, which is the one state the click handler will not let
+            // the user leave.
+            const ctl = typeof AbortController === "function" ? new AbortController() : null;
+            const sttTimer = setTimeout(function () {
+                if (ctl) ctl.abort();
+            }, MIC_STT_MS);
+            try {
+                const resp = await fetch("/api/terminal/stt", {
+                    method: "POST", credentials: "same-origin", body: form,
+                    signal: ctl ? ctl.signal : undefined,
+                });
+                if (!resp.ok) { deliverMicSegment(run, seq, ""); return; }
+                const data = await resp.json();
+                text = (data && data.text ? String(data.text) : "").trim();
+            } catch (e) {
+                deliverMicSegment(run, seq, "");
+                return;
+            } finally {
+                clearTimeout(sttTimer);
+            }
+            // Abandoned mid-flight — the tile narrowed past the breakpoint,
+            // or stood down. The user was already told the capture was over,
+            // so this is silent rather than an error.
+            if (run !== micRun || spokenTo !== micSpokenTo) return;
+            deliverMicSegment(run, seq, text);
+        }
+        micBtn.addEventListener("click", function () {
+            if (micState === "recording") finishMicCapture();
+            else if (micState === "idle") startMicCapture();
+            // working: a second recording here would race two transcripts
+            // into the same line, in whichever order the GPU finished them.
+        });
+        // The button is hidden below the phone breakpoint, so a window
+        // narrowed mid-recording would take the only way to stop it.
+        const micWide = window.matchMedia("(min-width: 860px)");
+        function onMicWidthChange(ev) {
+            if (!ev.matches && micState !== "idle") {
+                abandonMicCapture();
+                setMicState("idle");
+            }
+        }
+        if (micWide.addEventListener) micWide.addEventListener("change", onMicWidthChange);
+        else micWide.addListener(onMicWidthChange);
+        // The only per-panel listener on an object outliving the panel. A
+        // MediaQueryList is global, so leaving it attached retains the whole
+        // closure — the disposed terminal, the detached DOM, the lot — once
+        // per tile ever opened.
+        function detachMicWidth() {
+            if (micWide.removeEventListener) micWide.removeEventListener("change", onMicWidthChange);
+            else micWide.removeListener(onMicWidthChange);
+        }
+
+        // ── pty attach over WS ────────────────────────────────────
+        // Every handler comes off before the close, because close() is
+        // asynchronous and a socket in CLOSING still delivers whatever the
+        // browser has queued for it. Leaving onmessage attached let the
+        // outgoing socket keep writing into the terminal alongside its
+        // replacement — two tmux clients' cursor-addressed update streams
+        // interleaved into one buffer, which is corruption no repaint can
+        // undo. See TerminalRouting.detachSocket.
+        function closeSocket() {
+            const dead = ws;
+            ws = null;
+            TerminalRouting.detachSocket(dead);
+        }
+        // TEXT frames are the control channel (the pty end parses them as
+        // JSON); terminal bytes always travel as BINARY frames.
+        function sendResize() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({type: "resize", cols: term.cols, rows: term.rows}));
+            }
+        }
+        function attach() {
+            closeSocket();
+            socketOpenedAt = 0;
+            term.reset();
+            setAttachState("connecting…");
+            const socket = new WebSocket(wsUrl(sessionId, term.cols, term.rows));
+            socket.binaryType = "arraybuffer";
+            socket.onopen = () => {
+                socketOpenedAt = Date.now();
+                lastRecvAt = socketOpenedAt;
+                setAttachState("attached");
+                sendResize();
+            };
+            socket.onmessage = (ev) => {
+                lastRecvAt = Date.now();
+                if (ev.data instanceof ArrayBuffer) {
+                    const bytes = new Uint8Array(ev.data);
+                    noteRealOutput(bytes);
+                    term.write(bytes);
+                    return;
+                }
+                // Terminal bytes always arrive as BINARY frames, so a TEXT
+                // frame is the gateway's control channel, never output.
+                // Never printed: echoing a control frame into the pane
+                // corrupts the screen.
+                let msg;
+                try { msg = JSON.parse(ev.data); } catch (e) { return; }
+                if (msg && msg.type === "session_rotated") showRotated(msg.exchange);
+            };
+            socket.onclose = (ev) => {
+                if (ws === socket) ws = null;
+                if (destroyed || deliberateClose) return;
+                // Before anything else decides what to do with the tile: if a
+                // submit went out and the pane never answered, those bytes
+                // were written into a socket that was already gone.
+                //
+                // A rotation no longer closes this socket at all: it replaces
+                // the harness conversation under the row the tile is already
+                // attached to, and the pane is respawned in place.
+                restorePendingSubmit();
+                // 4410 = the conversation has ended on purpose (end-session,
+                // /kill), whether its row is gone — the ordinary shape — or
+                // still marked closed. Report the ending and remove it from
+                // the terminal session lists.
+                if (ev && ev.code === 4410) {
+                    // The session is gone for good, so its stored draft can
+                    // never be resumed — drop it rather than keep a key per
+                    // dead conversation forever. What is on screen stays on
+                    // screen, and stays selectable, for the user to copy out.
+                    setDraft(sessionId, "");
+                    setAttachState("session ended");
+                    standDownMic();
+                    refreshSessions();
+                    return;
+                }
+                if (ev && ev.code === 4411) {
+                    setAttachState("session suspended");
+                    standDownMic();
+                    refreshSessions();
+                    return;
+                }
+                // Codes that are a decision rather than a blip — a tile
+                // already open elsewhere, a mind with no pty route, a mind
+                // refusing the attach or the gateway's credential. The ladder
+                // lives in TerminalRouting.permanentClose so it can be tested
+                // against every code rather than grepped for in this file.
+                const permanent = TerminalRouting.permanentClose(ev && ev.code);
+                if (permanent) {
+                    stopWith(permanent.message);
+                    return;
+                }
+                // Anything else is a blip over a pty that outlives the
+                // socket, so the tile reattaches to the session it is on.
+                setAttachState("disconnected");
+                beginReattachLoop();
+            };
+            socket.onerror = () => setAttachState("connection error");
+            ws = socket;
+        }
+        // Reports whether the bytes actually went. A tile that has stood
+        // down (evicted by another window, suspended, mid-reattach) looks
+        // no different from a live one, so a caller that can't watch the
+        // pane for an echo — the mic — needs to be told.
+        function sendRaw(text) {
+            if (!text) return false;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(new TextEncoder().encode(text));
+                return true;
+            }
+            return false;
+        }
+        function isAltBuffer() {
+            const buf = term.buffer && term.buffer.active;
+            return !!buf && buf.type === "alternate";
+        }
+        term.onData(sendRaw);
+
+        // xterm's hidden composition textarea is its model of "the current
+        // line": every change is diffed against the box's prior value, and
+        // the difference is what goes to the pty. That works for a shell
+        // xterm draws itself, but here a TUI (claude) owns the line, and the
+        // box is never cleared between words. Left to accumulate, it holds
+        // the whole line, and a mobile keyboard's autocorrect, prediction, or
+        // multi-character backspace rewrites text the pty already has — the
+        // diff then re-emits that stale region and the pty echoes it twice,
+        // which is the "keys repeat, deleted characters come back" report.
+        // Emptying the box after every committed burst (never mid-word, where
+        // it still holds what's being typed) makes each burst diff from an
+        // empty base, so nothing already sent can be sent again.
+        function resetImeAccumulator() {
+            const helper = term._core && term._core._compositionHelper;
+            if (helper && !TerminalRouting.shouldResetImeAccumulator({composing: helper._isComposing})) {
+                return;
+            }
+            const ta = term.textarea;
+            if (ta && ta.value) ta.value = "";
+            if (helper) {
+                helper._dataAlreadySent = "";
+                const pos = helper._compositionPosition;
+                if (pos) { pos.start = 0; pos.end = 0; }
+            }
+        }
+        term.onData(resetImeAccumulator);
+
+        // Scrolling by finger. On the alternate buffer — which is where
+        // the TUI lives, and so the only buffer this tile ever really
+        // shows — the viewport has no overflow, so the browser has
+        // nothing to pan and a drag does nothing at all. Translate it
+        // into the wheel reports the program turned on for itself.
+        let dragY = null;
+        let dragCell = {col: 1, row: 1};
+        xtermEl.addEventListener("touchstart", function (e) {
+            if (e.touches.length !== 1 || !isAltBuffer()) { dragY = null; return; }
+            const t = e.touches[0];
+            const box = xtermEl.getBoundingClientRect();
+            dragCell = {
+                col: Math.floor((t.clientX - box.left) / (box.width / term.cols)) + 1,
+                row: Math.floor((t.clientY - box.top) / (box.height / term.rows)) + 1,
+            };
+            dragY = t.clientY;
+        }, {passive: true});
+        xtermEl.addEventListener("touchmove", function (e) {
+            if (dragY === null || e.touches.length !== 1) return;
+            const t = e.touches[0];
+            const move = TerminalRouting.dragWheelSteps(t.clientY - dragY, 24);
+            if (!move.steps) return;
+            e.preventDefault();
+            dragY += move.consumed;
+            for (let i = 0; i < move.steps; i++) {
+                sendRaw(TerminalRouting.wheelReport(move.dir, dragCell.col, dragCell.row));
+            }
+        }, {passive: false});
+        xtermEl.addEventListener("touchend", function () { dragY = null; });
+        xtermEl.addEventListener("touchcancel", function () { dragY = null; });
+        // Mobile virtual keyboards (Gboard, iOS predictive text) route typed
+        // words through an IME composition that isn't closed before Enter
+        // fires; xterm.js then discards the still-open composition instead
+        // of sending it (CompositionHelper.keydown -> finalizeComposition
+        // with commit=false), so the whole line silently vanishes and only
+        // a bare return reaches the pty.
+        //
+        // Only the open composition is owed, though. xterm never clears the
+        // helper textarea between words, so it holds the whole line, and
+        // every earlier word already went to the pty as its own composition
+        // ended. Forwarding the box wholesale sends the paragraph a second
+        // time -- which is what the pty then echoed, the typed text
+        // concatenated with a copy of itself.
+        function pendingImeText() {
+            const ta = term.textarea;
+            const helper = term._core && term._core._compositionHelper;
+            if (!ta || !helper) return "";
+            const pos = helper._compositionPosition || {};
+            return TerminalRouting.pendingImeText({
+                composing: helper._isComposing,
+                // A composition that has ended but whose flush is still on
+                // xterm's 0ms timer: Enter cancels that flush, so the text
+                // is ours to send.
+                flushPending: helper._isSendingComposition,
+                start: pos.start,
+                alreadySent: helper._dataAlreadySent,
+            }, ta.value);
+        }
+        // Emptying the box first leaves xterm's own finalize with nothing to
+        // re-send, so its Enter path runs untouched: composition state
+        // resets, the preview bubble closes, the carriage return goes out.
+        function flushPendingIme() {
+            const ta = term.textarea;
+            const pending = pendingImeText();
+            if (pending && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(new TextEncoder().encode(pending));
+            }
+            if (ta) ta.value = "";
+        }
+        // Capture-phase on this ancestor runs before any listener on the
+        // textarea itself, composing or not, so this lands ahead of xterm's
+        // own handler.
+        xtermEl.addEventListener("keydown", function (e) {
+            if (e.key !== "Enter" && e.keyCode !== 13) return;
+            flushPendingIme();
+        }, true);
+        // Clicking into a tile is the moment a user who is looking at
+        // garbage acts on it, so it is the cheapest place to hang the cure:
+        // one click repaints instead of the select-the-text-to-read-it
+        // workaround. It runs before the drag that would start a selection,
+        // so a click that turns into a selection has already repainted.
+        el.addEventListener("mousedown", function () { setFocusedPanel(panel); repaint(); });
+
+        // ── compose box ───────────────────────────────────────────
+        // Width alone is the wrong gate. A phone in landscape is 915-932 CSS
+        // px — a desktop as far as the 859px breakpoint is concerned — so
+        // gating on width takes the box away on rotation and hands the
+        // duplication back on the same device, mid-sentence. Either a narrow
+        // window or a device that has no hover and a coarse pointer.
+        const narrowMedia = window.matchMedia("(max-width: 859px)");
+        const touchMedia = window.matchMedia("(hover: none) and (pointer: coarse)");
+        function syncComposeShown() {
+            const want = TerminalRouting.composeBoxWanted({
+                narrow: narrowMedia.matches,
+                coarsePointer: touchMedia.matches,
+            });
+            if (composeEl.hidden === !want) return;
+            composeEl.hidden = !want;
+            doFit();
+        }
+        function onComposeMedia() { if (!destroyed) syncComposeShown(); }
+        [narrowMedia, touchMedia].forEach(function (m) {
+            if (m.addEventListener) m.addEventListener("change", onComposeMedia);
+            else if (m.addListener) m.addListener(onComposeMedia);
+        });
+        function detachComposeMedia() {
+            [narrowMedia, touchMedia].forEach(function (m) {
+                if (m.removeEventListener) m.removeEventListener("change", onComposeMedia);
+                else if (m.removeListener) m.removeListener(onComposeMedia);
+            });
+        }
+
+        function composeLockedNow() {
+            return TerminalRouting.composeLocked({
+                attachState: attachState, standingDown: standingDown,
+            });
+        }
+        // readOnly, never disabled: a session ended for good never re-enables,
+        // and iOS refuses to let a disabled textarea be selected or copied —
+        // the user's own unsent words would be visible and unrecoverable.
+        function syncComposeLock() {
+            const locked = composeLockedNow();
+            composeInput.readOnly = locked;
+            composeSend.disabled = locked;
+            composeEl.classList.toggle("is-locked", locked);
+        }
+
+        // Text handed to a socket that has not yet proved it was listening.
+        // A half-open connection still reports OPEN for up to STALE_MS, so
+        // `sendRaw` returning true is not evidence of delivery — it is
+        // evidence the browser had somewhere to put the bytes.
+        let pendingSubmit = "";
+        function submitCompose() {
+            if (composeLockedNow()) return false;
+            const text = composeInput.value;
+            const bytes = TerminalRouting.composeSubmitBytes(
+                text, !!(term.modes && term.modes.bracketedPasteMode));
+            if (!bytes) return false;
+            if (!sendRaw(bytes)) { flashComposeError(); return false; }
+            // Accumulated, not replaced. Sending again is the natural response
+            // to a pane that has not answered, and the second submit must not
+            // discard the first one's only copy.
+            pendingSubmit = pendingSubmit ? pendingSubmit + "\n" + text : text;
+            composeInput.value = "";
+            // The stored draft deliberately survives the submit, and is
+            // cleared only once the pane answers. Everything else that could
+            // hold the safety copy dies with the tile: tapping back to the
+            // session list destroys the panel outright, and iOS discards a
+            // backgrounded tab with no dependable unload. Clearing here loses
+            // the message on the one gesture people make right after sending.
+            return true;
+        }
+        // A submit that could not go anywhere has to say so. The arrow is not
+        // disabled during an outage — the box stays typable through one on
+        // purpose — so without this, tapping send does nothing at all and
+        // nothing on screen explains why.
+        let composeErrTimer = null;
+        function flashComposeError() {
+            composeEl.classList.add("is-error");
+            if (composeErrTimer) clearTimeout(composeErrTimer);
+            composeErrTimer = setTimeout(function () {
+                composeErrTimer = null;
+                composeEl.classList.remove("is-error");
+            }, 1500);
+        }
+        // The pane answered, so the submit landed. Only real output counts:
+        // the pty end sends a NUL keepalive every 5s, and treating that as an
+        // acknowledgement would clear the safety copy of a message that never
+        // arrived, five seconds after it didn't.
+        function noteRealOutput(bytes) {
+            if (!pendingSubmit) return;
+            for (let i = 0; i < bytes.length; i++) {
+                if (bytes[i] !== 0) {
+                    pendingSubmit = "";
+                    // The safety copy is now redundant: what is stored again
+                    // is whatever the user has typed since, which is usually
+                    // nothing.
+                    setDraft(sessionId, composeInput.value);
+                    return;
+                }
+            }
+        }
+        // The socket died without the pane ever answering. Give the words
+        // back rather than letting a phone's screen-lock eat a paragraph the
+        // box has already cleared as if it were sent.
+        function restorePendingSubmit() {
+            if (!pendingSubmit) return;
+            const text = pendingSubmit;
+            pendingSubmit = "";
+            composeInput.value = composeInput.value
+                ? text + "\n" + composeInput.value : text;
+            setDraft(sessionId, composeInput.value);
+        }
+
+        composeInput.value = getDraft(sessionId);
+        // Saved on every keystroke, not on teardown. Mobile switches sessions
+        // by destroying the panel outright (not through closePanel), and iOS
+        // discards a backgrounded tab with no dependable unload — a draft
+        // written at either of those moments is a draft written never.
+        composeInput.addEventListener("input", function () {
+            setDraft(sessionId, composeInput.value);
+        });
+        // Return inserts a newline: xterm's own Enter handling lives on the
+        // pane, and nothing here forwards to it, so this needs no handler at
+        // all. The arrow is the only thing that submits.
+        composeSend.addEventListener("mousedown", function (ev) { ev.preventDefault(); });
+        composeSend.addEventListener("click", function () {
+            submitCompose();
+            composeInput.focus();
+        });
+        syncComposeShown();
+        syncComposeLock();
+
+        // ── rotation reattach ─────────────────────────────────────
+        function cancelReattachLoop() {
+            if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
+        }
+        // A half-open socket still reports OPEN, so onclose never fires and
+        // the normal reattach loop never starts. Tear the zombie down
+        // ourselves and reattach — the pty is almost certainly still live.
+        function forceReattach() {
+            if (destroyed || deliberateClose) return;
+            // The zombie case, and the one the compose box exists to survive:
+            // a phone locks, TCP half-opens, the socket keeps reporting OPEN
+            // and a submit is written into nothing. closeSocket nulls onclose,
+            // so the restore has to happen here rather than there.
+            restorePendingSubmit();
+            closeSocket();          // nulls onclose, so drive the loop directly
+            beginReattachLoop();
+        }
+        // Reattach if the connection has gone silent past a threshold. Called
+        // on a timer (a zombie left behind by a network blip) and eagerly on
+        // a foreground return (a mobile rotation, with a tighter threshold
+        // because that's when the socket most likely just died).
+        function reattachIfStale(thresholdMs) {
+            if (destroyed || deliberateClose) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (TerminalRouting.socketIsStale(Date.now(), lastRecvAt, thresholdMs)) {
+                forceReattach();
+            }
+        }
+        function beginReattachLoop() {
+            cancelReattachLoop();
+            if (!mindId) return;
+            // Only a socket that stayed up clears the backoff. A socket
+            // that opens and dies straight back is a failing attach, and
+            // reconnecting at full speed is how a tile ends up flickering.
+            reattachAttempts = TerminalRouting.attemptsAfterSocket(
+                reattachAttempts,
+                socketOpenedAt ? Date.now() - socketOpenedAt : 0,
+                STABLE_SOCKET_MS,
+            );
+            reattachStartedAt = Date.now();
+            setAttachState("reattaching…");
+            pollForReattach();
+        }
+        async function pollForReattach() {
+            if (destroyed) return;
+            const deadId = sessionId || "";
+            try {
+                const resp = await fetch("/api/terminal/sessions", {credentials: "same-origin"});
+                if (resp.ok) {
+                    const rows = await resp.json();
+                    const target = TerminalRouting.pickReattachTarget(rows, {
+                        deadId: deadId,
+                        openIds: Array.from(openPanels.keys()),
+                    });
+                    if (target.action === "retry") {
+                        // Back off between tries. An attach that fails as
+                        // fast as it opens (a mind that refuses the
+                        // handshake) would otherwise loop several times a
+                        // second and hammer the gateway.
+                        cancelReattachLoop();
+                        reattachAttempts += 1;
+                        // Nothing ends this loop on its own, so without a
+                        // cap a tile whose attach is being refused retries
+                        // for as long as the tab is open. Stop and offer the
+                        // tap.
+                        if (TerminalRouting.attachExhausted(reattachAttempts, MAX_ATTACH_ATTEMPTS)) {
+                            stopWith("can't attach");
+                            return;
+                        }
+                        const wait = TerminalRouting.retryDelayMs(reattachAttempts);
+                        setAttachState("reconnecting…");
+                        reattachTimer = setTimeout(attach, wait);
+                        return;
+                    }
+                }
+            } catch (err) {}
+            if (Date.now() - reattachStartedAt >= REATTACH_WINDOW_MS) {
+                stopWith("disconnected");
+                return;
+            }
+            reattachTimer = setTimeout(pollForReattach, 2000);
+        }
+        // ── suspend / close / back ────────────────────────────────
+        endBtn.addEventListener("click", async function () {
+            if (!sessionId) return;
+            // Blunter than suspend's, because this one does not come
+            // back: the harness is stopped, the row leaves both tabs,
+            // and the name goes with it.
+            if (!confirm("End this conversation for good? This cannot be undone.")) return;
+            endBtn.disabled = true;
+            endBtn.textContent = "ending…";
+            try {
+                const resp = await fetch("/api/terminal/sessions/" + encodeURIComponent(sessionId), {
+                    method: "DELETE", credentials: "same-origin",
+                });
+                if (!resp.ok) {
+                    let msg = "HTTP " + resp.status;
+                    try { const d = await resp.json(); msg = d.detail || d.error || msg; } catch (e) {}
+                    setAttachState("end failed: " + msg);
+                    endBtn.disabled = false;
+                    endBtn.textContent = "end";
+                    return;
+                }
+                deliberateClose = true;
+                closePanel(panel);
+                await refreshSessions();
+            } catch (err) {
+                setAttachState("end error: " + err.message);
+                endBtn.disabled = false;
+                endBtn.textContent = "end";
+            }
+        });
+
+        suspendBtn.addEventListener("click", async function () {
+            if (!sessionId) return;
+            if (!confirm("Suspend this session? You can resume it later.")) return;
+            suspendBtn.disabled = true;
+            suspendBtn.textContent = "suspending…";
+            try {
+                const resp = await fetch("/api/terminal/sessions/" + encodeURIComponent(sessionId) + "/suspend", {
+                    method: "POST", credentials: "same-origin",
+                });
+                if (!resp.ok) {
+                    let msg = "HTTP " + resp.status;
+                    try { const d = await resp.json(); msg = d.detail || d.error || msg; } catch (e) {}
+                    setAttachState("suspend failed: " + msg);
+                    suspendBtn.disabled = false;
+                    suspendBtn.textContent = "suspend";
+                    return;
+                }
+                deliberateClose = true;
+                closePanel(panel);
+                await refreshSessions();
+            } catch (err) {
+                setAttachState("suspend error: " + err.message);
+                suspendBtn.disabled = false;
+                suspendBtn.textContent = "suspend";
+            }
+        });
+        closeBtn.addEventListener("click", function () { closePanel(panel); });
+        backBtn.addEventListener("click", function () { closePanel(panel); });
+
+        const panel = {
+            el: el,
+            get sessionId() { return sessionId; },
+            mindId: function () { return mindId; },
+            mount: function () {
+                term.open(xtermEl);
+                loadRenderer();
+                // term.textarea only exists once xterm has opened.
+                term.textarea.addEventListener("focus", function () { setFocusedPanel(panel); });
+                resizeObserver.observe(xtermEl);
+                applyLabel();
+                fitWhenSized(attach);
+                staleTimer = setInterval(function () { reattachIfStale(STALE_MS); }, 2000);
+            },
+            fit: doFit,
+            repaint: repaint,
+            paintCheck: paintCheck,
+            screenText: screenText,
+            rendererInfo: function () {
+                return {
+                    webgl: !!webgl,
+                    canvases: xtermEl.querySelectorAll(".xterm-screen canvas").length,
+                    repaints: repaints,
+                    altBuffer: isAltBuffer(),
+                    // The grid the tile is painting. tmux paints to the
+                    // geometry of the pty it was handed, so a disagreement
+                    // between this and `tmux list-panes` is stale text no
+                    // repaint can reach: the columns tmux never writes keep
+                    // whatever was in them, and the ones it writes past wrap.
+                    cols: term.cols,
+                    rows: term.rows,
+                };
+            },
+            checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
+            // setFocusedPanel unconditionally, term.focus() only where a
+            // cursor does not cost a keyboard. They are not one decision:
+            // focusedPanel is what paints the header bar and what the key row
+            // routes to, so dropping it on touch devices would send Ctrl+C to
+            // whichever tile happens to be first in the Map — with no tile
+            // painted as focused to say so.
+            focus: function () {
+                setFocusedPanel(panel);
+                if (paneTakesCursor()) term.focus();
+            },
+            refreshLabel: applyLabel,
+            scrollPage: function (dir) {
+                const action = TerminalRouting.pageScrollAction({
+                    altBuffer: isAltBuffer(), rows: term.rows, dir: dir,
+                });
+                if (action.kind === "wheel") {
+                    const mid = {col: Math.max(1, Math.round(term.cols / 2)),
+                                 row: Math.max(1, Math.round(term.rows / 2))};
+                    for (let i = 0; i < action.notches; i++) {
+                        sendRaw(TerminalRouting.wheelReport(action.dir, mid.col, mid.row));
+                    }
+                } else term.scrollLines(action.lines);
+            },
+            sendBytes: function (text) {
+                // The return key belongs to whatever is being typed into. A
+                // draft sitting in the box must not capture it: someone who
+                // tapped the pane to answer a y/n prompt gets their draft
+                // pasted onto the end of that half-typed line and the whole
+                // thing submitted as one — "ya draft for later" answering a
+                // yes/no. Focus is the only thing that says which field the
+                // user means, and a phone has no second return key.
+                //
+                // No flushPendingIme on this path. That dumps xterm's own
+                // pending composition to the pty, which here would prefix a
+                // half-typed word from the pane onto the box's message.
+                if (text === "\r" && !composeEl.hidden
+                        && document.activeElement === composeInput
+                        && TerminalRouting.composeIsSubmittable(composeInput.value)) {
+                    submitCompose();
+                    return;
+                }
+                // The toolbar's return key never reaches xterm's keydown
+                // path, so an open composition would sit in the helper
+                // textarea and arrive after the newline, on the next
+                // prompt. Same debt as the hardware Enter, paid the same
+                // way.
+                if (text === "\r") flushPendingIme();
+                sendRaw(text);
+            },
+            destroy: function () {
+                destroyed = true;
+                resizeObserver.disconnect();
+                if (fitRaf) { cancelAnimationFrame(fitRaf); fitRaf = null; }
+                if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
+                cancelReattachLoop();
+                closeSocket();
+                closeTtsStream();
+                stopTtsPlayback();
+                abandonMicCapture();
+                detachMicWidth();
+                detachComposeMedia();
+                try { term.dispose(); } catch (e) {}
+                if (el.parentNode) el.parentNode.removeChild(el);
+            },
+        };
+        return panel;
+    }
+
+    // ── grid / stage management ───────────────────────────────────
+    function relayoutGrid() {
+        // The key row belongs to an open tile, and opening or closing one is
+        // the only thing that changes whether there is any.
+        syncKeyRow();
+        const n = openPanels.size;
+        gridEl.dataset.count = String(n);
+        gridEmpty.hidden = n > 0;
+        if (n > 0) {
+            const cols = Math.min(n, Math.ceil(Math.sqrt(n)));
+            gridEl.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
+        } else {
+            gridEl.style.gridTemplateColumns = "";
+        }
+        // Tile geometry changed for everyone — refit every terminal.
+        requestAnimationFrame(function () {
+            openPanels.forEach(function (p) { p.fit(); });
+        });
+    }
+
+    function closePanel(panel) {
+        openPanels.delete(panel.sessionId);
+        panel.destroy();
+        if (focusedPanel === panel) focusedPanel = null;
+        relayoutGrid();
+        saveOpenSet();
+        renderCards(lastRows);
+        if (!isWide() && openPanels.size === 0) showView("list");
+        if (openPanels.size === 0) releaseWakeLock();
+    }
+
+    function addPanel(session) {
+        const existing = openPanels.get(session.id);
+        if (existing) {
+            existing.focus();
+            if (!isWide()) showView("stage");
+            return;
+        }
+        // mobile is single-panel: replace whatever's open
+        if (!isWide()) {
+            Array.from(openPanels.values()).forEach(function (p) { openPanels.delete(p.sessionId); p.destroy(); });
+        }
+        const panel = createPanel(session);
+        openPanels.set(session.id, panel);
+        gridEl.appendChild(panel.el);
+        relayoutGrid();
+        panel.mount();
+        saveOpenSet();
+        renderCards(lastRows);
+        // The stage before the focus. focus() on an element in a display:none
+        // subtree is a silent no-op, and below the 859px breakpoint the stage
+        // is still hidden at this point — which is how a narrow *desktop*
+        // window ended up opening tiles that accepted no typing at all:
+        // nothing focused, no keydown listener on the page to catch the
+        // keystrokes, and an unfocused xterm cursor as the only cue.
+        if (!isWide()) showView("stage");
+        panel.focus();
+        acquireWakeLock();
+    }
+
+    function showView(name) { termApp.dataset.view = name; syncKeyRow(); }
+
+    // The key row and the compose box answer to the same question — is this a
+    // device with an on-screen keyboard — and they used to answer it in
+    // different places: the box in JS (narrow OR coarse pointer), the row in
+    // a `max-width: 859px` media query. A phone in landscape is 915-932px, so
+    // it got the box and no keys at all: no Esc, no Tab, no Ctrl+C, no arrows,
+    // and no way to send a bare return to the pane. One gate, in JS, driving
+    // both.
+    const keyRowNarrow = window.matchMedia("(max-width: 859px)");
+    const keyRowTouch = window.matchMedia("(hover: none) and (pointer: coarse)");
+    function syncKeyRow() {
+        const want = TerminalRouting.composeBoxWanted({
+            narrow: keyRowNarrow.matches,
+            coarsePointer: keyRowTouch.matches,
+        }) && openPanels.size > 0 && (isWide() || termApp.dataset.view === "stage");
+        toolbar.classList.toggle("is-on", want);
+    }
+    [keyRowNarrow, keyRowTouch].forEach(function (m) {
+        if (m.addEventListener) m.addEventListener("change", syncKeyRow);
+        else if (m.addListener) m.addListener(syncKeyRow);
+    });
+
+    // Each panel's own ResizeObserver (see createPanel) is the primary
+    // refit trigger, but a foldable unfolding is reported (not reproduced
+    // here in a headless Chromium run) to sometimes not resize a tile's
+    // box at all on some mobile browsers even though the physical screen
+    // -- and therefore the CSS viewport -- changed shape. visualViewport
+    // and orientationchange are independent browser signals for exactly
+    // that: a shape change that isn't a plain window resize. Redundant
+    // with the observer in a well-behaved browser; the point is not
+    // depending on any single one of the three firing.
+    function refitAllPanels() {
+        openPanels.forEach(function (p) { p.fit(); });
+    }
+
+    // The shell is exactly as tall as the part of the page you can see.
+    //
+    // A soft keyboard is drawn over the page. Where it is honoured,
+    // `interactive-widget=resizes-content` makes it shorten the layout
+    // viewport instead and 100dvh alone would be enough; iOS Safari
+    // ignores the key entirely and shrinks only the visual viewport, so
+    // the shell stayed full height with the keyboard parked over its
+    // bottom third — over the prompt, the cursor, and the line being
+    // typed. The only way to see what you were typing was to drag the
+    // page up by hand. visualViewport.height is the one measurement that
+    // is right on both, so it drives the height and 100dvh is the
+    // fallback for browsers without it.
+    //
+    // iOS also *scrolls* the visual viewport rather than resizing the
+    // layout one, which leaves the fixed nav pushed off the top; pinning
+    // the window back to zero each time undoes that.
+    function syncAppHeight() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        document.documentElement.style.setProperty(
+            "--app-h", Math.round(vv.height) + "px");
+        if (window.scrollY !== 0) window.scrollTo(0, 0);
+        refitAllPanels();
+    }
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", syncAppHeight);
+        window.visualViewport.addEventListener("scroll", syncAppHeight);
+        syncAppHeight();
+    }
+    window.addEventListener("orientationchange", refitAllPanels);
+    // Belt and suspenders: if none of the three signals above fire on a
+    // given browser, this puts a hard ceiling of a couple seconds on how
+    // long a tile can stay mis-sized rather than staying wrong forever.
+    // fit() is cheap (a character-metric measurement plus an int compare)
+    // and only sends a resize frame when the size actually changed.
+    setInterval(refitAllPanels, 2000);
+
+    // ── paint self-check ──────────────────────────────────────
+    // window.paintCheck() reports, per open tile, how many painted rows
+    // disagree with the buffer they came from. Loading the page with
+    // ?paintcheck=1 runs it on a timer and writes the count into each
+    // tile's header, so diagnosing a screen full of garbage needs no
+    // devtools and no selecting — selecting is itself a repaint, and it
+    // destroys the thing being measured.
+    window.paintCheck = function () {
+        const report = {};
+        openPanels.forEach(function (p) { report[p.sessionId] = p.paintCheck(); });
+        return report;
+    };
+    // window.rendererInfo() answers the first question about a garbled
+    // tile — which renderer is actually behind it. A tile reporting
+    // webgl:false has fallen back to the DOM renderer, and everything the
+    // paint sweep below exists for applies again.
+    window.screenText = function () {
+        const report = {};
+        openPanels.forEach(function (p) { report[p.sessionId] = p.screenText(); });
+        return report;
+    };
+    window.rendererInfo = function () {
+        const report = {};
+        openPanels.forEach(function (p) { report[p.sessionId] = p.rendererInfo(); });
+        return report;
+    };
+    // The sweep is the DOM renderer's safety net, and it reports nothing
+    // for a tile on WebGL — there are no rows to read back, only a canvas.
+    // Where it does apply, walking every painted row and reading the text
+    // back out is the point: the read forces the browser to resolve rows it
+    // has been treating as unchanged, which is exactly the invalidation
+    // that goes missing while text scrolls. A fallen-back tile left alone
+    // would otherwise accumulate stale strips indefinitely, since the
+    // buffer behind them is already correct and nothing marks them dirty a
+    // second time.
+    //
+    // If a row genuinely disagrees with its buffer the sweep repaints it,
+    // but that is the rarer half. The flag only adds the readout.
+    const SHOW_PAINT_CHECK = new URLSearchParams(location.search).has("paintcheck");
+    setInterval(function () {
+        openPanels.forEach(function (p) {
+            const r = p.paintCheck();
+            if (!r) return;
+            if (r.drift) { p.repaint(); console.warn("paintcheck drift", r.samples); }
+            if (SHOW_PAINT_CHECK) {
+                const head = p.el.querySelector(".term-panel-info");
+                if (head) head.textContent = "dom-drift " + r.drift + "/" + r.rows;
+            }
+        });
+    }, 2000);
+
+    // A rotation or an app-switch often kills the socket while the tab is
+    // hidden, where the watchdog interval is throttled and can't fire. The
+    // moment the tab comes back, check each tile eagerly so a returning
+    // user gets a reattach in a beat instead of a 30s black screen while
+    // the browser waits out its own dead-socket timeout.
+    // A backgrounded tab has its requestAnimationFrame throttled to a
+    // trickle or stopped outright, and xterm's render debouncer is built on
+    // rAF: rows written while the tab was away can be marked dirty and
+    // never painted, and nothing marks them dirty a second time. Repaint
+    // every tile on the way back in, alongside the liveness check.
+    function checkAllPanelsLive() {
+        openPanels.forEach(function (p) { p.checkLiveness(); p.repaint(); });
+    }
+    document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") checkAllPanelsLive();
+    });
+    window.addEventListener("pageshow", checkAllPanelsLive);
+
+    // ── screen wake lock ──────────────────────────────────────
+    // The reattach machinery above exists to recover from a socket the OS
+    // already killed. A mobile browser is far more likely to suspend the
+    // tab -- and with it the socket -- while the screen is on but the tab
+    // merely unfocused or the device about to auto-lock, than while the
+    // page is actually asking to stay awake. Holding a wake lock while a
+    // tile is open trades a bit of battery for fewer dead sockets to
+    // recover from in the first place; it does nothing for a tab that's
+    // genuinely backgrounded (the lock itself is released the moment
+    // visibility is lost, same as the browser would anyway) or for a
+    // desktop browser, where the API is absent and this is a no-op.
+    let wakeLock = null;
+    async function acquireWakeLock() {
+        if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+        if (openPanels.size === 0 || wakeLock) return;
+        try {
+            wakeLock = await navigator.wakeLock.request("screen");
+            wakeLock.addEventListener("release", function () { wakeLock = null; });
+        } catch (err) {
+            // Denied (e.g. low battery mode) or unsupported at runtime --
+            // the reattach loop is still there as the fallback.
+        }
+    }
+    function releaseWakeLock() {
+        if (wakeLock) wakeLock.release().catch(function () {});
+    }
+    document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") acquireWakeLock();
+    });
+
+    // ── session list rendering (flat rows grouped by mind) ────────
+    function isActiveStatus(status) { return TerminalRouting.isActive({status: status}); }
+    function statusDotClass(status) {
+        const s = (status || "").toLowerCase();
+        if (s === "running") return "is-running";
+        if (s === "idle") return "is-idle";
+        return "is-closed";
+    }
+
+    function renderCards(rows) {
+        lastRows = rows || [];
+        listEl.innerHTML = "";
+        let count = 0;
+        const byMind = new Map();
+        lastRows.forEach(function (r) {
+            const key = r.mind_id || r.mind_name || "?";
+            if (!byMind.has(key)) byMind.set(key, {name: r.mind_name || key, rows: []});
+            byMind.get(key).rows.push(r);
+        });
+        byMind.forEach(function (mind) {
+            const sessions = mind.rows.filter(function (s) {
+                return currentFilter === "active"
+                    ? isActiveStatus(s.status)
+                    : String(s.status || "").toLowerCase() === "suspended";
+            });
+            if (!sessions.length) return;
+            const group = document.createElement("div");
+            group.className = "term-mind-group";
+            group.textContent = mind.name;
+            listEl.appendChild(group);
+            sessions.forEach(function (s) {
+                const card = document.createElement("button");
+                card.type = "button";
+                card.className = "term-card" + (openPanels.has(s.id) ? " is-current" : "");
+
+                // the list is where color shouts: paint the whole card and
+                // flip the text to whichever pole stays readable on it
+                const label = getLabel(s.id);
+                if (label.color) {
+                    card.classList.add("is-colored");
+                    card.style.background = label.color;
+                    card.style.borderColor = label.color;
+                    card.style.color = contrastText(label.color);
+                }
+
+                const dot = document.createElement("span");
+                dot.className = "term-card-dot " + statusDotClass(s.status);
+
+                const body = document.createElement("span");
+                body.className = "term-card-body";
+                const title = document.createElement("span");
+                title.className = "term-card-title";
+                title.innerHTML = '<span class="term-card-name"></span> <span class="term-card-id"></span>';
+                title.querySelector(".term-card-name").textContent = (label.name || "").trim() || s.mind_name || mind.name;
+                title.querySelector(".term-card-id").textContent = s.short_id || (s.id || "").slice(0, 8);
+                const meta = document.createElement("span");
+                meta.className = "term-card-meta";
+                meta.textContent = (s.status || "") + (s.age ? " · " + s.age : "");
+                body.appendChild(title);
+                body.appendChild(meta);
+                if (s.summary) {
+                    const sum = document.createElement("span");
+                    sum.className = "term-card-summary";
+                    sum.textContent = s.summary;
+                    body.appendChild(sum);
+                }
+                card.appendChild(dot);
+                card.appendChild(body);
+                card.addEventListener("click", async function () {
+                    let status = s.status || "running";
+                    if (String(status).toLowerCase() === "suspended") {
+                        card.disabled = true;
+                        try {
+                            const resp = await fetch(
+                                "/api/terminal/sessions/" + encodeURIComponent(s.id) + "/resume",
+                                {method: "POST", credentials: "same-origin"}
+                            );
+                            if (!resp.ok) {
+                                card.disabled = false;
+                                return;
+                            }
+                            const resumed = await resp.json();
+                            status = resumed.status || "idle";
+                        } catch (err) {
+                            card.disabled = false;
+                            return;
+                        }
+                    }
+                    addPanel({
+                        id: s.id,
+                        mind_id: s.mind_id,
+                        mind_name: s.mind_name,
+                        status: status,
+                    });
+                    await refreshSessions();
+                });
+                listEl.appendChild(card);
+                count += 1;
+            });
+        });
+        listEmpty.hidden = count > 0;
+        listEmpty.textContent = currentFilter === "active" ? "No active sessions." : "No suspended sessions.";
+    }
+
+    async function refreshSessions() {
+        try {
+            const resp = await fetch("/api/terminal/sessions", {credentials: "same-origin"});
+            if (!resp.ok) return [];
+            const rows = await resp.json();
+            renderCards(Array.isArray(rows) ? rows : []);
+            pruneDrafts(Array.isArray(rows) ? rows : []);
+            return lastRows;
+        } catch (err) {
+            return [];
+        }
+    }
+
+    // ── new session ───────────────────────────────────────────────
+    async function spawnSession(mind) {
+        newMenu.hidden = true;
+        try {
+            const resp = await fetch("/api/terminal/sessions", {
+                method: "POST", credentials: "same-origin",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({mind_id: mind.id}),
+            });
+            if (!resp.ok) return;
+            const sess = await resp.json();
+            addPanel({
+                id: sess.id,
+                mind_id: sess.mind_id || mind.id,
+                mind_name: mind.name,
+                status: sess.status || "running",
+            });
+            await refreshSessions();
+        } catch (err) {}
+    }
+    async function toggleNewMenu() {
+        if (!newMenu.hidden) { newMenu.hidden = true; return; }
+        newMenu.hidden = false;
+        newMenu.textContent = "loading minds…";
+        let minds = [];
+        try {
+            const resp = await fetch("/api/minds", {credentials: "same-origin"});
+            if (resp.ok) minds = await resp.json();
+        } catch (err) {}
+        minds = (Array.isArray(minds) ? minds : []).filter(function (m) { return m && m.id; });
+        newMenu.innerHTML = "";
+        if (!minds.length) { newMenu.textContent = "no minds registered"; return; }
+        if (minds.length === 1) { spawnSession(minds[0]); return; }
+        minds.forEach(function (m) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "term-new-menu-item";
+            btn.textContent = "new · " + (m.name || m.id);
+            btn.addEventListener("click", function () { spawnSession(m); });
+            newMenu.appendChild(btn);
+        });
+    }
+    newBtn.addEventListener("click", toggleNewMenu);
+    document.addEventListener("click", function (e) {
+        if (!newMenu.hidden && !newMenu.contains(e.target) && e.target !== newBtn) newMenu.hidden = true;
+    });
+
+    // ── filter tabs ───────────────────────────────────────────────
+    function setFilter(filter) {
+        currentFilter = filter;
+        const activeSel = filter === "active";
+        tabActive.classList.toggle("is-active", activeSel);
+        tabSuspended.classList.toggle("is-active", !activeSel);
+        tabActive.setAttribute("aria-selected", activeSel ? "true" : "false");
+        tabSuspended.setAttribute("aria-selected", activeSel ? "false" : "true");
+        renderCards(lastRows);
+    }
+    tabActive.addEventListener("click", function () { setFilter("active"); });
+    tabSuspended.addEventListener("click", function () { setFilter("suspended"); });
+    refreshBtn.addEventListener("click", function () { refreshSessions(); });
+
+    // ── rail collapse (desktop) ───────────────────────────────────
+    function setRail(collapsed) {
+        termApp.dataset.rail = collapsed ? "collapsed" : "expanded";
+        railExpandBtn.hidden = !collapsed;
+        try { localStorage.setItem("term-rail", collapsed ? "collapsed" : "expanded"); } catch (e) {}
+        openPanels.forEach(function (p) { p.fit(); });
+    }
+    railCollapseBtn.addEventListener("click", function () { setRail(true); });
+    railExpandBtn.addEventListener("click", function () { setRail(false); });
+
+    // ── mobile key toolbar (routes to the focused tile) ───────────
+    // A key-row tap must not take the keyboard away from the compose box.
+    // Focus moves on mousedown, so the button stealing it closes the soft
+    // keyboard mid-sentence — and Ctrl+C, the one key someone reaches for
+    // while composing a follow-up to a running turn, is exactly when that
+    // happens.
+    toolbar.addEventListener("mousedown", function (ev) {
+        if (ev.target.closest("button")) ev.preventDefault();
+    });
+    toolbar.addEventListener("click", function (ev) {
+        const btn = ev.target.closest("button[data-seq], button[data-scroll]");
+        if (!btn) return;
+        const target = focusedPanel || openPanels.values().next().value;
+        if (!target) return;
+        // A phone has no visible scrollbar and no PageUp key, so a reply
+        // taller than the screen had nothing to reach the rest of it with.
+        // Where that scrolling happens depends on which buffer is up —
+        // see TerminalRouting.pageScrollAction — so the panel decides.
+        // Leave no editable holding the cursor. Withholding the automatic
+        // focus covers the tile nobody has touched; this covers the one they
+        // have, because a tap on the pane legitimately focuses it and from
+        // then on every key-row tap re-raises the keyboard over the reply
+        // being read. The keys do not need it: sendBytes writes the socket,
+        // and scrollPage either writes the socket or scrolls xterm's own
+        // buffer. Only the pane's hidden textarea, never the compose box —
+        // interrupting a running turn mid-follow-up must not take the
+        // keyboard off a half-written message.
+        const active = document.activeElement;
+        if (active && active.classList.contains("xterm-helper-textarea")) active.blur();
+        if (btn.dataset.scroll) {
+            target.scrollPage(Number(btn.dataset.scroll));
+            return;
+        }
+        target.sendBytes(btn.dataset.seq);
+    });
+
+    // ── boot ──────────────────────────────────────────────────────
+    try {
+        if (localStorage.getItem("term-rail") === "collapsed" && isWide()) setRail(true);
+    } catch (e) {}
+
+    showView("list");
+    syncLabelsFromServer();
+    // Labels are edited on whichever device is to hand, and a tile is left
+    // open for days — so this tab has to keep asking. On becoming visible
+    // too: a phone that was in a pocket during the edit polls nothing, and
+    // coming back to a stale name is exactly the case this exists for.
+    setInterval(syncLabelsFromServer, 30000);
+    document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") syncLabelsFromServer();
+    });
+    refreshSessions().then(function (rows) {
+        const active = (rows || []).filter(function (r) { return isActiveStatus(r.status); });
+        const byId = {};
+        active.forEach(function (r) { byId[r.id] = r; });
+        const wanted = recalledOpenSet().map(function (id) { return byId[id]; }).filter(Boolean);
+        // Mobile is single-panel: a refresh restores the one session the
+        // fragment names rather than dumping the user back on the list. No
+        // named session (or it went inactive) leaves the list showing.
+        if (!isWide()) {
+            if (wanted.length) {
+                const hit = wanted[0];
+                addPanel({id: hit.id, mind_id: hit.mind_id, mind_name: hit.mind_name, status: hit.status});
+            }
+            return;
+        }
+        // Desktop: reopen the whole recalled grid, or fall back to the most
+        // recent active session so the stage isn't empty on a first visit.
+        wanted.forEach(function (hit) {
+            addPanel({id: hit.id, mind_id: hit.mind_id, mind_name: hit.mind_name, status: hit.status});
+        });
+        if (wanted.length === 0 && active.length > 0) {
+            const first = active[0];
+            addPanel({id: first.id, mind_id: first.mind_id, mind_name: first.mind_name, status: first.status});
+        }
+    });
+})();
+</script>
+{% endblock %}
